@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 
+	"golang.org/x/sync/semaphore"
+
 	"github.com/go-git/go-billy/v5/osfs"
 	git "github.com/go-git/go-git/v5"
 	gitcfg "github.com/go-git/go-git/v5/config"
@@ -30,7 +32,9 @@ const (
 type Store struct {
 	root string
 
-	repoLocks sync.Map // per-repo mutexes for write operations
+	repoLocks   sync.Map // per-repo mutexes for write operations
+	captureOnce sync.Once
+	captureSem  *semaphore.Weighted
 
 	commitTreeCacheMu    sync.Mutex
 	commitTreeCache      map[string]commitTreeCacheEntry
@@ -141,6 +145,11 @@ var ErrNotFound = errors.New("repository not found in gitstore")
 
 // SetupConfig sets remote origin URL in the repo config.
 func (s *Store) SetupConfig(ctx context.Context, fullName, baseURL string) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	repo, err := s.open(ctx, fullName)
 	if err != nil {
 		return err

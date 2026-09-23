@@ -95,6 +95,11 @@ func (s *Store) withTempClone(ctx context.Context, fullName string, opts tempClo
 	mu := s.repoLock(ctx, fullName)
 	mu.Lock()
 	defer mu.Unlock()
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 
 	repoDir, err := s.repoPath(ctx, fullName)
 	if err != nil {
@@ -284,6 +289,11 @@ func (s *Store) RevertMerge(ctx context.Context, fullName, baseBranch, mergeComm
 	mu := s.repoLock(ctx, fullName)
 	mu.Lock()
 	defer mu.Unlock()
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	repoDir, err := s.repoPath(ctx, fullName)
 	if err != nil {
 		return "", err

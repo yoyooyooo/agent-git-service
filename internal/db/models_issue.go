@@ -134,24 +134,26 @@ type PullRequest struct {
 	HeadRepository           Repository `gorm:"foreignKey:HeadRepositoryID"`
 	Title                    string     `gorm:"size:1024;not null"`
 	Body                     LargeText
-	State                    string     `gorm:"size:20;default:'open';index:idx_pr_milestone_state_merged,priority:2"`
-	AuthorID                 uint       `gorm:"index"`
-	Author                   User       `gorm:"foreignKey:AuthorID"`
-	Labels                   []Label    `gorm:"many2many:pr_labels;"`
-	AssigneeLogins           string     `gorm:"size:2048"` // comma-separated user logins
-	MilestoneID              *uint      `gorm:"index:idx_pr_milestone_state_merged,priority:1"`
-	Milestone                *Milestone `gorm:"foreignKey:MilestoneID"`
-	HeadRef                  string     `gorm:"size:255"`
-	HeadSHA                  string     `gorm:"size:40"`
-	BaseRef                  string     `gorm:"size:255;default:'main'"`
-	BaseSHA                  string     `gorm:"size:40"`
-	Draft                    bool       `gorm:"default:false"`
-	MaintainerCanModify      bool       `gorm:"default:true"`
-	Merged                   bool       `gorm:"default:false;index:idx_pr_milestone_state_merged,priority:3"`
-	MergeCommitSHA           string     `gorm:"size:40"`
-	AutoMerge                bool       `gorm:"default:false"`
-	AutoMergeMethod          string     `gorm:"size:20"` // MERGE, SQUASH, REBASE
-	AutoMergeCommitHeadline  string     `gorm:"size:1024"`
+	State                    string                 `gorm:"size:20;default:'open';index:idx_pr_milestone_state_merged,priority:2"`
+	AuthorID                 uint                   `gorm:"index"`
+	Author                   User                   `gorm:"foreignKey:AuthorID"`
+	AgentSessionID           *string                `gorm:"type:char(36);index"`
+	AgentSession             *DelegatedAgentSession `gorm:"foreignKey:AgentSessionID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
+	Labels                   []Label                `gorm:"many2many:pr_labels;"`
+	AssigneeLogins           string                 `gorm:"size:2048"` // comma-separated user logins
+	MilestoneID              *uint                  `gorm:"index:idx_pr_milestone_state_merged,priority:1"`
+	Milestone                *Milestone             `gorm:"foreignKey:MilestoneID"`
+	HeadRef                  string                 `gorm:"size:255"`
+	HeadSHA                  string                 `gorm:"size:40"`
+	BaseRef                  string                 `gorm:"size:255;default:'main'"`
+	BaseSHA                  string                 `gorm:"size:40"`
+	Draft                    bool                   `gorm:"default:false"`
+	MaintainerCanModify      bool                   `gorm:"default:true"`
+	Merged                   bool                   `gorm:"default:false;index:idx_pr_milestone_state_merged,priority:3"`
+	MergeCommitSHA           string                 `gorm:"size:40"`
+	AutoMerge                bool                   `gorm:"default:false"`
+	AutoMergeMethod          string                 `gorm:"size:20"` // MERGE, SQUASH, REBASE
+	AutoMergeCommitHeadline  string                 `gorm:"size:1024"`
 	AutoMergeCommitBody      LargeText
 	AutoMergeAuthorEmail     string `gorm:"size:255"`
 	AutoMergeExpectedHeadSHA string `gorm:"size:40"`

@@ -4,12 +4,15 @@ import "time"
 
 // Repository represents a GitHub repository.
 type Repository struct {
-	ID                  uint   `gorm:"primaryKey;autoIncrement"`
-	Name                string `gorm:"size:255;not null"`
-	FullName            string `gorm:"uniqueIndex;size:512;not null"`
-	Description         string `gorm:"size:1024"`
-	OwnerID             uint   `gorm:"index"`
-	Owner               User   `gorm:"foreignKey:OwnerID"`
+	// GitStorageID is allocated once when replication is provisioned. NULL
+	// legacy rows are valid; names/URLs never become storage identities.
+	GitStorageID        *string `gorm:"size:64;uniqueIndex" json:"-"`
+	ID                  uint    `gorm:"primaryKey;autoIncrement"`
+	Name                string  `gorm:"size:255;not null"`
+	FullName            string  `gorm:"uniqueIndex;size:512;not null"`
+	Description         string  `gorm:"size:1024"`
+	OwnerID             uint    `gorm:"index"`
+	Owner               User    `gorm:"foreignKey:OwnerID"`
 	ParentID            *uint
 	Parent              *Repository `gorm:"foreignKey:ParentID"`
 	Private             bool        `gorm:"default:false"`

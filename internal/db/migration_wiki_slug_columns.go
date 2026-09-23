@@ -127,7 +127,11 @@ func dropObsoleteWikiColumn(database *gorm.DB, col wikiObsoleteColumn) error {
 	var err error
 	if database.Dialector != nil {
 		switch database.Dialector.Name() {
-		case "mysql":
+		case "mysql", "sqlite":
+			// SQLite's bundled engine supports native DROP COLUMN. Use it instead
+			// of GORM's string-table recreation: that path dereferences a nil
+			// schema and can also discard indexes or cascade dependent rows.
+			// Obsolete dependent indexes were removed before reaching this step.
 			err = database.Exec(dropWikiColumnDDL(database, col)).Error
 		default:
 			err = migrator.DropColumn(col.table, col.column)

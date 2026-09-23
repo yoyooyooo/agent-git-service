@@ -11,6 +11,8 @@ import (
 
 	driversql "github.com/go-sql-driver/mysql"
 	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
@@ -207,9 +209,28 @@ func Init(dsn string) (*gorm.DB, error) {
 	return database, nil
 }
 
+// The fork retains its deployed local SQLite and PostgreSQL integrations.
+// MySQL/TiDB still uses upstream's interpolation and unsafe-charset safeguards.
 func dialectorForDSN(dsn string) (gorm.Dialector, string) {
-	return mysql.Open(runtimeMySQLDSN(dsn)), "mysql"
+	raw := strings.TrimSpace(dsn)
+	lower := strings.ToLower(raw)
+	switch {
+	case lower == ":memory:", strings.HasPrefix(lower, "file:"):
+		return sqlite.Open(raw), "sqlite"
+	case strings.HasPrefix(lower, "sqlite://"):
+		return sqlite.Open(raw[len("sqlite://"):]), "sqlite"
+	case strings.HasPrefix(lower, "sqlite:"):
+		return sqlite.Open(strings.TrimPrefix(raw[len("sqlite:"):], "//")), "sqlite"
+	case strings.HasPrefix(lower, "postgres://"), strings.HasPrefix(lower, "postgresql://"):
+		return postgres.Open(raw), "postgres"
+	default:
+		return mysql.Open(runtimeMySQLDSN(raw)), "mysql"
+	}
 }
+
+// DialectorForDSN keeps explicit dialect dispatch available to fork embedders.
+// Selecting a dialect never chooses a tenant or bypasses runtime authorization.
+func DialectorForDSN(dsn string) (gorm.Dialector, string) { return dialectorForDSN(dsn) }
 
 func runtimeMySQLDSN(dsn string) string {
 	raw := strings.TrimSpace(dsn)
@@ -346,6 +367,12 @@ func Migrate(database *gorm.DB) error {
 		&IssuePRNumberCounter{},
 		&RepoRedirect{},
 		&Token{},
+		&ExecutionContextSnapshot{},
+		&AccessGrant{},
+		&AccessGrantInvocation{},
+		&DelegatedAgentSession{},
+		&TeamAuthorityEpoch{},
+		&PrincipalBindingRevocation{},
 		&UserIdentity{},
 		&DeviceCode{},
 		&DeviceCodeAuditLog{},
@@ -361,6 +388,16 @@ func Migrate(database *gorm.DB) error {
 		&PagesBuild{},
 		&AuditLogEntry{},
 		&PullRequest{},
+		&PullRequestMulticaLink{},
+		&PullRequestProjection{},
+		&PullRequestProjectionJob{},
+		&PullRequestProjectionJobAttempt{},
+		&PullRequestActionIntent{},
+		&AuthorityBoundaryReceipt{},
+		&OutboundDelivery{},
+		&ProjectionEvent{},
+		&ProjectionRefState{},
+		&RepoFlowEnvProjection{},
 		&LinkedBranch{},
 		&Release{},
 		&ReleaseAsset{},
@@ -397,6 +434,8 @@ func Migrate(database *gorm.DB) error {
 		&Collaborator{},
 		&Reaction{},
 		&Notification{},
+		&ExternalEvent{},
+		&RepoIncident{},
 		&WikiPageLabel{},
 		&WikiPageIndex{},
 		&WikiIndexState{},
@@ -427,6 +466,15 @@ func Migrate(database *gorm.DB) error {
 	}
 	// Enforce the user_kind column contract.
 	if err := MigrateUserKind(database); err != nil {
+		return err
+	}
+	if err := MigrateDelegatedSessionActorSnapshots(database); err != nil {
+		return err
+	}
+	if err := MigratePullRequestActionBoundaryReceipt(database); err != nil {
+		return err
+	}
+	if err := MigrateDelegatedPRMergeV2(database); err != nil {
 		return err
 	}
 	if err := MigrateTeamOrgSlugIndex(database); err != nil {

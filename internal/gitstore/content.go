@@ -661,6 +661,11 @@ func (s *Store) WriteFileIfBranchHead(ctx context.Context, fullName, branch, pat
 }
 
 func (s *Store) writeFile(ctx context.Context, fullName, branch, path, message string, content []byte, expectedHeadSHA string, useCAS bool) (string, error) {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	dir, err := s.repoPath(ctx, fullName)
 	if err != nil {
 		return "", err
@@ -754,6 +759,11 @@ func (s *Store) hashBlob(ctx context.Context, dir string, content []byte) (strin
 // DeleteFileFromRepo removes a file from a repository by creating a commit on the given branch.
 // Returns the commit SHA of the new commit.
 func (s *Store) DeleteFileFromRepo(ctx context.Context, fullName, branch, path, message string) (string, error) {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	dir, err := s.repoPath(ctx, fullName)
 	if err != nil {
 		return "", err
@@ -856,6 +866,11 @@ func (s *Store) MoveFile(ctx context.Context, fullName, branch, oldPath, newPath
 // commit on the given branch. Callers are responsible for validating that the
 // destination paths do not already exist and that the move set is conflict-free.
 func (s *Store) MoveFiles(ctx context.Context, fullName, branch string, moves []FileMove, message string) (string, error) {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	if len(moves) == 0 {
 		return "", fmt.Errorf("no files to move")
 	}

@@ -13,8 +13,11 @@ type User struct {
 	// Status controls whether the account may approve or receive OAuth grants.
 	Status string `gorm:"size:20;not null;default:'active'"` // active, banned, suspended, deleted
 	// UserKind distinguishes human accounts from agent accounts.
-	UserKind                    string `gorm:"size:16;not null;default:'human'"`
-	SiteAdmin                   bool   `gorm:"default:false"`
+	UserKind  string `gorm:"size:16;not null;default:'human'"`
+	SiteAdmin bool   `gorm:"default:false"`
+	// Legacy marker remains readable so fork grant issuance rejects historical
+	// anonymous rows. It never creates anonymous identities or grants access.
+	IsAnonymous                 bool   `gorm:"default:false" json:"-"`
 	DefaultRepositoryPermission string `gorm:"size:20;not null;default:'none'"`
 	CreatedAt                   time.Time
 	UpdatedAt                   time.Time

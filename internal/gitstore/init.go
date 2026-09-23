@@ -1,11 +1,13 @@
 package gitstore
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	git "github.com/go-git/go-git/v5"
@@ -19,12 +21,17 @@ import (
 
 // Init creates a new bare git repository, optionally seeding a README commit.
 func (s *Store) Init(ctx context.Context, fullName, defaultBranch string, seed bool) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	dir, err := s.repoPath(ctx, fullName)
 	if err != nil {
 		return err
 	}
 	if _, err := os.Stat(dir); err == nil {
-		return nil // already exists
+		return s.EnsureReceivePolicy(ctx, fullName)
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("gitstore: mkdir %s: %w", dir, err)
@@ -39,12 +46,9 @@ func (s *Store) Init(ctx context.Context, fullName, defaultBranch string, seed b
 		return fmt.Errorf("gitstore: git init: %w", err)
 	}
 
-	// Install a pre-receive hook that rejects non-fast-forward pushes on
-	// non-standard ref namespaces. refs/heads/* and refs/tags/* remain
-	// permissive (matching current server behaviour and preserving rebase
-	// flows that re-push heads); custom namespaces like refs/locks/*,
-	// refs/experiment/*, and refs/fleet/* require CAS, which is what
-	// distributed-coordination schemes built on top of git refs rely on.
+	// Install a pre-receive hook that protects the default branch from
+	// deletion and non-fast-forward rewrites while preserving rebase flows on
+	// ordinary work branches. Non-standard ref namespaces also require CAS.
 	if err := installNonFFRejectHook(dir); err != nil {
 		return fmt.Errorf("gitstore: install pre-receive hook: %w", err)
 	}
@@ -59,6 +63,11 @@ func (s *Store) Init(ctx context.Context, fullName, defaultBranch string, seed b
 
 // Fork creates a copy of the repository by duplicating its directory structure.
 func (s *Store) Fork(ctx context.Context, srcFullName, targetFullName string) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	srcPath, err := s.repoPath(ctx, srcFullName)
 	if err != nil {
 		return err
@@ -91,6 +100,29 @@ func (s *Store) Fork(ctx context.Context, srcFullName, targetFullName string) er
 		return fmt.Errorf("gitstore fork: %w", err)
 	}
 
+	return nil
+}
+
+// EnsureReceivePolicy refreshes the server-owned pre-receive dispatcher and
+// authority guard for an existing repository. Git HTTP calls this before
+// serving so upgraded repositories receive both delegated-session and durable
+// default-branch invariants without replacing repo-local policies.
+func (s *Store) EnsureReceivePolicy(ctx context.Context, fullName string) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	dir, err := s.repoPath(ctx, fullName)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("gitstore: repository path: %w", err)
+	}
+	if err := installNonFFRejectHook(dir); err != nil {
+		return fmt.Errorf("gitstore: install receive policy hook: %w", err)
+	}
 	return nil
 }
 
@@ -160,39 +192,117 @@ func seedReadme(ctx context.Context, repo *git.Repository, defaultBranch string)
 	return stg.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName(defaultBranch), commitHash))
 }
 
-// installNonFFRejectHook writes a pre-receive hook that rejects non-fast-
-// forward pushes for ref namespaces outside refs/heads/ and refs/tags/.
-// Standard head/tag pushes continue to use git's built-in receive-pack
-// rules (permissive by default; branch-protection layered on top);
-// custom namespaces get strict CAS so downstream tools that use refs as
-// distributed-coordination primitives (locks, leader election, fleet
-// membership) can detect contention.
-//
-// The hook is a posix-sh script written to <bareRepoDir>/hooks/pre-receive.
-// git-receive-pack invokes it during the receive phase, streaming
-// "<oldrev> <newrev> <refname>" lines on stdin; a non-zero exit aborts
-// the entire push.
+const (
+	preReceiveDispatcherMarker = "# gh-server: managed pre-receive dispatcher"
+	legacyAuthorityHookMarker  = "# gh-server: preserve the repository authority line"
+	preservedLocalHookName     = "10-local-preserved"
+	managedAuthorityHookName   = "50-gh-server-authority"
+)
+
+// installNonFFRejectHook installs the AGS authority guard behind a dispatcher.
+// An existing repo-local pre-receive policy is migrated into pre-receive.d and
+// retained across later refreshes; AGS never silently replaces a stronger
+// repository-specific policy.
 func installNonFFRejectHook(bareRepoDir string) error {
 	hooksDir := filepath.Join(bareRepoDir, "hooks")
 	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
 		return fmt.Errorf("mkdir hooks: %w", err)
 	}
+	partsDir := filepath.Join(hooksDir, "pre-receive.d")
+	if err := os.MkdirAll(partsDir, 0o750); err != nil {
+		return fmt.Errorf("mkdir pre-receive.d: %w", err)
+	}
+
 	path := filepath.Join(hooksDir, "pre-receive")
-	script := fmt.Sprintf(`#!/bin/sh
-# gh-server: reject non-fast-forward pushes to non-standard ref namespaces.
-# Standard refs/heads/* and refs/tags/* continue to use git's built-in
-# receive-pack rules; custom namespaces (refs/locks/*, refs/experiment/*,
-# refs/fleet/*, etc.) require compare-and-swap semantics.
+	if existing, err := os.ReadFile(path); err == nil {
+		body := string(existing)
+		isManaged := strings.Contains(body, preReceiveDispatcherMarker) || strings.Contains(body, legacyAuthorityHookMarker)
+		if !isManaged {
+			preservedPath := filepath.Join(partsDir, preservedLocalHookName)
+			if preserved, readErr := os.ReadFile(preservedPath); readErr == nil {
+				if !bytes.Equal(preserved, existing) {
+					return fmt.Errorf("preserve existing pre-receive hook: %s already contains a different policy", preservedPath)
+				}
+			} else if !os.IsNotExist(readErr) {
+				return fmt.Errorf("read preserved pre-receive hook: %w", readErr)
+			} else if err := os.WriteFile(preservedPath, existing, 0o755); err != nil {
+				return fmt.Errorf("preserve existing pre-receive hook: %w", err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read pre-receive hook: %w", err)
+	}
+
+	authorityScript := fmt.Sprintf(`#!/bin/sh
+# gh-server: preserve the repository authority line and CAS ref namespaces.
+default_ref=$(git symbolic-ref HEAD 2>/dev/null || true)
+zero="%s"
 exit_code=0
 while read -r oldrev newrev refname; do
+    if [ "${AGS_GIT_HTTP_RECEIVE_PACK:-}" = "1" ]; then
+        case ":${AGS_GIT_HTTP_PROTECTED_REFS:-}:" in
+            *":$refname:"*)
+                echo "error: direct Git HTTP push to protected branch $refname rejected" >&2
+                echo "hint: merge through the authoritative pull-request workflow." >&2
+                exit_code=1
+                continue
+                ;;
+        esac
+    fi
+
+    if [ "${AGS_DELEGATED_SESSION:-}" = "1" ]; then
+        case "$refname" in
+            refs/heads/*)
+                ;;
+            *)
+                echo "error: delegated session may update branch refs only: $refname" >&2
+                exit_code=1
+                continue
+                ;;
+        esac
+        if [ "$newrev" = "$zero" ]; then
+            echo "error: delegated session may not delete branch $refname" >&2
+            exit_code=1
+            continue
+        fi
+        case ":${AGS_DELEGATED_PROTECTED_REFS:-}:" in
+            *":$refname:"*)
+                echo "error: delegated session may not push directly to protected branch $refname" >&2
+                exit_code=1
+                continue
+                ;;
+        esac
+        if [ "$oldrev" != "$zero" ] && ! git merge-base --is-ancestor "$oldrev" "$newrev"; then
+            echo "error: delegated session non-fast-forward push to $refname rejected" >&2
+            exit_code=1
+        fi
+    fi
+
+    # Synthetic Wiki has its own catalog/repair transaction, not the PR base
+    # authority. Only the primary's verified Wiki HTTP adapter sets this marker;
+    # delegated requests and ordinary repositories never receive the exception.
+    if [ "${AGS_SYNTHETIC_WIKI_WRITE:-}" = "1" ] && [ "${AGS_GIT_HTTP_RECEIVE_PACK:-}" = "1" ] && [ "${AGS_DELEGATED_SESSION:-}" != "1" ] && [ "$refname" = "refs/heads/master" ]; then
+        continue
+    fi
+    if [ -n "$default_ref" ] && [ "$refname" = "$default_ref" ]; then
+        if [ "$newrev" = "$zero" ]; then
+            echo "error: deletion of default branch $refname rejected" >&2
+            exit_code=1
+            continue
+        fi
+        if [ "$oldrev" != "$zero" ] && ! git merge-base --is-ancestor "$oldrev" "$newrev"; then
+            echo "error: non-fast-forward push to default branch $refname rejected" >&2
+            echo "hint: merge through the authoritative pull-request workflow instead of rewriting the base history." >&2
+            exit_code=1
+        fi
+        continue
+    fi
     case "$refname" in
         refs/heads/*|refs/tags/*)
             continue
             ;;
     esac
-    # Ref creation (oldrev is all-zeros) and deletion (newrev is all-zeros)
-    # are always allowed; CAS enforcement is per-create via POST /git/refs.
-    zero="%s"
+    # Custom ref creation and deletion remain allowed. Updates require CAS.
     if [ "$oldrev" = "$zero" ] || [ "$newrev" = "$zero" ]; then
         continue
     fi
@@ -205,14 +315,62 @@ while read -r oldrev newrev refname; do
 done
 exit "$exit_code"
 `, ZeroSHA)
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		return fmt.Errorf("write pre-receive hook: %w", err)
+	if err := writeExecutableAtomically(filepath.Join(partsDir, managedAuthorityHookName), []byte(authorityScript)); err != nil {
+		return fmt.Errorf("write managed authority hook: %w", err)
+	}
+
+	dispatcher := `#!/bin/sh
+# gh-server: managed pre-receive dispatcher. Repo-local policies live in pre-receive.d.
+hooks_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)/pre-receive.d
+updates=$(cat)
+exit_code=0
+for hook in "$hooks_dir"/*; do
+    [ -f "$hook" ] && [ -x "$hook" ] || continue
+    if ! printf '%s\n' "$updates" | "$hook"; then
+        exit_code=1
+    fi
+done
+exit "$exit_code"
+`
+	if err := writeExecutableAtomically(path, []byte(dispatcher)); err != nil {
+		return fmt.Errorf("write pre-receive dispatcher: %w", err)
 	}
 	return nil
 }
 
+func writeExecutableAtomically(path string, body []byte) error {
+	if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, body) {
+		return os.Chmod(path, 0o755)
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".pre-receive-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o755); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
 // Delete removes the on-disk git repository.
 func (s *Store) Delete(ctx context.Context, fullName string) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	path, err := s.repoPath(ctx, fullName)
 	if err != nil {
 		return err

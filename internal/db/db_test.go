@@ -140,7 +140,7 @@ func TestMigrate(t *testing.T) {
 	}
 
 	// Verify key tables were created
-	tables := []string{"users", "repositories", "issues", "pull_requests", "labels", "milestones", "wiki_compaction_jobs"}
+	tables := []string{"users", "repositories", "issues", "pull_requests", "labels", "milestones", "delegated_agent_sessions", "principal_binding_revocations", "wiki_compaction_jobs", "outbound_deliveries"}
 	for _, table := range tables {
 		if !gdb.Migrator().HasTable(table) {
 			t.Errorf("expected table %q to exist after migration", table)
@@ -161,6 +161,11 @@ func TestMigrate(t *testing.T) {
 	for _, idx := range indexes {
 		if !gdb.Migrator().HasIndex(idx.table, idx.name) {
 			t.Errorf("expected index %q on table %q to exist after migration", idx.name, idx.table)
+		}
+	}
+	for _, column := range []string{"lease_owner", "lease_expires_at"} {
+		if !gdb.Migrator().HasColumn(&OutboundDelivery{}, column) {
+			t.Errorf("expected OutboundDelivery column %q after migration", column)
 		}
 	}
 }

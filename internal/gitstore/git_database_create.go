@@ -79,6 +79,11 @@ var validTreeModes = map[string]string{
 // CreateBlobObject writes content to the object database as a blob and
 // returns the resulting SHA. It does not modify any ref.
 func (s *Store) CreateBlobObject(ctx context.Context, fullName string, content []byte) (GitBlobObject, error) {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return GitBlobObject{}, err
+	}
+	defer release()
 	dir, err := s.repoPath(ctx, fullName)
 	if err != nil {
 		return GitBlobObject{}, err
@@ -147,6 +152,11 @@ func (s *Store) GetGitBlob(ctx context.Context, fullName, sha string) (GitBlobOb
 // CreateTreeObject builds a new tree from a base tree and a list of entries
 // using a temporary git index, then returns the resulting tree.
 func (s *Store) CreateTreeObject(ctx context.Context, fullName string, opts CreateTreeOptions) (GitTreeObject, error) {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return GitTreeObject{}, err
+	}
+	defer release()
 	dir, err := s.repoPath(ctx, fullName)
 	if err != nil {
 		return GitTreeObject{}, err

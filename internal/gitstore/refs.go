@@ -26,6 +26,11 @@ func (s *Store) HeadSHA(ctx context.Context, fullName, branch string) (string, e
 
 // CreateBranch creates branchName pointing at fromBranch HEAD.
 func (s *Store) CreateBranch(ctx context.Context, fullName, branchName, fromBranch string) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	repo, err := s.open(ctx, fullName)
 	if err != nil {
 		return err
@@ -40,6 +45,11 @@ func (s *Store) CreateBranch(ctx context.Context, fullName, branchName, fromBran
 
 // CreateBranchFromOid creates a new branch starting at a specific commit OID.
 func (s *Store) CreateBranchFromOid(ctx context.Context, fullName, branchName, oid string) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	dir, err := s.repoPath(ctx, fullName)
 	if err != nil {
 		return err
@@ -75,6 +85,11 @@ func (s *Store) CreateBranchFromOid(ctx context.Context, fullName, branchName, o
 // CreatePRRef creates a refs/pull/ID/head reference in the base repository,
 // fetching the commit from the head repository if necessary.
 func (s *Store) CreatePRRef(ctx context.Context, baseRepo, headRepo, headSHA string, number int) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	baseDir, err := s.repoPath(ctx, baseRepo)
 	if err != nil {
 		return err
@@ -101,6 +116,11 @@ func (s *Store) CreatePRRef(ctx context.Context, baseRepo, headRepo, headSHA str
 
 // UpdateRef updates a git reference to point to a new SHA.
 func (s *Store) UpdateRef(ctx context.Context, fullName, ref, sha string) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if !plumbing.IsHash(sha) {
 		return fmt.Errorf("%w: %q", ErrInvalidSHA, sha)
 	}
@@ -117,6 +137,11 @@ func (s *Store) UpdateRef(ctx context.Context, fullName, ref, sha string) error 
 
 // UpdateRefCAS atomically updates ref from expectedOldSHA to newSHA.
 func (s *Store) UpdateRefCAS(ctx context.Context, fullName, ref, newSHA, expectedOldSHA string) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if !plumbing.IsHash(newSHA) {
 		return fmt.Errorf("%w: %q", ErrInvalidSHA, newSHA)
 	}
@@ -167,6 +192,11 @@ var ErrNonFastForward = errors.New("non-fast-forward update")
 // which is what callers like the audit-ref CAS workflow on
 // refs/locks/* depend on.
 func (s *Store) UpdateRefSafe(ctx context.Context, fullName, ref, newSHA string, force bool) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if !plumbing.IsHash(newSHA) {
 		return fmt.Errorf("%w: %q", ErrInvalidSHA, newSHA)
 	}
@@ -248,6 +278,11 @@ var ErrRefNotFound = errors.New("ref not found")
 // is race-safe even under concurrent POSTs because git refuses the update
 // in the loser's transaction log.
 func (s *Store) CreateRef(ctx context.Context, fullName, ref, sha string) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	dir, err := s.repoPath(ctx, fullName)
 	if err != nil {
 		return err
@@ -344,6 +379,11 @@ func (s *Store) ListRefsWithPrefix(ctx context.Context, fullName, prefix string)
 
 // DeleteRef deletes a git reference (branch or tag).
 func (s *Store) DeleteRef(ctx context.Context, fullName, ref string) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	dir, err := s.repoPath(ctx, fullName)
 	if err != nil {
 		return err
@@ -391,6 +431,11 @@ func (s *Store) ListBranches(ctx context.Context, fullName string) ([]BranchInfo
 // CreateTagIfNotExists creates an annotated tag if it doesn't already exist.
 // Returns nil if the tag already exists.
 func (s *Store) CreateTagIfNotExists(ctx context.Context, fullName, tagName, message, sha string) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	dir, err := s.repoPath(ctx, fullName)
 	if err != nil {
 		return err

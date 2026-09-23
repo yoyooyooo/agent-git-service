@@ -281,6 +281,11 @@ func (s *Store) buildCommitFilesAt(
 // PersistPreparedCommit durably writes the objects produced by
 // BuildCommitFilesAt without publishing the branch ref.
 func (s *Store) PersistPreparedCommit(ctx context.Context, prepared PreparedCommit) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -306,6 +311,11 @@ func (s *Store) PersistPreparedCommit(ctx context.Context, prepared PreparedComm
 // PublishPreparedCommit advances branch to a previously prepared commit if the
 // branch still points at the parent observed during preparation.
 func (s *Store) PublishPreparedCommit(ctx context.Context, fullName, branch string, prepared PreparedCommit) error {
+	ctx, release, err := s.BeginMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
