@@ -5,7 +5,7 @@
 **A self-hosted, GitHub-compatible API server for agents, automation, and
 developer workflows.**
 
-[![Fork CI](https://github.com/yoyooyooo/agent-git-service-fork/actions/workflows/ci.yml/badge.svg)](https://github.com/yoyooyooo/agent-git-service-fork/actions/workflows/ci.yml)
+[![CI](https://github.com/yoyooyooo/agent-git-service/actions/workflows/ci.yml/badge.svg)](https://github.com/yoyooyooo/agent-git-service/actions/workflows/ci.yml)
 [![Upstream CI](https://github.com/ngaut/agent-git-service/actions/workflows/ci.yml/badge.svg)](https://github.com/ngaut/agent-git-service/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](go.mod)
@@ -75,6 +75,13 @@ run where your agents run:
 Known GitHub-compatibility gaps are tracked in
 [`docs/github-api-compatibility-matrix.md`](docs/github-api-compatibility-matrix.md).
 
+## Release installation
+
+Native release bundles, signed provenance, platform requirements, installation and
+data-safe rollback are documented in [Release operations](docs/operations/releases.md).
+Release installation does not require building this repository or running an AGS
+instance. Publishing and service upgrades remain separate explicit actions.
+
 ## Quick Start
 
 This local path uses [TiDB Zero](https://zero.tidbcloud.com/)
@@ -84,8 +91,8 @@ Install `curl` and `jq` before running this quickstart. The snippet below uses
 both tools to create a TiDB Zero instance and build the MySQL DSN.
 
 ```bash
-git clone --branch fork/main.20260924 https://github.com/yoyooyooo/agent-git-service-fork.git
-cd agent-git-service-fork
+git clone --branch fork/main.20260924 https://github.com/yoyooyooo/agent-git-service.git
+cd agent-git-service
 cp .env.example .env
 
 ZERO_INSTANCE="$(

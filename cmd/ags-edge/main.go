@@ -13,10 +13,17 @@ import (
 	"time"
 
 	"github.com/ngaut/agent-git-service/config"
+	"github.com/ngaut/agent-git-service/internal/buildinfo"
 	"github.com/ngaut/agent-git-service/internal/edge"
 )
 
 func main() {
+	if handled, err := buildinfo.PrintVersion(os.Args[1:], "ags-edge", os.Stdout); handled {
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -86,6 +93,6 @@ func run(ctx context.Context) (result error) {
 			}
 		}()
 	}
-	slog.Info("ags-edge listening", "edge_id", cfg.ID, "address", listener.Addr().String(), "read_path_wired", cfg.ReadConfigFile != "", "operational_ready", false)
+	slog.Info("ags-edge listening", "edge_id", cfg.ID, "address", listener.Addr().String(), "read_path_wired", cfg.ReadConfigFile != "", "operational_ready", false, "version", buildinfo.Version, "revision", buildinfo.Revision)
 	return srv.Run(ctx, listener)
 }

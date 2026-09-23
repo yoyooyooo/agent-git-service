@@ -52,11 +52,12 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_generation.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_public_ranges.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_casefold_policy.py
+          PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_release.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_edge_client_route.py
           (cd fork/tools && go test ./... -count=1)
       - name: Exercise repaired authorization and transport boundaries
         run: |
-          go test -race ./internal/gitbackend ./internal/gittransport ./config -count=1 -timeout=2m
+          go test -race ./internal/buildinfo ./internal/gitbackend ./internal/gittransport ./config -count=1 -timeout=2m
           go test -race ./internal/service -run '^TestExchangeDeviceCodeRevalidatesApproverBeforeTokenWrite$' -count=3 -timeout=2m
           go test ./internal/edge -run '^TestAliasIngressKeepsCanonicalUpstreamAndReadGates$' -count=1 -timeout=2m
       - name: Check documents
@@ -100,7 +101,7 @@ jobs:
           - name: fork-integrations
             packages: ./cmd/forgejo-authority ./internal/delegationpolicy ./internal/executioncontext ./internal/forgejointegration ./internal/githubintegration ./internal/gitlabintegration ./internal/integrations ./internal/multicafailures ./internal/multicaprojection ./internal/notifications ./internal/operationcatalog ./internal/operationconstraints ./internal/projectionwatch ./internal/providerlogbridge ./internal/providerlogprotocol ./internal/sessionauthority ./internal/tenant ./internal/workloadidentity
           - name: misc
-            packages: ./auth ./cmd/gh-server ./config ./e2e/cmd/mock-embedding-server ./e2e/cmd/mock-oidc-server ./internal/apperrors ./internal/connectedlogin ./internal/crypto ./internal/embedding ./internal/httputil ./internal/logging ./internal/mentions ./internal/metrics ./internal/middleware ./internal/oauth ./internal/oidc ./internal/randutil ./internal/ratelimit
+            packages: ./auth ./cmd/gh-server ./config ./e2e/cmd/mock-embedding-server ./e2e/cmd/mock-oidc-server ./internal/apperrors ./internal/buildinfo ./internal/connectedlogin ./internal/crypto ./internal/embedding ./internal/httputil ./internal/logging ./internal/mentions ./internal/metrics ./internal/middleware ./internal/oauth ./internal/oidc ./internal/randutil ./internal/ratelimit
     env:
       TEST_DB_DSN: 'root:@tcp(127.0.0.1:45400)/?parseTime=true&timeout=10s'
       PACKAGES: ${{ matrix.packages }}

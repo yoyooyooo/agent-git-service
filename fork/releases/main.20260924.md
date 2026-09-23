@@ -9,7 +9,7 @@ This is a source/disclosure checkpoint. It does not toggle repository visibility
 | Item | Accepted value |
 | --- | --- |
 | Formal branch | `fork/main.20260924` |
-| Source repository | `yoyooyooo/agent-git-service-fork` on GitHub |
+| Source repository | `yoyooyooo/agent-git-service` on GitHub (same repository identity after public-name cutover) |
 | Repository identity | `1383799420` |
 | Frozen official upstream | `c7691f45cf2c02d6a32e4bf13a21eca40649aa24` |
 | Official tag at selection | None; the fetched tag inventory was empty |

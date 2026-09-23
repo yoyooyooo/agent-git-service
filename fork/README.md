@@ -4,7 +4,7 @@ This source repository uses GitHub for collaboration and CI. Building or contrib
 
 ## Remotes and generations
 
-- `origin` is `git@github.com:yoyooyooo/agent-git-service-fork.git`, the maintained clean GitHub repository.
+- `origin` is `git@github.com:yoyooyooo/agent-git-service.git`, the maintained clean GitHub repository.
 - `upstream` is the official `ngaut/agent-git-service` source. Never push to it.
 - `fork/<upstream-version>-main.<date>` identifies an accepted generation. If the official repository has no tags, use `fork/main.<date>` and pin its full baseline SHA; do not invent a release version.
 - `feat/*` and `fix/*` branch from the active generation. Merge accepted work linearly into that generation.
@@ -38,6 +38,15 @@ python3 fork/scripts/audit.py publication --private-policy /private/operator-pol
 The inventory includes empty commits, all changed paths, and explicit pending review state. `tree` scans the selected **committed** fork tree, not dirty working files, and explicitly does not examine commit metadata. `publication` examines all new reachable blobs **and commit metadata**, including removed historical content, and never prints matched values. A clean `tree` result cannot stand in for the historical gate. Its output is a preflight, not proof that there are no secrets. Run an independent secret scanner and review GitHub branches, tags, PRs, Actions logs and artifacts separately.
 
 Hosted CI uses read-only GitHub permissions and disposable test dependencies. No workflow may use a self-hosted runner, production credentials, deployment keys, or `pull_request_target` to execute contributor code. CI caches dependencies, not private deployment data; it never deploys automatically.
+
+## Release delivery
+
+[Release operations](../docs/operations/releases.md) owns exact-source native builds,
+artifact provenance, immutable assets, opt-in installation and data-safe rollback.
+The repository name has no `-fork` suffix; the `fork/*` branch prefix continues to
+identify a downstream generation. Prior private repository histories are not
+publication inputs. New metadata/build changes have their own exact-source CI;
+the initial generation preservation receipt is not reused as a new runtime test.
 
 ## Product boundaries
 

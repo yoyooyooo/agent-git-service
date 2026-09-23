@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New immutable version, e.g. fork-20260924.1-rc1'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  RELEASE_SOURCE: ${{ github.sha }}
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  gate:
+    if: github.repository_id == '1383799420' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Verify exact source and complete release prerequisites
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 fork/scripts/audit.py verify
+          python3 fork/scripts/audit.py publication
+          python3 fork/scripts/release.py gate --version "$RELEASE_VERSION" --sha "$RELEASE_SOURCE"
+
+  build:
+    needs: gate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: darwin_arm64
+          - runner: ubuntu-24.04
+            target: linux_amd64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Build exact source and smoke-test actual binaries
+        run: python3 fork/scripts/release.py build --version "$RELEASE_VERSION" --output "$RUNNER_TEMP/ags-release-output"
+      - name: Attest the native release bundle
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ runner.temp }}/ags-release-output/*.tar.gz
+      - name: Retain only public release material
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ runner.temp }}/ags-release-output/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [gate, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/ags-release-assets
+      - name: Verify provenance and publish the complete immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 fork/scripts/release.py publish --version "$RELEASE_VERSION" --sha "$RELEASE_SOURCE" --output "$RUNNER_TEMP/ags-release-assets"

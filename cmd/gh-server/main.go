@@ -8,11 +8,18 @@ import (
 
 	"github.com/joho/godotenv"
 
+	"github.com/ngaut/agent-git-service/internal/buildinfo"
 	applog "github.com/ngaut/agent-git-service/internal/logging"
 	"github.com/ngaut/agent-git-service/server"
 )
 
 func main() {
+	if handled, err := buildinfo.PrintVersion(os.Args[1:], "gh-server", os.Stdout); handled {
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "wiki-reindex" {
 		_ = godotenv.Load()
 		applog.Init()

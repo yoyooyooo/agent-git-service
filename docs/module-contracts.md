@@ -77,6 +77,7 @@ document the relevant contract below in the same change.
 | `forgejointegration` | AGS -> Forgejo branch/PR projection, including exact lease-protected mapped PR-head rewrites |
 | `gitlabintegration` | optional AGS -> GitLab post-push mirror plus Forgejo-authoritative shadow MR and backup sync |
 | `githubintegration` | optional AGS -> GitHub post-push mirror plus Forgejo-authoritative shadow PR and backup sync |
+| `buildinfo` | dependency-free release identity and version output; no configuration, business state or network access |
 | `gitbackend` | already-authorized native Git CGI execution, isolated snapshot reads, bounded spooling and explicit receive opt-in |
 | `gittransport` | one-shot native provider Git with request-owned credentials, exact clean remote, bounded output and cancellation; no business or effect authority |
 | `snapshotstore` | immutable self-contained Git views, exact-root exports, staging/verification/publication, pinned leases and private process-owned storage |
@@ -1223,6 +1224,21 @@ Current state:
 - `service.DBForCtx(ctx)` is the context-aware DB entrypoint; the runtime has no tenant DB router
 - idempotent inserts followed by readback use a current read where repeatable-read isolation would otherwise hide a concurrently committed winner; this does not authorize repeating an external effect
 - optional incident timestamps are nullable rather than invalid SQL zero dates; identifier quoting is delegated to the dialect
+
+### Release identity and delivery
+
+`internal/buildinfo` owns the closed, credential-free `ags.build.v1` identity.
+The three binary entry points handle standalone version queries before any
+configuration, database or network activity. It depends only on the standard
+library; Edge must not acquire primary-service dependencies through versioning.
+Release linker values identify the full source/tree and fork release version.
+Development defaults remain explicitly unknown, not inferred from a machine path.
+
+`fork/scripts/release.py` owns exact-source archive builds, platform smoke checks,
+complete-CI admission, manifest/archive validation and complete draft publication.
+`scripts/install-release.py` owns verification and version-directory selection,
+not service lifetime or schema changes. Installed, selected and running versions
+are separate facts. See [release operations](operations/releases.md).
 
 ### Provider Git process credentials
 
