@@ -3,6 +3,7 @@ package graphql
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -238,6 +239,7 @@ func (s *Server) doUpdatePRBranch(ctx context.Context, req gqlRequest) map[strin
 			if pr.HeadRepositoryID != pr.RepositoryID {
 				repoFullName = pr.HeadRepository.FullName
 			}
+			oldHeadSHA := pr.HeadSHA
 			sha, err := s.Svc.UpdatePRBranch(ctx, gitstore.UpdatePRBranchOptions{
 				FullName:     repoFullName,
 				BaseBranch:   pr.BaseRef,
@@ -253,6 +255,22 @@ func (s *Server) doUpdatePRBranch(ctx context.Context, req gqlRequest) map[strin
 			// Update the head SHA in the DB
 			if err := s.Svc.UpdatePRFields(ctx, dbID, map[string]any{"head_sha": sha}); err != nil {
 				return errResp(err.Error())
+			}
+			headRepoID := pr.HeadRepositoryID
+			if headRepoID == 0 {
+				headRepoID = pr.RepositoryID
+			}
+			if err := s.Svc.SyncOpenPRHeadsForBranch(ctx, headRepoID, repoFullName, pr.HeadRef); err != nil {
+				slog.WarnContext(ctx, "sync open PR heads after updatePullRequestBranch failed", "repo", repoFullName, "branch", pr.HeadRef, "pr", pr.Number, "error", err)
+			}
+			if strings.EqualFold(strings.TrimSpace(updateMethod), "REBASE") {
+				updated, loadErr := s.Svc.GetPRByID(ctx, dbID)
+				if loadErr != nil {
+					return errResp(loadErr.Error())
+				}
+				if err := s.Svc.ProjectRebasedPullRequestBranch(ctx, updated, oldHeadSHA); err != nil {
+					return errResp(err.Error())
+				}
 			}
 
 			return wrap("updatePullRequestBranch", map[string]any{

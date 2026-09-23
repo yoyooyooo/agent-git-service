@@ -18,7 +18,8 @@ func preloadIssueForRESTList(q *gorm.DB) *gorm.DB {
 func preloadPRFull(q *gorm.DB) *gorm.DB {
 	return q.Preload("Author").Preload("Repository").Preload("Repository.Owner").
 		Preload("HeadRepository").Preload("HeadRepository.Owner").Preload("Labels").
-		Preload("Milestone").Preload("Milestone.Creator")
+		Preload("Milestone").Preload("Milestone.Creator").
+		Preload("AgentSession").Preload("AgentSession.PrincipalUser")
 }
 
 func preloadPRForRESTIssueList(q *gorm.DB) *gorm.DB {

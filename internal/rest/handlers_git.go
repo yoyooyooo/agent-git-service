@@ -30,19 +30,31 @@ func (d *Deps) ListBranches(w http.ResponseWriter, r *http.Request) {
 		respond.ServiceErrorRequest(r, w, err)
 		return
 	}
+	protectedNames, err := d.Svc.ProtectedBranchNames(r.Context(), rep.ID)
+	if err != nil {
+		respond.ServiceErrorRequest(r, w, err)
+		return
+	}
+	protected := make(map[string]struct{}, len(protectedNames))
+	for _, name := range protectedNames {
+		protected[name] = struct{}{}
+	}
+
 	// Read branches from the actual git store
 	gitBranches, err := d.Svc.Git.ListBranches(r.Context(), full)
 	if err != nil || len(gitBranches) == 0 {
 		// Fallback: return only the default branch with a zero SHA
 		sha := gitstore.ZeroSHA
+		_, isProtected := protected[rep.DefaultBranch]
 		respond.JSON(w, 200, []any{
-			transform.Branch(full, rep.DefaultBranch, sha),
+			transform.Branch(full, rep.DefaultBranch, sha, isProtected),
 		})
 		return
 	}
 	out := make([]any, len(gitBranches))
 	for i, b := range gitBranches {
-		out[i] = transform.Branch(full, b.Name, b.SHA)
+		_, isProtected := protected[b.Name]
+		out[i] = transform.Branch(full, b.Name, b.SHA, isProtected)
 	}
 	respond.JSON(w, 200, paginate(w, r, d.Svc.BaseURL, out, page, perPage))
 }
@@ -70,7 +82,8 @@ func (d *Deps) GetBranch(w http.ResponseWriter, r *http.Request) {
 
 	// Regular branch info request
 	branch := branchPath
-	if _, err := d.Svc.GetRepo(r.Context(), full); err != nil {
+	repo, err := d.Svc.GetRepo(r.Context(), full)
+	if err != nil {
 		respond.ServiceErrorRequest(r, w, err)
 		return
 	}
@@ -78,7 +91,14 @@ func (d *Deps) GetBranch(w http.ResponseWriter, r *http.Request) {
 	if s, err := d.Svc.Git.HeadSHA(r.Context(), full, branch); err == nil && s != "" {
 		sha = s
 	}
-	respond.JSON(w, 200, transform.Branch(full, branch, sha))
+	isProtected := false
+	if _, err := d.Svc.GetBranchProtection(r.Context(), repo.ID, branch); err == nil {
+		isProtected = true
+	} else if !errors.Is(err, service.ErrNotFound) {
+		respond.ServiceErrorRequest(r, w, err)
+		return
+	}
+	respond.JSON(w, 200, transform.Branch(full, branch, sha, isProtected))
 }
 
 // getBranchProtectionInternal is the internal implementation of branch protection lookup
@@ -343,6 +363,7 @@ func (d *Deps) PutRepoContents(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, 422, err.Error())
 		return
 	}
+	d.syncOpenPRHeadsAfterBranchAdvance(r.Context(), "PutRepoContents", repo.ID, full, body.Branch)
 	blobSHA, _ := d.Svc.Git.BlobSHAAtRef(r.Context(), full, path, body.Branch)
 	status := http.StatusCreated
 	if isUpdate {
@@ -407,6 +428,7 @@ func (d *Deps) DeleteRepoContents(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, 422, err.Error())
 		return
 	}
+	d.syncOpenPRHeadsAfterBranchAdvance(r.Context(), "DeleteRepoContents", repo.ID, full, body.Branch)
 	respond.JSON(w, 200, map[string]any{
 		"content": nil,
 		"commit": map[string]any{
@@ -1007,8 +1029,22 @@ func mergeGitCommitSignature(payload *gitCommitActorPayload, fallback gitstore.G
 func (d *Deps) GetGitRef(w http.ResponseWriter, r *http.Request) {
 	full := repoFullName(r)
 	branch := pathParam(r, "*")
-	if d.mustGetRepo(w, r) == nil {
+	repo := d.mustGetRepo(w, r)
+	if repo == nil {
 		return
+	}
+	if _, delegated := service.DelegatedSessionIDFromContext(r.Context()); delegated {
+		operation, _, err := d.Svc.CurrentDelegatedOperationScope(r.Context())
+		if err != nil {
+			respond.Error(w, http.StatusForbidden, "Resource not accessible by integration")
+			return
+		}
+		if operation == "pr.read" {
+			if _, err := d.Svc.RevalidateDelegatedSession(r.Context(), repo.ID, "pr.read", "repo:read", map[string]string{"head_ref": branch}); err != nil {
+				respond.Error(w, http.StatusForbidden, "Resource not accessible by integration")
+				return
+			}
+		}
 	}
 	sha, err := d.Svc.Git.HeadSHA(r.Context(), full, branch)
 	if err != nil {
@@ -1120,6 +1156,7 @@ func (d *Deps) UpdateGitRef(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, 422, err.Error())
 		return
 	}
+	d.syncOpenPRHeadsAfterBranchAdvance(r.Context(), "UpdateGitRef", repo.ID, full, branch)
 	d.logGitAudit(r.Context(), repo, service.AuditActionGitRefUpdate, full, "ref="+ref+" sha="+body.SHA)
 	respond.JSON(w, 200, map[string]any{
 		"ref": ref,
@@ -1193,6 +1230,9 @@ func (d *Deps) UpdateGitRefGeneric(w http.ResponseWriter, r *http.Request) {
 		}
 		respond.Error(w, 422, err.Error())
 		return
+	}
+	if strings.HasPrefix(refName, gitstore.RefsHeadsPrefix) {
+		d.syncOpenPRHeadsAfterBranchAdvance(r.Context(), "UpdateGitRefGeneric", repo.ID, full, strings.TrimPrefix(refName, gitstore.RefsHeadsPrefix))
 	}
 	d.logGitAudit(r.Context(), repo, service.AuditActionGitRefUpdate, full, "ref="+refName+" sha="+body.SHA)
 	respond.JSON(w, 200, transform.GitRef(refName, body.SHA))
@@ -1289,6 +1329,9 @@ func (d *Deps) CreateGitRef(w http.ResponseWriter, r *http.Request) {
 		}
 		respond.Error(w, 422, err.Error())
 		return
+	}
+	if strings.HasPrefix(body.Ref, gitstore.RefsHeadsPrefix) {
+		d.syncOpenPRHeadsAfterBranchAdvance(r.Context(), "CreateGitRef", repo.ID, full, strings.TrimPrefix(body.Ref, gitstore.RefsHeadsPrefix))
 	}
 	d.logGitAudit(r.Context(), repo, service.AuditActionGitRefCreate, full, "ref="+body.Ref+" sha="+body.SHA)
 	respond.JSON(w, 201, map[string]any{

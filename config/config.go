@@ -16,6 +16,22 @@ type Config struct {
 	BaseURL    string
 	DBdsn      string
 	GitRepoDir string
+	// ControlPlaneDSN is retained only to reject retired deployment settings.
+	// It must never silently fall back to the single application database.
+	ControlPlaneDSN string
+	// Fork deployments retain legacy extension URLs without redirects. Set
+	// this after client migration to use upstream's canonical-only surface.
+	DisableLegacyExtensionAliases bool
+
+	// IntegrationsConfigFile points to optional YAML configuration for external integrations.
+	IntegrationsConfigFile string
+
+	// ReplicationConfigFile explicitly enables a separate mTLS peer listener
+	// inside the owning primary process. Empty keeps existing deployments unchanged.
+	ReplicationConfigFile string
+	// Explicit operator identity enables native-admin registration before a
+	// peer listener exists. Must match authority_id when both are configured.
+	ReplicationAuthorityID string
 
 	// ListenMode controls listener setup: "development" (default) starts
 	// multiple listeners with TLS; "production" starts a single HTTP listener.
@@ -100,6 +116,45 @@ type Config struct {
 	WorkflowExecPidsLimit int
 	WorkflowExecNoFile    int
 	WorkflowExecTmpfsSize string
+
+	// ForgejoIntegration mirrors selected AGS post-push branch updates to a
+	// Forgejo repository so Forgejo PRs and Actions can act as the CI control plane.
+	ForgejoIntegrationEnabled             bool
+	ForgejoIntegrationBaseURL             string
+	ForgejoIntegrationToken               string
+	ForgejoIntegrationTokenFile           string
+	ForgejoIntegrationWebhookSecret       string
+	ForgejoIntegrationWebhookSecretFile   string
+	ForgejoIntegrationDefaultOwner        string
+	ForgejoIntegrationRepoMapFile         string
+	ForgejoIntegrationBranchInclude       []string // Legacy combined mirror/PR policy when split policies are unset.
+	ForgejoIntegrationBranchExclude       []string // Legacy combined mirror/PR policy when split policies are unset.
+	ForgejoIntegrationMirrorBranchInclude []string
+	ForgejoIntegrationMirrorBranchExclude []string
+	ForgejoIntegrationPRBranchInclude     []string
+	ForgejoIntegrationPRBranchExclude     []string
+	ForgejoIntegrationAutoCreateRepo      bool
+	ForgejoIntegrationAutoPullRequest     bool
+	ForgejoIntegrationDefaultBaseBranch   string
+	ForgejoIntegrationPrivateRepos        bool
+	ForgejoIntegrationPushGitConfig       []string
+	ForgejoIntegrationPushTimeout         time.Duration
+	ForgejoAuthorityPolicyEnabled         bool
+	ForgejoAuthorityPolicyTokenFile       string
+	ForgejoIntegrationBot                 string
+	ForgejoProjectionWorkerTimeout        time.Duration
+	ForgejoProjectionWorkerMaxAttempts    int
+	ForgejoProjectionWorkerRetryDelay     time.Duration
+	ForgejoActionsLogDir                  string
+	ProviderLogBridgeEnabled              bool
+	ProviderLogBridgeTokenFile            string
+	ProviderLogBridgeForgejoDBDSNFile     string
+	ProviderLogBridgeAllowedCIDRs         []string
+	ProviderLogBridgeMaxBytes             int64
+	// AllowMissingProjectionAlerting is an explicit development/test opt-out.
+	// Production deployments using Forgejo workflow actions should leave it false.
+	AllowMissingProjectionAlerting     bool
+	AllowMissingForgejoAuthorityPolicy bool
 }
 
 // New reads environment variables and returns a fully-populated Config.
@@ -111,7 +166,11 @@ func New() (Config, error) {
 		ConsoleBaseURL:                          os.Getenv("CONSOLE_BASE_URL"),
 		OAuthDeviceVerificationURL:              os.Getenv("OAUTH_DEVICE_VERIFICATION_URL"),
 		DBdsn:                                   os.Getenv("DB_DSN"),
+		ControlPlaneDSN:                         os.Getenv("CONTROL_PLANE_DSN"),
 		GitRepoDir:                              os.Getenv("GIT_REPO_DIR"),
+		ReplicationConfigFile:                   os.Getenv("AGS_REPLICATION_CONFIG_FILE"),
+		ReplicationAuthorityID:                  os.Getenv("AGS_REPLICATION_AUTHORITY_ID"),
+		IntegrationsConfigFile:                  os.Getenv("AGS_INTEGRATIONS_CONFIG"),
 		ListenMode:                              os.Getenv("LISTEN_MODE"),
 		AllowAnyToken:                           os.Getenv("ALLOW_ANY_TOKEN") == "true" || os.Getenv("ALLOW_ANY_TOKEN") == "1",
 		AdminLogin:                              os.Getenv("ADMIN_LOGIN"),
@@ -156,6 +215,36 @@ func New() (Config, error) {
 		WorkflowExecCPUs:                        os.Getenv("WORKFLOW_EXEC_CPUS"),
 		WorkflowExecMemory:                      os.Getenv("WORKFLOW_EXEC_MEMORY"),
 		WorkflowExecTmpfsSize:                   os.Getenv("WORKFLOW_EXEC_TMPFS_SIZE"),
+		ForgejoIntegrationEnabled:               envBool("FORGEJO_INTEGRATION_ENABLED"),
+		ForgejoIntegrationBaseURL:               os.Getenv("FORGEJO_INTEGRATION_BASE_URL"),
+		ForgejoIntegrationToken:                 os.Getenv("FORGEJO_INTEGRATION_TOKEN"),
+		ForgejoIntegrationTokenFile:             os.Getenv("FORGEJO_INTEGRATION_TOKEN_FILE"),
+		ForgejoIntegrationWebhookSecret:         os.Getenv("FORGEJO_INTEGRATION_WEBHOOK_SECRET"),
+		ForgejoIntegrationWebhookSecretFile:     os.Getenv("FORGEJO_INTEGRATION_WEBHOOK_SECRET_FILE"),
+		ForgejoIntegrationDefaultOwner:          os.Getenv("FORGEJO_INTEGRATION_DEFAULT_OWNER"),
+		ForgejoIntegrationRepoMapFile:           os.Getenv("FORGEJO_INTEGRATION_REPO_MAP"),
+		ForgejoIntegrationBranchInclude:         splitCSV(os.Getenv("FORGEJO_INTEGRATION_BRANCH_INCLUDE")),
+		ForgejoIntegrationBranchExclude:         splitCSV(os.Getenv("FORGEJO_INTEGRATION_BRANCH_EXCLUDE")),
+		ForgejoIntegrationMirrorBranchInclude:   splitCSV(os.Getenv("FORGEJO_INTEGRATION_MIRROR_BRANCH_INCLUDE")),
+		ForgejoIntegrationMirrorBranchExclude:   splitCSV(os.Getenv("FORGEJO_INTEGRATION_MIRROR_BRANCH_EXCLUDE")),
+		ForgejoIntegrationPRBranchInclude:       splitCSV(os.Getenv("FORGEJO_INTEGRATION_PR_BRANCH_INCLUDE")),
+		ForgejoIntegrationPRBranchExclude:       splitCSV(os.Getenv("FORGEJO_INTEGRATION_PR_BRANCH_EXCLUDE")),
+		ForgejoIntegrationAutoCreateRepo:        envBool("FORGEJO_INTEGRATION_AUTO_CREATE_REPO"),
+		ForgejoIntegrationAutoPullRequest:       envBool("FORGEJO_INTEGRATION_AUTO_PR"),
+		ForgejoIntegrationDefaultBaseBranch:     os.Getenv("FORGEJO_INTEGRATION_PR_BASE"),
+		ForgejoIntegrationPrivateRepos:          envBool("FORGEJO_INTEGRATION_PRIVATE_REPOS"),
+		ForgejoIntegrationPushGitConfig:         splitCSV(os.Getenv("FORGEJO_INTEGRATION_PUSH_GIT_CONFIG")),
+		ForgejoAuthorityPolicyEnabled:           envBool("FORGEJO_INTEGRATION_AUTHORITY_POLICY_ENABLED"),
+		ForgejoAuthorityPolicyTokenFile:         os.Getenv("FORGEJO_INTEGRATION_AUTHORITY_POLICY_TOKEN_FILE"),
+		ForgejoIntegrationBot:                   os.Getenv("FORGEJO_INTEGRATION_BOT"),
+		ForgejoActionsLogDir:                    os.Getenv("FORGEJO_ACTIONS_LOG_DIR"),
+		ProviderLogBridgeEnabled:                envBool("PROVIDER_LOG_BRIDGE_ENABLED"),
+		ProviderLogBridgeTokenFile:              os.Getenv("PROVIDER_LOG_BRIDGE_TOKEN_FILE"),
+		ProviderLogBridgeForgejoDBDSNFile:       os.Getenv("PROVIDER_LOG_BRIDGE_FORGEJO_DB_DSN_FILE"),
+		ProviderLogBridgeAllowedCIDRs:           splitCSV(os.Getenv("PROVIDER_LOG_BRIDGE_ALLOWED_CIDRS")),
+		ProviderLogBridgeMaxBytes:               envInt64("PROVIDER_LOG_BRIDGE_MAX_BYTES", 4<<20),
+		AllowMissingProjectionAlerting:          envBool("AGS_ALLOW_MISSING_PROJECTION_ALERTING"),
+		AllowMissingForgejoAuthorityPolicy:      envBool("AGS_ALLOW_MISSING_FORGEJO_AUTHORITY_POLICY"),
 	}
 	if v := os.Getenv("EMBEDDING_DIMENSIONS"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -171,12 +260,40 @@ func New() (Config, error) {
 		}
 		cfg.WorkflowExecTimeout = d
 	}
+	if v := os.Getenv("FORGEJO_INTEGRATION_PUSH_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return Config{}, fmt.Errorf("invalid FORGEJO_INTEGRATION_PUSH_TIMEOUT %q: must be a non-negative duration", v)
+		}
+		cfg.ForgejoIntegrationPushTimeout = d
+	}
+	if v := os.Getenv("FORGEJO_PROJECTION_WORKER_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return Config{}, fmt.Errorf("invalid FORGEJO_PROJECTION_WORKER_TIMEOUT %q: must be a non-negative duration", v)
+		}
+		cfg.ForgejoProjectionWorkerTimeout = d
+	}
+	if v := os.Getenv("FORGEJO_PROJECTION_WORKER_RETRY_DELAY"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return Config{}, fmt.Errorf("invalid FORGEJO_PROJECTION_WORKER_RETRY_DELAY %q: must be a non-negative duration", v)
+		}
+		cfg.ForgejoProjectionWorkerRetryDelay = d
+	}
 	if v := os.Getenv("WORKFLOW_EXEC_PIDS_LIMIT"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
 			return Config{}, fmt.Errorf("invalid WORKFLOW_EXEC_PIDS_LIMIT %q: must be a positive integer", v)
 		}
 		cfg.WorkflowExecPidsLimit = n
+	}
+	if v := os.Getenv("FORGEJO_PROJECTION_WORKER_MAX_ATTEMPTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return Config{}, fmt.Errorf("invalid FORGEJO_PROJECTION_WORKER_MAX_ATTEMPTS %q: must be a positive integer", v)
+		}
+		cfg.ForgejoProjectionWorkerMaxAttempts = n
 	}
 	if v := os.Getenv("WORKFLOW_EXEC_NOFILE"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -185,16 +302,30 @@ func New() (Config, error) {
 		}
 		cfg.WorkflowExecNoFile = n
 	}
+	if value := os.Getenv("AGS_LEGACY_EXTENSION_ALIASES"); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid AGS_LEGACY_EXTENSION_ALIASES")
+		}
+		cfg.DisableLegacyExtensionAliases = !enabled
+	}
 	return Normalize(cfg)
 }
 
 // Normalize applies defaults and validates a programmatically supplied config.
 func Normalize(cfg Config) (Config, error) {
+	if strings.TrimSpace(cfg.ControlPlaneDSN) != "" {
+		return Config{}, fmt.Errorf("CONTROL_PLANE_DSN is not supported by this single-database runtime; refusing root database fallback")
+	}
+	if err := validateReplicationAuthority(cfg); err != nil {
+		return Config{}, err
+	}
 	cfg.Port = firstNonEmpty(cfg.Port, "8080")
 	cfg.BaseURL = firstNonEmpty(cfg.BaseURL, "http://localhost:8080")
 	cfg.ConsoleBaseURL = firstNonEmpty(cfg.ConsoleBaseURL, "http://localhost:5173")
 	cfg.OAuthDeviceVerificationURL = strings.TrimSpace(cfg.OAuthDeviceVerificationURL)
 	cfg.GitRepoDir = firstNonEmpty(cfg.GitRepoDir, "gitrepos")
+	cfg.IntegrationsConfigFile = strings.TrimSpace(cfg.IntegrationsConfigFile)
 	cfg.ListenMode = firstNonEmpty(cfg.ListenMode, "development")
 	cfg.Environment = strings.ToLower(strings.TrimSpace(firstNonEmpty(cfg.Environment, "production")))
 	cfg.EmbeddingBaseURL = firstNonEmpty(cfg.EmbeddingBaseURL, "https://api.openai.com")
@@ -219,6 +350,14 @@ func Normalize(cfg Config) (Config, error) {
 	if cfg.WorkflowExecTmpfsSize == "" {
 		cfg.WorkflowExecTmpfsSize = "64m"
 	}
+	cfg.ForgejoIntegrationBaseURL = strings.TrimSpace(cfg.ForgejoIntegrationBaseURL)
+	cfg.ForgejoIntegrationToken = strings.TrimSpace(cfg.ForgejoIntegrationToken)
+	cfg.ForgejoIntegrationTokenFile = strings.TrimSpace(cfg.ForgejoIntegrationTokenFile)
+	cfg.ForgejoIntegrationWebhookSecret = strings.TrimSpace(cfg.ForgejoIntegrationWebhookSecret)
+	cfg.ForgejoIntegrationWebhookSecretFile = strings.TrimSpace(cfg.ForgejoIntegrationWebhookSecretFile)
+	cfg.ForgejoIntegrationDefaultOwner = strings.TrimSpace(cfg.ForgejoIntegrationDefaultOwner)
+	cfg.ForgejoIntegrationRepoMapFile = strings.TrimSpace(cfg.ForgejoIntegrationRepoMapFile)
+	cfg.ForgejoIntegrationDefaultBaseBranch = firstNonEmpty(cfg.ForgejoIntegrationDefaultBaseBranch, "main")
 	if cfg.DBdsn == "" {
 		return Config{}, fmt.Errorf("required environment variable not set: DB_DSN")
 	}
@@ -234,6 +373,18 @@ func Normalize(cfg Config) (Config, error) {
 	if cfg.WorkflowExecTimeout <= 0 {
 		return Config{}, fmt.Errorf("invalid WORKFLOW_EXEC_TIMEOUT %q: must be a positive duration", cfg.WorkflowExecTimeout)
 	}
+	if cfg.ForgejoIntegrationPushTimeout < 0 {
+		return Config{}, fmt.Errorf("invalid FORGEJO_INTEGRATION_PUSH_TIMEOUT %q: must be a non-negative duration", cfg.ForgejoIntegrationPushTimeout)
+	}
+	if cfg.ForgejoProjectionWorkerTimeout < 0 {
+		return Config{}, fmt.Errorf("invalid FORGEJO_PROJECTION_WORKER_TIMEOUT %q: must be a non-negative duration", cfg.ForgejoProjectionWorkerTimeout)
+	}
+	if cfg.ForgejoProjectionWorkerRetryDelay < 0 {
+		return Config{}, fmt.Errorf("invalid FORGEJO_PROJECTION_WORKER_RETRY_DELAY %q: must be a non-negative duration", cfg.ForgejoProjectionWorkerRetryDelay)
+	}
+	if cfg.ForgejoProjectionWorkerMaxAttempts < 0 {
+		return Config{}, fmt.Errorf("invalid FORGEJO_PROJECTION_WORKER_MAX_ATTEMPTS %d: must be a non-negative integer", cfg.ForgejoProjectionWorkerMaxAttempts)
+	}
 	if cfg.WorkflowExecPidsLimit <= 0 {
 		return Config{}, fmt.Errorf("invalid WORKFLOW_EXEC_PIDS_LIMIT %d: must be a positive integer", cfg.WorkflowExecPidsLimit)
 	}
@@ -247,6 +398,14 @@ func Normalize(cfg Config) (Config, error) {
 		}
 		if parsed.Scheme != "http" && parsed.Scheme != "https" {
 			return Config{}, fmt.Errorf("invalid OAUTH_DEVICE_VERIFICATION_URL %q: must use http or https", cfg.OAuthDeviceVerificationURL)
+		}
+	}
+	if cfg.ForgejoIntegrationEnabled {
+		if cfg.ForgejoIntegrationBaseURL == "" {
+			return Config{}, fmt.Errorf("FORGEJO_INTEGRATION_BASE_URL is required when FORGEJO_INTEGRATION_ENABLED=1")
+		}
+		if cfg.ForgejoIntegrationToken == "" && cfg.ForgejoIntegrationTokenFile == "" {
+			return Config{}, fmt.Errorf("FORGEJO_INTEGRATION_TOKEN or FORGEJO_INTEGRATION_TOKEN_FILE is required when FORGEJO_INTEGRATION_ENABLED=1")
 		}
 	}
 	if strings.TrimSpace(cfg.OIDCProvider) == "" && (cfg.OIDCIssuer != "" || cfg.OIDCDiscoveryURL != "" || cfg.OIDCClientID != "") {
@@ -306,6 +465,38 @@ func (c Config) ConnectedLoginEnabled() bool {
 		strings.TrimSpace(c.ConnectedLoginAPIOrigin) != "" &&
 		strings.TrimSpace(c.ConnectedLoginClientID) != "" &&
 		strings.TrimSpace(c.ConnectedLoginClientSecret) != ""
+}
+
+func envBool(key string) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func envInt64(key string, fallback int64) int64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func splitCSV(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func firstNonEmpty(value, fallback string) string {

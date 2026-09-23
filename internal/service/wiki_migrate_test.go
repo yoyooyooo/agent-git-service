@@ -50,6 +50,13 @@ func newWikiGitIngestPeerService(t testing.TB, base *service.Service) *service.S
 	return peer
 }
 
+func rewriteWikiMasterOutOfBand(t testing.TB, repoDir, sha string) {
+	t.Helper()
+	if out, err := exec.Command("git", "--git-dir", repoDir, "update-ref", "refs/heads/master", sha).CombinedOutput(); err != nil {
+		t.Fatalf("out-of-band wiki master rewrite: %v\n%s", err, out)
+	}
+}
+
 func TestMigrateAllWikis_ContinuesAfterRepoFailure(t *testing.T) {
 	svc, cleanup := setupWikiGitIngestTestService(t)
 	defer cleanup()
@@ -371,9 +378,7 @@ func TestIngestWikiGit_RebuildsCatalogAfterNonFastForwardRewrite(t *testing.T) {
 	if out, err := exec.Command("git", "-C", workDir, "reset", "--hard", headA).CombinedOutput(); err != nil {
 		t.Fatalf("git reset --hard %s: %v\n%s", headA, err, out)
 	}
-	if out, err := exec.Command("git", "-C", workDir, "push", "--force", "origin", "master").CombinedOutput(); err != nil {
-		t.Fatalf("git push --force origin master: %v\n%s", err, out)
-	}
+	rewriteWikiMasterOutOfBand(t, repoDir, headA)
 
 	if _, err := svc.IngestWikiGit(ctx, repoFullName, service.WikiGitIngestOptions{}); err != nil {
 		t.Fatalf("IngestWikiGit after rewrite: %v", err)
@@ -471,9 +476,7 @@ func TestIngestWikiGit_RefreshesPageAndHistoryAfterNonFastForwardRewrite(t *test
 	if out, err := exec.Command("git", "-C", workDir, "reset", "--hard", headA).CombinedOutput(); err != nil {
 		t.Fatalf("git reset --hard %s: %v\n%s", headA, err, out)
 	}
-	if out, err := exec.Command("git", "-C", workDir, "push", "--force", "origin", "master").CombinedOutput(); err != nil {
-		t.Fatalf("git push --force origin master: %v\n%s", err, out)
-	}
+	rewriteWikiMasterOutOfBand(t, repoDir, headA)
 
 	if _, err := svc.IngestWikiGit(ctx, repoFullName, service.WikiGitIngestOptions{}); err != nil {
 		t.Fatalf("IngestWikiGit after rewrite: %v", err)
@@ -1539,9 +1542,7 @@ func TestIngestWikiGit_SerializesConcurrentRefreshAfterRewrite(t *testing.T) {
 	if out, err := exec.Command("git", "-C", workDir, "reset", "--hard", headA).CombinedOutput(); err != nil {
 		t.Fatalf("git reset --hard %s: %v\n%s", headA, err, out)
 	}
-	if out, err := exec.Command("git", "-C", workDir, "push", "--force", "origin", "master").CombinedOutput(); err != nil {
-		t.Fatalf("git push --force origin master: %v\n%s", err, out)
-	}
+	rewriteWikiMasterOutOfBand(t, repoDir, headA)
 
 	enterCh := make(chan struct{}, 1)
 	releaseCh := make(chan struct{})

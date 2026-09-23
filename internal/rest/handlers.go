@@ -121,8 +121,15 @@ func repoFullName(r *http.Request) string {
 
 // Deps holds server-wide dependencies passed to handlers.
 type Deps struct {
-	Svc            *service.Service
-	ConsoleBaseURL string
+	// LegacyExtensionAliases preserves the fork's deployed /api/v3 extension
+	// clients. Canonical upstream registration remains the zero-value behavior.
+	LegacyExtensionAliases bool
+	Svc                    *service.Service
+	ConsoleBaseURL         string
+	ProviderLogBridge      http.Handler
+	// Empty disables operator registration. Set only by the owning strict
+	// single-DB primary, never taken from client or peer requests.
+	ReplicationAuthorityID string
 }
 
 // --- Meta ---
@@ -422,6 +429,17 @@ func (d *Deps) mustGetOrg(w http.ResponseWriter, r *http.Request) *db.User {
 		return nil
 	}
 	return &u
+}
+
+func (d *Deps) syncOpenPRHeadsAfterBranchAdvance(ctx context.Context, op string, repoID uint, repoFullName, branch string) {
+	if d == nil || d.Svc == nil {
+		return
+	}
+	branch = strings.TrimSpace(strings.TrimPrefix(branch, "refs/heads/"))
+	if repoID == 0 || strings.TrimSpace(repoFullName) == "" || branch == "" {
+		return
+	}
+	logErr(ctx, op+": sync open PR heads", d.Svc.SyncOpenPRHeadsForBranch(ctx, repoID, repoFullName, branch), "repo", repoFullName, "branch", branch)
 }
 
 // logErr logs a non-nil error from a service call that would otherwise be swallowed.

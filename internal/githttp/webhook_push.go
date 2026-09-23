@@ -3,6 +3,7 @@ package githttp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
@@ -46,6 +47,7 @@ func (h *Handler) handlePostPushWebhooks(ctx context.Context, repoFullName, repo
 		return err
 	}
 
+	var syncedPRs []db.PullRequest
 	for _, change := range changes {
 		payload := h.buildPushWebhookPayload(ctx, repoPath, repo, change)
 		if err := h.Svc.DispatchWebhookEvent(ctx, repo.ID, "push", "", payload); err != nil {
@@ -64,6 +66,7 @@ func (h *Handler) handlePostPushWebhooks(ctx context.Context, repoFullName, repo
 			if err != nil {
 				return err
 			}
+			syncedPRs = append(syncedPRs, updatedPR)
 			if err := h.Svc.DispatchWebhookEvent(ctx, updatedPR.RepositoryID, "pull_request", "synchronize", map[string]any{
 				"action":       "synchronize",
 				"number":       updatedPR.Number,
@@ -75,7 +78,54 @@ func (h *Handler) handlePostPushWebhooks(ctx context.Context, repoFullName, repo
 			}
 		}
 	}
+	for _, change := range changes {
+		if !strings.HasPrefix(change.Ref, "refs/heads/env/") || change.Deleted {
+			continue
+		}
+		if _, err := h.Svc.DispatchRepoFlowEnvProjection(ctx, service.RepoFlowEnvProjectionRequest{
+			RepoFullName: repoFullName,
+			RepoPath:     repoPath,
+			Ref:          change.Ref,
+			Before:       change.Before,
+			After:        change.After,
+			Deleted:      change.Deleted,
+		}); err != nil {
+			slog.WarnContext(ctx, "repo-flow env projection failed", "repo", repoFullName, "ref", change.Ref, "error", err)
+		}
+	}
+
+	forgejoDispatchOK := true
+	if err := h.Svc.DispatchForgejoIntegration(ctx, repoFullName, repoPath, forgejoRefChanges(changes)); err != nil {
+		forgejoDispatchOK = false
+		slog.WarnContext(ctx, "forgejo integration dispatch failed", "repo", repoFullName, "error", err)
+	}
+	if err := h.Svc.DispatchGitLabIntegration(ctx, repoFullName, repoPath, forgejoRefChanges(changes)); err != nil {
+		slog.WarnContext(ctx, "gitlab integration dispatch failed", "repo", repoFullName, "error", err)
+	}
+	if err := h.Svc.DispatchGitHubIntegration(ctx, repoFullName, repoPath, forgejoRefChanges(changes)); err != nil {
+		slog.WarnContext(ctx, "github integration dispatch failed", "repo", repoFullName, "error", err)
+	}
+	if forgejoDispatchOK {
+		for _, pr := range syncedPRs {
+			h.Svc.ProjectPullRequestSyncedToMultica(ctx, pr)
+		}
+	}
 	return nil
+}
+
+func forgejoRefChanges(changes []pushRefChange) []service.ForgejoRefChange {
+	out := make([]service.ForgejoRefChange, 0, len(changes))
+	for _, change := range changes {
+		out = append(out, service.ForgejoRefChange{
+			Ref:     change.Ref,
+			Before:  change.Before,
+			After:   change.After,
+			Created: change.Created,
+			Deleted: change.Deleted,
+			Forced:  change.Forced,
+		})
+	}
+	return out
 }
 
 func (h *Handler) buildPushWebhookPayload(ctx context.Context, repoPath string, repo db.Repository, change pushRefChange) map[string]any {

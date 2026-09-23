@@ -111,6 +111,7 @@ func (s *Server) doCreatePR(ctx context.Context, req gqlRequest) map[string]any 
 	if reloaded, err := s.Svc.ReloadPR(ctx, pr.ID); err == nil {
 		pr = reloaded
 	}
+	logErr(ctx, "CreatePR: external integrations", s.Svc.EnqueuePullRequestCreatedIntegrations(ctx, pr))
 	return wrap("createPullRequest", map[string]any{"pullRequest": s.prGQL(ctx, pr)})
 }
 

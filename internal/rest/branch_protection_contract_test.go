@@ -50,6 +50,41 @@ func TestBranchProtectionBypassAllowancesRESTContract(t *testing.T) {
 	}
 }
 
+func TestBranchInfoReflectsProtectionRow(t *testing.T) {
+	h := testharness.New(t)
+
+	w := h.DoRESTJSON(t, "POST", "/api/v3/user/repos", map[string]any{
+		"name": "branch-protection-projection",
+	})
+	assertStatusCode(t, w, http.StatusCreated)
+
+	w = h.DoREST(t, "GET", "/api/v3/repos/testuser/branch-protection-projection/branches/main", nil)
+	assertStatusCode(t, w, http.StatusOK)
+	before := testharness.DecodeJSON(t, w)
+	if before["protected"] != false {
+		t.Fatalf("branch protected before rule: got %#v, want false", before["protected"])
+	}
+
+	w = h.DoRESTJSON(t, "PUT", "/api/v3/repos/testuser/branch-protection-projection/branches/main/protection", map[string]any{
+		"enforce_admins": true,
+	})
+	assertStatusCode(t, w, http.StatusOK)
+
+	w = h.DoREST(t, "GET", "/api/v3/repos/testuser/branch-protection-projection/branches/main", nil)
+	assertStatusCode(t, w, http.StatusOK)
+	after := testharness.DecodeJSON(t, w)
+	if after["protected"] != true {
+		t.Fatalf("protected branch response: got %#v, want true", after["protected"])
+	}
+
+	w = h.DoREST(t, "GET", "/api/v3/repos/testuser/branch-protection-projection/branches", nil)
+	assertStatusCode(t, w, http.StatusOK)
+	branches := testharness.DecodeJSONArray(t, w)
+	if len(branches) != 1 || branches[0]["name"] != "main" || branches[0]["protected"] != true {
+		t.Fatalf("protected branch list response: %#v", branches)
+	}
+}
+
 func TestBranchProtectionSubresourceRESTContract(t *testing.T) {
 	h := testharness.New(t)
 

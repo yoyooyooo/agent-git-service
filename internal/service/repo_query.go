@@ -32,6 +32,14 @@ func (s *Service) IsRepoEmpty(ctx context.Context, fullName string) bool {
 
 // RenameRepo renames a repository.
 func (s *Service) RenameRepo(ctx context.Context, fullName, newName string) (db.Repository, error) {
+	if s.Git != nil {
+		mutationCtx, release, err := s.Git.BeginMutation(ctx)
+		if err != nil {
+			return db.Repository{}, err
+		}
+		defer release()
+		ctx = mutationCtx
+	}
 	rep, err := s.GetRepo(ctx, fullName)
 	if err != nil {
 		return db.Repository{}, err
@@ -87,6 +95,14 @@ func (s *Service) RenameRepo(ctx context.Context, fullName, newName string) (db.
 
 // TransferRepo transfers a repository to a new owner.
 func (s *Service) TransferRepo(ctx context.Context, fullName, newOwnerLogin string) (db.Repository, error) {
+	if s.Git != nil {
+		mutationCtx, release, err := s.Git.BeginMutation(ctx)
+		if err != nil {
+			return db.Repository{}, err
+		}
+		defer release()
+		ctx = mutationCtx
+	}
 	rep, err := s.GetRepo(ctx, fullName)
 	if err != nil {
 		return db.Repository{}, err

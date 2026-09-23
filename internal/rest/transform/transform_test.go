@@ -546,10 +546,10 @@ func TestPREmptySHADefaults(t *testing.T) {
 }
 
 func TestBranch(t *testing.T) {
-	result := transform.Branch("alice/myrepo", "main", "abc123")
+	result := transform.Branch("alice/myrepo", "main", "abc123", true)
 
 	assertField(t, result, "name", "main")
-	assertField(t, result, "protected", false)
+	assertField(t, result, "protected", true)
 
 	commit := result["commit"].(map[string]any)
 	if commit["sha"] != "abc123" {

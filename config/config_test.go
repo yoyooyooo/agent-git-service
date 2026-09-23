@@ -418,3 +418,102 @@ func TestWorkflowExecNoFileInvalid(t *testing.T) {
 		t.Fatal("expected error for invalid WORKFLOW_EXEC_NOFILE")
 	}
 }
+
+func TestForgejoIntegrationConfigFromEnv(t *testing.T) {
+	t.Setenv("DB_DSN", "custom-dsn")
+	t.Setenv("AGS_INTEGRATIONS_CONFIG", "/etc/ags/integrations.yaml")
+	t.Setenv("FORGEJO_INTEGRATION_ENABLED", "1")
+	t.Setenv("FORGEJO_INTEGRATION_BASE_URL", "http://forgejo.local:5555")
+	t.Setenv("FORGEJO_INTEGRATION_TOKEN_FILE", "/run/secrets/forgejo-token")
+	t.Setenv("FORGEJO_INTEGRATION_DEFAULT_OWNER", "ci")
+	t.Setenv("FORGEJO_INTEGRATION_REPO_MAP", "/etc/ags/forgejo-map.json")
+	t.Setenv("FORGEJO_INTEGRATION_BRANCH_INCLUDE", "legacy/*")
+	t.Setenv("FORGEJO_INTEGRATION_BRANCH_EXCLUDE", "legacy-skip/*")
+	t.Setenv("FORGEJO_INTEGRATION_MIRROR_BRANCH_INCLUDE", "main,agent/*,feature/*")
+	t.Setenv("FORGEJO_INTEGRATION_MIRROR_BRANCH_EXCLUDE", "ci/*")
+	t.Setenv("FORGEJO_INTEGRATION_PR_BRANCH_INCLUDE", "agent/*,feature/*")
+	t.Setenv("FORGEJO_INTEGRATION_PR_BRANCH_EXCLUDE", "main,ci/*")
+	t.Setenv("FORGEJO_INTEGRATION_AUTO_CREATE_REPO", "1")
+	t.Setenv("FORGEJO_INTEGRATION_AUTO_PR", "true")
+	t.Setenv("FORGEJO_INTEGRATION_PR_BASE", "develop")
+	t.Setenv("FORGEJO_INTEGRATION_PRIVATE_REPOS", "true")
+	t.Setenv("FORGEJO_INTEGRATION_PUSH_GIT_CONFIG", "core.compression=0, pack.window=0")
+	t.Setenv("FORGEJO_INTEGRATION_PUSH_TIMEOUT", "8m")
+	t.Setenv("FORGEJO_PROJECTION_WORKER_TIMEOUT", "10m")
+	t.Setenv("FORGEJO_PROJECTION_WORKER_MAX_ATTEMPTS", "4")
+	t.Setenv("FORGEJO_PROJECTION_WORKER_RETRY_DELAY", "2s")
+	t.Setenv("AGS_ALLOW_MISSING_PROJECTION_ALERTING", "true")
+	t.Setenv("FORGEJO_INTEGRATION_AUTHORITY_POLICY_ENABLED", "true")
+	t.Setenv("FORGEJO_INTEGRATION_AUTHORITY_POLICY_TOKEN_FILE", "/run/secrets/forgejo-operator-token")
+	t.Setenv("FORGEJO_INTEGRATION_BOT", "ags-bot")
+	t.Setenv("FORGEJO_ACTIONS_LOG_DIR", "/opt/forgejo/data/gitea/actions_log")
+	t.Setenv("AGS_ALLOW_MISSING_FORGEJO_AUTHORITY_POLICY", "true")
+
+	cfg, err := New()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.IntegrationsConfigFile != "/etc/ags/integrations.yaml" {
+		t.Fatalf("integrations config=%q", cfg.IntegrationsConfigFile)
+	}
+	if !cfg.ForgejoIntegrationEnabled {
+		t.Fatal("expected ForgejoIntegrationEnabled=true")
+	}
+	if cfg.ForgejoIntegrationBaseURL != "http://forgejo.local:5555" {
+		t.Fatalf("base URL=%q", cfg.ForgejoIntegrationBaseURL)
+	}
+	if cfg.ForgejoIntegrationTokenFile != "/run/secrets/forgejo-token" {
+		t.Fatalf("token file=%q", cfg.ForgejoIntegrationTokenFile)
+	}
+	if cfg.ForgejoIntegrationDefaultOwner != "ci" {
+		t.Fatalf("default owner=%q", cfg.ForgejoIntegrationDefaultOwner)
+	}
+	if cfg.ForgejoIntegrationRepoMapFile != "/etc/ags/forgejo-map.json" {
+		t.Fatalf("repo map=%q", cfg.ForgejoIntegrationRepoMapFile)
+	}
+	if strings.Join(cfg.ForgejoIntegrationBranchInclude, ",") != "legacy/*" {
+		t.Fatalf("legacy include=%v", cfg.ForgejoIntegrationBranchInclude)
+	}
+	if strings.Join(cfg.ForgejoIntegrationBranchExclude, ",") != "legacy-skip/*" {
+		t.Fatalf("legacy exclude=%v", cfg.ForgejoIntegrationBranchExclude)
+	}
+	if strings.Join(cfg.ForgejoIntegrationMirrorBranchInclude, ",") != "main,agent/*,feature/*" {
+		t.Fatalf("mirror include=%v", cfg.ForgejoIntegrationMirrorBranchInclude)
+	}
+	if strings.Join(cfg.ForgejoIntegrationMirrorBranchExclude, ",") != "ci/*" {
+		t.Fatalf("mirror exclude=%v", cfg.ForgejoIntegrationMirrorBranchExclude)
+	}
+	if strings.Join(cfg.ForgejoIntegrationPRBranchInclude, ",") != "agent/*,feature/*" {
+		t.Fatalf("pr include=%v", cfg.ForgejoIntegrationPRBranchInclude)
+	}
+	if strings.Join(cfg.ForgejoIntegrationPRBranchExclude, ",") != "main,ci/*" {
+		t.Fatalf("pr exclude=%v", cfg.ForgejoIntegrationPRBranchExclude)
+	}
+	if !cfg.ForgejoIntegrationAutoCreateRepo || !cfg.ForgejoIntegrationAutoPullRequest || !cfg.ForgejoIntegrationPrivateRepos {
+		t.Fatalf("expected auto-create, auto-pr, and private repos enabled")
+	}
+	if cfg.ForgejoIntegrationDefaultBaseBranch != "develop" {
+		t.Fatalf("base branch=%q", cfg.ForgejoIntegrationDefaultBaseBranch)
+	}
+	if strings.Join(cfg.ForgejoIntegrationPushGitConfig, ",") != "core.compression=0,pack.window=0" {
+		t.Fatalf("push git config=%v", cfg.ForgejoIntegrationPushGitConfig)
+	}
+	if cfg.ForgejoIntegrationPushTimeout.String() != "8m0s" {
+		t.Fatalf("push timeout=%s", cfg.ForgejoIntegrationPushTimeout)
+	}
+	if cfg.ForgejoProjectionWorkerTimeout.String() != "10m0s" || cfg.ForgejoProjectionWorkerMaxAttempts != 4 || cfg.ForgejoProjectionWorkerRetryDelay.String() != "2s" {
+		t.Fatalf("worker timeout/retry config=%s/%d/%s", cfg.ForgejoProjectionWorkerTimeout, cfg.ForgejoProjectionWorkerMaxAttempts, cfg.ForgejoProjectionWorkerRetryDelay)
+	}
+	if !cfg.AllowMissingProjectionAlerting {
+		t.Fatal("expected explicit projection alerting opt-out")
+	}
+	if !cfg.ForgejoAuthorityPolicyEnabled || cfg.ForgejoIntegrationBot != "ags-bot" || cfg.ForgejoAuthorityPolicyTokenFile != "/run/secrets/forgejo-operator-token" {
+		t.Fatalf("unexpected Forgejo authority policy config: enabled=%v bot=%q token_file=%q", cfg.ForgejoAuthorityPolicyEnabled, cfg.ForgejoIntegrationBot, cfg.ForgejoAuthorityPolicyTokenFile)
+	}
+	if !cfg.AllowMissingForgejoAuthorityPolicy {
+		t.Fatal("expected explicit Forgejo authority policy opt-out")
+	}
+	if cfg.ForgejoActionsLogDir != "/opt/forgejo/data/gitea/actions_log" {
+		t.Fatalf("actions log dir=%q", cfg.ForgejoActionsLogDir)
+	}
+}

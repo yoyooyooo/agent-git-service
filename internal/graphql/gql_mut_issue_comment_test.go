@@ -1051,6 +1051,94 @@ func TestGraphQL_CreateLinkedBranch_Valid(t *testing.T) {
 	}
 }
 
+func TestGraphQL_CreateLinkedBranch_RefreshesOpenPRHeadAfterRecreate(t *testing.T) {
+	svc, mux, u, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+	ctx := context.Background()
+	svc.DB.AutoMigrate(&db.LinkedBranch{})
+
+	repo, err := svc.CreateRepo(ctx, service.CreateRepoInput{
+		OwnerLogin: u.Login,
+		Name:       "linked-pr-head-repo",
+		AutoInit:   true,
+		AddReadme:  true,
+	})
+	if err != nil {
+		t.Fatalf("CreateRepo: %v", err)
+	}
+	fullName := repo.FullName
+	headRef := "feature"
+	if err := svc.Git.CreateBranch(ctx, fullName, headRef, "main"); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if _, err := svc.Git.WriteFile(ctx, fullName, headRef, "hello.txt", "add file", []byte("hello\n")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	authCtx := service.ContextWithUser(ctx, u)
+	pr, err := svc.CreatePR(authCtx, service.CreatePRInput{
+		RepoFullName: fullName,
+		Title:        "open head",
+		HeadRef:      headRef,
+		BaseRef:      "main",
+		AuthorLogin:  u.Login,
+	})
+	if err != nil {
+		t.Fatalf("CreatePR: %v", err)
+	}
+	oldSHA := pr.HeadSHA
+	if _, err := svc.Git.WriteFile(ctx, fullName, headRef, "next.txt", "advance", []byte("next\n")); err != nil {
+		t.Fatalf("advance head: %v", err)
+	}
+	newSHA, err := svc.Git.HeadSHA(ctx, fullName, headRef)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+	if newSHA == oldSHA {
+		t.Fatal("expected head tip to advance")
+	}
+	if err := svc.Git.DeleteRef(ctx, fullName, "refs/heads/"+headRef); err != nil {
+		t.Fatalf("DeleteRef: %v", err)
+	}
+
+	issue, err := svc.CreateIssue(ctx, service.CreateIssueInput{
+		RepoFullName: fullName,
+		Title:        "link",
+		AuthorLogin:  u.Login,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	mut := `
+	mutation($input: CreateLinkedBranchInput!) {
+		createLinkedBranch(input: $input) {
+			linkedBranch {
+				id
+				ref { name }
+			}
+		}
+	}`
+	data := doGql(t, mux, mut, map[string]any{
+		"input": map[string]any{
+			"repositoryId": fmt.Sprintf("Repository_%d", repo.ID),
+			"issueId":      fmt.Sprintf("Issue_%d", issue.ID),
+			"name":         headRef,
+			"oid":          newSHA,
+		},
+	})
+	linkedBranch := data["createLinkedBranch"].(map[string]any)["linkedBranch"].(map[string]any)
+	if linkedBranch == nil {
+		t.Fatal("linkedBranch should not be nil")
+	}
+
+	var refreshed db.PullRequest
+	if err := svc.DB.First(&refreshed, pr.ID).Error; err != nil {
+		t.Fatalf("reload PR: %v", err)
+	}
+	if refreshed.HeadSHA != newSHA {
+		t.Fatalf("createLinkedBranch did not refresh open PR head: got %s want %s (old %s)", refreshed.HeadSHA, newSHA, oldSHA)
+	}
+}
+
 // TestGraphQL_CreateLinkedBranch_InvalidRepo tests creating a linked branch with non-existent repo.
 func TestGraphQL_CreateLinkedBranch_InvalidRepo(t *testing.T) {
 	svc, mux, u, cleanup := setupTestEnvironment(t)

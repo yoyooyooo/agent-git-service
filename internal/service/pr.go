@@ -10,6 +10,7 @@ import (
 	"github.com/ngaut/agent-git-service/internal/db"
 	applog "github.com/ngaut/agent-git-service/internal/logging"
 	"github.com/ngaut/agent-git-service/internal/mentions"
+	"github.com/ngaut/agent-git-service/internal/multicaprojection"
 
 	"gorm.io/gorm"
 )
@@ -22,6 +23,22 @@ func (s *Service) CountPRsByRepoID(ctx context.Context, repoID uint) int {
 	}
 	return int(count)
 }
+
+// PRRefProjectionDeniedError reports the narrow post-commit boundary where the
+// AGS PR fact exists but fresh delegated authority denied the separate local ref
+// projection. Callers must expose the committed PR number without treating the
+// ref effect as successful.
+type PRRefProjectionDeniedError struct {
+	PRNumber int
+	Created  bool
+	Cause    error
+}
+
+func (e *PRRefProjectionDeniedError) Error() string {
+	return fmt.Sprintf("PR #%d committed but ref projection denied by fresh delegated authority", e.PRNumber)
+}
+
+func (e *PRRefProjectionDeniedError) Unwrap() error { return e.Cause }
 
 // CreatePRInput holds PR creation parameters.
 type CreatePRInput struct {
@@ -36,17 +53,50 @@ type CreatePRInput struct {
 	AuthorLogin         string
 }
 
+// CreatePRWithResult creates one pull request. Assertion-keyed idempotency was
+// retired with the workload assertion exchange; callers use normal PR facts and
+// Access Grant invocation receipts instead.
+func (s *Service) CreatePRWithResult(ctx context.Context, in CreatePRInput) (db.PullRequest, bool, error) {
+	pr, err := s.CreatePR(ctx, in)
+	if err != nil {
+		// CreatePR can fail after the AGS PR fact commits but before a separate
+		// repository projection. Preserve that fact and its created status for
+		// callers while the non-nil error prevents a false success response.
+		return pr, pr.ID != 0, err
+	}
+	return pr, true, nil
+}
+
 // CreatePR creates a pull request.
 func (s *Service) CreatePR(ctx context.Context, in CreatePRInput) (db.PullRequest, error) {
+	if err := ValidateDelegatedSessionOperationConstraints(ctx, "pr.create", map[string]string{"base_ref": in.BaseRef, "head_ref": in.HeadRef}); err != nil {
+		return db.PullRequest{}, fmt.Errorf("service: create pr: operation constraints: %w", err)
+	}
 	rep, err := s.GetRepo(ctx, in.RepoFullName)
 	if err != nil {
 		return db.PullRequest{}, fmt.Errorf("service: create pr: repo: %w", err)
 	}
-	author, err := s.createPRAuthor(ctx, in.AuthorLogin)
+	delegatedSession, delegated := DelegatedSessionFromContext(ctx)
+	if delegated {
+		fresh, err := s.RevalidateDelegatedSession(ctx, rep.ID, "pr.create", "pr:create", map[string]string{"base_ref": in.BaseRef, "head_ref": in.HeadRef})
+		if err != nil {
+			return db.PullRequest{}, fmt.Errorf("service: create pr: delegated session capability: %w", ErrForbidden)
+		}
+		delegatedSession = fresh.Session
+	}
+	authorizationUserID := uint(0)
+	var author db.User
+	if delegated && isAccessGrantTransportSession(delegatedSession) {
+		author, err = s.accessGrantPRAuthor(ctx, delegatedSession)
+		authorizationUserID = delegatedSession.PrincipalUserID
+	} else {
+		author, err = s.createPRAuthor(ctx, in.AuthorLogin)
+		authorizationUserID = author.ID
+	}
 	if err != nil {
 		return db.PullRequest{}, fmt.Errorf("service: create pr: author: %w", err)
 	}
-	canCreatePR, err := s.CanCreatePR(ctx, rep.ID, author.ID)
+	canCreatePR, err := s.CanCreatePR(ctx, rep.ID, authorizationUserID)
 	if err != nil {
 		return db.PullRequest{}, fmt.Errorf("service: create pr: permission check: %w", err)
 	}
@@ -57,7 +107,6 @@ func (s *Service) CreatePR(ctx context.Context, in CreatePRInput) (db.PullReques
 	if baseRef == "" {
 		baseRef = rep.DefaultBranch
 	}
-
 	// Resolve head repo identity so the same-branch check uses canonical IDs.
 	headRepoFullName := in.HeadRepoFullName
 	if headRepoFullName == "" {
@@ -79,11 +128,66 @@ func (s *Service) CreatePR(ctx context.Context, in CreatePRInput) (db.PullReques
 	if in.HeadRef == baseRef && headRep.ID == rep.ID {
 		return db.PullRequest{}, fmt.Errorf("service: create pr: head and base must be different branches")
 	}
+	cleanBody, multicaLinkToken := extractMulticaPRLinkToken(in.Body)
+	body := s.enrichPRBodyWithMulticaLink(rep.FullName, cleanBody, in.Title, in.HeadRef)
+	var authoritativeMulticaClaims multicaprojection.PRLinkClaims
+	multicaLinkAccepted := false
+	var grantPRContext accessGrantPRContext
+	grantLinkAccepted := false
+	if delegated && isAccessGrantTransportSession(delegatedSession) {
+		loaded, contextErr := s.accessGrantPRContextForSession(ctx, delegatedSession)
+		if contextErr != nil {
+			slog.WarnContext(ctx, "create PR without Access Grant context association", "repo", rep.FullName, "reason", "snapshot_unavailable")
+		} else {
+			grantPRContext = loaded
+			body = s.enrichPRBodyWithAccessGrantContext(cleanBody, loaded)
+			_, grantLinkAccepted = accessGrantSnapshotMulticaLink(0, rep.ID, loaded, s.accessGrantPRIssueURL(loaded))
+		}
+		if strings.TrimSpace(multicaLinkToken) != "" {
+			slog.WarnContext(ctx, "ignore legacy Multica PR assertion for Access Grant transport Session", "repo", rep.FullName)
+		}
+	} else if strings.TrimSpace(multicaLinkToken) != "" {
+		if s == nil || s.MulticaProjection == nil {
+			slog.WarnContext(ctx, "create PR without Multica association", "repo", rep.FullName, "reason", "projection_not_configured")
+		} else if claims, verifyErr := s.MulticaProjection.VerifyPRLinkToken(multicaLinkToken); verifyErr != nil {
+			slog.WarnContext(ctx, "create PR without Multica association", "repo", rep.FullName, "reason", "link_token_invalid")
+		} else {
+			authoritativeMulticaClaims = claims
+			multicaLinkAccepted = true
+			body = enrichBodyWithAuthoritativeMulticaLink(cleanBody, claims)
+		}
+	}
+
+	var agentSessionID *string
+	if delegated {
+		id := delegatedSession.ID
+		agentSessionID = &id
+	}
+
+	if delegated {
+		fresh, err := s.RevalidateDelegatedSession(ctx, rep.ID, "pr.create", "pr:create", map[string]string{"base_ref": baseRef, "head_ref": in.HeadRef})
+		if err != nil {
+			return db.PullRequest{}, fmt.Errorf("service: create pr: final delegated authority: %w", ErrForbidden)
+		}
+		delegatedSession = fresh.Session
+		agentSessionID = &fresh.Session.ID
+	}
 
 	const maxRetries = 25
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		var pr db.PullRequest
+		attemptSession := delegatedSession
 		if err := s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
+			txCtx := ContextWithDB(ctx, tx)
+			attemptSessionID := agentSessionID
+			if delegated {
+				fresh, err := s.RevalidateDelegatedSession(txCtx, rep.ID, "pr.create", "pr:create", map[string]string{"base_ref": baseRef, "head_ref": in.HeadRef})
+				if err != nil {
+					return fmt.Errorf("delegated authority before PR transaction write: %w", ErrForbidden)
+				}
+				attemptSession = fresh.Session
+				attemptSessionID = &attemptSession.ID
+			}
 			if err := lockRepoForNumbering(tx, rep.ID); err != nil {
 				return err
 			}
@@ -96,7 +200,7 @@ func (s *Service) CreatePR(ctx context.Context, in CreatePRInput) (db.PullReques
 				RepositoryID:        rep.ID,
 				HeadRepositoryID:    headRep.ID,
 				Title:               in.Title,
-				Body:                db.LargeText(in.Body),
+				Body:                db.LargeText(body),
 				HeadRef:             in.HeadRef,
 				HeadSHA:             headSHA,
 				BaseRef:             baseRef,
@@ -105,20 +209,76 @@ func (s *Service) CreatePR(ctx context.Context, in CreatePRInput) (db.PullReques
 				MaintainerCanModify: in.MaintainerCanModify,
 				State:               db.StateOpen,
 				AuthorID:            author.ID,
+				AgentSessionID:      attemptSessionID,
 			}
 			if err := tx.Create(&pr).Error; err != nil {
 				return err
 			}
-			if err := s.syncPullRequestBodyReferences(ContextWithDB(ctx, tx), pr); err != nil {
+			if err := s.syncPullRequestBodyReferences(txCtx, pr); err != nil {
 				return fmt.Errorf("sync pull request references: %w", err)
+			}
+			if multicaLinkAccepted {
+				linkClaims := authoritativeMulticaClaims
+				issueURL := strings.TrimSpace(linkClaims.IssueURL)
+				if issueURL == "" && strings.TrimSpace(linkClaims.Workspace) != "" {
+					issueURL = multicaprojection.IssueURL(s.MulticaProjection.AppURL(), linkClaims.Workspace, linkClaims.IssueKey)
+				}
+				link := authoritativeMulticaLink(pr.ID, rep.ID, linkClaims, issueURL)
+				if err := tx.Create(&link).Error; err != nil {
+					return fmt.Errorf("bind Multica issue link: %w", err)
+				}
+			}
+			if grantLinkAccepted {
+				link, ok := accessGrantSnapshotMulticaLink(pr.ID, rep.ID, grantPRContext, s.accessGrantPRIssueURL(grantPRContext))
+				if ok {
+					if err := tx.Create(&link).Error; err != nil {
+						return fmt.Errorf("bind Access Grant context link: %w", err)
+					}
+				}
+			}
+			if delegated {
+				if _, err := s.RevalidateDelegatedSession(txCtx, rep.ID, "pr.create", "pr:create", map[string]string{"base_ref": baseRef, "head_ref": in.HeadRef}); err != nil {
+					return fmt.Errorf("delegated authority at PR commit boundary: %w", ErrForbidden)
+				}
+				if err := s.LogCurrentDelegatedSessionAudit(txCtx, DelegatedSessionAuditEvent{
+					Action: AuditActionDelegatedPRCreate, Operation: "pull_request.create", Outcome: "success", PRNumber: pr.Number,
+				}); err != nil {
+					return fmt.Errorf("audit delegated PR create: %w", err)
+				}
 			}
 			return nil
 		}); err != nil {
 			if isDuplicateErr(err) {
+				if s.testCreatePRRetry != nil {
+					s.testCreatePRRetry(attempt)
+				}
 				time.Sleep(retryDelay(attempt))
 				continue
 			}
 			return db.PullRequest{}, fmt.Errorf("service: create pr: %w", err)
+		}
+		if delegated {
+			delegatedSession = attemptSession
+		}
+
+		// The PR row is an AGS-owned durable fact; the refs/pull write is a
+		// separate repository effect. Revalidate immediately before that effect
+		// and return the committed fact with an error if authority drifted.
+		if s.testCreatePRRefBeforeWrite != nil {
+			s.testCreatePRRefBeforeWrite()
+		}
+		if delegated {
+			fresh, err := s.RevalidateDelegatedSession(ctx, rep.ID, "pr.create", "pr:create", map[string]string{"base_ref": baseRef, "head_ref": in.HeadRef})
+			if err != nil {
+				hydrateCreatedPR(&pr, rep, headRep, author)
+				sessionSnapshot := delegatedSession
+				if sessionSnapshot.PrincipalUser.ID == 0 && sessionSnapshot.PrincipalUserID == author.ID {
+					sessionSnapshot.PrincipalUser = author
+				}
+				pr.AgentSession = &sessionSnapshot
+				return pr, &PRRefProjectionDeniedError{PRNumber: pr.Number, Created: true, Cause: ErrForbidden}
+			}
+			delegatedSession = fresh.Session
 		}
 
 		// Create the refs/pull/ID/head ref in the git repository
@@ -128,6 +288,13 @@ func (s *Service) CreatePR(ctx context.Context, in CreatePRInput) (db.PullReques
 		}
 
 		hydrateCreatedPR(&pr, rep, headRep, author)
+		if delegated {
+			sessionSnapshot := delegatedSession
+			if sessionSnapshot.PrincipalUser.ID == 0 && sessionSnapshot.PrincipalUserID == author.ID {
+				sessionSnapshot.PrincipalUser = author
+			}
+			pr.AgentSession = &sessionSnapshot
+		}
 		// Generate and store embedding for semantic search (fire-and-forget).
 		s.EmbedPR(ctx, pr.ID, pr.Title, string(pr.Body))
 		// Update commit messages and filenames for search.
@@ -418,17 +585,24 @@ func (s *Service) UpdatePR(ctx context.Context, repoFullName string, number int,
 
 	origTitle := pr.Title
 	origBody := pr.Body
+	origState := pr.State
 	if in.Title != nil {
 		pr.Title = *in.Title
 	}
 	if in.Body != nil {
-		pr.Body = db.LargeText(*in.Body)
+		title := pr.Title
+		if in.Title != nil {
+			title = *in.Title
+		}
+		pr.Body = db.LargeText(s.enrichPRBodyWithMulticaLink(rep.FullName, *in.Body, title, pr.HeadRef))
 	}
 	if in.State != nil {
 		pr.State = *in.State
 		if *in.State == db.StateClosed {
-			now := time.Now()
-			pr.ClosedAt = &now
+			if pr.ClosedAt == nil || pr.ClosedAt.IsZero() {
+				now := time.Now().UTC()
+				pr.ClosedAt = &now
+			}
 		} else {
 			pr.ClosedAt = nil
 		}
@@ -439,7 +613,18 @@ func (s *Service) UpdatePR(ctx context.Context, repoFullName string, number int,
 	if in.Draft != nil {
 		pr.Draft = *in.Draft
 	}
-	if err := s.DBForCtx(ctx).Save(&pr).Error; err != nil {
+	if err := s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(&pr).Error; err != nil {
+			return err
+		}
+		if in.State != nil && *in.State == db.StateClosed && !pr.Merged {
+			now := time.Now().UTC()
+			if err := s.enqueueClosedMulticaExternalPRTerminalDeliveryTx(ctx, tx, pr, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		return pr, err
 	}
 	if in.Body != nil && pr.Body != origBody {
@@ -454,20 +639,39 @@ func (s *Service) UpdatePR(ctx context.Context, repoFullName string, number int,
 	if err := preloadPRFull(s.DBForCtx(ctx)).First(&pr, pr.ID).Error; err != nil {
 		return pr, wrapErr(err)
 	}
+	if in.State != nil && *in.State == db.StateClosed && origState != db.StateClosed && !pr.Merged {
+		if err := s.DispatchPullRequestClosedIntegrations(ctx, pr); err != nil {
+			slog.WarnContext(ctx, "close PR projections failed", "repo", repoFullName, "pr_number", number, "error", err)
+		}
+	} else if pr.State == db.StateOpen && (pr.Title != origTitle || pr.Body != origBody || in.BaseRef != nil || (in.State != nil && *in.State == db.StateOpen && origState == db.StateClosed)) {
+		if _, err := s.DispatchPullRequestIntegrations(ctx, pr); err != nil {
+			slog.WarnContext(ctx, "refresh PR projections failed", "repo", repoFullName, "pr_number", number, "error", err)
+		}
+	}
 	return pr, nil
+}
+
+func (s *Service) enrichPRBodyWithMulticaLink(repoFullName, body string, values ...string) string {
+	if s == nil || s.MulticaProjection == nil {
+		return body
+	}
+	return s.MulticaProjection.EnrichPullRequestBodyForRepo(repoFullName, body, values...)
 }
 
 // UpdatePRByID updates a PR's state and/or draft flag using its DB ID.
 func (s *Service) UpdatePRByID(ctx context.Context, id uint, state *string, draft *bool) error {
-	if _, err := s.GetPRByID(ctx, id); err != nil {
+	orig, err := s.GetPRByID(ctx, id)
+	if err != nil {
 		return err
 	}
 	updates := make(map[string]any)
 	if state != nil {
 		updates["state"] = *state
 		if *state == db.StateClosed {
-			now := time.Now()
-			updates["closed_at"] = &now
+			if orig.ClosedAt == nil || orig.ClosedAt.IsZero() {
+				now := time.Now().UTC()
+				updates["closed_at"] = &now
+			}
 		} else if *state == db.StateOpen {
 			updates["closed_at"] = nil
 		}
@@ -476,7 +680,34 @@ func (s *Service) UpdatePRByID(ctx context.Context, id uint, state *string, draf
 		updates["draft"] = *draft
 	}
 	if len(updates) > 0 {
-		return s.DBForCtx(ctx).Model(&db.PullRequest{}).Where("id = ?", id).Updates(updates).Error
+		if err := s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&db.PullRequest{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+				return err
+			}
+			if state != nil && *state == db.StateClosed {
+				var closedPR db.PullRequest
+				if err := tx.First(&closedPR, id).Error; err != nil {
+					return err
+				}
+				if !closedPR.Merged {
+					return s.enqueueClosedMulticaExternalPRTerminalDeliveryTx(ctx, tx, closedPR, time.Now().UTC())
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if state != nil && *state == db.StateClosed && orig.State != db.StateClosed {
+			pr, err := s.GetPRByID(ctx, id)
+			if err != nil {
+				return err
+			}
+			if !pr.Merged {
+				if err := s.DispatchPullRequestClosedIntegrations(ctx, pr); err != nil {
+					slog.WarnContext(ctx, "close PR projections failed", "pull_request_id", id, "error", err)
+				}
+			}
+		}
 	}
 	return nil
 }

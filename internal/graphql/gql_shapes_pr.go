@@ -3,10 +3,12 @@ package graphql
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/ngaut/agent-git-service/internal/db"
+	"github.com/ngaut/agent-git-service/internal/service"
 )
 
 // prGQL converts db.PullRequest to GraphQL shape. REST counterpart: rest/transform.PR()
@@ -50,6 +52,13 @@ func (s *Server) prGQL(ctx context.Context, p db.PullRequest, queries ...string)
 	// once so each per-login GetUser call runs at most once per PR.
 	assignees := s.assigneeLoginsToGQL(ctx, p.AssigneeLogins)
 
+	var agsActor, delegatedBy any
+	if attribution, err := s.Svc.PullRequestAttributionFor(ctx, p); err != nil {
+		slog.WarnContext(ctx, "load delegated GraphQL PR actor projection", "pr_number", p.Number, "error", err)
+	} else if attribution != nil {
+		agsActor, delegatedBy = pullRequestAttributionGQL(attribution)
+	}
+
 	return map[string]any{
 		"id":                      gqlID("PullRequest", p.ID),
 		"number":                  p.Number,
@@ -59,7 +68,10 @@ func (s *Server) prGQL(ctx context.Context, p db.PullRequest, queries ...string)
 		"isDraft":                 p.Draft,
 		"merged":                  p.Merged,
 		"url":                     fmt.Sprintf("%s/%s/pull/%d", s.Svc.HTMLBaseURL(), p.Repository.FullName, p.Number),
+		"externalProjections":     s.externalProjectionsGQL(ctx, p, q),
 		"author":                  s.authorGQL(p.Author),
+		"agsActor":                agsActor,
+		"delegatedBy":             delegatedBy,
 		"headRefName":             p.HeadRef,
 		"headRefOid":              p.HeadSHA,
 		"baseRefName":             p.BaseRef,
@@ -142,6 +154,55 @@ func (s *Server) prGQL(ctx context.Context, p db.PullRequest, queries ...string)
 		"mergedAt":                mergedAt,
 		"__typename":              "PullRequest",
 	}
+}
+
+func (s *Server) externalProjectionsGQL(ctx context.Context, p db.PullRequest, q string) []map[string]any {
+	if !queryHasAny(q, "externalProjections") {
+		return []map[string]any{}
+	}
+	rows, err := s.Svc.ListPullRequestProjections(ctx, p.ID)
+	if err != nil {
+		logErr(ctx, "externalProjections GraphQL", err)
+		return []map[string]any{}
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, map[string]any{
+			"provider":       row.Provider,
+			"externalRepo":   row.ExternalRepo,
+			"externalNumber": row.ExternalNumber,
+			"externalUrl":    row.ExternalURL,
+			"sourceBranch":   row.SourceBranch,
+			"targetBranch":   row.TargetBranch,
+			"state":          row.State,
+			"lastSyncedSha":  row.LastSyncedSHA,
+		})
+	}
+	return out
+}
+
+func pullRequestAttributionGQL(attribution *service.PullRequestAttribution) (any, any) {
+	if attribution == nil {
+		return nil, nil
+	}
+	actor := attribution.AGSActor
+	agsActor := map[string]any{
+		"type": actor.Type, "provider": actor.Provider, "workspaceId": actor.WorkspaceID, "workspace": actor.Workspace,
+		"agentId": actor.AgentID, "agentName": actor.AgentName, "taskId": actor.TaskID,
+		"runId": actor.RunID, "issueId": actor.IssueID, "issueKey": actor.IssueKey,
+		"sessionId": actor.SessionID, "sessionState": actor.SessionState,
+		"sessionCreatedAt": actor.SessionCreatedAt.Format(time.RFC3339),
+		"targetInstance":   actor.TargetInstance, "displayName": actor.DisplayName,
+	}
+	principal := attribution.DelegatedBy.Principal
+	delegatedBy := map[string]any{
+		"principal": map[string]any{"databaseId": principal.ID, "login": principal.Login, "userKind": principal.UserKind},
+		"human":     nil, "bindingSource": attribution.DelegatedBy.BindingSource,
+	}
+	if human := attribution.DelegatedBy.Human; human != nil {
+		delegatedBy["human"] = map[string]any{"databaseId": human.ID, "login": human.Login, "userKind": human.UserKind}
+	}
+	return agsActor, delegatedBy
 }
 
 func (s *Server) prCommentsGQL(ctx context.Context, p db.PullRequest) map[string]any {

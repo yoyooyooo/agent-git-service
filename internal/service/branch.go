@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"sort"
+	"strings"
 
 	"github.com/ngaut/agent-git-service/internal/db"
 
@@ -19,6 +21,34 @@ func (s *Service) GetBranchProtection(ctx context.Context, repoID uint, branch s
 		return nil, wrapErr(err)
 	}
 	return &bp, nil
+}
+
+// ProtectedBranchNames returns the exact branch names with AGS branch
+// protection rows. Callers may add the repository default branch as a
+// conservative protected baseline for delegated Git writes.
+func (s *Service) ProtectedBranchNames(ctx context.Context, repoID uint) ([]string, error) {
+	var names []string
+	if err := s.DBForCtx(ctx).
+		Model(&db.BranchProtection{}).
+		Where("repository_id = ?", repoID).
+		Pluck("branch_name", &names).Error; err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // UpdateBranchProtection creates or updates branch protection rules.

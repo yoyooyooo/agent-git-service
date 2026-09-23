@@ -28,6 +28,16 @@ const extensionAPIPrefix = "/api/ext/v1"
 
 var extensionAPIPrefixes = []string{extensionAPIPrefix}
 
+// Prefix selection is per router, never shared mutable global configuration.
+// Both names register the same handler/middleware; mutation bodies are not
+// redirected or retried. Retired auth and removed collaboration routes stay out.
+func extensionPrefixes(legacy bool) []string {
+	if legacy {
+		return []string{extensionAPIPrefix, defaultRESTPrefix}
+	}
+	return extensionAPIPrefixes
+}
+
 // RegisterRoutes wires all routes onto the router and returns the host-aware
 // mux that handles api.github.localhost path rewriting.
 func RegisterRoutes(r chi.Router, handlers *rest.Deps, gitHandler *githttp.Handler, gqlSrv *graphql.Server, oauthHandler *oauth.Handler, consoleBaseURL string, embeddedAuth ...srvmiddleware.EmbeddedAuthConfig) http.Handler {
@@ -47,9 +57,12 @@ func RegisterRoutes(r chi.Router, handlers *rest.Deps, gitHandler *githttp.Handl
 
 	rateLimitMw := srvmiddleware.APIRateLimitHeaders()
 
-	registerOAuthRoutes(r, oauthHandler, authCfg)
+	registerOAuthRoutes(r, oauthHandler, authCfg, handlers.LegacyExtensionAliases)
 	registerPublicAuthRoutes(r, handlers, rateLimitMw)
 	registerAgentPublicRoutes(r, handlers, rateLimitMw)
+	registerExecutionContextIntakeRoutes(r, handlers, rateLimitMw)
+	registerAccessGrantRoutes(r, handlers, rateLimitMw)
+	registerProviderLogBridgeRoutes(r, handlers)
 	registerGitHTTPRoutes(r, gitHandler, handlers, consoleBaseURL, authCfg)
 	registerAPIDiscoveryRoutes(r, handlers, rateLimitMw, authCfg)
 	registerPublicUserLookupRoutes(r, handlers, rateLimitMw, authCfg)
@@ -58,6 +71,13 @@ func RegisterRoutes(r chi.Router, handlers *rest.Deps, gitHandler *githttp.Handl
 	registerNotFoundHandler(r)
 
 	return registerHostMux(r)
+}
+
+func registerProviderLogBridgeRoutes(r chi.Router, handlers *rest.Deps) {
+	if handlers == nil || handlers.ProviderLogBridge == nil {
+		return
+	}
+	r.Get("/api/internal/provider-logs/repos/{owner}/{repo}/tasks/{task}", handlers.ProviderLogBridge.ServeHTTP)
 }
 
 func corsMiddleware(consoleBaseURL string) func(http.Handler) http.Handler {
@@ -144,7 +164,7 @@ func buildOrigin(scheme, host, port string) string {
 	return scheme + "://" + host
 }
 
-func registerOAuthRoutes(r chi.Router, oauthHandler *oauth.Handler, embeddedAuth srvmiddleware.EmbeddedAuthConfig) {
+func registerOAuthRoutes(r chi.Router, oauthHandler *oauth.Handler, embeddedAuth srvmiddleware.EmbeddedAuthConfig, legacy bool) {
 	// Public OAuth endpoints used by the device and auth-code bootstrap flow.
 	r.Post("/login/device/code", oauthHandler.RequestDeviceCode)
 	r.Post("/login/oauth/access_token", oauthHandler.AccessToken)
@@ -155,7 +175,7 @@ func registerOAuthRoutes(r chi.Router, oauthHandler *oauth.Handler, embeddedAuth
 	deviceVerificationRateLimit := srvmiddleware.RateLimit(5, time.Minute)
 	r.With(deviceVerificationRateLimit, authMW).Get("/login/device", oauthHandler.DeviceCodeVerification)
 	r.With(deviceVerificationRateLimit, authMW).Post("/login/device", oauthHandler.DeviceCodeVerification)
-	for _, prefix := range extensionAPIPrefixes {
+	for _, prefix := range extensionPrefixes(legacy) {
 		r.With(deviceVerificationRateLimit, authMW).Post(prefix+"/oauth/device/approve", oauthHandler.ApproveDeviceCode)
 		r.With(deviceVerificationRateLimit, authMW).Post(prefix+"/oauth/device/reject", oauthHandler.RejectDeviceCode)
 	}
@@ -164,7 +184,7 @@ func registerOAuthRoutes(r chi.Router, oauthHandler *oauth.Handler, embeddedAuth
 func registerPublicAuthRoutes(r chi.Router, handlers *rest.Deps, rateLimitMw func(http.Handler) http.Handler) {
 	r.Group(func(r chi.Router) {
 		r.Use(rateLimitMw)
-		for _, prefix := range extensionAPIPrefixes {
+		for _, prefix := range extensionPrefixes(handlers.LegacyExtensionAliases) {
 			r.Post(prefix+"/oidc/device/code", handlers.OIDCDeviceCode)
 			r.Post(prefix+"/oidc/session", handlers.OIDCSession)
 			r.Post(prefix+"/oidc/callback", handlers.OIDCCallback)
@@ -172,6 +192,7 @@ func registerPublicAuthRoutes(r chi.Router, handlers *rest.Deps, rateLimitMw fun
 		}
 		r.Get("/auth/connected/login", handlers.ConnectedLogin)
 		r.Get("/auth/connected/callback", handlers.ConnectedCallback)
+		r.Post("/api/v3/integrations/forgejo/webhook", handlers.ForgejoWebhook)
 	})
 }
 
@@ -179,7 +200,7 @@ func registerAgentPublicRoutes(r chi.Router, handlers *rest.Deps, rateLimitMw fu
 	r.Group(func(r chi.Router) {
 		r.Use(rateLimitMw)
 		// Agent registration (no auth required)
-		for _, prefix := range extensionAPIPrefixes {
+		for _, prefix := range extensionPrefixes(handlers.LegacyExtensionAliases) {
 			r.Post(prefix+"/agents", handlers.CreateAgent)
 		}
 	})
@@ -264,6 +285,7 @@ func registerAPIDiscoveryRoutes(r chi.Router, handlers *rest.Deps, rateLimitMw f
 func registerPublicRepoRoutes(r chi.Router, handlers *rest.Deps, rateLimitMw func(http.Handler) http.Handler, embeddedAuth srvmiddleware.EmbeddedAuthConfig) {
 	r.Group(func(r chi.Router) {
 		r.Use(srvmiddleware.OptionalTokenAuthWithEmbeddedIdentity(handlers.Svc, embeddedAuth))
+		r.Use(srvmiddleware.EnforceDelegatedSessionSurface(handlers.Svc))
 		r.Use(rateLimitMw)
 		r.Use(srvmiddleware.RequireAuthForWrites(handlers.Svc))
 
@@ -283,6 +305,7 @@ func registerPublicUserLookupRoutes(r chi.Router, handlers *rest.Deps, rateLimit
 func registerAuthenticatedRoutes(r chi.Router, handlers *rest.Deps, gqlSrv *graphql.Server, rateLimitMw func(http.Handler) http.Handler, embeddedAuth srvmiddleware.EmbeddedAuthConfig) {
 	r.Group(func(r chi.Router) {
 		r.Use(srvmiddleware.TokenAuthWithEmbeddedIdentity(handlers.Svc, embeddedAuth))
+		r.Use(srvmiddleware.EnforceDelegatedSessionSurface(handlers.Svc))
 		r.Use(rateLimitMw)
 
 		registerGraphQLRoutes(r, gqlSrv)
@@ -294,8 +317,33 @@ func registerAuthenticatedRoutes(r chi.Router, handlers *rest.Deps, gqlSrv *grap
 		registerRulesetRoutes(r, handlers)
 		registerLicenseRoutes(r, handlers)
 		registerSearchRoutes(r, handlers)
+		registerOutboundRoutes(r, handlers)
+		registerIntegrationPolicyRoutes(r, handlers)
 		registerAppRoutes(r, handlers)
 		registerEnvByRepoIDRoutes(r, handlers)
+	})
+}
+
+func registerExecutionContextIntakeRoutes(r chi.Router, handlers *rest.Deps, rateLimitMw func(http.Handler) http.Handler) {
+	r.Group(func(r chi.Router) {
+		r.Use(rateLimitMw)
+		r.Post("/api/v3/execution-context/intake", handlers.IntakeExecutionContext)
+	})
+}
+
+func registerAccessGrantRoutes(r chi.Router, handlers *rest.Deps, rateLimitMw func(http.Handler) http.Handler) {
+	// Access Grants are scoped to this upstream single-database runtime.
+	// Source locators never select a different database.
+	r.Group(func(r chi.Router) {
+		r.Use(rateLimitMw)
+		r.Post("/api/v3/access-grants", handlers.IssueAccessGrant)
+		r.Post("/api/v3/access-grants/renew", handlers.RenewAccessGrant)
+		r.Get("/api/v3/access-grants/current", handlers.GetCurrentAccessGrant)
+		r.Post("/api/v3/access-grants/revoke", handlers.RevokeAccessGrant)
+		r.Post("/api/v3/access-grants/authorize", handlers.AuthorizeAccessGrantOperation)
+		r.Post("/api/v3/access-grants/transport-sessions", handlers.IssueAccessGrantTransportSession)
+		r.Post("/api/v3/access-grants/effects/pr.merge", handlers.RequestAccessGrantPRMerge)
+		r.Get("/api/v3/access-grants/invocations/{invocation_id}", handlers.GetAccessGrantInvocation)
 	})
 }
 
@@ -306,7 +354,7 @@ func registerGraphQLRoutes(r chi.Router, gqlSrv *graphql.Server) {
 }
 
 func registerAgentBindingRoutes(r chi.Router, handlers *rest.Deps) {
-	for _, prefix := range extensionAPIPrefixes {
+	for _, prefix := range extensionPrefixes(handlers.LegacyExtensionAliases) {
 		r.Post(prefix+"/agent-invites", handlers.CreateAgentInvite)
 		r.Post(prefix+"/agent-bindings/confirm", handlers.ConfirmAgentBinding)
 		r.Patch(prefix+"/agent-bindings/{agent_login}", handlers.RenameBoundAgent)
@@ -318,16 +366,19 @@ func registerAgentBindingRoutes(r chi.Router, handlers *rest.Deps) {
 }
 
 func registerUserScopedRoutes(r chi.Router, handlers *rest.Deps) {
-	// Current user
+	// Current user and exact-ID historical Session lifecycle audit.
 	r.Get("/api/v3/user", handlers.GetAuthenticatedUser)
-	for _, prefix := range extensionAPIPrefixes {
+	for _, prefix := range extensionPrefixes(handlers.LegacyExtensionAliases) {
 		r.Get(prefix+"/viewer/summary", handlers.GetViewerSummary)
 	}
+	r.Get("/api/v3/agent-sessions/{session_id}/lifecycle", handlers.GetDelegatedAgentSessionLifecycle)
 	r.Post("/api/v3/user/repos", handlers.CreateUserRepo)
 	r.Get("/api/v3/user/repos", handlers.ListUserRepos)
 	r.Get("/api/v3/user/orgs", handlers.ListUserOrgs)
-	r.Post(extensionAPIPrefix+"/user/orgs", handlers.CreateUserOrg)
-	for _, prefix := range extensionAPIPrefixes {
+	for _, prefix := range extensionPrefixes(handlers.LegacyExtensionAliases) {
+		r.Post(prefix+"/user/orgs", handlers.CreateUserOrg)
+	}
+	for _, prefix := range extensionPrefixes(handlers.LegacyExtensionAliases) {
 		r.Get(prefix+"/user/agents", handlers.ListBoundAgents)
 	}
 	r.Get("/api/v3/user/starred", handlers.ListStarredRepos)
@@ -336,7 +387,7 @@ func registerUserScopedRoutes(r chi.Router, handlers *rest.Deps) {
 	r.Delete("/api/v3/user/starred/{owner}/{repo}", handlers.UnstarRepo)
 
 	// Tokens
-	for _, prefix := range extensionAPIPrefixes {
+	for _, prefix := range extensionPrefixes(handlers.LegacyExtensionAliases) {
 		r.Get(prefix+"/user/tokens", handlers.ListTokens)
 		r.Post(prefix+"/user/tokens", handlers.CreateToken)
 		r.Delete(prefix+"/user/tokens", handlers.DeleteToken)
@@ -369,7 +420,7 @@ func registerUserScopedRoutes(r chi.Router, handlers *rest.Deps) {
 
 	// Notifications
 	r.Get("/api/v3/notifications", handlers.ListNotifications)
-	for _, prefix := range extensionAPIPrefixes {
+	for _, prefix := range extensionPrefixes(handlers.LegacyExtensionAliases) {
 		r.Get(prefix+"/notifications/summary", handlers.GetNotificationsSummary)
 	}
 	r.Put("/api/v3/notifications", handlers.MarkNotificationsRead)
@@ -397,7 +448,7 @@ func registerUserLookupRoutes(r chi.Router, handlers *rest.Deps) {
 func registerOrgRoutes(r chi.Router, handlers *rest.Deps) {
 	// Orgs
 	r.Get("/api/v3/orgs/{org}", handlers.GetOrg)
-	for _, prefix := range extensionAPIPrefixes {
+	for _, prefix := range extensionPrefixes(handlers.LegacyExtensionAliases) {
 		r.Get(prefix+"/orgs/{org}/management-summary", handlers.GetOrgManagementSummary)
 	}
 	r.Get("/api/v3/orgs/{org}/members", handlers.ListOrgMembers)
@@ -436,6 +487,8 @@ func registerRepoRoutes(r chi.Router, handlers *rest.Deps) {
 	registerAutolinkRoutes(r, handlers)
 	registerCheckRoutes(r, handlers)
 	registerWebhookRoutes(r, handlers)
+	registerProjectionRoutes(r, handlers)
+	registerRepoFlowRoutes(r, handlers)
 	registerDeploymentRoutes(r, handlers)
 	registerBranchProtectionRoutes(r, handlers)
 	registerDependabotAlertRoutes(r, handlers)
@@ -448,6 +501,35 @@ func registerRepoRoutes(r chi.Router, handlers *rest.Deps) {
 	registerRepoWikiRoutes(r, handlers)
 }
 
+func registerProjectionRoutes(r chi.Router, handlers *rest.Deps) {
+	r.Get("/api/v3/repos/{owner}/{repo}/projection/status", handlers.GetProjectionStatus)
+	r.Post("/api/v3/repos/{owner}/{repo}/projection/forgejo/pulls/{number}/retry", handlers.RetryProjection)
+	r.Post("/api/v3/repos/{owner}/{repo}/pulls/{pull_number}/outbound/replay-merge", handlers.ReplayPullRequestMergeOutbound)
+}
+
+func registerOutboundRoutes(r chi.Router, handlers *rest.Deps) {
+	r.Get("/api/v3/outbound/deliveries", handlers.ListOutboundDeliveries)
+	r.Post("/api/v3/outbound/deliveries/{delivery_id}/retry", handlers.RetryOutboundDelivery)
+}
+
+func registerIntegrationPolicyRoutes(r chi.Router, handlers *rest.Deps) {
+	r.Get("/api/v3/integrations/principal-sessions", handlers.GetPrincipalSessionAuthority)
+	r.Post("/api/v3/integrations/principal-sessions/epoch-floor", handlers.AdvanceTeamAuthorityEpochFloor)
+	r.Post("/api/v3/integrations/authority-boundary-receipts/legacy-capture", handlers.CaptureLegacyAuthorityBoundary)
+	r.Get("/api/v3/integrations/authority-boundary-receipts/{id}", handlers.GetAuthorityBoundaryReceipt)
+	r.Get("/api/v3/agent-sessions/current/authority-boundary-receipts/{id}", handlers.GetCurrentDelegatedEffectBoundaryReceipt)
+	r.Post("/api/v3/operations/authorize", handlers.AuthorizeOperation)
+}
+
+func registerRepoFlowRoutes(r chi.Router, handlers *rest.Deps) {
+	r.Get("/api/v3/repos/{owner}/{repo}/repo-flow/env/{env}/status", handlers.GetRepoFlowEnvProjection)
+	r.Get("/api/v3/repos/{owner}/{repo}/repo-flow/env/{env}/history", handlers.ListRepoFlowEnvEvidenceHistory)
+	r.Post("/api/v3/repos/{owner}/{repo}/repo-flow/env/{env}/retry", handlers.RetryRepoFlowEnvProjection)
+	r.Post("/api/v3/repos/{owner}/{repo}/repo-flow/evidence", handlers.CreateRepoFlowEvidence)
+	r.Get("/api/v3/repos/{owner}/{repo}/repo-flow/evidence/status", handlers.GetRepoFlowEvidenceStatus)
+	r.Get("/api/v3/repos/{owner}/{repo}/repo-flow/evidence/history", handlers.ListRepoFlowEvidenceHistory)
+}
+
 func registerRepoPagesRoutes(r chi.Router, handlers *rest.Deps) {
 	r.Get("/api/v3/repos/{owner}/{repo}/pages", handlers.GetPages)
 	r.Post("/api/v3/repos/{owner}/{repo}/pages", handlers.EnablePages)
@@ -458,7 +540,7 @@ func registerRepoPagesRoutes(r chi.Router, handlers *rest.Deps) {
 }
 
 func registerRepoWikiRoutes(r chi.Router, handlers *rest.Deps) {
-	for _, prefix := range extensionAPIPrefixes {
+	for _, prefix := range extensionPrefixes(handlers.LegacyExtensionAliases) {
 		r.Post(prefix+"/admin/wiki/repos/{owner}/{repo}/repair-locks", handlers.RepairWikiLocks)
 		r.Get(prefix+"/repos/{owner}/{repo}/wiki/state", handlers.GetWikiState)
 		r.Get(prefix+"/repos/{owner}/{repo}/wiki/tree", handlers.ListWikiTree)
@@ -487,16 +569,18 @@ func registerRepoWikiRoutes(r chi.Router, handlers *rest.Deps) {
 
 func registerRepoCoreRoutes(r chi.Router, handlers *rest.Deps) {
 	// Repos
-	for _, prefix := range extensionAPIPrefixes {
+	for _, prefix := range extensionPrefixes(handlers.LegacyExtensionAliases) {
 		r.Get(prefix+"/repos/{owner}/{repo}/summary", handlers.GetRepoSummary)
 	}
 	r.Get("/api/v3/repos/{owner}/{repo}", handlers.GetRepo)
 	r.Patch("/api/v3/repos/{owner}/{repo}", handlers.UpdateRepo)
 	r.Delete("/api/v3/repos/{owner}/{repo}", handlers.DeleteRepo)
 	r.Post("/api/v3/repos/{owner}/{repo}/transfer", handlers.TransferRepo)
-	for _, prefix := range extensionAPIPrefixes {
+	for _, prefix := range extensionPrefixes(handlers.LegacyExtensionAliases) {
 		r.Post(prefix+"/repos/{owner}/{repo}/team-sharing/enable", handlers.EnableRepoTeamSharing)
 	}
+	r.Get("/api/v3/repos/{owner}/{repo}/replication/identity", handlers.GetReplicationRegistration)
+	r.Post("/api/v3/repos/{owner}/{repo}/replication/identity", handlers.RegisterReplicationRepository)
 	r.Post("/api/v3/repos/{owner}/{repo}/forks", handlers.ForkRepo)
 	r.Get("/api/v3/repos/{owner}/{repo}/forks", handlers.ListRepoForks)
 	r.Get("/api/v3/repos/{owner}/{repo}/topics", handlers.GetRepoTopics)
@@ -583,8 +667,15 @@ func registerPullRequestRoutes(r chi.Router, handlers *rest.Deps) {
 	r.Get("/api/v3/repos/{owner}/{repo}/pulls", handlers.ListPRs)
 	r.Post("/api/v3/repos/{owner}/{repo}/pulls", handlers.CreatePR)
 	r.Get("/api/v3/repos/{owner}/{repo}/pulls/{number}", handlers.GetPR)
+	r.Get("/api/v3/repos/{owner}/{repo}/pulls/{number}/provider/projection", handlers.GetPullRequestProviderProjection)
+	r.Get("/api/v3/repos/{owner}/{repo}/pulls/{number}/provider/ci/runs", handlers.GetPullRequestProviderCIRuns)
+	r.Get("/api/v3/repos/{owner}/{repo}/pulls/{number}/provider/ci/runs/{run_id}/logs", handlers.GetPullRequestProviderCIRunLogs)
+	r.Post("/api/v3/repos/{owner}/{repo}/pulls/{number}/provider/merge", handlers.MergePRViaProvider)
+	r.Get("/api/v3/repos/{owner}/{repo}/pulls/{number}/provider/merge", handlers.ObservePRViaProvider)
 	r.Patch("/api/v3/repos/{owner}/{repo}/pulls/{number}", handlers.UpdatePR)
 	r.Put("/api/v3/repos/{owner}/{repo}/pulls/{number}/update-branch", handlers.UpdatePRBranch)
+	r.Post("/api/v3/repos/{owner}/{repo}/pulls/{number}/actions/pr.rebase", handlers.RequestForgejoActionRebase)
+	r.Get("/api/v3/repos/{owner}/{repo}/pulls/{number}/actions/pr.rebase/{intent_id}", handlers.GetForgejoActionRebase)
 	r.Put("/api/v3/repos/{owner}/{repo}/pulls/{number}/merge", handlers.MergePR)
 	r.Get("/api/v3/repos/{owner}/{repo}/pulls/{number}/merge", handlers.GetPRMerged)
 	r.Get("/api/v3/repos/{owner}/{repo}/pulls/comments/{comment_id}", handlers.GetPRComment)

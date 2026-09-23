@@ -3,6 +3,9 @@ package rest
 import (
 	"fmt"
 	"net/http"
+
+	"github.com/ngaut/agent-git-service/internal/service"
+	"strconv"
 	"strings"
 	"time"
 
@@ -190,6 +193,15 @@ func (d *Deps) CreateIssueComment(w http.ResponseWriter, r *http.Request) {
 	u, err := d.Svc.GetCurrentUser(r.Context())
 	if err != nil {
 		respond.ServiceErrorRequest(r, w, err)
+		return
+	}
+	if err := service.ValidateDelegatedSessionOperationConstraints(r.Context(), "pr.comment", map[string]string{
+		"pull_request_number": strconv.Itoa(num),
+	}); err != nil {
+		logErr(r.Context(), "CreateIssueComment: delegated constraint denial audit", d.Svc.LogCurrentDelegatedSessionAudit(r.Context(), service.DelegatedSessionAuditEvent{
+			Action: service.AuditActionDelegatedWriteDenied, Operation: "pr.comment", Outcome: "denied", Reason: "operation_constraint_mismatch",
+		}))
+		respond.Error(w, http.StatusForbidden, "Resource not accessible by integration")
 		return
 	}
 	if inReplyTo != nil {

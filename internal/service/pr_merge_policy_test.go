@@ -86,6 +86,81 @@ func TestMergePR_BranchProtectionRequiresApproval(t *testing.T) {
 	}
 }
 
+func TestMergePR_BranchProtectionIgnoresSelfApproval(t *testing.T) {
+	svc, cleanup := setupTestService(t)
+	defer cleanup()
+
+	pr, authCtx, _ := setupProtectedPR(t, svc, "self-review-user", "self-review-repo", false)
+	protectBranch(t, svc, pr.RepositoryID, pr.BaseRef, "", `{"required_approving_review_count":1}`, true)
+
+	review, err := svc.AddPRReview(authCtx, pr.ID, "self-review-user", "APPROVE", "self approval", pr.HeadSHA)
+	if err != nil {
+		t.Fatalf("AddPRReview: %v", err)
+	}
+	if review.State != db.ReviewApproved {
+		t.Fatalf("review state = %q, want %q", review.State, db.ReviewApproved)
+	}
+
+	_, err = svc.MergePR(authCtx, "self-review-user/self-review-repo", pr.Number, "merge", "")
+	if !errors.Is(err, service.ErrInvalidState) {
+		t.Fatalf("self approval must not satisfy branch protection, got %v", err)
+	}
+}
+
+func TestMergePR_BranchProtectionIgnoresStaleApproval(t *testing.T) {
+	svc, cleanup := setupTestService(t)
+	defer cleanup()
+
+	pr, authCtx, _ := setupProtectedPR(t, svc, "stale-review-user", "stale-review-repo", false)
+	protectBranch(t, svc, pr.RepositoryID, pr.BaseRef, "", `{"required_approving_review_count":1}`, true)
+
+	if _, err := svc.AddPRReview(authCtx, pr.ID, "independent-reviewer", "APPROVE", "approved old head", pr.HeadSHA); err != nil {
+		t.Fatalf("AddPRReview: %v", err)
+	}
+	if _, err := svc.Git.WriteFile(authCtx, pr.Repository.FullName, pr.HeadRef, "new-head.txt", "advance head", []byte("new head\n")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := svc.PushHeadSHA(authCtx, pr.Repository.FullName, pr.Number); err != nil {
+		t.Fatalf("PushHeadSHA: %v", err)
+	}
+	updated, err := svc.GetPRByID(authCtx, pr.ID)
+	if err != nil {
+		t.Fatalf("GetPRByID: %v", err)
+	}
+	if updated.HeadSHA == pr.HeadSHA {
+		t.Fatal("expected PR head to advance")
+	}
+
+	_, err = svc.MergePR(authCtx, pr.Repository.FullName, pr.Number, "merge", "")
+	if !errors.Is(err, service.ErrInvalidState) {
+		t.Fatalf("stale approval must not satisfy current-head branch protection, got %v", err)
+	}
+}
+
+func TestMergePR_BranchProtectionCountsIndependentCurrentHeadApproval(t *testing.T) {
+	svc, cleanup := setupTestService(t)
+	defer cleanup()
+
+	pr, authCtx, _ := setupProtectedPR(t, svc, "current-review-user", "current-review-repo", false)
+	protectBranch(t, svc, pr.RepositoryID, pr.BaseRef, "", `{"required_approving_review_count":1}`, true)
+
+	review, err := svc.AddPRReview(authCtx, pr.ID, "independent-reviewer", "APPROVE", "approved current head", "")
+	if err != nil {
+		t.Fatalf("AddPRReview: %v", err)
+	}
+	if review.CommitSHA != pr.HeadSHA {
+		t.Fatalf("default review commit SHA = %q, want current head %q", review.CommitSHA, pr.HeadSHA)
+	}
+
+	merged, err := svc.MergePR(authCtx, pr.Repository.FullName, pr.Number, "merge", "")
+	if err != nil {
+		t.Fatalf("MergePR: %v", err)
+	}
+	if !merged.Merged {
+		t.Fatal("expected independent current-head approval to satisfy branch protection")
+	}
+}
+
 func TestMergePR_BranchProtectionBypassUser(t *testing.T) {
 	svc, cleanup := setupTestService(t)
 	defer cleanup()

@@ -2,6 +2,7 @@ package rest
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -109,6 +110,11 @@ func (d *Deps) ListPRs(w http.ResponseWriter, r *http.Request) {
 	allComments := d.Svc.CountPRCommentsBatch(ctx, repoID, prNumbers)
 	allReviewComments := d.Svc.CountPRReviewCommentsBatch(ctx, prIDs)
 	allReactions, _ := d.Svc.CountReactionsBatch(ctx, prIDs)
+	allProjections, projErr := d.Svc.ListPullRequestProjectionsBatch(ctx, prIDs)
+	if projErr != nil {
+		logErr(ctx, "ListPRs: external projections", projErr)
+		allProjections = map[uint][]db.PullRequestProjection{}
+	}
 	reviewLogins := make([]string, 0, len(prIDs))
 	for _, reqs := range allReviewReqs {
 		for _, rq := range reqs {
@@ -162,6 +168,7 @@ func (d *Deps) ListPRs(w http.ResponseWriter, r *http.Request) {
 			}
 			assoc := d.authorAssociationChecks(ctx, pr.Repository)
 			result := transform.PR(pr, resolver, assoc, allReactions[pr.ID], stats)
+			d.addPRAttribution(ctx, result, pr)
 			reviewers, teams := d.requestedReviewersAndTeams(ctx, resolver, allReviewReqs[pr.ID])
 			result["requested_reviewers"] = reviewers
 			result["requested_teams"] = teams
@@ -178,6 +185,7 @@ func (d *Deps) ListPRs(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			result["auto_merge"] = autoMerge
+			result["external_projections"] = projectionRESTRows(allProjections[pr.ID])
 
 			out[i] = result
 			return nil
@@ -201,14 +209,19 @@ func (d *Deps) GetPR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle diff format request
+	pr, err := d.Svc.GetPR(r.Context(), full, num)
+	if err != nil {
+		respond.ServiceErrorRequest(r, w, err)
+		return
+	}
+	if !d.revalidateDelegatedPRRead(w, r, pr) {
+		return
+	}
+
+	// Handle diff format request only after exact delegated read constraints
+	// have been recomputed from the loaded authoritative PR/projection facts.
 	accept := r.Header.Get("Accept")
 	if strings.Contains(accept, "diff") || strings.HasSuffix(r.URL.Path, ".diff") {
-		pr, err := d.Svc.GetPR(r.Context(), full, num)
-		if err != nil {
-			respond.ServiceErrorRequest(r, w, err)
-			return
-		}
 		if pr.BaseSHA != "" && pr.HeadSHA != "" && d.Svc.Git != nil {
 			diff, diffErr := d.Svc.Git.DiffRaw(r.Context(), full, pr.BaseSHA, pr.HeadSHA)
 			if diffErr == nil {
@@ -224,12 +237,59 @@ func (d *Deps) GetPR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pr, err := d.Svc.GetPR(r.Context(), full, num)
-	if err != nil {
-		respond.ServiceErrorRequest(r, w, err)
-		return
-	}
 	respond.JSON(w, 200, d.prResponse(r, pr, prResponseModeFull))
+}
+
+func (d *Deps) revalidateDelegatedPRRead(w http.ResponseWriter, r *http.Request, pr db.PullRequest) bool {
+	if _, delegated := service.DelegatedSessionIDFromContext(r.Context()); !delegated {
+		return true
+	}
+	operation, persistedConstraints, err := d.Svc.CurrentDelegatedOperationScope(r.Context())
+	if err != nil {
+		respond.Error(w, http.StatusForbidden, "Resource not accessible by integration")
+		return false
+	}
+	actual := map[string]string{}
+	switch operation {
+	case "pr.read":
+		actual["pull_request_number"] = strconv.Itoa(pr.Number)
+	case "review.read", "ci.read":
+		var forgejoNumber int
+		projections, projectionErr := d.Svc.ListPullRequestProjections(r.Context(), pr.ID)
+		if projectionErr == nil {
+			for _, projection := range projections {
+				if strings.EqualFold(strings.TrimSpace(projection.Provider), "forgejo") {
+					if forgejoNumber != 0 {
+						forgejoNumber = 0
+						break
+					}
+					forgejoNumber = projection.ExternalNumber
+				}
+			}
+		}
+		if forgejoNumber <= 0 {
+			respond.Error(w, http.StatusForbidden, "Resource not accessible by integration")
+			return false
+		}
+		actual["pull_request_number"] = strconv.Itoa(pr.Number)
+		actual["forgejo_pull_request_number"] = strconv.Itoa(forgejoNumber)
+		if operation == "ci.read" {
+			if _, constrained := persistedConstraints["head_sha"]; constrained {
+				actual["head_sha"] = pr.HeadSHA
+			}
+		}
+	default:
+		// Other delegated operations may use this endpoint only as an explicit
+		// verification read; their own effect adapters revalidate their actual
+		// constraints. Unknown/stale operation snapshots fail closed in the
+		// shared repository permission evaluator before reaching this point.
+		return true
+	}
+	if _, err := d.Svc.RevalidateDelegatedSession(r.Context(), pr.RepositoryID, operation, "repo:read", actual); err != nil {
+		respond.Error(w, http.StatusForbidden, "Resource not accessible by integration")
+		return false
+	}
+	return true
 }
 
 // UpdatePRBranch handles PUT /api/v3/repos/{owner}/{repo}/pulls/{number}/update-branch.
@@ -292,6 +352,7 @@ func (d *Deps) UpdatePRBranch(w http.ResponseWriter, r *http.Request) {
 		respond.ServiceErrorRequest(r, w, err)
 		return
 	}
+	d.syncOpenPRHeadsAfterBranchAdvance(r.Context(), "UpdatePRBranch", headRepo.ID, headRepo.FullName, pr.HeadRef)
 	updatedPR, err := d.Svc.GetPR(r.Context(), full, num)
 	if err != nil {
 		respond.ServiceErrorRequest(r, w, err)
@@ -361,6 +422,7 @@ func (d *Deps) prResponse(r *http.Request, pr db.PullRequest, mode prResponseMod
 	resolver := d.userResolver(ctx)
 	assoc := d.authorAssociationChecks(ctx, pr.Repository)
 	result := transform.PR(pr, resolver, assoc, reactionCounts, stats)
+	d.addPRAttribution(ctx, result, pr)
 	result["requested_reviewers"] = reviewers
 	result["requested_teams"] = teams
 	mergeability := d.restPRMergeability(ctx, pr)
@@ -368,7 +430,48 @@ func (d *Deps) prResponse(r *http.Request, pr db.PullRequest, mode prResponseMod
 	result["rebaseable"] = mergeability.rebaseable
 	result["mergeable_state"] = mergeability.mergeableState
 	result["auto_merge"] = autoMerge
+	projectionRows := []map[string]any{}
+	if rows, err := d.Svc.ListPullRequestProjections(ctx, pr.ID); err != nil {
+		logErr(r.Context(), "prResponse: external projections", err)
+	} else {
+		projectionRows = projectionRESTRows(rows)
+	}
+	result["external_projections"] = projectionRows
+	result["projection_job"] = nil
+	if job, ok, err := d.Svc.PullRequestProjectionJob(ctx, pr.ID); err != nil {
+		logErr(r.Context(), "prResponse: projection job", err)
+	} else if ok {
+		result["projection_job"] = job
+	}
 	return result
+}
+
+func projectionRESTRows(rows []db.PullRequestProjection) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, map[string]any{
+			"provider":        row.Provider,
+			"external_repo":   row.ExternalRepo,
+			"external_number": row.ExternalNumber,
+			"external_url":    row.ExternalURL,
+			"source_branch":   row.SourceBranch,
+			"target_branch":   row.TargetBranch,
+			"state":           row.State,
+			"last_synced_sha": row.LastSyncedSHA,
+		})
+	}
+	return out
+}
+
+func (d *Deps) addPRAttribution(ctx context.Context, result map[string]any, pr db.PullRequest) {
+	result["ags_actor"] = nil
+	result["delegated_by"] = nil
+	if attribution, err := d.Svc.PullRequestAttributionFor(ctx, pr); err != nil {
+		logErr(ctx, "PR response: delegated actor attribution", err)
+	} else if attribution != nil {
+		result["ags_actor"] = attribution.AGSActor
+		result["delegated_by"] = attribution.DelegatedBy
+	}
 }
 
 // CreatePR handles POST /api/v3/repos/{owner}/{repo}/pulls
@@ -405,8 +508,17 @@ func (d *Deps) CreatePR(w http.ResponseWriter, r *http.Request) {
 			headRepoFullName = headOwner + "/" + baseParts[1]
 		}
 	}
+	if err := service.ValidateDelegatedSessionOperationConstraints(r.Context(), "pr.create", map[string]string{
+		"base_ref": body.Base, "head_ref": headRef,
+	}); err != nil {
+		logErr(r.Context(), "CreatePR: delegated constraint denial audit", d.Svc.LogCurrentDelegatedSessionAudit(r.Context(), service.DelegatedSessionAuditEvent{
+			Action: service.AuditActionDelegatedWriteDenied, Operation: "pull_request.create", Outcome: "denied", Reason: "operation_constraint_mismatch",
+		}))
+		respond.Error(w, http.StatusForbidden, "Resource not accessible by integration")
+		return
+	}
 
-	pr, err := d.Svc.CreatePR(r.Context(), service.CreatePRInput{
+	pr, created, err := d.Svc.CreatePRWithResult(r.Context(), service.CreatePRInput{
 		RepoFullName:        full,
 		HeadRepoFullName:    headRepoFullName,
 		Title:               body.Title,
@@ -419,11 +531,30 @@ func (d *Deps) CreatePR(w http.ResponseWriter, r *http.Request) {
 	})
 	// GitHub API returns 422 for creation failures — intentional compatibility.
 	if err != nil {
+		if _, delegated := service.DelegatedSessionFromContext(r.Context()); delegated {
+			logErr(r.Context(), "CreatePR: delegated denial audit", d.Svc.LogCurrentDelegatedSessionAudit(r.Context(), service.DelegatedSessionAuditEvent{
+				Action: service.AuditActionDelegatedWriteDenied, Operation: "pull_request.create", Outcome: "denied", Reason: "request_rejected",
+			}))
+		}
+		var refDenied *service.PRRefProjectionDeniedError
+		if errors.As(err, &refDenied) && pr.ID != 0 {
+			respond.JSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"message":        "pull request committed but ref projection denied",
+				"pull_request":   map[string]any{"number": pr.Number, "created": created},
+				"ref_projection": map[string]string{"status": "denied", "reason": "fresh_authority_denied"},
+			})
+			return
+		}
 		respond.ValidationFailed(w, err.Error())
 		return
 	}
-	logErr(r.Context(), "CreatePR: webhook", d.Svc.DispatchWebhookEvent(r.Context(), pr.RepositoryID, "pull_request", "opened", d.webhookPRPayload(r.Context(), pr, "opened", d.prWithCreateExtras(r, pr))))
-	respond.JSON(w, 201, d.prWithCreateExtras(r, pr))
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+		logErr(r.Context(), "CreatePR: external integrations", d.Svc.EnqueuePullRequestCreatedIntegrations(r.Context(), pr))
+		logErr(r.Context(), "CreatePR: webhook", d.Svc.DispatchWebhookEvent(r.Context(), pr.RepositoryID, "pull_request", "opened", d.webhookPRPayload(r.Context(), pr, "opened", d.prWithCreateExtras(r, pr))))
+	}
+	respond.JSON(w, status, d.prWithCreateExtras(r, pr))
 }
 
 // UpdatePR handles PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}
@@ -441,6 +572,29 @@ func (d *Deps) UpdatePR(w http.ResponseWriter, r *http.Request) {
 		Draft *bool   `json:"draft"`
 	}
 	decodeBody(r, &body)
+	// AGS-T022: classify PATCH body into exact standard operations. State
+	// transitions cannot hide under pr.edit, and non-state edits cannot use close/reopen.
+	operation := "pr.edit"
+	if body.State != nil {
+		switch strings.ToLower(strings.TrimSpace(*body.State)) {
+		case db.StateClosed:
+			operation = "pr.close"
+		case db.StateOpen:
+			operation = "pr.reopen"
+		default:
+			respond.ValidationFailed(w, "invalid pull request state")
+			return
+		}
+	}
+	if err := service.ValidateDelegatedSessionOperationConstraints(r.Context(), operation, map[string]string{
+		"pull_request_number": strconv.Itoa(num),
+	}); err != nil {
+		logErr(r.Context(), "UpdatePR: delegated constraint denial audit", d.Svc.LogCurrentDelegatedSessionAudit(r.Context(), service.DelegatedSessionAuditEvent{
+			Action: service.AuditActionDelegatedWriteDenied, Operation: operation, Outcome: "denied", Reason: "operation_constraint_mismatch",
+		}))
+		respond.Error(w, http.StatusForbidden, "Resource not accessible by integration")
+		return
+	}
 	pr, err := d.Svc.UpdatePR(r.Context(), full, num, service.UpdatePRInput{
 		Title: body.Title, Body: body.Body, State: body.State, BaseRef: body.Base, Draft: body.Draft,
 	})
@@ -449,16 +603,15 @@ func (d *Deps) UpdatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := ""
-	if body.State != nil {
-		switch *body.State {
-		case db.StateClosed:
-			action = "closed"
-		case db.StateOpen:
-			action = "reopened"
+	switch operation {
+	case "pr.close":
+		action = "closed"
+	case "pr.reopen":
+		action = "reopened"
+	default:
+		if body.Title != nil || body.Body != nil || body.Base != nil || body.Draft != nil {
+			action = "edited"
 		}
-	}
-	if action == "" && (body.Title != nil || body.Body != nil || body.Base != nil || body.Draft != nil) {
-		action = "edited"
 	}
 	if action != "" {
 		logErr(r.Context(), "UpdatePR: webhook", d.Svc.DispatchWebhookEvent(r.Context(), pr.RepositoryID, "pull_request", action, d.webhookPRPayload(r.Context(), pr, action, d.prWithExtras(r, pr))))
@@ -627,6 +780,28 @@ func (d *Deps) CreatePRReview(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Event == "" {
 		body.Event = "COMMENTED"
+	}
+	reviewAction := "comment"
+	switch strings.ToUpper(strings.TrimSpace(body.Event)) {
+	case "APPROVE", "APPROVED":
+		reviewAction = "approve"
+	case "REQUEST_CHANGES", "CHANGES_REQUESTED":
+		reviewAction = "request_changes"
+	case "COMMENT", "COMMENTED", "PENDING", "":
+		reviewAction = "comment"
+	default:
+		respond.ValidationFailed(w, "invalid review event")
+		return
+	}
+	if err := service.ValidateDelegatedSessionOperationConstraints(r.Context(), "review.write", map[string]string{
+		"pull_request_number": strconv.Itoa(num),
+		"review_action":       reviewAction,
+	}); err != nil {
+		logErr(r.Context(), "CreatePRReview: delegated constraint denial audit", d.Svc.LogCurrentDelegatedSessionAudit(r.Context(), service.DelegatedSessionAuditEvent{
+			Action: service.AuditActionDelegatedWriteDenied, Operation: "review.write", Outcome: "denied", Reason: "operation_constraint_mismatch",
+		}))
+		respond.Error(w, http.StatusForbidden, "Resource not accessible by integration")
+		return
 	}
 	u, err := d.Svc.GetCurrentUser(r.Context())
 	if err != nil {

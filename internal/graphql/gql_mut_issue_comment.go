@@ -273,6 +273,9 @@ func (s *Server) doCreateLinkedBranch(ctx context.Context, req gqlRequest) map[s
 		if err := s.Svc.Git.CreateBranchFromOid(ctx, fullName, name, oid); err != nil {
 			return errResp(err.Error())
 		}
+		if err := s.Svc.SyncOpenPRHeadsForBranch(ctx, repo.ID, fullName, name); err != nil {
+			return errResp(err.Error())
+		}
 
 		// Map issueID back to DB ID if provided
 		parsedIssueID := parseNodeID(issueID, "Issue")

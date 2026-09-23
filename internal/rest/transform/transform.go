@@ -410,11 +410,11 @@ func RepoTopics(t string) []string {
 }
 
 // Branch converts branch name + sha + repo full name to a GitHub branch object.
-func Branch(repoFullName, name, sha string) map[string]any {
+func Branch(repoFullName, name, sha string, protected bool) map[string]any {
 	return map[string]any{
 		"name":      name,
 		"commit":    BranchCommit(repoFullName, sha),
-		"protected": false,
+		"protected": protected,
 	}
 }
 

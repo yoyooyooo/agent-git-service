@@ -465,6 +465,16 @@ func releaseClaimedWikiSearchProjectionTask(database *gorm.DB, task db.WikiSearc
 
 func (s *Service) repairWikiSearchProjectionTasks(ctx context.Context) (int64, error) {
 	now := time.Now().UTC()
+	// Keep the set-based upstream repair on every supported fork dialect.
+	// A conflict advances the generation without replacing a current lease.
+	upsert := `ON DUPLICATE KEY UPDATE
+	generation = wiki_search_projection_tasks.generation + 1,
+	updated_at = VALUES(updated_at)`
+	if dialect := s.DBForCtx(ctx).Dialector.Name(); dialect == "sqlite" || dialect == "postgres" {
+		upsert = `ON CONFLICT (repository_id, slug, kind) DO UPDATE SET
+	generation = wiki_search_projection_tasks.generation + 1,
+	updated_at = excluded.updated_at`
+	}
 	live := s.DBForCtx(ctx).Exec(`
 INSERT INTO wiki_search_projection_tasks
 	(repository_id, slug, kind, generation, created_at, updated_at)
@@ -474,10 +484,7 @@ LEFT JOIN wiki_search_documents AS docs
 	ON docs.repository_id = pages.repository_id AND docs.slug = pages.slug
 WHERE pages.deleted_at IS NULL
 	AND (docs.id IS NULL OR docs.revision_sha <> pages.head_blob_sha)
-ON DUPLICATE KEY UPDATE
-	generation = wiki_search_projection_tasks.generation + 1,
-	updated_at = VALUES(updated_at)
-`, wikiSearchProjectionKindLexical, now, now)
+`+upsert, wikiSearchProjectionKindLexical, now, now)
 	if live.Error != nil {
 		return 0, live.Error
 	}
@@ -492,10 +499,7 @@ LEFT JOIN wiki_pages AS pages
 	AND pages.slug = docs.slug
 	AND pages.deleted_at IS NULL
 WHERE pages.page_id IS NULL
-ON DUPLICATE KEY UPDATE
-	generation = wiki_search_projection_tasks.generation + 1,
-	updated_at = VALUES(updated_at)
-`, wikiSearchProjectionKindLexical, now, now)
+`+upsert, wikiSearchProjectionKindLexical, now, now)
 	if stale.Error != nil {
 		return live.RowsAffected, stale.Error
 	}

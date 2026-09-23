@@ -1392,6 +1392,30 @@ func TestConsoleRedirects(t *testing.T) {
 	}
 }
 
+func TestLegacyAssertionSessionLifecycleDelegationPolicyAndMergeGatewayRoutesAreRetired(t *testing.T) {
+	_, mux := setupRouterTest(t)
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/v3/agent-sessions/exchange"},
+		{http.MethodGet, "/api/v3/agent-sessions/current"},
+		{http.MethodPost, "/api/v3/agent-sessions/current/revoke"},
+		{http.MethodPost, "/api/v3/agent-sessions/11111111-1111-4111-8111-111111111111/revoke"},
+		{http.MethodGet, "/api/v3/integrations/delegation-policies"},
+		{http.MethodPost, "/api/v3/repos/operator/project-kit/pulls/1/actions/pr.merge"},
+		{http.MethodGet, "/api/v3/repos/operator/project-kit/pulls/1/actions/pr.merge/11111111-1111-4111-8111-111111111111"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("expected retired route %s %s to return 404, got %d: %s", tc.method, tc.path, w.Code, w.Body.String())
+		}
+	}
+}
+
 func TestGitHTTP_SingleModeAllowsUnauthenticatedRequests(t *testing.T) {
 	_, mux := setupRouterTest(t)
 

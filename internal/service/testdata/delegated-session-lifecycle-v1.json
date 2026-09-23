@@ -1,0 +1,52 @@
+{
+  "schema": "ags.delegated-session-lifecycle.v1",
+  "session_id": "11111111-1111-4111-8111-111111111111",
+  "state": "expired",
+  "created_at": "2026-07-28T00:00:00Z",
+  "expires_at": "2026-07-28T00:01:00Z",
+  "expiry_audited_at": "2026-07-28T00:02:00Z",
+  "authority": {
+    "contract_revision": "2026-07-24.team-authority-v4",
+    "principal": {
+      "id": 7,
+      "login": "mini-team-principal"
+    },
+    "team_identity_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "team_binding_revision": "2026-07-25.mini-team-binding-1",
+    "policy_class": "multica.workspace.default.v1",
+    "membership_epoch": 1,
+    "issuer_instance_id": "multica-mini",
+    "target": {
+      "instance": "primary-a",
+      "repository": "operator/project-kit"
+    },
+    "resource": {
+      "service": "ags",
+      "repository": "operator/project-kit"
+    },
+    "operation": {
+      "name": "repo.read"
+    },
+    "authorization_basis": {
+      "trust_revision": "2026-07-25.mini-team-authority-1",
+      "native_grant_revision": "grant-rev:05c236315cbdbe2cd9f8255a706e75ec5cd84d1fe2949f4e901b27e731801582",
+      "resource_policy_revision": "2026-07-25.mini-resource-policy-1",
+      "policy_class_revision": "2026-07-25.mini-default-dynamic-1",
+      "requested_operation_scope": "repo.read:operator/project-kit"
+    }
+  },
+  "provenance": {
+    "schema": "workload.context.v1",
+    "workspace_id": "11111111-1111-4111-8111-111111111111",
+    "agent_id": "b92d04cf-76fa-492c-afad-12d4b149743e",
+    "squad_id": "ba82b0c4-3488-47c0-be4a-39976d689b1a",
+    "issue_id": "22222222-2222-4222-8222-222222222222",
+    "issue_key": "MINI-989",
+    "task_id": "33333333-3333-4333-8333-333333333333",
+    "run_id": "44444444-4444-4444-8444-444444444444",
+    "correlation_id": "55555555-5555-4555-8555-555555555555",
+    "trigger_id": "66666666-6666-4666-8666-666666666666",
+    "runtime_id": "77777777-7777-4777-8777-777777777777"
+  },
+  "claim_limit": "This readback proves the persisted lifecycle state and expiry-audited marker for one delegated Session; it does not expose authentication material or prove external provider effects."
+}

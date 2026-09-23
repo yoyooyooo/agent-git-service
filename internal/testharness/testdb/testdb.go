@@ -59,6 +59,10 @@ func (p *SchemaPool) Open(t testing.TB) (*gorm.DB, func()) {
 	var once sync.Once
 	cleanup := func() {
 		once.Do(func() {
+			if shouldDiscard(pdb.sqlDB) {
+				pdb.drop()
+				return
+			}
 			tables, ok, err := p.schemaTableSetMatches(context.Background(), pdb)
 			if err != nil {
 				t.Logf("testdb: compare pooled database %s with template %s: %v; dropping it", pdb.name, p.TemplateDB, err)

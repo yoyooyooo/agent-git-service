@@ -144,7 +144,16 @@ func TypeFields(typeName string) map[string]any {
 			"isDraft", "merged", "mergeable", "isInMergeQueue",
 			"reviewRequests", "reviews", "commits", "files",
 			"headRefOid", "headRepository", "headRepositoryOwner",
-			"isCrossRepository", "statusCheckRollup", "repository")
+			"isCrossRepository", "statusCheckRollup", "repository",
+			"agsActor", "delegatedBy")
+	case "AGSActor":
+		return FieldResp("type", "provider", "workspaceId", "workspace",
+			"agentId", "agentName", "taskId", "runId", "issueId", "issueKey",
+			"sessionId", "sessionState", "sessionCreatedAt", "targetInstance", "displayName")
+	case "AGSDelegatedBy":
+		return FieldResp("principal", "human", "bindingSource")
+	case "AGSDelegatorIdentity":
+		return FieldResp("databaseId", "login", "userKind")
 	case "StatusCheckRollupContextConnection":
 		return FieldResp("checkRunCount", "checkRunCountsByState",
 			"statusContextCount", "statusContextCountsByState")

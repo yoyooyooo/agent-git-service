@@ -14,29 +14,19 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/cgi"
 	"net/url"
-	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/ngaut/agent-git-service/internal/gitbackend"
 	"github.com/ngaut/agent-git-service/internal/gitstore"
 	applog "github.com/ngaut/agent-git-service/internal/logging"
 	"github.com/ngaut/agent-git-service/internal/rest/respond"
 	"github.com/ngaut/agent-git-service/internal/service"
-	"github.com/ngaut/agent-git-service/internal/wikiv2"
 )
-
-// defaultMaxPushBytes caps a single chunked git push when no explicit override
-// is set. Chunked requests must be materialized in full before handing off to
-// git-http-backend (the CGI contract requires Content-Length), so an
-// unbounded body would translate directly into unbounded disk use.
-const defaultMaxPushBytes int64 = 2 * 1024 * 1024 * 1024 // 2 GiB
 
 const wikiReceivePackRepairOwnerRefreshInterval = 15 * time.Minute
 
@@ -49,6 +39,10 @@ type Store interface {
 	WithRepoLock(ctx context.Context, fullName string, fn func() error) error
 }
 
+type receivePolicyEnsurer interface {
+	EnsureReceivePolicy(ctx context.Context, fullName string) error
+}
+
 // Handler wraps the gitstore for HTTP git protocol serving.
 type Handler struct {
 	store Store
@@ -56,12 +50,15 @@ type Handler struct {
 }
 
 type serveRequest struct {
-	projectRoot        string
-	repoPath           string
-	svcName            string
-	advertise          bool
-	repoFullName       string
-	allowDeleteCurrent bool
+	projectRoot                string
+	repoPath                   string
+	svcName                    string
+	advertise                  bool
+	repoFullName               string
+	allowDeleteCurrent         bool
+	gitHTTPProtectedBranches   []string
+	delegatedSession           bool
+	delegatedProtectedBranches []string
 }
 
 // repoContext holds the resolved repository context for serving git HTTP requests.
@@ -70,6 +67,7 @@ type repoContext struct {
 	repoPath        string
 	repoFullName    string
 	gitRepoFullName string
+	repositoryID    uint
 	defaultBranch   string
 	isWikiBacking   bool
 }
@@ -135,9 +133,14 @@ func New(store Store, svc *service.Service) *Handler {
 	return &Handler{store: store, Svc: svc}
 }
 
-// ensureRepo checks if the repository exists in the gitstore; if not but in DB, inits it.
+// ensureRepo creates missing storage and refreshes managed receive hooks on
+// existing repositories. Hook refresh is fail-closed: serving Git while the
+// authority guard cannot be installed would silently weaken repository policy.
 func (h *Handler) ensureRepo(ctx context.Context, fullName, defaultBranch string) error {
 	if h.store.Exists(ctx, fullName) {
+		if ensurer, ok := h.store.(receivePolicyEnsurer); ok {
+			return ensurer.EnsureReceivePolicy(ctx, fullName)
+		}
 		return nil
 	}
 	if err := h.store.Init(ctx, fullName, defaultBranch, false); err != nil {
@@ -149,119 +152,52 @@ func (h *Handler) ensureRepo(ctx context.Context, fullName, defaultBranch string
 // resolveRepoContext resolves and prepares repository context for git HTTP serving.
 // It handles repo lookup, ensures repo exists, and fetches repo path information.
 // Returns repoContext on success, or writes error response and returns false on failure.
-func (h *Handler) resolveRepoContext(w http.ResponseWriter, r *http.Request, action string, required service.RepoPermission) (*repoContext, bool) {
+func (h *Handler) resolveRepoContext(w http.ResponseWriter, r *http.Request, action, gitService string, required service.RepoPermission) (*repoContext, bool) {
 	owner := pathParam(r, "owner")
 	repo := strings.TrimSuffix(pathParam(r, "repo"), ".git")
 	requested := owner + "/" + repo
 	applog.AddAttrs(r.Context(), slog.String("repo", requested))
 
-	rep, err := h.Svc.LookupRepoIdentity(r.Context(), requested)
+	rep, err := h.Svc.AuthorizeGitTransport(r.Context(), requested, gitService)
 	if err != nil {
-		if !errors.Is(err, service.ErrNotFound) {
-			slog.ErrorContext(r.Context(), "githttp resolve repo failed", "action", action, "repo", requested, "error", err)
-			http.Error(w, "Internal Server Error", 500)
-			return nil, false
-		}
-		parentFullName, ok := wikiRepoParentName(requested)
-		if !ok {
-			respond.NotFound(w)
-			return nil, false
-		}
-		parent, parentErr := h.Svc.LookupRepoIdentity(r.Context(), parentFullName)
-		if parentErr != nil {
-			if errors.Is(parentErr, service.ErrNotFound) {
-				respond.NotFound(w)
+		var denied *service.GitTransportAccessError
+		if errors.As(err, &denied) {
+			switch denied.Stage {
+			case service.GitAccessLookup:
+				if errors.Is(err, service.ErrNotFound) {
+					if _, wiki := wikiRepoParentName(requested); wiki {
+						return h.resolveWikiRepoContext(w, r, action, gitService, requested)
+					}
+				}
+			case service.GitAccessOperation:
+				respond.Error(w, http.StatusBadRequest, "Unsupported Git service")
 				return nil, false
-			}
-			slog.ErrorContext(r.Context(), "githttp resolve wiki parent failed", "action", action, "repo", requested, "parent_repo", parentFullName, "error", parentErr)
-			http.Error(w, "Internal Server Error", 500)
-			return nil, false
-		}
-		if !parent.HasWiki || parent.FullName+".wiki" != requested {
-			respond.NotFound(w)
-			return nil, false
-		}
-		fullName := parent.FullName
-		applog.AddAttrs(r.Context(), slog.String("repo", fullName), slog.String("git_repo", requested))
-
-		allowAnonymousRead := !parent.Private && required.Effective() == service.RepoPermissionRead
-		if !allowAnonymousRead {
-			viewer, ok := service.UserFromContext(r.Context())
-			if !ok {
+			case service.GitAccessAuthentication:
 				gitAuthChallenge(w)
 				return nil, false
-			}
-			perm, permErr := h.Svc.HasRepoAccess(r.Context(), parent.ID, viewer.ID)
-			if permErr != nil {
-				if errors.Is(permErr, service.ErrNotFound) {
-					respond.NotFound(w)
-					return nil, false
+			case service.GitAccessDelegated:
+				h.logDelegatedGitOperation(r.Context(), gitService, "denied", service.DelegatedSessionDenialReason(err))
+				respond.Error(w, http.StatusForbidden, "Delegated session operation does not allow this Git transport")
+				return nil, false
+			case service.GitAccessPermission:
+				if required.Effective() == service.RepoPermissionWrite {
+					h.logDelegatedGitWrite(r.Context(), "denied", "permission_denied")
 				}
-				slog.ErrorContext(r.Context(), "githttp wiki permission check failed", "action", action, "repo", requested, "parent_repo", fullName, "error", permErr)
-				http.Error(w, "Internal Server Error", 500)
-				return nil, false
-			}
-			if !perm.AtLeast(required) {
-				respond.NotFound(w)
-				return nil, false
 			}
 		}
-
-		if !h.store.Exists(r.Context(), requested) {
-			if initErr := h.store.Init(r.Context(), requested, wikiv2.DefaultBranch, false); initErr != nil {
-				slog.ErrorContext(r.Context(), "githttp ensure wiki repo failed", "action", action, "repo", requested, "parent_repo", fullName, "error", initErr)
-				http.Error(w, "Internal Server Error", 500)
-				return nil, false
-			}
+		switch {
+		case errors.Is(err, service.ErrForbidden):
+			respond.Error(w, http.StatusForbidden, "Delegated session capability does not allow this Git operation")
+		case errors.Is(err, service.ErrNotFound):
+			respond.NotFound(w)
+		default:
+			slog.ErrorContext(r.Context(), "githttp authorization failed", "action", action, "repo", requested, "error", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
-
-		repoPath, pathErr := h.store.GetRepoPath(r.Context(), requested)
-		if pathErr != nil {
-			slog.ErrorContext(r.Context(), "githttp wiki repo path lookup failed", "action", action, "repo", requested, "parent_repo", fullName, "error", pathErr)
-			http.Error(w, "Internal Server Error", 500)
-			return nil, false
-		}
-		projectRoot, rootErr := h.store.RepoRoot(r.Context())
-		if rootErr != nil {
-			slog.ErrorContext(r.Context(), "githttp wiki repo root lookup failed", "action", action, "repo", requested, "parent_repo", fullName, "error", rootErr)
-			http.Error(w, "Internal Server Error", 500)
-			return nil, false
-		}
-
-		return &repoContext{
-			projectRoot:     projectRoot,
-			repoPath:        repoPath,
-			repoFullName:    fullName,
-			gitRepoFullName: requested,
-			defaultBranch:   wikiv2.DefaultBranch,
-			isWikiBacking:   true,
-		}, true
+		return nil, false
 	}
 	fullName := rep.FullName
 	applog.AddAttrs(r.Context(), slog.String("repo", fullName))
-
-	allowAnonymousRead := !rep.Private && required.Effective() == service.RepoPermissionRead
-	if !allowAnonymousRead {
-		viewer, ok := service.UserFromContext(r.Context())
-		if !ok {
-			gitAuthChallenge(w)
-			return nil, false
-		}
-		perm, err := h.Svc.HasRepoAccess(r.Context(), rep.ID, viewer.ID)
-		if err != nil {
-			if errors.Is(err, service.ErrNotFound) {
-				respond.NotFound(w)
-				return nil, false
-			}
-			slog.ErrorContext(r.Context(), "githttp permission check failed", "action", action, "repo", requested, "error", err)
-			http.Error(w, "Internal Server Error", 500)
-			return nil, false
-		}
-		if !perm.AtLeast(required) {
-			respond.NotFound(w)
-			return nil, false
-		}
-	}
 
 	if err := h.ensureRepo(r.Context(), fullName, rep.DefaultBranch); err != nil {
 		if errors.Is(err, service.ErrNotFound) {
@@ -292,8 +228,40 @@ func (h *Handler) resolveRepoContext(w http.ResponseWriter, r *http.Request, act
 		repoPath:        repoPath,
 		repoFullName:    fullName,
 		gitRepoFullName: fullName,
+		repositoryID:    rep.ID,
 		defaultBranch:   rep.DefaultBranch,
 	}, true
+}
+
+func (h *Handler) revalidateDelegatedGit(ctx context.Context, repositoryID uint, gitService string) error {
+	return h.Svc.RevalidateDelegatedGitTransport(ctx, repositoryID, gitService)
+}
+
+func (h *Handler) logDelegatedGitOperation(ctx context.Context, operation, outcome, reason string) {
+	if _, ok := service.DelegatedSessionFromContext(ctx); !ok {
+		return
+	}
+	operation = delegatedGitAuditOperation(operation)
+	if err := h.Svc.LogCurrentDelegatedSessionAudit(ctx, service.DelegatedSessionAuditEvent{
+		Action: service.AuditActionDelegatedGitWrite, Operation: operation, Outcome: outcome, Reason: reason,
+	}); err != nil {
+		slog.WarnContext(ctx, "delegated Git operation audit failed", "operation", operation, "outcome", outcome, "reason", reason, "error", err)
+	}
+}
+
+func delegatedGitAuditOperation(gitService string) string {
+	switch gitService {
+	case "git-receive-pack", "git.receive_pack":
+		return "git.receive_pack"
+	case "git-upload-pack", "git.upload_pack":
+		return "git.upload_pack"
+	default:
+		return strings.TrimSpace(gitService)
+	}
+}
+
+func (h *Handler) logDelegatedGitWrite(ctx context.Context, outcome, reason string) {
+	h.logDelegatedGitOperation(ctx, "git.receive_pack", outcome, reason)
 }
 
 func pathParam(r *http.Request, key string) string {
@@ -314,9 +282,15 @@ func (h *Handler) InfoRefs(w http.ResponseWriter, r *http.Request) {
 	if svc == "git-receive-pack" {
 		required = service.RepoPermissionWrite
 	}
-	repoCtx, ok := h.resolveRepoContext(w, r, "info/refs", required)
+	repoCtx, ok := h.resolveRepoContext(w, r, "info/refs", svc, required)
 	if !ok {
 		return
+	}
+	if _, delegated := service.DelegatedSessionIDFromContext(r.Context()); delegated {
+		if err := h.revalidateDelegatedGit(r.Context(), repoCtx.repositoryID, svc); err != nil {
+			respond.Error(w, http.StatusForbidden, "Delegated session authority changed before Git operation")
+			return
+		}
 	}
 	if err := h.serve(w, r, serveRequest{
 		projectRoot:  repoCtx.projectRoot,
@@ -332,9 +306,15 @@ func (h *Handler) InfoRefs(w http.ResponseWriter, r *http.Request) {
 
 // UploadPack handles POST /{owner}/{repo}.git/git-upload-pack (clone/fetch)
 func (h *Handler) UploadPack(w http.ResponseWriter, r *http.Request) {
-	repoCtx, ok := h.resolveRepoContext(w, r, "upload-pack", service.RepoPermissionRead)
+	repoCtx, ok := h.resolveRepoContext(w, r, "upload-pack", "git-upload-pack", service.RepoPermissionRead)
 	if !ok {
 		return
+	}
+	if _, delegated := service.DelegatedSessionIDFromContext(r.Context()); delegated {
+		if err := h.revalidateDelegatedGit(r.Context(), repoCtx.repositoryID, "git-upload-pack"); err != nil {
+			respond.Error(w, http.StatusForbidden, "Delegated session authority changed before Git operation")
+			return
+		}
 	}
 	if err := h.serve(w, r, serveRequest{
 		projectRoot:  repoCtx.projectRoot,
@@ -350,12 +330,30 @@ func (h *Handler) UploadPack(w http.ResponseWriter, r *http.Request) {
 
 // ReceivePack handles POST /{owner}/{repo}.git/git-receive-pack (push)
 func (h *Handler) ReceivePack(w http.ResponseWriter, r *http.Request) {
-	repoCtx, ok := h.resolveRepoContext(w, r, "receive-pack", service.RepoPermissionWrite)
+	repoCtx, ok := h.resolveRepoContext(w, r, "receive-pack", "git-receive-pack", service.RepoPermissionWrite)
 	if !ok {
 		return
 	}
 	if rejectOversizedReceivePack(w, r) {
+		h.logDelegatedGitWrite(r.Context(), "denied", "body_too_large")
 		return
+	}
+	var configuredProtectedBranches []string
+	if !repoCtx.isWikiBacking {
+		var err error
+		configuredProtectedBranches, err = h.Svc.ProtectedBranchNames(r.Context(), repoCtx.repositoryID)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "githttp protected branch lookup failed", "repo", repoCtx.repoFullName, "error", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+	}
+	delegated := false
+	var delegatedProtectedBranches []string
+	if _, ok := service.DelegatedSessionFromContext(r.Context()); ok {
+		delegated = true
+		delegatedProtectedBranches = append(delegatedProtectedBranches, repoCtx.defaultBranch)
+		delegatedProtectedBranches = append(delegatedProtectedBranches, configuredProtectedBranches...)
 	}
 	var beforeRefs map[string]string
 	parentRepo := repoCtx.repoFullName
@@ -366,7 +364,19 @@ func (h *Handler) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		buffered = newBufferedResponseWriter()
 		serveWriter = buffered
 	}
+	var delegatedDenial error
 	runReceivePack := func() error {
+		// Repository/catalog locks precede the capture barrier. Taking the
+		// mutation lease before WithRepoLock could deadlock a queued capture.
+		r := r
+		if h.Svc.Git != nil {
+			ctx, release, err := h.Svc.Git.BeginMutation(r.Context())
+			if err != nil {
+				return err
+			}
+			defer release()
+			r = r.WithContext(ctx)
+		}
 		var repairOwnerToken string
 		clearRepairOwner := func(reason string) error {
 			if !isWikiRepo || repairOwnerToken == "" {
@@ -398,18 +408,41 @@ func (h *Handler) ReceivePack(w http.ResponseWriter, r *http.Request) {
 			stopRefresh := h.startWikiReceivePackRepairOwnerRefresh(r.Context(), parentRepo, repairOwnerToken)
 			defer stopRefresh()
 		}
+		if delegated {
+			if err := h.revalidateDelegatedGit(r.Context(), repoCtx.repositoryID, "git-receive-pack"); err != nil {
+				delegatedDenial = err
+				h.logDelegatedGitWrite(r.Context(), "denied", service.DelegatedSessionDenialReason(err))
+				return err
+			}
+		}
 		if err := h.serve(serveWriter, r, serveRequest{
-			projectRoot:        repoCtx.projectRoot,
-			repoPath:           repoCtx.repoPath,
-			svcName:            "git-receive-pack",
-			advertise:          false,
-			repoFullName:       repoCtx.gitRepoFullName,
-			allowDeleteCurrent: isWikiRepo,
+			projectRoot:                repoCtx.projectRoot,
+			repoPath:                   repoCtx.repoPath,
+			svcName:                    "git-receive-pack",
+			advertise:                  false,
+			repoFullName:               repoCtx.gitRepoFullName,
+			allowDeleteCurrent:         isWikiRepo,
+			gitHTTPProtectedBranches:   configuredProtectedBranches,
+			delegatedSession:           delegated,
+			delegatedProtectedBranches: delegatedProtectedBranches,
 		}); err != nil {
 			if clearErr := clearRepairOwner("pre-backend serve error"); clearErr != nil {
 				return errors.Join(err, clearErr)
 			}
 			return err
+		}
+		// Compare under the repository lock so another push cannot be
+		// attributed to this delegated request.
+		if delegated {
+			if beforeRefsErr != nil {
+				h.logDelegatedGitWrite(r.Context(), "unknown", "ref_snapshot_failed")
+			} else if afterRefs, err := snapshotRefs(r.Context(), repoCtx.repoPath); err != nil {
+				h.logDelegatedGitWrite(r.Context(), "unknown", "ref_snapshot_failed")
+			} else if len(diffPushedRefs(r.Context(), repoCtx.repoPath, beforeRefs, afterRefs)) > 0 {
+				h.logDelegatedGitWrite(r.Context(), "success", "")
+			} else {
+				h.logDelegatedGitWrite(r.Context(), "denied", "no_ref_change")
+			}
 		}
 		refsChanged := true
 		if isWikiRepo {
@@ -446,6 +479,11 @@ func (h *Handler) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		err = h.store.WithRepoLock(r.Context(), repoCtx.gitRepoFullName, runReceivePack)
 	}
 	if err != nil {
+		if delegatedDenial != nil {
+			respond.Error(w, http.StatusForbidden, "Delegated session authority changed before Git operation")
+			return
+		}
+		h.logDelegatedGitWrite(r.Context(), "denied", "backend_error")
 		slog.ErrorContext(r.Context(), "githttp receive-pack failed", "repo", repoCtx.repoFullName, "error", err)
 		http.Error(w, "Internal Server Error", 500)
 		return
@@ -461,8 +499,23 @@ func (h *Handler) ReceivePack(w http.ResponseWriter, r *http.Request) {
 	if u, ok := service.UserFromContext(r.Context()); ok {
 		followupCtx = service.ContextWithUser(followupCtx, u)
 	}
+	if session, ok := service.DelegatedSessionFromContext(r.Context()); ok {
+		followupCtx = service.ContextWithDelegatedSession(followupCtx, session)
+	}
 	applog.AddAttrs(followupCtx, slog.String("repo", repoCtx.repoFullName))
-	fixHEAD(repoCtx.repoPath)
+	if err := h.store.WithRepoLock(followupCtx, repoCtx.gitRepoFullName, func() error {
+		if h.Svc.Git != nil {
+			_, release, err := h.Svc.Git.BeginMutation(followupCtx)
+			if err != nil {
+				return err
+			}
+			defer release()
+		}
+		fixHEAD(repoCtx.repoPath)
+		return nil
+	}); err != nil {
+		slog.WarnContext(followupCtx, "post-push HEAD repair unavailable", "error", err)
+	}
 	if !repoCtx.isWikiBacking {
 		if err := h.handlePostPushWebhooks(followupCtx, repoCtx.repoFullName, repoCtx.repoPath, beforeRefs); err != nil {
 			slog.ErrorContext(followupCtx, "post-push webhook delivery failed", "error", err)
@@ -519,7 +572,7 @@ func wikiRepoParentName(full string) (string, bool) {
 }
 
 func rejectOversizedReceivePack(w http.ResponseWriter, r *http.Request) bool {
-	limit := maxPushBytes()
+	limit := gitbackend.MaxPushBytes()
 	if r.ContentLength > limit {
 		slog.WarnContext(r.Context(), "githttp push body exceeded limit", "size", r.ContentLength, "limit", limit)
 		http.Error(w, "push body exceeds maximum size", http.StatusRequestEntityTooLarge)
@@ -528,95 +581,37 @@ func rejectOversizedReceivePack(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// serve delegates to the system git-http-backend CGI program using net/http/cgi.
+// serve adapts primary-only branch policy to the shared, database-free backend.
+// Only this primary write path may opt into receive-pack.
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, req serveRequest) error {
-	backend, err := findGitHTTPBackend()
-	if err != nil {
-		return fmt.Errorf("git-http-backend not found: %w", err)
-	}
-
-	action := ""
-	if strings.HasSuffix(r.URL.Path, "info/refs") {
-		action = "info/refs"
-	} else if strings.HasSuffix(r.URL.Path, "git-upload-pack") {
-		action = "git-upload-pack"
-	} else if strings.HasSuffix(r.URL.Path, "git-receive-pack") {
-		action = "git-receive-pack"
-	}
-
-	// Build PATH_INFO for git-http-backend.
-	// The path structure is: /{owner}/{repo}.git/{action}
-	owner, repo, ok := strings.Cut(req.repoFullName, "/")
-	if !ok || owner == "" || repo == "" {
-		return errors.New("invalid repository full name")
-	}
-	pathInfo := fmt.Sprintf("/%s/%s.git/%s", owner, repo, action)
-
-	env := []string{
-		"GIT_PROJECT_ROOT=" + req.projectRoot,
-		"GIT_HTTP_EXPORT_ALL=1",
-		"PATH_INFO=" + pathInfo,
-		"REMOTE_USER=git",
-	}
-	if req.allowDeleteCurrent {
-		// A wiki has one canonical branch. Deleting it through receive-pack
-		// intentionally empties the wiki, so override Git's default protection
-		// for this request without changing ordinary repository policy.
-		env = append(env,
-			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=receive.denyDeleteCurrent",
-			"GIT_CONFIG_VALUE_0=ignore",
-		)
-	}
-
-	// Auth is handled by middleware/service before this point. Avoid forwarding
-	// bearer credentials to git-http-backend via CGI environment.
-	cgiReq := r.Clone(r.Context())
-	cgiReq.Header = r.Header.Clone()
-	cgiReq.Header.Del("Authorization")
-
-	// git-http-backend runs as a CGI program and requires Content-Length, so we
-	// must convert chunked transfer-encoding requests to a sized body. Spool to a
-	// temp file instead of RAM so hostile or oversized pushes don't exhaust
-	// memory; the cap is configurable via GITHTTP_MAX_PUSH_BYTES and the spool
-	// directory via GITHTTP_SPOOL_DIR (for environments where $TMPDIR is tmpfs).
-	if hasChunkedTransferEncoding(cgiReq.TransferEncoding) {
-		tmp, size, exceeded, err := spoolChunkedBody(r.Context(), w, cgiReq.Body, maxPushBytes())
-		if err != nil {
-			return fmt.Errorf("spool chunked request body: %w", err)
-		}
-		if exceeded {
-			return nil
-		}
-		defer func() {
-			_ = tmp.Close()
-			_ = os.Remove(tmp.Name())
-		}()
-		cgiReq.Body = tmp
-		cgiReq.ContentLength = size
-		cgiReq.TransferEncoding = nil
-		cgiReq.Header.Del("Transfer-Encoding")
-	}
-
-	dir, _ := os.Getwd()
-	handler := &cgi.Handler{
-		Path:       backend,
-		Dir:        dir,
-		Env:        env,
-		InheritEnv: []string{"PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL"},
-	}
-
-	handler.ServeHTTP(w, cgiReq)
-	return nil
+	return gitbackend.Serve(w, r, gitbackend.Request{
+		ProjectRoot:            req.projectRoot,
+		Repository:             req.repoFullName,
+		Service:                req.svcName,
+		Advertise:              req.advertise,
+		AllowReceive:           req.svcName == gitbackend.ReceivePack,
+		AllowDeleteCurrent:     req.allowDeleteCurrent,
+		ProtectedRefs:          protectedBranchRefs(req.gitHTTPProtectedBranches),
+		Delegated:              req.delegatedSession,
+		DelegatedProtectedRefs: protectedBranchRefs(req.delegatedProtectedBranches),
+	})
 }
 
-func hasChunkedTransferEncoding(encodings []string) bool {
-	for _, encoding := range encodings {
-		if strings.EqualFold(encoding, "chunked") {
-			return true
+func protectedBranchRefs(branches []string) []string {
+	seen := make(map[string]struct{}, len(branches))
+	refs := make([]string, 0, len(branches))
+	for _, branch := range branches {
+		ref := gitstore.RefsHeadsPrefix + strings.TrimSpace(branch)
+		if !gitstore.IsValidRefName(ref) {
+			continue
 		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
 	}
-	return false
+	return refs
 }
 
 func detachedGitHTTPContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -629,58 +624,6 @@ func detachedGitHTTPContext(parent context.Context, timeout time.Duration) (cont
 		ctx = service.ContextWithUser(ctx, u)
 	}
 	return ctx, cancel
-}
-
-// maxPushBytes returns the configured chunked-push size cap.
-func maxPushBytes() int64 {
-	if env := os.Getenv("GITHTTP_MAX_PUSH_BYTES"); env != "" {
-		if n, err := strconv.ParseInt(env, 10, 64); err == nil && n > 0 {
-			return n
-		}
-	}
-	return defaultMaxPushBytes
-}
-
-// pushSpoolDir returns the directory where chunked-push temp files are
-// written. Defaults to "" (system tmpdir); set GITHTTP_SPOOL_DIR to force a
-// disk-backed location when $TMPDIR is mounted as tmpfs.
-func pushSpoolDir() string {
-	return os.Getenv("GITHTTP_SPOOL_DIR")
-}
-
-// spoolChunkedBody drains a chunked request body into a seekable temp file
-// bounded by maxBytes. Returns the spooled file (rewound to offset 0) and its
-// size on success — the caller then owns closing and removing the file.
-// On overflow, a 413 has already been written to w, the temp file has been
-// cleaned up internally, and exceeded=true is returned.
-func spoolChunkedBody(ctx context.Context, w http.ResponseWriter, body io.ReadCloser, maxBytes int64) (*os.File, int64, bool, error) {
-	tmp, err := os.CreateTemp(pushSpoolDir(), "git-push-*.body")
-	if err != nil {
-		return nil, 0, false, fmt.Errorf("create temp: %w", err)
-	}
-	release := tmp
-	defer func() {
-		if release != nil {
-			_ = release.Close()
-			_ = os.Remove(release.Name())
-		}
-	}()
-
-	n, err := io.Copy(tmp, io.LimitReader(body, maxBytes+1))
-	_ = body.Close()
-	if err != nil {
-		return nil, 0, false, fmt.Errorf("spool body: %w", err)
-	}
-	if n > maxBytes {
-		slog.WarnContext(ctx, "githttp push body exceeded limit", "size", n, "limit", maxBytes)
-		http.Error(w, "push body exceeds maximum size", http.StatusRequestEntityTooLarge)
-		return nil, 0, true, nil
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return nil, 0, false, fmt.Errorf("rewind temp: %w", err)
-	}
-	release = nil
-	return tmp, n, false, nil
 }
 
 // fixHEAD updates a bare repo's HEAD to point to the first available branch
@@ -706,23 +649,4 @@ func fixHEAD(repoPath string) {
 		return
 	}
 	_ = exec.Command("git", "-C", repoPath, "symbolic-ref", "HEAD", branch).Run()
-}
-
-// findGitHTTPBackend locates the git-http-backend executable.
-func findGitHTTPBackend() (string, error) {
-	candidates := []string{
-		"/usr/lib/git-core/git-http-backend",
-		"/usr/libexec/git-core/git-http-backend",
-		"/opt/homebrew/libexec/git-core/git-http-backend", // Add homebrew for mac users
-	}
-	if out, err := exec.Command("git", "--exec-path").Output(); err == nil {
-		execPath := strings.TrimSpace(string(out))
-		candidates = append([]string{filepath.Join(execPath, "git-http-backend")}, candidates...)
-	}
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("not found in common locations")
 }

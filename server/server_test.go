@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -254,6 +255,24 @@ func TestShutdown_BackgroundDrain_Timeout(t *testing.T) {
 	}
 }
 
+func TestStartDelegatedSessionExpiryAuditorStopsWithServerContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	svc := &service.Service{Ctx: ctx, DB: openTestDB(t)}
+	startDelegatedSessionExpiryAuditor(ctx, svc)
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		svc.Wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("delegated session expiry auditor did not join server shutdown")
+	}
+}
+
 // ============================================================================
 // Existing Readyz Tests (unchanged)
 // ============================================================================
@@ -279,12 +298,144 @@ func TestReadyz_SingleDB_Healthy(t *testing.T) {
 		t.Errorf("expected status=ready, got %v", body["status"])
 	}
 	checks := body["checks"].(map[string]any)
-	if len(checks) != 1 {
-		t.Fatalf("expected only main_db check, got %v", checks)
+	if len(checks) != 2 {
+		t.Fatalf("expected main_db and explicit disabled typed-delivery check, got %v", checks)
+	}
+	if typed, ok := checks["multica_typed_delivery"].(map[string]any); !ok || typed["status"] != "disabled" {
+		t.Fatalf("unexpected typed-delivery health: %v", checks)
 	}
 	mainCheck := checks["main_db"].(map[string]any)
 	if mainCheck["status"] != "ok" {
 		t.Errorf("expected main_db status=ok, got %v", mainCheck["status"])
+	}
+}
+
+func TestReadyzDistinguishesTypedMulticaConfigurationAndWorker(t *testing.T) {
+	mainDB := openTestDB(t)
+	withoutWorker := readyzHandler(readyzConfig{MainDB: mainDB, TypedMulticaConfigured: true, TypedMulticaWorkerAvailable: false})
+	rec := httptest.NewRecorder()
+	withoutWorker.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"multica_typed_delivery":{"status":"configured"}`) || !strings.Contains(rec.Body.String(), `"multica_typed_worker":{"status":"unavailable"`) {
+		t.Fatalf("typed Multica unavailable state not observable: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	withWorker := readyzHandler(readyzConfig{MainDB: mainDB, TypedMulticaConfigured: true, TypedMulticaWorkerAvailable: true})
+	rec = httptest.NewRecorder()
+	withWorker.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"multica_typed_worker":{"status":"ok"}`) {
+		t.Fatalf("typed Multica worker state not observable: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestReadyzOutboundWorkerPollErrorIsObservable(t *testing.T) {
+	mainDB := openTestDB(t)
+	handler := readyzHandler(readyzConfig{
+		MainDB: mainDB,
+		OutboundWorkerHealth: func() service.OutboundWorkerHealth {
+			return service.OutboundWorkerHealth{LastPollAt: time.Now().UTC(), LastError: "read database clock: invalid timestamp"}
+		},
+	})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"outbound_worker":{"status":"unavailable"`) || !strings.Contains(rec.Body.String(), "invalid timestamp") {
+		t.Fatalf("outbound poll error was not visible in readyz: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestReadyz_RequiredProjectionAlertingMissing_Returns503(t *testing.T) {
+	mainDB := openTestDB(t)
+	handler := readyzHandler(readyzConfig{
+		MainDB:                       mainDB,
+		ProjectionAlertingRequired:   true,
+		ProjectionAlertingConfigured: false,
+	})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	checks := body["checks"].(map[string]any)
+	alerting := checks["projection_alerting"].(map[string]any)
+	if alerting["status"] != "unavailable" {
+		t.Fatalf("expected projection alerting unavailable, got %v", alerting["status"])
+	}
+}
+
+func TestReadyz_ForgejoAuthorityPolicyDrift_Returns503(t *testing.T) {
+	mainDB := openTestDB(t)
+	handler := readyzHandler(readyzConfig{
+		MainDB:                       mainDB,
+		ProjectionAlertingRequired:   true,
+		ProjectionAlertingConfigured: true,
+		AuthorityPolicyCheck: func(context.Context) error {
+			return errors.New("allow_rebase_update is enabled")
+		},
+	})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	checks := body["checks"].(map[string]any)
+	authority := checks["forgejo_authority_policy"].(map[string]any)
+	if authority["status"] != "unavailable" || !strings.Contains(authority["error"].(string), "allow_rebase_update") {
+		t.Fatalf("unexpected authority result: %#v", authority)
+	}
+}
+
+func TestReadyz_ForgejoAuthorityExplicitOptOut_IsVisible(t *testing.T) {
+	mainDB := openTestDB(t)
+	handler := readyzHandler(readyzConfig{
+		MainDB:                       mainDB,
+		ProjectionAlertingRequired:   true,
+		ProjectionAlertingConfigured: true,
+		AuthorityPolicyOptOut:        true,
+	})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for explicit authority opt-out, got %d", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	checks := body["checks"].(map[string]any)
+	authority := checks["forgejo_authority_policy"].(map[string]any)
+	if authority["status"] != "degraded" || authority["error"] != "explicit_opt_out" {
+		t.Fatalf("expected visible authority opt-out, got %#v", authority)
+	}
+}
+
+func TestReadyz_ProjectionAlertingExplicitOptOut_IsVisible(t *testing.T) {
+	mainDB := openTestDB(t)
+	handler := readyzHandler(readyzConfig{
+		MainDB:                       mainDB,
+		ProjectionAlertingRequired:   true,
+		ProjectionAlertingConfigured: false,
+		ProjectionAlertingOptOut:     true,
+		AuthorityPolicyCheck:         func(context.Context) error { return nil },
+	})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for explicit opt-out, got %d", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	checks := body["checks"].(map[string]any)
+	alerting := checks["projection_alerting"].(map[string]any)
+	if alerting["status"] != "degraded" || alerting["error"] != "explicit_opt_out" {
+		t.Fatalf("expected visible explicit opt-out, got %#v", alerting)
 	}
 }
 

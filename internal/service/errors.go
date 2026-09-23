@@ -75,6 +75,51 @@ func isDuplicateErr(err error) bool {
 	return strings.Contains(msg, "Duplicate entry") || strings.Contains(msg, "UNIQUE constraint")
 }
 
+// isSQLiteLockErr reports transient SQLite lock/busy errors that are retryable.
+func isSQLiteLockErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked") ||
+		strings.Contains(msg, "database schema is locked") ||
+		strings.Contains(msg, "sqlite_busy")
+}
+
+// isTransientDBTransactionErr reports database errors for which the whole
+// transaction may be safely retried. Terminal projection mutations must rerun
+// their lock/read/CAS/enqueue sequence rather than retrying only one statement.
+func isTransientDBTransactionErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isSQLiteLockErr(err) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"deadlock",
+		"lock wait timeout",
+		"serialization failure",
+		"could not serialize access",
+		"serialization conflict",
+		"write conflict",
+		"try again",
+		"transaction retry",
+		"restart transaction",
+		"sqlstate 40001",
+		"error 1213",
+		"error 1205",
+		"terminal fact cas lost",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // retryDelay returns a small linear backoff delay for transient DB retries.
 func retryDelay(attempt int) time.Duration {
 	return time.Duration(attempt+1) * 10 * time.Millisecond

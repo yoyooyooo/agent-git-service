@@ -2,6 +2,8 @@ package githttp_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +23,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/ngaut/agent-git-service/internal/db"
+	"github.com/ngaut/agent-git-service/internal/executioncontext"
 	"github.com/ngaut/agent-git-service/internal/githttp"
 	"github.com/ngaut/agent-git-service/internal/gitstore"
 	"github.com/ngaut/agent-git-service/internal/graphql"
@@ -29,6 +32,7 @@ import (
 	"github.com/ngaut/agent-git-service/internal/rest/transform"
 	"github.com/ngaut/agent-git-service/internal/router"
 	"github.com/ngaut/agent-git-service/internal/service"
+	"github.com/ngaut/agent-git-service/internal/sessionauthority"
 	"github.com/ngaut/agent-git-service/internal/testharness/testdb"
 	"github.com/ngaut/agent-git-service/internal/wikicatalog"
 )
@@ -75,12 +79,13 @@ func setupTestServer(t *testing.T, owner, repo, defaultBranch string, seed bool)
 	if err := gdb.AutoMigrate(
 		&db.User{}, &db.Team{}, &db.TeamMember{}, &db.TeamRepository{},
 		&db.Repository{}, &db.RepoRedirect{}, &db.Token{}, &db.Label{}, &db.Workflow{}, &db.Collaborator{},
-		&db.Webhook{}, &db.HookDelivery{}, &db.PullRequest{},
+		&db.Webhook{}, &db.HookDelivery{}, &db.PullRequest{}, &db.DelegatedAgentSession{}, &db.TeamAuthorityEpoch{}, &db.BranchProtection{}, &db.AuditLogEntry{},
 		&db.WikiPage{}, &db.WikiPageRevision{}, &db.WikiChangeset{}, &db.WikiRepoHead{},
 		&db.WikiGitRepairObligation{}, &db.WikiPageLink{}, &db.WikiBlobRef{}, &db.WikiPendingBlob{},
 		&db.WikiPageLabel{}, &db.WikiSearchDocument{},
 		&db.WikiSearchProjectionTask{},
 		&db.WikiPageIndex{}, &db.WikiIndexState{}, &db.WikiBacklink{}, &db.WikiPageHistory{},
+		&db.AgentBinding{}, &db.UserIdentity{}, &db.ExecutionContextSnapshot{}, &db.AccessGrant{}, &db.AccessGrantInvocation{},
 	); err != nil {
 		t.Fatalf("auto-migrate: %v", err)
 	}
@@ -116,7 +121,7 @@ func setupTestServer(t *testing.T, owner, repo, defaultBranch string, seed bool)
 	transform.Init(ts.URL)
 
 	// Seed DB.
-	user := db.User{Login: owner, Name: owner, Type: db.TypeUser}
+	user := db.User{Login: owner, Name: owner, Type: db.TypeUser, Status: db.UserStatusActive}
 	if err := gdb.Create(&user).Error; err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -269,7 +274,7 @@ func TestReceivePackDispatchesPushWebhook(t *testing.T) {
 	runGit(t, cloneDir, "commit", "-m", "push webhook test")
 	runGit(t, cloneDir, "push", "origin", "main")
 
-	delivery := waitForPushWebhookDelivery(t, env.DB, repo.ID, &hits)
+	delivery := waitForSuccessfulHookDelivery(t, env.DB, repo.ID, &hits)
 	if delivery.Event != "push" {
 		t.Fatalf("expected push delivery, got %q", delivery.Event)
 	}
@@ -684,7 +689,7 @@ func TestReceivePackDispatchesPushWebhookForNewBranchWithoutAncestorHistory(t *t
 	runGit(t, cloneDir, "commit", "-m", "feature branch push")
 	runGit(t, cloneDir, "push", "origin", "feature")
 
-	delivery := waitForPushWebhookDelivery(t, env.DB, repo.ID, &hits)
+	delivery := waitForSuccessfulHookDelivery(t, env.DB, repo.ID, &hits)
 	if delivery.Status != "ok" {
 		t.Fatalf("expected ok delivery status, got %q", delivery.Status)
 	}
@@ -719,6 +724,25 @@ func TestReceivePackDispatchesPushWebhookForNewBranchWithoutAncestorHistory(t *t
 	if len(payload.HeadCommit.Added) != 1 || payload.HeadCommit.Added[0] != "feature.txt" {
 		t.Fatalf("expected added files [feature.txt], got %#v", payload.HeadCommit.Added)
 	}
+}
+
+func waitForSuccessfulHookDelivery(t *testing.T, database *gorm.DB, repositoryID uint, hits *atomic.Int64) db.HookDelivery {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var delivery db.HookDelivery
+	for time.Now().Before(deadline) {
+		delivery = db.HookDelivery{}
+		err := database.Where("repository_id = ?", repositoryID).First(&delivery).Error
+		if err == nil && delivery.Status == "ok" && hits.Load() == 1 {
+			return delivery
+		}
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			t.Fatalf("find hook delivery: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for successful hook delivery: hits=%d status=%q", hits.Load(), delivery.Status)
+	return db.HookDelivery{}
 }
 
 // waitFor polls condFn at interval until it returns true or timeout elapses.
@@ -777,7 +801,7 @@ func newTestDB(t *testing.T) *gorm.DB {
 	t.Cleanup(dbCleanup)
 	if err := gdb.AutoMigrate(
 		&db.User{}, &db.Team{}, &db.TeamMember{}, &db.TeamRepository{},
-		&db.Repository{}, &db.RepoRedirect{}, &db.Token{}, &db.Label{}, &db.Workflow{}, &db.Collaborator{},
+		&db.Repository{}, &db.RepoRedirect{}, &db.Token{}, &db.Label{}, &db.Workflow{}, &db.Collaborator{}, &db.BranchProtection{},
 	); err != nil {
 		t.Fatalf("auto-migrate: %v", err)
 	}
@@ -1043,6 +1067,41 @@ func TestEnsureRepo_MissingRepo(t *testing.T) {
 			t.Errorf("expected 404 or 'not found' for missing repo, got:\n%s", out)
 		}
 	})
+}
+
+func TestEnsureRepo_RefreshesManagedHooksWithoutReplacingRepoPolicy(t *testing.T) {
+	env := setupTestServer(t, "hookowner", "hookrepo", "main", true)
+	ctx := context.Background()
+	root, err := env.Store.RepoRoot(ctx)
+	if err != nil {
+		t.Fatalf("RepoRoot: %v", err)
+	}
+	repoDir := filepath.Join(root, "hookowner", "hookrepo.git")
+	if _, err := os.Stat(repoDir); err != nil {
+		repoDir = filepath.Join(root, "hookowner", "hookrepo")
+	}
+	hook := filepath.Join(repoDir, "hooks", "pre-receive")
+	custom := []byte("#!/bin/sh\necho repo-local-policy >&2\nexit 0\n")
+	if err := os.WriteFile(hook, custom, 0o755); err != nil {
+		t.Fatalf("write repo-local hook: %v", err)
+	}
+
+	runGit(t, t.TempDir(), "ls-remote", env.RepoURL, "refs/heads/main")
+
+	dispatcher, err := os.ReadFile(hook)
+	if err != nil {
+		t.Fatalf("read dispatcher: %v", err)
+	}
+	if !strings.Contains(string(dispatcher), "managed pre-receive dispatcher") {
+		t.Fatalf("HTTP repository resolution did not refresh the managed dispatcher:\n%s", dispatcher)
+	}
+	preserved, err := os.ReadFile(filepath.Join(repoDir, "hooks", "pre-receive.d", "10-local-preserved"))
+	if err != nil {
+		t.Fatalf("read preserved repo-local policy: %v", err)
+	}
+	if string(preserved) != string(custom) {
+		t.Fatalf("repo-local policy changed during HTTP hook refresh:\n%s", preserved)
+	}
 }
 
 // TestEnsureRepo_AutoInit tests auto-init behavior when repo is in DB but not on disk.
@@ -1521,6 +1580,357 @@ func TestGitHTTP_Authorization_DeniesUnauthorized(t *testing.T) {
 	}
 }
 
+func TestGitHTTP_DurableCredentialCannotPushProtectedBranch(t *testing.T) {
+	env := setupTestServer(t, "protectedowner", "protectedrepo", "main", true)
+	var repo db.Repository
+	if err := env.DB.First(&repo, "full_name = ?", "protectedowner/protectedrepo").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := env.DB.Create(&db.BranchProtection{RepositoryID: repo.ID, BranchName: "main", EnforceAdmins: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	localDir := filepath.Join(t.TempDir(), "local")
+	runGit(t, t.TempDir(), "clone", env.RepoURL, localDir)
+	mainBefore := strings.TrimSpace(runGit(t, localDir, "rev-parse", "origin/main"))
+	if err := os.WriteFile(filepath.Join(localDir, "protected.txt"), []byte("protected branch proof\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, localDir, "add", "protected.txt")
+	runGit(t, localDir, "commit", "-m", "docs: protected branch proof")
+	out, err := runGitAllowFailure(t, localDir, "push", "origin", "HEAD:refs/heads/main")
+	if err == nil {
+		t.Fatal("durable credential unexpectedly pushed directly to a protected branch")
+	}
+	if !strings.Contains(out, "direct Git HTTP push to protected branch refs/heads/main rejected") {
+		t.Fatalf("protected branch denial did not explain the authoritative PR path: %s", out)
+	}
+	if got := runGit(t, t.TempDir(), "ls-remote", env.RepoURL, "refs/heads/main"); !strings.Contains(got, mainBefore+"\trefs/heads/main") {
+		t.Fatalf("rejected direct push changed protected main from %s: %s", mainBefore, got)
+	}
+
+	runGit(t, localDir, "push", "origin", "HEAD:refs/heads/agent/protected-branch-proof")
+	if out := runGit(t, t.TempDir(), "ls-remote", env.RepoURL, "refs/heads/agent/protected-branch-proof"); !strings.Contains(out, "refs/heads/agent/protected-branch-proof") {
+		t.Fatalf("unprotected work branch missing after push: %s", out)
+	}
+
+	mergedSHA, err := env.Store.Rebase(context.Background(), gitstore.RebaseOptions{
+		FullName: "protectedowner/protectedrepo", BaseBranch: "main", HeadBranch: "agent/protected-branch-proof",
+		Committer: "authorized-merge", Email: "authorized-merge@localhost",
+	})
+	if err != nil {
+		t.Fatalf("service-owned protected branch merge failed: %v", err)
+	}
+	if out := runGit(t, t.TempDir(), "ls-remote", env.RepoURL, "refs/heads/main"); !strings.Contains(out, mergedSHA+"\trefs/heads/main") {
+		t.Fatalf("service-owned merge did not advance protected main to %s: %s", mergedSHA, out)
+	}
+}
+
+func TestGitHTTP_DelegatedSessionCapabilitiesAndRepositoryBinding(t *testing.T) {
+	env := setupTestServer(t, "sessionowner", "sessionrepo", "main", true)
+	var boundRepo db.Repository
+	if err := env.DB.First(&boundRepo, "full_name = ?", "sessionowner/sessionrepo").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := env.DB.Create(&db.BranchProtection{RepositoryID: boundRepo.ID, BranchName: "release"}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	readSession := seedAccessGrantGitSession(t, env, "read", "git.read", "active")
+	t.Setenv("GIT_HTTP_EXTRA_HEADER", "Authorization: Bearer "+readSession.Token)
+	runGit(t, t.TempDir(), "ls-remote", env.RepoURL)
+
+	localDir := filepath.Join(t.TempDir(), "local")
+	runGit(t, t.TempDir(), "clone", env.RepoURL, localDir)
+	if err := os.WriteFile(filepath.Join(localDir, "delegated.txt"), []byte("delegated git push\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, localDir, "add", "delegated.txt")
+	runGit(t, localDir, "commit", "-m", "docs: delegated session git proof")
+	if _, err := runGitAllowFailure(t, localDir, "push", "origin", "HEAD:refs/heads/agent/session-write-proof"); err == nil {
+		t.Fatal("read-only delegated session unexpectedly pushed")
+	}
+
+	writeSession := seedAccessGrantGitSession(t, env, "write", "git.push", "active")
+	t.Setenv("GIT_HTTP_EXTRA_HEADER", "Authorization: Bearer "+writeSession.Token)
+	runGit(t, localDir, "push", "origin", "HEAD:refs/heads/agent/session-write-proof")
+	t.Setenv("GIT_HTTP_EXTRA_HEADER", "Authorization: token token-sessionowner")
+	if out := runGit(t, t.TempDir(), "ls-remote", env.RepoURL, "refs/heads/agent/session-write-proof"); !strings.Contains(out, "refs/heads/agent/session-write-proof") {
+		t.Fatalf("delegated branch missing after push: %s", out)
+	}
+	t.Setenv("GIT_HTTP_EXTRA_HEADER", "Authorization: Bearer "+writeSession.Token)
+	if _, err := runGitAllowFailure(t, localDir, "push", "origin", "HEAD:refs/heads/main"); err == nil {
+		t.Fatal("delegated session unexpectedly pushed directly to the protected default branch")
+	}
+	if _, err := runGitAllowFailure(t, localDir, "push", "origin", "HEAD:refs/heads/release"); err == nil {
+		t.Fatal("delegated session unexpectedly pushed directly to a configured protected branch")
+	}
+	if _, err := runGitAllowFailure(t, localDir, "push", "origin", ":refs/heads/agent/session-write-proof"); err == nil {
+		t.Fatal("delegated session unexpectedly deleted a branch")
+	}
+
+	alternateDir := filepath.Join(t.TempDir(), "alternate")
+	t.Setenv("GIT_HTTP_EXTRA_HEADER", "Authorization: token token-sessionowner")
+	runGit(t, t.TempDir(), "clone", env.RepoURL, alternateDir)
+	if err := os.WriteFile(filepath.Join(alternateDir, "alternate.txt"), []byte("sibling history\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, alternateDir, "add", "alternate.txt")
+	runGit(t, alternateDir, "commit", "-m", "docs: alternate delegated history")
+	t.Setenv("GIT_HTTP_EXTRA_HEADER", "Authorization: Bearer "+writeSession.Token)
+	if _, err := runGitAllowFailure(t, alternateDir, "push", "--force", "origin", "HEAD:refs/heads/agent/session-write-proof"); err == nil {
+		t.Fatal("delegated session unexpectedly replaced a branch with non-fast-forward history")
+	}
+
+	var owner db.User
+	if err := env.DB.First(&owner, "login = ?", "sessionowner").Error; err != nil {
+		t.Fatal(err)
+	}
+	other := db.Repository{Name: "other", FullName: "sessionowner/other", OwnerID: owner.ID, Private: false, DefaultBranch: "main"}
+	if err := env.DB.Create(&other).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := env.Store.Init(context.Background(), other.FullName, other.DefaultBranch, true); err != nil {
+		t.Fatal(err)
+	}
+	otherURL := env.Server.URL + "/sessionowner/other.git"
+	if _, err := runGitAllowFailure(t, t.TempDir(), "ls-remote", otherURL); err == nil {
+		t.Fatal("delegated credential was reused against a second public repository")
+	}
+
+	var audits []db.AuditLogEntry
+	if err := env.DB.Where("action = ?", service.AuditActionDelegatedGitWrite).Order("id ASC").Find(&audits).Error; err != nil {
+		t.Fatal(err)
+	}
+	var sawReadDenied, sawWriteSuccess, sawWriteDenied bool
+	for _, row := range audits {
+		if strings.Contains(row.Details, readSession.Token) || strings.Contains(row.Details, writeSession.Token) {
+			t.Fatalf("delegated Git audit leaked credential material: %s", row.Details)
+		}
+		if strings.Contains(row.Details, `"session_id":"`+readSession.SessionID+`"`) && strings.Contains(row.Details, `"outcome":"denied"`) {
+			sawReadDenied = true
+		}
+		if strings.Contains(row.Details, `"session_id":"`+writeSession.SessionID+`"`) && strings.Contains(row.Details, `"outcome":"success"`) {
+			sawWriteSuccess = true
+		}
+		if strings.Contains(row.Details, `"session_id":"`+writeSession.SessionID+`"`) && strings.Contains(row.Details, `"outcome":"denied"`) {
+			sawWriteDenied = true
+		}
+	}
+	if !sawReadDenied || !sawWriteSuccess || !sawWriteDenied {
+		t.Fatalf("delegated Git audit coverage read_denied=%v write_success=%v write_denied=%v rows=%#v", sawReadDenied, sawWriteSuccess, sawWriteDenied, audits)
+	}
+}
+
+func TestGitHTTP_DelegatedSessionRequiresGitPushOperationScope(t *testing.T) {
+	env := setupTestServer(t, "operationscope", "repo", "main", true)
+	localDir := filepath.Join(t.TempDir(), "push-worktree")
+	runGit(t, t.TempDir(), "clone", env.RepoURL, localDir)
+	if err := os.WriteFile(filepath.Join(localDir, "push.txt"), []byte("operation-scoped push\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, localDir, "add", "push.txt")
+	runGit(t, localDir, "commit", "-m", "test: operation-scoped push")
+
+	repoReadSession := seedAccessGrantGitSession(t, env, "operation-read", "repo.read", "active")
+	t.Setenv("GIT_HTTP_EXTRA_HEADER", "Authorization: Bearer "+repoReadSession.Token)
+	if _, err := runGitAllowFailure(t, t.TempDir(), "ls-remote", env.RepoURL); err == nil {
+		t.Fatal("repo.read operation-scoped session unexpectedly crossed into Git")
+	}
+
+	pushSession := seedAccessGrantGitSession(t, env, "operation-push", "git.push", "active")
+	t.Setenv("GIT_HTTP_EXTRA_HEADER", "Authorization: Bearer "+pushSession.Token)
+	uploadRequest, err := http.NewRequest(http.MethodPost, env.RepoURL+"/git-upload-pack", strings.NewReader("0000"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadRequest.Header.Set("Authorization", "Bearer "+pushSession.Token)
+	uploadResponse, err := env.Server.Client().Do(uploadRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = uploadResponse.Body.Close()
+	if uploadResponse.StatusCode != http.StatusForbidden {
+		t.Fatalf("git.push upload-pack status=%d want=403", uploadResponse.StatusCode)
+	}
+	if _, err := runGitAllowFailure(t, t.TempDir(), "ls-remote", env.RepoURL); err == nil {
+		t.Fatal("git.push session unexpectedly received upload-pack advertisement")
+	}
+	if _, err := runGitAllowFailure(t, t.TempDir(), "clone", env.RepoURL, filepath.Join(t.TempDir(), "denied-clone")); err == nil {
+		t.Fatal("git.push session unexpectedly cloned through upload-pack")
+	}
+	if _, err := runGitAllowFailure(t, localDir, "fetch", "origin"); err == nil {
+		t.Fatal("git.push session unexpectedly fetched through upload-pack")
+	}
+	runGit(t, localDir, "push", "origin", "HEAD:refs/heads/agent/operation-scope")
+}
+
+func TestGitHTTP_DelegatedSessionRejectsExpiredAndRevokedCredentials(t *testing.T) {
+	env := setupTestServer(t, "sessionstate", "repo", "main", true)
+	t.Setenv("GIT_HTTP_EXTRA_HEADER", "Authorization: token token-sessionstate")
+	localDir := filepath.Join(t.TempDir(), "replay")
+	runGit(t, t.TempDir(), "clone", env.RepoURL, localDir)
+	if err := os.WriteFile(filepath.Join(localDir, "replay.txt"), []byte("old bearer replay\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, localDir, "add", "replay.txt")
+	runGit(t, localDir, "commit", "-m", "docs: old bearer replay fixture")
+
+	for _, state := range []string{"expired", "revoked"} {
+		t.Run(state, func(t *testing.T) {
+			session := seedAccessGrantGitSession(t, env, state, "git.push", state)
+			t.Setenv("GIT_HTTP_EXTRA_HEADER", "Authorization: Bearer "+session.Token)
+
+			request, err := http.NewRequest(http.MethodGet, env.Server.URL+"/api/v3/user", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("Authorization", "Bearer "+session.Token)
+			response, err := env.Server.Client().Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("%s REST read status=%d want=401", state, response.StatusCode)
+			}
+
+			request, err = http.NewRequest(http.MethodPost, env.Server.URL+"/api/v3/repos/sessionstate/repo/pulls", strings.NewReader(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("Authorization", "Bearer "+session.Token)
+			request.Header.Set("Content-Type", "application/json")
+			response, err = env.Server.Client().Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("%s PR write status=%d want=401", state, response.StatusCode)
+			}
+
+			if _, err := runGitAllowFailure(t, t.TempDir(), "ls-remote", env.RepoURL); err == nil {
+				t.Fatalf("%s delegated credential unexpectedly authenticated for Git read", state)
+			}
+			if _, err := runGitAllowFailure(t, localDir, "push", "origin", "HEAD:refs/heads/agent/replay-"+state); err == nil {
+				t.Fatalf("%s delegated credential unexpectedly authenticated for Git write", state)
+			}
+		})
+	}
+}
+
+type accessGrantGitSessionFixture struct {
+	Token     string
+	SessionID string
+}
+
+type staticGitExecutionContextPuller struct {
+	result executioncontext.PullResult
+}
+
+func (p *staticGitExecutionContextPuller) Pull(_ context.Context, _ executioncontext.PullRequest) (executioncontext.PullResult, error) {
+	return p.result, nil
+}
+
+func seedAccessGrantGitSession(t *testing.T, env *testEnv, suffix, operation, state string) accessGrantGitSessionFixture {
+	t.Helper()
+	var executor db.User
+	if err := env.DB.First(&executor, "login = ?", strings.Split(strings.TrimPrefix(env.RepoURL, env.Server.URL+"/"), "/")[0]).Error; err != nil {
+		t.Fatal(err)
+	}
+	var repository db.Repository
+	if err := env.DB.First(&repository, "full_name = ?", strings.TrimSuffix(strings.TrimPrefix(env.RepoURL, env.Server.URL+"/"), ".git")).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		sourceID    = "multica-githttp"
+		workspaceID = "11111111-1111-4111-8111-111111111111"
+		agentID     = "22222222-2222-4222-8222-222222222222"
+		taskID      = "33333333-3333-4333-8333-333333333333"
+		runID       = "44444444-4444-4444-8444-444444444444"
+	)
+	authority, err := sessionauthority.New(sessionauthority.Config{
+		Version: sessionauthority.CurrentVersion, ContractRevision: sessionauthority.ContractRevision,
+		TrustedIssuers: []sessionauthority.TrustedIssuer{{ID: sourceID, Issuer: "multica", KeyIDs: []string{"source-key"}, Status: "active", TrustRevision: "trust-v1"}},
+		PolicyClasses: []sessionauthority.PolicyClass{{
+			ID: sessionauthority.DefaultDynamicPolicyClass, Status: "active", PolicyRevision: "class-v1",
+			Operations: []string{"ci.read", "git.push", "git.read", "pr.create", "pr.rebase", "pr.read", "repo.read", "review.read"},
+		}},
+		TeamBindings: []sessionauthority.TeamBinding{{
+			ID: "team-binding", IssuerInstanceID: sourceID, WorkspaceID: workspaceID, TeamIdentityID: "team-1",
+			PolicyClass: sessionauthority.DefaultDynamicPolicyClass, PrincipalID: executor.ID, Status: "active", BindingRevision: "team-v1", EpochFloor: 1,
+		}},
+		Resources: []sessionauthority.ResourcePolicy{{
+			ID: "repo", Target: "primary-a", Service: "ags", Repository: repository.FullName,
+			Status: "active", MaxSessionTTL: "30m", PolicyRevision: "repo-v1",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.Svc.PrincipalSessions = authority
+
+	observedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	current := executioncontext.CurrentContext{
+		Schema: executioncontext.MulticaCurrentExecutionContextSchema, ObservedAt: observedAt,
+		Workspace:   executioncontext.Workspace{ID: workspaceID, Name: "Git HTTP", Slug: "git-http"},
+		Agent:       executioncontext.Agent{ID: agentID, Name: "git-http-agent", Status: "working"},
+		Task:        executioncontext.Task{ID: taskID, Status: "running", Attempt: 1, MaxAttempts: 1},
+		Run:         executioncontext.Run{ID: runID, TaskID: taskID, Status: "running", Attempt: 1, MaxAttempts: 1},
+		Attribution: &executioncontext.Attribution{Source: "direct_human", Precise: true},
+	}
+	contextJSON, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextDigest := sha256.Sum256(contextJSON)
+	env.Svc.ExecutionContextPuller = &staticGitExecutionContextPuller{result: executioncontext.PullResult{
+		SourceRef: executioncontext.SourceRef{
+			Schema: executioncontext.SourceRefSchema, SourceInstanceID: sourceID,
+			Adapter: executioncontext.AdapterMulticaCurrentExecutionContextV1, WorkspaceID: workspaceID,
+			WorkspaceRef: "git-http", AgentID: agentID, TaskID: taskID, RunID: runID, ObservedAt: observedAt,
+		},
+		Context: current, ContextJSON: contextJSON, ContextDigest: "sha256:" + hex.EncodeToString(contextDigest[:]),
+	}}
+	issued, err := env.Svc.IssueAccessGrant(context.Background(), service.AccessGrantIssueInput{
+		ExecutionContext: service.ExecutionContextIntakeInput{
+			SourceInstanceID: sourceID,
+			Locator:          executioncontext.Locator{WorkspaceID: workspaceID, AgentID: agentID, TaskID: taskID},
+			SourceToken:      "task-token-" + suffix,
+		},
+		Repository: repository.FullName,
+	})
+	if err != nil {
+		t.Fatalf("issue Access Grant: %v", err)
+	}
+	transport, err := env.Svc.IssueAccessGrantTransportSession(context.Background(), issued.GrantToken, service.AccessGrantOperationInput{
+		Operation: operation, Constraints: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("issue Access Grant transport Session: %v", err)
+	}
+
+	now := time.Now().UTC()
+	switch state {
+	case "active":
+	case "expired":
+		if err := env.DB.Model(&db.DelegatedAgentSession{}).Where("id = ?", transport.Session.ID).Update("expires_at", now.Add(-time.Minute)).Error; err != nil {
+			t.Fatal(err)
+		}
+	case "revoked":
+		if err := env.DB.Model(&db.DelegatedAgentSession{}).Where("id = ?", transport.Session.ID).Updates(map[string]any{
+			"revoked_at": now.Add(-time.Second), "revocation_reason": "test fixture",
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatalf("unknown Session state %q", state)
+	}
+	return accessGrantGitSessionFixture{Token: transport.SessionToken, SessionID: transport.Session.ID}
+}
+
 func TestInfoRefs_EnsureRepoFailure(t *testing.T) {
 	gdb := newTestDB(t)
 	owner, _ := seedUserRepo(t, gdb, "owner", "repo", "owner/repo", "main")
@@ -1698,5 +2108,35 @@ func TestReceivePack_PropagatesDBAndUserContext(t *testing.T) {
 	}
 	if wf.Name != "CI" {
 		t.Fatalf("expected workflow name CI, got %q", wf.Name)
+	}
+}
+
+func TestGitHTTP_AccessGrantTransportRejectsNativeAndParentGrantDriftBeforeCGI(t *testing.T) {
+	env := setupTestServer(t, "canonicaldrift", "repo", "main", true)
+	t.Setenv("GIT_HTTP_EXTRA_HEADER", "Authorization: token token-canonicaldrift")
+	localDir := filepath.Join(t.TempDir(), "local")
+	runGit(t, t.TempDir(), "clone", env.RepoURL, localDir)
+	if err := os.WriteFile(filepath.Join(localDir, "drift.txt"), []byte("drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, localDir, "add", "drift.txt")
+	runGit(t, localDir, "commit", "-m", "test: canonical authority drift")
+
+	writeSession := seedAccessGrantGitSession(t, env, "canonical-write-drift", "git.push", "active")
+	if err := env.DB.Model(&db.DelegatedAgentSession{}).Where("id = ?", writeSession.SessionID).Update("native_grant_revision", "grant-rev:stale").Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_HTTP_EXTRA_HEADER", "Authorization: Bearer "+writeSession.Token)
+	if _, err := runGitAllowFailure(t, localDir, "push", "origin", "HEAD:refs/heads/agent/canonical-drift"); err == nil {
+		t.Fatal("canonical git.push reached receive-pack after native grant revision drift")
+	}
+
+	readSession := seedAccessGrantGitSession(t, env, "canonical-read-drift", "git.read", "active")
+	if err := env.DB.Model(&db.DelegatedAgentSession{}).Where("id = ?", readSession.SessionID).Update("access_grant_authority_revision", "sha256:stale").Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_HTTP_EXTRA_HEADER", "Authorization: Bearer "+readSession.Token)
+	if _, err := runGitAllowFailure(t, t.TempDir(), "ls-remote", env.RepoURL); err == nil {
+		t.Fatal("canonical git.read reached upload-pack after authority snapshot drift")
 	}
 }

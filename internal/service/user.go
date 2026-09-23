@@ -73,7 +73,10 @@ LIMIT ?
 // contextKey is an unexported type for context keys defined in this package.
 type contextKey int
 
-const ctxKeyUser contextKey = iota
+const (
+	ctxKeyUser contextKey = iota
+	ctxKeyDelegatedSession
+)
 
 // ContextWithUser returns a copy of ctx carrying the authenticated user.
 func ContextWithUser(ctx context.Context, u db.User) context.Context {

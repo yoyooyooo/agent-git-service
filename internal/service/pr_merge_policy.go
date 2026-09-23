@@ -141,7 +141,7 @@ func (s *Service) enforceBranchProtectionForMerge(ctx context.Context, currentUs
 
 	bypassReviews := isBranchProtectionBypassUser(currentUser.Login, requiredReviews.BypassPullRequestAllowances.Users)
 	if requiredReviews.RequiredApprovingReviewCount > 0 && !bypassReviews {
-		approvals, changesRequested, err := s.currentPRReviewState(ctx, pr.ID)
+		approvals, changesRequested, err := s.currentPRReviewState(ctx, pr)
 		if err != nil {
 			return err
 		}
@@ -197,11 +197,11 @@ func isBranchProtectionBypassUser(login string, users []string) bool {
 	return false
 }
 
-func (s *Service) currentPRReviewState(ctx context.Context, prID uint) (approvals int, changesRequested bool, err error) {
+func (s *Service) currentPRReviewState(ctx context.Context, pr db.PullRequest) (approvals int, changesRequested bool, err error) {
 	var reviews []db.PullRequestReview
 	err = s.DBForCtx(ctx).
-		Where("pull_request_id = ?", prID).
-		Order("created_at asc").
+		Where("pull_request_id = ?", pr.ID).
+		Order("created_at asc, id asc").
 		Find(&reviews).Error
 	if err != nil {
 		return 0, false, err
@@ -209,10 +209,14 @@ func (s *Service) currentPRReviewState(ctx context.Context, prID uint) (approval
 
 	latestByAuthor := make(map[string]db.PullRequestReview)
 	for _, review := range reviews {
-		if review.AuthorLogin == "" {
+		author := strings.TrimSpace(review.AuthorLogin)
+		if author == "" || strings.EqualFold(author, strings.TrimSpace(pr.Author.Login)) {
 			continue
 		}
-		latestByAuthor[review.AuthorLogin] = review
+		if strings.TrimSpace(review.CommitSHA) == "" || !strings.EqualFold(review.CommitSHA, pr.HeadSHA) {
+			continue
+		}
+		latestByAuthor[strings.ToLower(author)] = review
 	}
 	for _, review := range latestByAuthor {
 		switch review.State {

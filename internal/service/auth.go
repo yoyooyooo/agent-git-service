@@ -369,8 +369,11 @@ func (s *Service) ExchangeDeviceCode(ctx context.Context, deviceCode string) (ac
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if err := s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
 			var code db.DeviceCode
-			if err := tx.First(&code, "device_code = ?", deviceCode).Error; err != nil {
-				return ErrNotFound
+			// Serialize exchanges for this exact device code before touching the
+			// unique token. This is a current read: concurrent pollers must see the
+			// approved code and the token committed by the preceding exchanger.
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&code, "device_code = ?", deviceCode).Error; err != nil {
+				return wrapErr(err)
 			}
 
 			// Check expiration first
@@ -406,13 +409,18 @@ func (s *Service) ExchangeDeviceCode(ctx context.Context, deviceCode string) (ac
 				return fmt.Errorf("device code approved but has no approver: %w", ErrInvalidState)
 			}
 
-			// Ensure a persistent token row exists for the access token atomically.
+			// Approval does not freeze account authority. Revalidate the current
+			// approver before either creating a token or changing its usage time.
+			// Lock order is device code -> approving user -> token.
 			var approver db.User
-			if err := tx.Select("id", "type").First(&approver, "id = ?", *code.ApprovedBy).Error; err != nil {
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "type", "status").First(&approver, "id = ?", *code.ApprovedBy).Error; err != nil {
 				return fmt.Errorf("lookup approving user: %w", wrapErr(err))
 			}
 			if approver.Type != db.TypeUser {
 				return fmt.Errorf("device code approver is not a user: %w", ErrInvalidState)
+			}
+			if !isUserStatusActive(approver.Status) {
+				return ErrForbidden
 			}
 
 			now := time.Now().UTC()
@@ -428,7 +436,7 @@ func (s *Service) ExchangeDeviceCode(ctx context.Context, deviceCode string) (ac
 
 			// Ensure this token belongs to the approving user (defense in depth).
 			var persisted db.Token
-			if err := tx.Select("id", "user_id").Take(&persisted, "value = ?", code.AccessToken).Error; err != nil {
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "user_id").Take(&persisted, "value = ?", code.AccessToken).Error; err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
 					return errDeviceTokenNotVisible
 				}

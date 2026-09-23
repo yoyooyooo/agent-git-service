@@ -114,8 +114,12 @@ func (s *Service) ListReviewRequestsBatch(ctx context.Context, prIDs []uint) (ma
 
 // AddPRReview stores a submitted PR review in the DB.
 func (s *Service) AddPRReview(ctx context.Context, prID uint, authorLogin, state, body, commitSHA string) (db.PullRequestReview, error) {
-	if _, err := s.GetPRByID(ctx, prID); err != nil {
+	pr, err := s.GetPRByID(ctx, prID)
+	if err != nil {
 		return db.PullRequestReview{}, err
+	}
+	if strings.TrimSpace(commitSHA) == "" {
+		commitSHA = pr.HeadSHA
 	}
 	review := db.PullRequestReview{
 		PullRequestID: prID,

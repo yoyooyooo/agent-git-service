@@ -56,6 +56,90 @@ func TestPRHandlers_GetPRDiff(t *testing.T) {
 	}
 }
 
+func TestPRHandlers_GetPRIncludesAuthoritativeExternalProjections(t *testing.T) {
+	h := testharness.New(t)
+	ctx := context.Background()
+	repo := "pr-external-projection"
+	compatSeedRepo(t, h, repo)
+	full := "testuser/" + repo
+	if err := h.Svc.Git.CreateBranch(ctx, full, "feature", "main"); err != nil {
+		t.Fatalf("create branch: %v", err)
+	}
+	created := h.DoRESTJSON(t, "POST", fmt.Sprintf("/api/v3/repos/%s/pulls", full), map[string]any{
+		"title": "projected PR", "head": "feature", "base": "main",
+	})
+	assertStatusCode(t, created, http.StatusCreated)
+	pr, err := h.Svc.GetPR(ctx, full, 1)
+	if err != nil {
+		t.Fatalf("get PR: %v", err)
+	}
+	if err := h.Svc.UpsertPullRequestProjection(ctx, db.PullRequestProjection{
+		PullRequestID: pr.ID, RepositoryID: pr.RepositoryID, Provider: service.ProjectionProviderForgejo,
+		ExternalRepo: "testuser/pr-external-projection", ExternalNumber: 42,
+		ExternalURL:  "http://forgejo.local/testuser/pr-external-projection/pulls/42",
+		SourceBranch: "feature", TargetBranch: "main", State: service.ProjectionStateOpen,
+	}); err != nil {
+		t.Fatalf("upsert projection: %v", err)
+	}
+
+	response := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/pulls/1", full), nil)
+	assertStatusCode(t, response, http.StatusOK)
+	body := testharness.DecodeJSON(t, response)
+	rows, ok := body["external_projections"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("external_projections=%#v, want one row", body["external_projections"])
+	}
+	row, _ := rows[0].(map[string]any)
+	if row["provider"] != "forgejo" || int(row["external_number"].(float64)) != 42 {
+		t.Fatalf("unexpected projection: %#v", row)
+	}
+}
+
+func TestPRHandlers_ListPRsIncludesAuthoritativeExternalProjections(t *testing.T) {
+	h := testharness.New(t)
+	ctx := context.Background()
+	repo := "list-pr-external-projection"
+	compatSeedRepo(t, h, repo)
+	full := "testuser/" + repo
+	if err := h.Svc.Git.CreateBranch(ctx, full, "feature", "main"); err != nil {
+		t.Fatalf("create branch: %v", err)
+	}
+	created := h.DoRESTJSON(t, "POST", fmt.Sprintf("/api/v3/repos/%s/pulls", full), map[string]any{
+		"title": "projected PR", "head": "feature", "base": "main",
+	})
+	assertStatusCode(t, created, http.StatusCreated)
+	pr, err := h.Svc.GetPR(ctx, full, 1)
+	if err != nil {
+		t.Fatalf("get PR: %v", err)
+	}
+	if err := h.Svc.UpsertPullRequestProjection(ctx, db.PullRequestProjection{
+		PullRequestID: pr.ID, RepositoryID: pr.RepositoryID, Provider: service.ProjectionProviderForgejo,
+		ExternalRepo: "testuser/list-pr-external-projection", ExternalNumber: 23,
+		ExternalURL:  "http://forgejo.local/testuser/list-pr-external-projection/pulls/23",
+		SourceBranch: "feature", TargetBranch: "main", State: service.ProjectionStateOpen,
+	}); err != nil {
+		t.Fatalf("upsert projection: %v", err)
+	}
+
+	response := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/pulls?state=open", full), nil)
+	assertStatusCode(t, response, http.StatusOK)
+	items := testharness.DecodeJSONArray(t, response)
+	if len(items) != 1 {
+		t.Fatalf("list items=%d, want 1", len(items))
+	}
+	rows, ok := items[0]["external_projections"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("list external_projections=%#v, want one row", items[0]["external_projections"])
+	}
+	row, _ := rows[0].(map[string]any)
+	if row["provider"] != "forgejo" || int(row["external_number"].(float64)) != 23 {
+		t.Fatalf("unexpected list projection: %#v", row)
+	}
+	if row["external_url"] != "http://forgejo.local/testuser/list-pr-external-projection/pulls/23" {
+		t.Fatalf("unexpected list projection url: %#v", row["external_url"])
+	}
+}
+
 func TestPRHandlers_CreatePR_CrossRepoHeadParsingError(t *testing.T) {
 	h := testharness.New(t)
 	repo := "cross-head"

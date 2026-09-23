@@ -539,6 +539,12 @@ func TestTypeFields_PullRequest(t *testing.T) {
 	require.NotNil(t, result["fields"])
 	fields := result["fields"].([]any)
 	require.Greater(t, len(fields), 15, "PullRequest should have many fields")
+	fieldNames := make(map[string]bool, len(fields))
+	for _, field := range fields {
+		fieldNames[field.(map[string]any)["name"].(string)] = true
+	}
+	require.True(t, fieldNames["agsActor"], "PullRequest should advertise delegated actor projection")
+	require.True(t, fieldNames["delegatedBy"], "PullRequest should advertise delegator projection")
 }
 
 // TestTypeFields_Repository tests TypeFields for Repository

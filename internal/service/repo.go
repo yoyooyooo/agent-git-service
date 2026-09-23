@@ -16,8 +16,15 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/ngaut/agent-git-service/internal/db"
+	"github.com/ngaut/agent-git-service/internal/delegationpolicy"
 	"github.com/ngaut/agent-git-service/internal/embedding"
+	"github.com/ngaut/agent-git-service/internal/executioncontext"
+	"github.com/ngaut/agent-git-service/internal/forgejointegration"
+	"github.com/ngaut/agent-git-service/internal/githubintegration"
+	"github.com/ngaut/agent-git-service/internal/gitlabintegration"
 	"github.com/ngaut/agent-git-service/internal/gitstore"
+	"github.com/ngaut/agent-git-service/internal/multicaprojection"
+	"github.com/ngaut/agent-git-service/internal/sessionauthority"
 	"github.com/ngaut/agent-git-service/internal/wikicatalog"
 )
 
@@ -30,16 +37,48 @@ import (
 // All methods access the database through s.DBForCtx(ctx) which returns the
 // per-request DB when available, falling back to s.DB.
 type Service struct {
-	Ctx            context.Context
-	DB             *gorm.DB
-	Git            *gitstore.Store
-	WikiCatalog    *wikicatalog.Catalog
-	WikiBlob       *wikicatalog.BlobStore
-	BaseURL        string
-	Embedder       embedding.Embedder
-	AllowAnyToken  bool
-	OIDC           OIDCProvider
-	ConnectedLogin ConnectedLoginProvider
+	Ctx         context.Context
+	DB          *gorm.DB
+	Git         *gitstore.Store
+	WikiCatalog *wikicatalog.Catalog
+	WikiBlob    *wikicatalog.BlobStore
+	BaseURL     string
+	// SourceRevision is the exact build-time AGS source SHA. Durable authority
+	// receipts fail closed when it is absent or not a full Git object ID.
+	SourceRevision     string
+	Embedder           embedding.Embedder
+	AllowAnyToken      bool
+	OIDC               OIDCProvider
+	ConnectedLogin     ConnectedLoginProvider
+	ForgejoIntegration *forgejointegration.Integration
+	// DisableForgejoProjectionWorker leaves admitted durable Forgejo PR projection
+	// jobs queued without starting the in-process worker. Delegated admission
+	// denials are persisted failed_terminal before this flag is considered.
+	// Operators/tests can resume admitted jobs later with ResumePendingForgejoProjectionJobs.
+	DisableForgejoProjectionWorker     bool
+	ForgejoProjectionWorkerTimeout     time.Duration
+	ForgejoProjectionWorkerMaxAttempts int
+	ForgejoSuccessCommentClaimTTL      time.Duration
+	ForgejoProjectionWorkerRetryDelay  time.Duration
+	GitLabIntegration                  *gitlabintegration.Integration
+	GitHubIntegration                  *githubintegration.Integration
+	MulticaProjection                  *multicaprojection.Projection
+	ExecutionContextPuller             interface {
+		Pull(context.Context, executioncontext.PullRequest) (executioncontext.PullResult, error)
+	}
+	DelegationPolicies            *delegationpolicy.Set
+	PrincipalSessions             *sessionauthority.Set
+	MulticaIncidentNotifier       MulticaIncidentNotifier
+	MulticaIncidentNotifyThrottle time.Duration
+	PullRequestMergeNotifier      PullRequestMergeNotifier
+	OutboundDispatcher            OutboundDispatcher
+	OutboundEventTargets          map[string][]OutboundTarget
+	// AccessGrantRequireCI reports whether workload pr.merge must see exact-head CI
+	// success for the given repository full name. Nil means require CI everywhere.
+	AccessGrantRequireCI func(repoFullName string) bool
+
+	outboundWorkerHealthMu sync.RWMutex
+	outboundWorkerHealth   OutboundWorkerHealth
 
 	WorkflowExecEnabled bool
 	WorkflowExecImage   string
@@ -108,6 +147,15 @@ type Service struct {
 	webhookWorkersOnce sync.Once
 	webhookJobs        chan webhookJob
 
+	// forgejoWorkflowActionLocks serializes action-label handling per projected Forgejo PR.
+	forgejoWorkflowActionLocks sync.Map
+
+	// forgejoProjectionJobLocks deduplicates in-process workers for the same durable job.
+	forgejoProjectionJobLocks sync.Map
+
+	// forgejoProjectionLocks serializes Forgejo push/PR ensure per AGS repo/ref/PR.
+	forgejoProjectionLocks sync.Map
+
 	// testWikiGitIngestAfterSnapshot is a test-only hook used to
 	// coordinate concurrent ingest callers after they have loaded the
 	// catalog/git snapshot but before they replay any git commits.
@@ -152,12 +200,47 @@ type Service struct {
 	// testWikiCompactionJobContinue is a test-only hook that can block the
 	// async compaction worker until tests allow it to proceed.
 	testWikiCompactionJobContinue func(jobID string)
+
+	// testCreatePRRetry is a test-only hook fired after a retryable PR
+	// transaction failure and before the next authority evaluation.
+	testCreatePRRetry func(attempt int)
+	// testCreatePRRefBeforeWrite fires after the PR DB fact commits and before
+	// the final delegated check guarding the repository ref mutation.
+	testCreatePRRefBeforeWrite func()
+
+	// testAuthorityBoundaryTransaction can wrap an entire receipt transaction
+	// to simulate ambiguous commit-time conflicts in hermetic tests.
+	testAuthorityBoundaryTransaction func(attempt int, run func(*gorm.DB) error) error
+
+	// testDelegatedProviderWrite can inject a final provider-seam denial after
+	// higher-level admission has completed.
+	testDelegatedProviderWrite func() error
+
+	// testForgejoSuccessCommentBeforeWrite simulates process failure after the
+	// durable lease is claimed but before the provider write. The after-write
+	// hook simulates failure after provider acceptance but before AGS readback.
+	testForgejoSuccessCommentBeforeWrite  func() error
+	testForgejoSuccessCommentAfterWrite   func() error
+	testForgejoTerminalDenialBeforeCommit func()
+	// testForgejoActionDispatchAfterCAS advances an intent after a successful
+	// dispatch acknowledgement CAS but before its required fresh readback.
+	testForgejoActionDispatchAfterCAS func(intentID string)
+	// testGenericProjectionBeforeFinalCAS injects a transaction-local change
+	// after mapping upsert so tests can prove a failed generation CAS rolls the
+	// mapping back with the job transition.
+	testGenericProjectionBeforeFinalCAS func(*gorm.DB)
 }
 
 type scopedRepoKey struct {
 	db     *sql.DB
 	repoID uint
 	repo   string
+}
+
+func (s *Service) getForgejoWorkflowActionMu(externalRepo string, prNumber int) *sync.Mutex {
+	key := fmt.Sprintf("%s#%d", strings.TrimSpace(externalRepo), prNumber)
+	v, _ := s.forgejoWorkflowActionLocks.LoadOrStore(key, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 func (s *Service) workflowSyncMuInit() {
@@ -316,23 +399,25 @@ func (s *Service) HTMLBaseURL() string {
 
 // CreateRepoInput holds parameters for creating a repository.
 type CreateRepoInput struct {
-	OwnerLogin          string
-	Name                string
-	Description         string
-	Visibility          string
-	Private             bool
-	HasIssues           bool
-	HasIssuesSet        bool
-	HasWiki             bool
-	HasWikiSet          bool
-	HasProjects         *bool
-	HasDownloads        *bool
-	HasDiscussions      *bool
-	Homepage            string
-	IsTemplate          bool
-	License             string
-	DefaultBranch       string
-	AutoInit            bool
+	OwnerLogin     string
+	Name           string
+	Description    string
+	Visibility     string
+	Private        bool
+	HasIssues      bool
+	HasIssuesSet   bool
+	HasWiki        bool
+	HasWikiSet     bool
+	HasProjects    *bool
+	HasDownloads   *bool
+	HasDiscussions *bool
+	Homepage       string
+	IsTemplate     bool
+	License        string
+	DefaultBranch  string
+	AutoInit       bool
+	// AddReadme is a fork source-compatibility alias. New callers use AutoInit.
+	AddReadme           bool
 	AllowMergeCommit    *bool
 	AllowSquashMerge    *bool
 	AllowRebaseMerge    *bool
@@ -345,6 +430,14 @@ type CreateRepoInput struct {
 
 // CreateRepo creates a repository in DB and initializes its git storage.
 func (s *Service) CreateRepo(ctx context.Context, in CreateRepoInput) (db.Repository, error) {
+	if s.Git != nil {
+		mutationCtx, release, err := s.Git.BeginMutation(ctx)
+		if err != nil {
+			return db.Repository{}, err
+		}
+		defer release()
+		ctx = mutationCtx
+	}
 	owner, err := s.GetUser(ctx, in.OwnerLogin)
 	if err != nil {
 		return db.Repository{}, fmt.Errorf("service: create repo: owner: %w", err)
@@ -532,7 +625,7 @@ func (s *Service) CreateRepo(ctx context.Context, in CreateRepoInput) (db.Reposi
 	}
 
 	fullName := rep.FullName
-	if err := s.Git.Init(ctx, fullName, in.DefaultBranch, in.AutoInit); err != nil {
+	if err := s.Git.Init(ctx, fullName, in.DefaultBranch, in.AutoInit || in.AddReadme); err != nil {
 		// Non-fatal, the repo object still gets returned.
 		slog.Error("CreateRepo: git init", "repo", fullName, "error", err)
 	}
@@ -658,6 +751,9 @@ func (s *Service) lookupRepo(ctx context.Context, fullName string, newQuery func
 // when multiple service methods need the same repo in one handler.
 func (s *Service) GetRepo(ctx context.Context, fullName string) (db.Repository, error) {
 	if cached, ok := repoCacheGet(ctx, fullName); ok {
+		if err := s.RequireRepoPermission(ctx, cached.ID, RepoPermissionRead); err != nil {
+			return db.Repository{}, err
+		}
 		return cached, nil
 	}
 	rep, err := s.lookupRepo(ctx, fullName, func() *gorm.DB {
@@ -666,11 +762,9 @@ func (s *Service) GetRepo(ctx context.Context, fullName string) (db.Repository, 
 	if err != nil {
 		return rep, err
 	}
-	perm, err := s.repoVisibilityPermission(ctx, rep)
-	if err != nil {
+	if err := s.RequireRepoPermission(ctx, rep.ID, RepoPermissionRead); err != nil {
 		return db.Repository{}, err
 	}
-	repoPermissionCacheSet(ctx, rep.ID, perm)
 	repoCacheSetForLookup(ctx, fullName, rep)
 	return rep, nil
 }
@@ -780,7 +874,7 @@ func (s *Service) repoVisibilityPermission(ctx context.Context, rep db.Repositor
 // associations or checking permissions. Callers must enforce authorization.
 func (s *Service) LookupRepoIdentity(ctx context.Context, fullName string) (db.Repository, error) {
 	return s.lookupRepo(ctx, fullName, func() *gorm.DB {
-		return s.DBForCtx(ctx).Select("id", "full_name", "owner_id", "default_branch", "private", "has_wiki")
+		return s.DBForCtx(ctx).Select("id", "full_name", "owner_id", "default_branch", "private", "has_wiki", "disabled", "git_storage_id")
 	})
 }
 
@@ -799,6 +893,14 @@ func (s *Service) GetRepoByID(ctx context.Context, idStr string) (db.Repository,
 
 // DeleteRepo removes a repository from the DB and git store.
 func (s *Service) DeleteRepo(ctx context.Context, fullName string) error {
+	if s.Git != nil {
+		mutationCtx, release, err := s.Git.BeginMutation(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		ctx = mutationCtx
+	}
 	rep, err := s.GetRepo(ctx, fullName)
 	if err != nil {
 		return err
@@ -1052,6 +1154,14 @@ type OptionalStringUpdate struct {
 // When the Name field changes, it delegates to RenameRepo to atomically
 // update FullName and the git directory, then applies remaining fields.
 func (s *Service) UpdateRepo(ctx context.Context, fullName string, in UpdateRepoInput) (db.Repository, error) {
+	if s.Git != nil {
+		mutationCtx, release, err := s.Git.BeginMutation(ctx)
+		if err != nil {
+			return db.Repository{}, err
+		}
+		defer release()
+		ctx = mutationCtx
+	}
 	// Load repo first so we can validate permissions before any rename.
 	baseRep, err := s.GetRepo(ctx, fullName)
 	if err != nil {

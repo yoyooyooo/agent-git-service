@@ -58,6 +58,7 @@ func (d *Deps) MergeUpstream(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, 409, fmt.Sprintf("cannot update ref: %v", err))
 			return
 		}
+		d.syncOpenPRHeadsAfterBranchAdvance(r.Context(), "MergeUpstream", repo.ID, full, branch)
 		respond.JSON(w, 200, map[string]any{
 			"message":     "Successfully fetched and fast-forwarded from upstream " + parentFullName,
 			"merge_type":  "fast-forward",

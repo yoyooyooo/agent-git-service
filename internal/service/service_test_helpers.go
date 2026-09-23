@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/ngaut/agent-git-service/internal/db"
+	"github.com/ngaut/agent-git-service/internal/sessionauthority"
 	"github.com/ngaut/agent-git-service/internal/wikicatalog"
+	"gorm.io/gorm"
 )
 
 // Test helper methods - exported only for testing purposes.
@@ -160,6 +162,108 @@ func SetTestWikiCompactionJobStartedForTest(s *Service, fn func(jobID string)) {
 // block the async compaction worker until tests allow it to proceed.
 func SetTestWikiCompactionJobContinueForTest(s *Service, fn func(jobID string)) {
 	s.testWikiCompactionJobContinue = fn
+}
+
+// SetCreatePRRetryHookForTest installs a test-only hook fired after a retryable
+// transaction failure and before CreatePR starts the next attempt.
+func SetCreatePRRetryHookForTest(s *Service, fn func(attempt int)) {
+	s.testCreatePRRetry = fn
+}
+
+// SetCreatePRRefBeforeWriteHookForTest injects drift after the PR row commit
+// and before the local refs/pull mutation.
+func SetCreatePRRefBeforeWriteHookForTest(s *Service, fn func()) {
+	s.testCreatePRRefBeforeWrite = fn
+}
+
+// SetAuthorityBoundaryTransactionHookForTest wraps complete receipt
+// transactions so tests can inject commit-time conflict results.
+func SetAuthorityBoundaryTransactionHookForTest(s *Service, fn func(attempt int, run func(*gorm.DB) error) error) {
+	s.testAuthorityBoundaryTransaction = fn
+}
+
+// StampDurableActionIntentAuthorityForTest snapshots the current durable
+// principal authority onto a direct action-intent fixture.
+func StampDurableActionIntentAuthorityForTest(ctx context.Context, s *Service, intent *db.PullRequestActionIntent) error {
+	if s == nil || intent == nil {
+		return fmt.Errorf("durable action intent fixture is required")
+	}
+	var principal db.User
+	if err := s.DBForCtx(ctx).First(&principal, intent.PrincipalID).Error; err != nil {
+		return err
+	}
+	result, err := s.AuthorizeDurableOperation(ctx, principal, "ags", intent.Repository, "pr.rebase",
+		forgejoRebaseDurableConstraints(intent.AGSPRNumber, intent.ForgejoPRNumber, intent.ExpectedHeadSHA, intent.ExpectedBaseSHA))
+	if err != nil {
+		return err
+	}
+	intent.TeamIdentityID = result.AuthorizationBasis.TeamIdentityID
+	intent.PolicyClass = result.AuthorizationBasis.PolicyClass
+	intent.MembershipEpoch = result.AuthorizationBasis.MembershipEpoch
+	intent.AuthorityRev = durableActionAuthorityRevision(result)
+	return nil
+}
+
+// SetDelegatedProviderWriteHookForTest injects a final provider seam result.
+func SetDelegatedProviderWriteHookForTest(s *Service, fn func() error) {
+	s.testDelegatedProviderWrite = fn
+}
+
+// SetForgejoSuccessCommentBeforeWriteHookForTest simulates interruption after
+// a durable claim but before the provider write.
+func SetForgejoSuccessCommentBeforeWriteHookForTest(s *Service, fn func() error) {
+	s.testForgejoSuccessCommentBeforeWrite = fn
+}
+
+// SetForgejoSuccessCommentAfterWriteHookForTest simulates interruption after
+// the provider accepted a deterministic comment and before AGS readback.
+func SetForgejoSuccessCommentAfterWriteHookForTest(s *Service, fn func() error) {
+	s.testForgejoSuccessCommentAfterWrite = fn
+}
+
+// SetForgejoTerminalDenialBeforeCommitHookForTest pauses the owning denial
+// transaction after intent denial and before terminal job convergence.
+func SetForgejoTerminalDenialBeforeCommitHookForTest(s *Service, fn func()) {
+	s.testForgejoTerminalDenialBeforeCommit = fn
+}
+
+// ConfirmDelegatedSessionCommitBoundaryForTest exposes only the final DB-side
+// boundary so an expiry that occurs during evaluation can be deterministic.
+func ConfirmDelegatedSessionCommitBoundaryForTest(s *Service, ctx context.Context, session db.DelegatedAgentSession, required RepoPermission, compareRevision bool) (RepoPermission, error) {
+	return s.confirmDelegatedSessionCommitBoundary(ctx, session, required, compareRevision)
+}
+
+// FinalizeCanonicalDelegatedSessionForTest derives the exact persisted
+// team-v4 snapshot for a hermetic transport fixture.
+func FinalizeCanonicalDelegatedSessionForTest(s *Service, ctx context.Context, session *db.DelegatedAgentSession) error {
+	request := sessionauthority.Request{
+		Issuer: session.Issuer, IssuerInstanceID: session.IssuerInstanceID, AssertionKeyID: session.AssertionKeyID,
+		Subject: session.IssuerSubject, WorkspaceID: session.IssuerWorkspaceID, TeamIdentityID: session.TeamIdentityID,
+		PolicyClass: session.PolicyClass, MembershipEpoch: session.MembershipEpoch,
+		Target: session.TargetInstance, Service: session.ResourceService, Repository: session.Repository.FullName,
+		Operation: session.OperationName, Now: time.Now().UTC(),
+	}
+	resolved, err := s.PrincipalSessions.Resolve(request)
+	if err != nil {
+		return err
+	}
+	permission, err := s.currentRepoAccess(ctx, session.RepositoryID, session.PrincipalUserID)
+	if err != nil {
+		return err
+	}
+	revision := nativeGrantRevision(session.PrincipalUserID, session.RepositoryID, permission)
+	snapshot, err := principalSessionSnapshotHash(resolved, revision, session.MembershipEpoch, session.GrantedCapabilities, session.OperationConstraints)
+	if err != nil {
+		return err
+	}
+	session.ContractRevision = sessionauthority.ContractRevision
+	session.TrustRevision = resolved.Issuer.TrustRevision
+	session.TeamBindingRevision = resolved.TeamBinding.BindingRevision
+	session.PolicyVersion = policyVersion(resolved)
+	session.PolicySnapshotHash = snapshot
+	session.NativeGrantRevision = revision
+	session.ResourcePolicyRevision = resolved.Resource.PolicyRevision
+	return s.observeTeamAuthorityEpoch(ctx, resolved, session.MembershipEpoch)
 }
 
 // ClaimWikiBackgroundGitIngestForTest exposes background git ingest slot claims for tests.

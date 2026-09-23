@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	agsauth "github.com/ngaut/agent-git-service/auth"
+	"github.com/ngaut/agent-git-service/internal/db"
 	applog "github.com/ngaut/agent-git-service/internal/logging"
 	"github.com/ngaut/agent-git-service/internal/ratelimit"
 	"github.com/ngaut/agent-git-service/internal/rest/respond"
@@ -251,6 +253,23 @@ func handleAuthError(w http.ResponseWriter, r *http.Request, token string, mode 
 // resolveTokenAndInjectContext resolves the token and injects user/DB context.
 // Returns (newContext, shouldReturn). If shouldReturn is true, the handler should return immediately.
 func resolveTokenAndInjectContext(w http.ResponseWriter, r *http.Request, token string, svc *service.Service) (context.Context, bool) {
+	if service.IsDelegatedSessionCredential(token) {
+		user, session, err := svc.ResolveDelegatedSessionCredential(r.Context(), token)
+		if err != nil {
+			return nil, handleAuthError(w, r, token, "delegated_session", "invalid_session", err)
+		}
+		ctx := service.ContextWithUser(r.Context(), user)
+		ctx = service.ContextWithDelegatedSession(ctx, session)
+		ctx = service.ContextWithRepoCache(ctx)
+		ctx = ratelimit.WithActor(ctx, "delegated-session:"+session.ID)
+		applog.AddAttrs(ctx,
+			slog.String("auth_mode", "delegated_session"),
+			slog.String("user_login", user.Login),
+			slog.String("delegated_session_id", session.ID),
+		)
+		return ctx, false
+	}
+
 	// Validate and resolve user in a single pass to avoid
 	// duplicate COUNT(*) and SELECT queries (see #1038).
 	u, failure, err := svc.ValidateAndResolveTokenDetailed(r.Context(), token)
@@ -268,6 +287,244 @@ func resolveTokenAndInjectContext(w http.ResponseWriter, r *http.Request, token 
 		slog.String("user_login", u.Login),
 	)
 	return singleCtx, false
+}
+
+// EnforceDelegatedSessionSurface keeps delegated REST access on an exact
+// allowlist. Capability and repository checks still run in the service layer.
+// Durable credentials and anonymous requests are unaffected.
+func EnforceDelegatedSessionSurface(svc *service.Service) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			session, ok := service.DelegatedSessionFromContext(r.Context())
+			if !ok {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if delegatedSessionRequestAllowed(session, r.Method, r.URL.Path) || delegatedSessionGraphQLRequestAllowed(session, r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if svc != nil {
+				_ = svc.LogCurrentDelegatedSessionAudit(r.Context(), service.DelegatedSessionAuditEvent{
+					Action: service.AuditActionDelegatedWriteDenied, Operation: r.Method + " " + strings.TrimSuffix(r.URL.Path, "/"),
+					Outcome: "denied", Reason: "surface_not_allowed",
+				})
+			}
+			respond.Error(w, http.StatusForbidden, "Delegated session capability does not allow this operation")
+		})
+	}
+}
+
+// EnforceDelegatedSessionReadSurface remains as an internal compatibility
+// wrapper for callers that have not yet adopted audit-aware surface wiring.
+func EnforceDelegatedSessionReadSurface() func(http.Handler) http.Handler {
+	return EnforceDelegatedSessionSurface(nil)
+}
+
+func delegatedSessionRequestAllowed(session db.DelegatedAgentSession, method, path string) bool {
+	exactPath := path
+	path = strings.TrimSuffix(path, "/")
+	if method == http.MethodGet && path == "/api/v3/user" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(session.OperationName)) {
+	case "repo.read":
+		return delegatedExactVerificationRead(method, path) || delegatedRepoBranchProtectionRead(method, exactPath)
+	case "pr.read":
+		return delegatedExactVerificationRead(method, path) || delegatedPRListRead(method, path) || delegatedProviderEvidenceRead(method, path, "projection")
+	case "review.read":
+		return delegatedReviewCIVerificationRead(method, path)
+	case "ci.read":
+		return delegatedReviewCIVerificationRead(method, path) || delegatedProviderEvidenceRead(method, path, "ci")
+	case "pr.create":
+		return delegatedExactVerificationRead(method, path) || delegatedPRCreate(method, path)
+	case "pr.comment":
+		return delegatedExactVerificationRead(method, path) || delegatedPRComment(method, path)
+	case "pr.edit", "pr.close", "pr.reopen":
+		// Handler body distinguishes edit vs close vs reopen; middleware only
+		// admits the exact PATCH pull route for the bound operation.
+		return delegatedExactVerificationRead(method, path) || delegatedPRPatch(method, path)
+	case "review.write", "review.submit":
+		return delegatedExactVerificationRead(method, path) || delegatedPRReviewWrite(method, path)
+	case "pr.rebase":
+		return delegatedExactVerificationRead(method, path) || delegatedPRRebaseAction(method, path)
+	case "git.read", "git.push":
+		// Git transport is authorized and revalidated by githttp immediately
+		// before upload-pack/receive-pack, never by the REST surface.
+		return false
+	default:
+		return false
+	}
+}
+
+func delegatedPRListRead(method, path string) bool {
+	if method != http.MethodGet {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	return len(parts) == 6 && delegatedRepositoryPath(parts) && parts[5] == "pulls"
+}
+
+func delegatedExactVerificationRead(method, path string) bool {
+	if method != http.MethodGet {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) == 5 && delegatedRepositoryPath(parts) {
+		return true
+	}
+	if len(parts) == 7 && delegatedRepositoryPath(parts) && parts[5] == "pulls" {
+		_, err := strconv.ParseUint(parts[6], 10, 64)
+		return err == nil && parts[6] != "0"
+	}
+	return len(parts) >= 9 && delegatedRepositoryPath(parts) && parts[5] == "git" && parts[6] == "ref" && parts[7] == "heads" && delegatedHeadRefAllowed(strings.Join(parts[8:], "/"))
+}
+
+func delegatedRepoBranchProtectionRead(method, path string) bool {
+	if method != http.MethodGet || path != strings.TrimSuffix(path, "/") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) < 8 || !delegatedRepositoryPath(parts) || parts[5] != "branches" || parts[len(parts)-1] != "protection" {
+		return false
+	}
+	return delegatedHeadRefAllowed(strings.Join(parts[6:len(parts)-1], "/"))
+}
+
+func delegatedReviewCIVerificationRead(method, path string) bool {
+	if method != http.MethodGet {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) == 5 && delegatedRepositoryPath(parts) {
+		return true
+	}
+	if len(parts) == 7 && delegatedRepositoryPath(parts) && parts[5] == "pulls" {
+		number, err := strconv.ParseUint(parts[6], 10, 64)
+		return err == nil && number > 0
+	}
+	return false
+}
+
+func delegatedProviderEvidenceRead(method, path, capability string) bool {
+	if method != http.MethodGet {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if !delegatedRepositoryPath(parts) || len(parts) < 9 || parts[5] != "pulls" || parts[7] != "provider" {
+		return false
+	}
+	number, err := strconv.ParseUint(parts[6], 10, 64)
+	if err != nil || number == 0 {
+		return false
+	}
+	switch capability {
+	case "projection":
+		return len(parts) == 9 && parts[8] == "projection"
+	case "ci":
+		if len(parts) == 10 && parts[8] == "ci" && parts[9] == "runs" {
+			return true
+		}
+		if len(parts) == 12 && parts[8] == "ci" && parts[9] == "runs" && parts[11] == "logs" {
+			_, err := strconv.ParseUint(parts[10], 10, 64)
+			return err == nil && parts[10] != "0"
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+func delegatedPRCreate(method, path string) bool {
+	if method != http.MethodPost {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	return len(parts) == 6 && parts[0] == "api" && parts[1] == "v3" && parts[2] == "repos" && parts[3] != "" && parts[4] != "" && parts[5] == "pulls"
+}
+
+func delegatedPRComment(method, path string) bool {
+	if method != http.MethodPost {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if !delegatedRepositoryPath(parts) {
+		return false
+	}
+	// POST /api/v3/repos/{owner}/{repo}/issues/{n}/comments
+	if len(parts) == 8 && parts[5] == "issues" && parts[7] == "comments" {
+		number, err := strconv.ParseUint(parts[6], 10, 64)
+		return err == nil && number > 0
+	}
+	// POST /api/v3/repos/{owner}/{repo}/pulls/{n}/comments
+	if len(parts) == 8 && parts[5] == "pulls" && parts[7] == "comments" {
+		number, err := strconv.ParseUint(parts[6], 10, 64)
+		return err == nil && number > 0
+	}
+	return false
+}
+
+func delegatedPRPatch(method, path string) bool {
+	if method != http.MethodPatch {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) != 7 || !delegatedRepositoryPath(parts) || parts[5] != "pulls" {
+		return false
+	}
+	number, err := strconv.ParseUint(parts[6], 10, 64)
+	return err == nil && number > 0
+}
+
+func delegatedPRReviewWrite(method, path string) bool {
+	if method != http.MethodPost {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	// POST /api/v3/repos/{owner}/{repo}/pulls/{n}/reviews
+	if len(parts) != 8 || !delegatedRepositoryPath(parts) || parts[5] != "pulls" || parts[7] != "reviews" {
+		return false
+	}
+	number, err := strconv.ParseUint(parts[6], 10, 64)
+	return err == nil && number > 0
+}
+
+func delegatedPRRebaseAction(method, path string) bool {
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if method == http.MethodGet && len(parts) == 6 && parts[0] == "api" && parts[1] == "v3" && parts[2] == "agent-sessions" && parts[3] == "current" && parts[4] == "authority-boundary-receipts" {
+		return parts[5] != ""
+	}
+	if len(parts) < 9 || parts[0] != "api" || parts[1] != "v3" || parts[2] != "repos" || parts[3] == "" || parts[4] == "" || parts[5] != "pulls" || parts[7] != "actions" || parts[8] != "pr.rebase" {
+		return false
+	}
+	if number, err := strconv.ParseUint(parts[6], 10, 64); err != nil || number == 0 {
+		return false
+	}
+	if method == http.MethodPost {
+		return len(parts) == 9
+	}
+	return method == http.MethodGet && len(parts) == 10 && strings.TrimSpace(parts[9]) != ""
+}
+
+func delegatedRepositoryPath(parts []string) bool {
+	return len(parts) >= 5 && parts[0] == "api" && parts[1] == "v3" && parts[2] == "repos" && parts[3] != "" && parts[4] != ""
+}
+
+func delegatedHeadRefAllowed(ref string) bool {
+	if ref == "" || ref == "@" || strings.HasPrefix(ref, "/") || strings.HasSuffix(ref, "/") || strings.HasSuffix(ref, ".") || strings.Contains(ref, "//") || strings.Contains(ref, "..") || strings.Contains(ref, "@{") || strings.ContainsAny(ref, `\\~^:?*[]`) {
+		return false
+	}
+	for _, part := range strings.Split(ref, "/") {
+		if strings.HasPrefix(part, ".") || strings.HasSuffix(part, ".lock") {
+			return false
+		}
+	}
+	for _, char := range ref {
+		if char <= ' ' || char == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func authScheme(auth string) string {

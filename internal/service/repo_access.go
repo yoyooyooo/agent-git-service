@@ -72,7 +72,16 @@ func (s *Service) HasRepoAccess(ctx context.Context, repoID, userID uint) (RepoP
 	if err := s.maybeBackfillAdminsForRepo(ctx, repoID, userID); err != nil {
 		slog.Warn("repo access backfill failed", "repo_id", repoID, "user_id", userID, "error", err)
 	}
+	return s.currentRepoAccess(ctx, repoID, userID)
+}
 
+// currentRepoAccess reads the effective native grant without invoking any
+// compatibility repair/backfill. Use-time delegated authority checks must be
+// observational so a denial path cannot create the grant it is evaluating.
+func (s *Service) currentRepoAccess(ctx context.Context, repoID, userID uint) (RepoPermission, error) {
+	if repoID == 0 || userID == 0 {
+		return RepoPermissionNone, nil
+	}
 	row := s.DBForCtx(ctx).Raw(repoAccessQuery, repoID, userID).Row()
 	var level int
 	if err := row.Scan(&level); err != nil {
@@ -263,7 +272,57 @@ func isMissingIssueReferencesTableErr(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "issue_references")
 }
 
+// RequireRepoPermission applies the shared effective repository authorization
+// used by REST and Git HTTP. A delegated session must match both its single
+// bound repository and the protocol capability required by the operation;
+// the stable principal grant is then checked through the legacy path.
+func (s *Service) RequireRepoPermission(ctx context.Context, repoID uint, required RepoPermission) error {
+	return s.requireRepoPermission(ctx, repoID, required)
+}
+
+// RequireRepoCapability combines a protocol capability with the stable
+// principal's repository permission. Durable credentials are governed only by
+// required; delegated sessions must additionally match the exact repository
+// and carry delegatedCapability.
+func (s *Service) RequireRepoCapability(ctx context.Context, repoID uint, required RepoPermission, delegatedCapability string) error {
+	return s.requireRepoCapability(ctx, repoID, required, delegatedCapability)
+}
+
 func (s *Service) requireRepoPermission(ctx context.Context, repoID uint, required RepoPermission) error {
+	capability := ""
+	switch required.Effective() {
+	case RepoPermissionRead:
+		capability = "repo:read"
+	case RepoPermissionWrite:
+		capability = "repo:write"
+	}
+	return s.requireRepoCapability(ctx, repoID, required, capability)
+}
+
+func (s *Service) requireRepoCapability(ctx context.Context, repoID uint, required RepoPermission, delegatedCapability string) error {
+	if sessionID, delegated := DelegatedSessionIDFromContext(ctx); delegated {
+		if sessionID == "" || strings.TrimSpace(delegatedCapability) == "" {
+			return ErrForbidden
+		}
+		var current db.DelegatedAgentSession
+		if err := s.DBForCtx(ctx).Select("id", "operation_name").First(&current, "id = ?", sessionID).Error; err != nil {
+			return ErrForbidden
+		}
+		operation := current.OperationName
+		if strings.TrimSpace(operation) == "" {
+			operation = "repo.read"
+			if required.Effective() == RepoPermissionWrite {
+				operation = "git.push"
+			}
+		}
+		fresh, err := s.RevalidateDelegatedSession(ctx, repoID, operation, delegatedCapability, nil)
+		if err != nil || !fresh.Permission.AtLeast(required) {
+			return ErrForbidden
+		}
+		repoPermissionCacheSet(ctx, repoID, fresh.Permission)
+		return nil
+	}
+
 	viewer, ok := UserFromContext(ctx)
 	if !ok || viewer.ID == 0 {
 		// Anonymous HTTP request — only allow read access to public repos.
@@ -273,7 +332,10 @@ func (s *Service) requireRepoPermission(ctx context.Context, repoID uint, requir
 			}
 			return ErrNotFound
 		}
-		// Internal service call (no HTTP user context) — skip auth.
+		// Internal service calls remain available only when no delegated Session
+		// marker is present. A fabricated delegated context can never reach this
+		// bypass because the branch above fails closed without a matching user/DB
+		// Session/current authority.
 		return nil
 	}
 	perm, err := s.HasRepoAccess(ctx, repoID, viewer.ID)
@@ -287,6 +349,7 @@ func (s *Service) requireRepoPermission(ctx context.Context, repoID uint, requir
 		}
 		return ErrNotFound
 	}
+	repoPermissionCacheSet(ctx, repoID, perm)
 	return nil
 }
 

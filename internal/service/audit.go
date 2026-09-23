@@ -12,14 +12,20 @@ import (
 // Audit action constants. Centralized so callers can't drift from the
 // vocabulary the REST transform / clients filter on.
 const (
-	AuditActionOrgAddMember    = "org.add_member"
-	AuditActionOrgRemoveMember = "org.remove_member"
-	AuditActionGitBlobCreate   = "git.blob.create"
-	AuditActionGitTreeCreate   = "git.tree.create"
-	AuditActionGitCommitCreate = "git.commit.create"
-	AuditActionGitRefCreate    = "git.ref.create"
-	AuditActionGitRefUpdate    = "git.ref.update"
-	AuditActionGitRefDelete    = "git.ref.delete"
+	AuditActionOrgAddMember                = "org.add_member"
+	AuditActionOrgRemoveMember             = "org.remove_member"
+	AuditActionGitBlobCreate               = "git.blob.create"
+	AuditActionGitTreeCreate               = "git.tree.create"
+	AuditActionGitCommitCreate             = "git.commit.create"
+	AuditActionGitRefCreate                = "git.ref.create"
+	AuditActionGitRefUpdate                = "git.ref.update"
+	AuditActionGitRefDelete                = "git.ref.delete"
+	AuditActionAccessGrantTransportSession = "access_grant.transport_session"
+	AuditActionDelegatedSessionExpiry      = "agent_session.expiry"
+	AuditActionTeamAuthorityEpochAdvance   = "team_authority.epoch_floor_advance"
+	AuditActionDelegatedGitWrite           = "git.delegated_write"
+	AuditActionDelegatedPRCreate           = "pull_request.delegated_create"
+	AuditActionDelegatedWriteDenied        = "agent_session.write_denied"
 )
 
 // AuditEvent describes a single audit entry to record.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/ngaut/agent-git-service/internal/delegationpolicy"
+	"github.com/ngaut/agent-git-service/internal/sessionauthority"
 	"gorm.io/gorm"
 
 	appdb "github.com/ngaut/agent-git-service/internal/db"
@@ -168,6 +171,103 @@ func TestBootstrap_Success_Minimal(t *testing.T) {
 	}
 }
 
+func TestBootstrap_LoadsDelegationPolicyProjection(t *testing.T) {
+	integrationsPath := filepath.Join(t.TempDir(), "integrations.yaml")
+	if err := os.WriteFile(integrationsPath, []byte(`delegation:
+  version: 1
+  policies:
+    - id: mini-workspace
+      issuer: multica
+      workspace_id: 11111111-1111-4111-8111-111111111111
+      target: primary-a
+      principal: automation-principal
+      repositories:
+        operator/project-kit:
+          max_capabilities: [repo:read]
+      max_session_ttl: 30m
+      allow_merge: false
+      status: active
+      policy_version: test-v1
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setupBootstrapEnv(t, map[string]string{
+		"DB_DSN":                  "file:test_bootstrap_delegation?mode=memory&cache=shared",
+		"AGS_INTEGRATIONS_CONFIG": integrationsPath,
+	})
+
+	result := bootstrap()
+	if result.Err != nil {
+		t.Fatalf("bootstrap failed: %v", result.Err)
+	}
+	if result.Deps == nil || result.Deps.SvcDeps == nil {
+		t.Fatal("service deps missing")
+	}
+	resolved, err := result.Deps.SvcDeps.DelegationPolicies.Resolve(delegationpolicy.Selector{
+		Issuer: "multica", WorkspaceID: "11111111-1111-4111-8111-111111111111",
+		Target: "primary-a", Repository: "operator/project-kit",
+	})
+	if err != nil {
+		t.Fatalf("resolve loaded policy: %v", err)
+	}
+	if resolved.Policy.Principal != "automation-principal" {
+		t.Fatalf("principal = %q", resolved.Policy.Principal)
+	}
+	if result.Deps.SrvCancel != nil {
+		result.Deps.SrvCancel()
+	}
+}
+
+func TestBootstrapLoadsPrincipalSessionAuthorityProjection(t *testing.T) {
+	integrationsPath := filepath.Join(t.TempDir(), "integrations.yaml")
+	if err := os.WriteFile(integrationsPath, []byte(`team_authority:
+  version: 1
+  contract_revision: 2026-07-19.principal-session-v2
+  legacy_compatibility_mode: legacy-subject-v2
+  trusted_issuers:
+    - id: multica-mini
+      issuer: multica
+      key_ids: [session-key]
+      status: active
+      trust_revision: trust-v1
+  bindings:
+    - id: binding-agent
+      issuer_instance_id: multica-mini
+      subject: agent-1
+      principal_id: 42
+      status: active
+      binding_revision: binding-v1
+  resources:
+    - id: repo
+      target: primary-a
+      service: ags
+      repository: operator/project-kit
+      status: active
+      max_session_ttl: 30m
+      policy_revision: repo-v1
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setupBootstrapEnv(t, map[string]string{
+		"DB_DSN":                  "file:test_bootstrap_principal_sessions?mode=memory&cache=shared",
+		"AGS_INTEGRATIONS_CONFIG": integrationsPath,
+	})
+	result := bootstrap()
+	if result.Err != nil {
+		t.Fatalf("bootstrap failed: %v", result.Err)
+	}
+	resolved, err := result.Deps.SvcDeps.PrincipalSessions.Resolve(sessionauthority.Request{
+		Issuer: "multica", IssuerInstanceID: "multica-mini", AssertionKeyID: "session-key", Subject: "agent-1",
+		Target: "primary-a", Service: "ags", Repository: "operator/project-kit", Operation: "repo.read",
+	})
+	if err != nil || resolved.PrincipalID != 42 {
+		t.Fatalf("resolved=%#v err=%v", resolved, err)
+	}
+	if result.Deps.SrvCancel != nil {
+		result.Deps.SrvCancel()
+	}
+}
+
 func TestBootstrap_Failure_ConfigMissing(t *testing.T) {
 	// Set explicit empty value so .env loading cannot repopulate DB_DSN.
 	t.Setenv("DB_DSN", "")
@@ -229,8 +329,13 @@ func TestBootstrap_Failure_DBConnection(t *testing.T) {
 }
 
 func TestBootstrap_Failure_GitstoreInvalidDir(t *testing.T) {
+	blockedParent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write blocked parent: %v", err)
+	}
+
 	setupBootstrapEnv(t, map[string]string{
-		"GIT_REPO_DIR": "/nonexistent/path/that/does/not/exist",
+		"GIT_REPO_DIR": filepath.Join(blockedParent, "repo-root"),
 	})
 
 	result := bootstrap()

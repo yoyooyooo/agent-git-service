@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -98,7 +99,10 @@ func (s *Service) loadPRForMerge(ctx context.Context, repoFullName string, numbe
 
 	var pr db.PullRequest
 	if err := s.DBForCtx(ctx).
-		Select("id", "number", "repository_id", "merged", "state", "head_ref", "head_sha", "base_ref").
+		Select("id", "number", "repository_id", "title", "body", "merged", "state", "author_id", "head_ref", "head_sha", "base_ref").
+		Preload("Author", func(q *gorm.DB) *gorm.DB {
+			return q.Select("id", "login")
+		}).
 		First(&pr, "repository_id = ? AND number = ?", repo.ID, number).Error; err != nil {
 		return pr, wrapErrf(err, "pull request #%d", number)
 	}
@@ -109,7 +113,10 @@ func (s *Service) loadPRForMerge(ctx context.Context, repoFullName string, numbe
 func (s *Service) loadPRForMergeByID(ctx context.Context, prID uint) (db.PullRequest, error) {
 	var pr db.PullRequest
 	if err := s.DBForCtx(ctx).
-		Select("id", "number", "repository_id", "merged", "state", "head_ref", "head_sha", "base_ref").
+		Select("id", "number", "repository_id", "title", "body", "merged", "state", "author_id", "head_ref", "head_sha", "base_ref").
+		Preload("Author", func(q *gorm.DB) *gorm.DB {
+			return q.Select("id", "login")
+		}).
 		Preload("Repository", func(q *gorm.DB) *gorm.DB {
 			return q.Select("id", "full_name")
 		}).
@@ -153,6 +160,7 @@ func (s *Service) mergePRRecordWithActor(ctx context.Context, actor db.User, pr 
 		pr.AutoMergeAuthorEmail = ""
 		pr.AutoMergeExpectedHeadSHA = ""
 		pr.AutoMergeEnabledByLogin = ""
+		s.emitPullRequestMergedNotification(ctx, *pr, "ags", mergeMethod)
 		return nil
 	}
 	if commitMsg == "" {
@@ -223,6 +231,14 @@ func (s *Service) mergePRRecordWithActor(ctx context.Context, actor db.User, pr 
 	pr.AutoMergeAuthorEmail = ""
 	pr.AutoMergeExpectedHeadSHA = ""
 	pr.AutoMergeEnabledByLogin = ""
+	s.emitPullRequestMergedNotification(ctx, *pr, "ags", mergeMethod)
+	// Merging advances base_ref outside receive-pack. Refresh any open PR that
+	// uses the merge target as its head (stacked / wave PRs). The merge fact is
+	// already durable; helper failures stay on the reconciliation path.
+	if err := s.SyncOpenPRHeadsForBranch(ctx, pr.RepositoryID, pr.Repository.FullName, pr.BaseRef); err != nil {
+		slog.ErrorContext(ctx, "refresh stacked open PR heads after merge failed",
+			"repo", pr.Repository.FullName, "branch", pr.BaseRef, "merged_pr", pr.Number, "error", err)
+	}
 	return nil
 }
 
