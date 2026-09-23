@@ -1,114 +1,90 @@
-name: CI
+name: Fork CI
 
 on:
-  pull_request:
-    branches: [main]
   push:
-    branches: [main]
+    branches: ['main', 'fork/**', 'prepare/public-fork-*']
+  pull_request:
+    branches: ['main', 'fork/**']
   workflow_dispatch:
+    inputs:
+      full_regression:
+        description: Run every root package, client contracts and race checks
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
+env:
+  GIT_TERMINAL_PROMPT: '0'
+  GOMAXPROCS: '2'
+
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  checks:
+    name: Source and governance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-
-      - uses: actions/setup-go@v6
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-
-      - name: Check Go formatting
-        shell: bash
+      - name: Verify exact source and complete package inventory
         run: |
-          set -euo pipefail
-
-          case "${GITHUB_EVENT_NAME}" in
-            pull_request)
-              mapfile -t files < <(git diff --name-only --diff-filter=ACMR \
-                "${{ github.event.pull_request.base.sha }}...HEAD" \
-                -- '*.go' ':(exclude)cli/**')
-              ;;
-            push)
-              if [[ "${{ github.event.before }}" == "0000000000000000000000000000000000000000" ]]; then
-                mapfile -t files < <(git ls-files '*.go' ':(exclude)cli/**')
-              else
-                mapfile -t files < <(git diff --name-only --diff-filter=ACMR \
-                  "${{ github.event.before }}" HEAD \
-                  -- '*.go' ':(exclude)cli/**')
-              fi
-              ;;
-            *)
-              mapfile -t files < <(git ls-files '*.go' ':(exclude)cli/**')
-              ;;
-          esac
-
-          if [[ "${#files[@]}" -eq 0 ]]; then
-            echo "No non-CLI Go files changed."
-            exit 0
-          fi
-
-          unformatted="$(gofmt -l "${files[@]}")"
-          if [[ -n "${unformatted}" ]]; then
-            echo "Go files are not formatted:"
-            echo "${unformatted}"
-            exit 1
-          fi
-
-      - name: Run go vet
-        run: go vet ./...
-
-  regression-gate:
-    name: Regression Gate
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version: '1.25.7'
-          cache-dependency-path: |
-            go.sum
-            cli/go.sum
-            cli/_go-gh-local/go.sum
-
-      - name: Install TiDB test dependencies
-        shell: bash
+          python3 fork/scripts/audit.py verify
+          bash scripts/check-ci-package-coverage.sh
+      - name: Test publication scanner and scoped operator routing
         run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y default-mysql-client
-          curl --proto '=https' --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
-          echo "${HOME}/.tiup/bin" >> "${GITHUB_PATH}"
-
-      - name: Start TiDB test database
-        run: make test-db-start
-
-      - name: Run regression gate
-        run: bash scripts/regression_gate.sh
-
-      - name: Clean regression gate database
-        if: always()
-        run: make test-db-stop
+          PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_audit.py
+          PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_ci_database.py
+          PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_generation.py
+          PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_public_ranges.py
+          PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_casefold_policy.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_edge_client_route.py
+          (cd fork/tools && go test ./... -count=1)
+      - name: Exercise repaired authorization and transport boundaries
+        run: |
+          go test -race ./internal/gitbackend ./internal/gittransport ./config -count=1 -timeout=2m
+          go test -race ./internal/service -run '^TestExchangeDeviceCodeRevalidatesApproverBeforeTokenWrite$' -count=3 -timeout=2m
+          go test ./internal/edge -run '^TestAliasIngressKeepsCanonicalUpstreamAndReadGates$' -count=1 -timeout=2m
+      - name: Check documents
+        run: python3 scripts/doc_lint.py
+      - name: Build and vet
+        run: |
+          go build ./...
+          go vet ./...
+      - name: Check fork Go formatting
+        run: |
+          base=$(tr -d '\n' < fork/UPSTREAM_BASELINE)
+          mapfile -d '' files < <(git diff --name-only --diff-filter=ACM -z "$base" HEAD -- '*.go' ':(exclude)cli/**')
+          if ((${#files[@]})); then
+            unformatted=$(gofmt -l "${files[@]}")
+            test -z "$unformatted" || { printf '%s\n' "$unformatted"; exit 1; }
+          fi
 
   unit-tests:
-    name: Unit Tests (${{ matrix.name }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    name: Root tests (${{ matrix.name }})
+    needs: checks
+    # Preparation pushes are intentionally cheap. Release generations and PRs
+    # require the complete matrix, or an operator can request it explicitly.
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/fork/') || github.ref == 'refs/heads/main' || inputs.full_regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         include:
           - name: service
@@ -118,283 +94,78 @@ jobs:
           - name: server-graphql
             packages: ./server ./internal/graphql
           - name: db-router-git
-            packages: ./internal/db ./internal/githttp ./internal/gitstore ./internal/router ./internal/testharness ./internal/testharness/testdb ./internal/wikicatalog ./internal/wikiv2
+            packages: ./internal/db ./internal/githttp ./internal/gitstore ./internal/gittransport ./internal/router ./internal/testharness ./internal/testharness/testdb ./internal/wikicatalog ./internal/wikiv2
+          - name: edge
+            packages: ./cmd/ags-edge ./cmd/ags-replication ./internal/edge ./internal/edgeprotocol ./internal/gitbackend ./internal/replication ./internal/replicationadmin ./internal/snapshotstore
+          - name: fork-integrations
+            packages: ./cmd/forgejo-authority ./internal/delegationpolicy ./internal/executioncontext ./internal/forgejointegration ./internal/githubintegration ./internal/gitlabintegration ./internal/integrations ./internal/multicafailures ./internal/multicaprojection ./internal/notifications ./internal/operationcatalog ./internal/operationconstraints ./internal/projectionwatch ./internal/providerlogbridge ./internal/providerlogprotocol ./internal/sessionauthority ./internal/tenant ./internal/workloadidentity
           - name: misc
             packages: ./auth ./cmd/gh-server ./config ./e2e/cmd/mock-embedding-server ./e2e/cmd/mock-oidc-server ./internal/apperrors ./internal/connectedlogin ./internal/crypto ./internal/embedding ./internal/httputil ./internal/logging ./internal/mentions ./internal/metrics ./internal/middleware ./internal/oauth ./internal/oidc ./internal/randutil ./internal/ratelimit
+    env:
+      TEST_DB_DSN: 'root:@tcp(127.0.0.1:45400)/?parseTime=true&timeout=10s'
+      PACKAGES: ${{ matrix.packages }}
     steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: '1.25.7'
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
           cache-dependency-path: go.sum
-
-      - name: Install TiDB test dependencies
-        shell: bash
+      - name: Start disposable loopback-only TiDB
+        run: bash fork/scripts/ci-database.sh start
+      - name: Run all packages assigned to this shard
         run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y default-mysql-client
-          curl --proto '=https' --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
-          echo "${HOME}/.tiup/bin" >> "${GITHUB_PATH}"
-
-      - name: Run unit tests
-        env:
-          GO_TEST_PACKAGES: ${{ matrix.packages }}
-          GO_TEST_PKG_PARALLELISM: '1'
-        run: make test-unit
-
-      - name: Clean unit test database
+          read -r -a packages <<< "$PACKAGES"
+          go test -p 1 -count=1 -timeout=20m "${packages[@]}"
+      - name: Stop disposable database
         if: always()
-        run: make test-db-stop
+        run: bash fork/scripts/ci-database.sh stop
 
-  integration-tests:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  race:
+    name: Edge and authority race checks
+    needs: checks
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/fork/') || inputs.full_regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      TEST_DB_DSN: 'root:@tcp(127.0.0.1:45400)/?parseTime=true&timeout=10s'
     steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: '1.25.7'
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - run: bash fork/scripts/ci-database.sh start
+      - run: go test -race -p 1 -count=1 -timeout=15m ./internal/edge ./internal/snapshotstore ./internal/gitbackend ./internal/edgeprotocol ./internal/replication
+      - run: go test -race ./internal/service -run 'TestExchangeDeviceCode|TestAccessGrantPRMergeConcurrentSameEffect|TestAuthorityBoundaryReceiptConcurrentCapture' -count=3 -timeout=5m
+      - if: always()
+        run: bash fork/scripts/ci-database.sh stop
+
+  clients:
+    name: Vendored client compatibility
+    needs: checks
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/fork/') || inputs.full_regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: cli/go.mod
           cache-dependency-path: |
-            go.sum
             cli/go.sum
-
-      - name: Install TiDB test dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y default-mysql-client
-          curl --proto '=https' --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
-          echo "${HOME}/.tiup/bin" >> "${GITHUB_PATH}"
-
-      - name: Start TiDB test database
-        run: make test-db-start
-
-      - name: Run integration tests
-        run: make test-integration
-
-      - name: Clean integration test database
-        if: always()
-        run: make test-db-stop
-
-  tidb-migration-smoke:
-    name: TiDB Migration Smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-
-      - name: Install TiDB test dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y default-mysql-client
-          curl --proto '=https' --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
-          echo "${HOME}/.tiup/bin" >> "${GITHUB_PATH}"
-
-      - name: Run TiDB migration smoke
-        run: make test-migrate-tidb
-
-      - name: Clean TiDB migration smoke environment
-        if: always()
-        run: make test-db-stop
-
-  compatibility-tests:
-    name: Compatibility Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version: '1.25.7'
-          cache-dependency-path: |
-            go.sum
-            cli/go.sum
-
-      - name: Install TiDB test dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y default-mysql-client
-          curl --proto '=https' --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
-          echo "${HOME}/.tiup/bin" >> "${GITHUB_PATH}"
-
-      - name: Prepare compatibility test environment
-        run: make test-setup
-
-      - name: Verify Docker access
-        run: |
-          docker --version
-          docker run --rm hello-world
-
-      - name: Start compatibility server
-        env:
-          GIT_REPO_DIR: /tmp/gh-server-compatibility-repos
-          LISTEN_MODE: production
-          PORT: '80'
-          ADMIN_LOGIN: testadmin
-          ADMIN_TOKEN: mytoken
-          ENABLE_WORKFLOW_EXEC: "1"
-        run: make run-bg
-
-      - name: Run compatibility tests
-        run: make test
-
-      - name: Clean compatibility environment
-        if: always()
-        run: make test-clean-all
-
-  e2e-tests:
-    name: E2E Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-
-      - name: Install E2E test dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y default-mysql-client
-          curl --proto '=https' --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
-          echo "${HOME}/.tiup/bin" >> "${GITHUB_PATH}"
-
-      - name: Prepare e2e test environment
-        run: make test-setup
-
-      - name: Start mock OIDC issuer
-        shell: bash
-        run: |
-          set -euo pipefail
-          go run ./e2e/cmd/mock-oidc-server/main.go :8891 >/tmp/mock-oidc.log 2>&1 &
-          echo $! >/tmp/mock-oidc.pid
-          for _ in $(seq 1 30); do
-            if curl -sf http://localhost:8891/.well-known/openid-configuration >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "mock issuer failed to start" >&2
-          cat /tmp/mock-oidc.log >&2 || true
-          exit 1
-
-      - name: Start e2e server
-        env:
-          GIT_REPO_DIR: /tmp/gh-server-e2e-repos
-          LISTEN_MODE: production
-          PORT: '80'
-          ADMIN_LOGIN: testadmin
-          ADMIN_TOKEN: mytoken
-          OIDC_PROVIDER: casdoor
-          OIDC_ISSUER: http://localhost:8891/
-          OIDC_CLIENT_ID: test-client-id
-          OIDC_ALLOW_INSECURE_HTTP: '1'
-          ENABLE_WORKFLOW_EXEC: "1"
-        run: make run-bg
-
-      - name: Run full e2e suite
-        env:
-          GIT_REPO_DIR: /tmp/gh-server-e2e-repos
-          LISTEN_MODE: production
-          PORT: '80'
-          ADMIN_LOGIN: testadmin
-          ADMIN_TOKEN: mytoken
-          OIDC_PROVIDER: casdoor
-          OIDC_ISSUER: http://localhost:8891/
-          OIDC_CLIENT_ID: test-client-id
-          OIDC_ALLOW_INSECURE_HTTP: '1'
-          ENABLE_WORKFLOW_EXEC: "1"
-        run: make test-e2e
-
-      - name: Clean e2e environment
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          make test-clean-all
-          if [[ -f /tmp/mock-oidc.pid ]]; then
-            kill "$(cat /tmp/mock-oidc.pid)" 2>/dev/null || true
-            rm -f /tmp/mock-oidc.pid
-          fi
-
-  backend-smoke:
-    name: Backend Smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-
-      - name: Install TiDB test dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y default-mysql-client
-          curl --proto '=https' --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
-          echo "${HOME}/.tiup/bin" >> "${GITHUB_PATH}"
-
-      - name: Start TiDB test database
-        run: make test-db-start
-
-      - name: Run backend smoke
-        run: bash scripts/backend_smoke.sh
-
-      - name: Clean backend smoke database
-        if: always()
-        run: make test-db-stop
-
-  ci-success:
-    name: CI Success
-    needs:
-      - lint
-      - regression-gate
-      - unit-tests
-      - integration-tests
-      - tidb-migration-smoke
-      - compatibility-tests
-      - e2e-tests
-      - backend-smoke
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Check all jobs
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "${{ needs.lint.result }}" != "success" ||
-                "${{ needs.regression-gate.result }}" != "success" ||
-                "${{ needs.unit-tests.result }}" != "success" ||
-                "${{ needs.integration-tests.result }}" != "success" ||
-                "${{ needs.tidb-migration-smoke.result }}" != "success" ||
-                "${{ needs.compatibility-tests.result }}" != "success" ||
-                "${{ needs.e2e-tests.result }}" != "success" ||
-                "${{ needs.backend-smoke.result }}" != "success" ]]; then
-            echo "One or more CI jobs failed."
-            exit 1
-          fi
-
-          echo "All CI checks passed."
+            cli/_go-gh-local/go.sum
+      - name: Compile complete client
+        working-directory: cli
+        run: env -u NO_COLOR -u CLICOLOR -u PAGER -u GH_PAGER go test -p 2 ./... -run '^$' -timeout=10m
+      - name: Exercise core client contracts
+        working-directory: cli
+        run: env -u NO_COLOR -u CLICOLOR -u PAGER -u GH_PAGER go test -p 2 ./git ./api ./internal/config ./pkg/cmd/auth/... ./pkg/cmd/repo/clone ./pkg/cmd/pr/create ./pkg/cmd/pr/view ./pkg/cmd/pr/merge -count=1 -timeout=5m
+      - name: Exercise complete local API client
+        working-directory: cli/_go-gh-local
+        run: go test -p 2 ./... -count=1 -timeout=5m

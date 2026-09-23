@@ -2,6 +2,7 @@
 # ─── Variables ────────────────────────────────────────────────────────────────
 
 BINARY      = gh-server
+GIT_SHA    ?= $(shell git rev-parse --verify HEAD 2>/dev/null)
 PORT       ?= 80
 UNPRIVILEGED_PORT ?= 8080
 LOG_FILE    = /tmp/ghlog.txt
@@ -14,18 +15,28 @@ E2E_BASE_URL ?= http://$(TEST_HOST)
 TIDB_TAG    = gh-server
 DB_NAME     = gh-server
 TEST_DB_DSN ?= root:@tcp(127.0.0.1:4000)/$(DB_NAME)?parseTime=true&timeout=10s
-GO_TEST_TIMEOUT ?= 90m
+GO_TEST_TIMEOUT ?= 20m
 GO_TEST_PKG_PARALLELISM ?= 1
 GO_TEST_PACKAGES ?= ./...
 TIDB_TMP_DIR ?= /mnt/gh-server-tidb-tmp
 TIDB_CONFIG_FILE ?= /tmp/gh-server-tidb.toml
 TIDB_SCREEN_SESSION ?= gh-server-tidb-playground
+TIDB_STARTUP_WAIT_ATTEMPTS ?= 240
+TIDB_STARTUP_RETRIES ?= 2
 
 # ─── Build ────────────────────────────────────────────────────────────────────
 
+.PHONY: verify-source-revision
+verify-source-revision:
+	GIT_SHA=$(GIT_SHA) ./scripts/build-exact-source.sh verify
+
 .PHONY: build
-build: ## Build the gh-server binary
-	go build -o $(BINARY) ./cmd/gh-server
+build: ## Build the gh-server binary from an exact accepted Git archive
+	GIT_SHA=$(GIT_SHA) ./scripts/build-exact-source.sh binary --output "$(CURDIR)/$(BINARY)"
+
+.PHONY: build-dev
+build-dev: ## Compile packages without producing an attributable release artifact
+	go build ./...
 
 .PHONY: vet
 vet: ## Run go vet
@@ -38,8 +49,8 @@ fmt: ## Run goimports on all Go files
 # ─── Docker ──────────────────────────────────────────────────────────────────
 
 .PHONY: docker-build
-docker-build: ## Build Docker image locally
-	docker build -t gh-server:local .
+docker-build: ## Build Docker image from the same exact accepted Git archive
+	GIT_SHA=$(GIT_SHA) ./scripts/build-exact-source.sh docker --tag gh-server:local
 
 .PHONY: docker-build-all
 docker-build-all: docker-build ## Build backend Docker image locally
@@ -137,6 +148,9 @@ test-db-start: ## Start test-only TiDB via tiup playground
 			base_tmp_dir="/tmp/gh-server-tidb-tmp"; \
 		fi; \
 		mkdir -p "$$base_tmp_dir"; \
+		ready=0; \
+		for attempt in $$(seq 1 $(TIDB_STARTUP_RETRIES)); do \
+		echo "Starting TiDB playground (attempt $$attempt/$(TIDB_STARTUP_RETRIES))..."; \
 		tmp_dir="$$(mktemp -d "$$base_tmp_dir/tidb.XXXXXX")"; \
 		printf 'temp-dir = "%s"\ntmp-storage-path = "%s"\n' "$$tmp_dir" "$$tmp_dir" > "$(TIDB_CONFIG_FILE)"; \
 		tiup clean $(TIDB_TAG) 2>/dev/null || true; \
@@ -149,17 +163,23 @@ test-db-start: ## Start test-only TiDB via tiup playground
 			nohup tiup playground --tag $(TIDB_TAG) --db 1 --pd 1 --kv 1 --tiflash 0 --without-monitor --db.port 4000 --pd.port 2379 --kv.port 20160 --db.config "$(TIDB_CONFIG_FILE)" > /tmp/tiup-playground.log 2>&1 < /dev/null & \
 		fi; \
 		echo "Waiting for TiDB to be ready..."; \
-		for i in $$(seq 1 30); do \
+		for i in $$(seq 1 $(TIDB_STARTUP_WAIT_ATTEMPTS)); do \
 			if mysql -h 127.0.0.1 -P 4000 -u root -e "SELECT 1" >/dev/null 2>&1; then \
 				echo "✓ TiDB ready"; \
+				ready=1; \
 				break; \
-			fi; \
-			if [ "$$i" = "30" ]; then \
-				echo "✗ TiDB failed to start (see /tmp/tiup-playground.log)"; \
-				exit 1; \
 			fi; \
 			sleep 2; \
 		done; \
+		if [ "$$ready" = "1" ]; then break; fi; \
+		echo "✗ TiDB startup attempt $$attempt exhausted $(TIDB_STARTUP_WAIT_ATTEMPTS) readiness checks"; \
+		echo "----- TiDB startup log (last 200 lines) -----"; \
+		tail -n 200 /tmp/tiup-playground.log 2>/dev/null || true; \
+		if ! $(MAKE) --no-print-directory test-db-stop; then \
+			echo "✗ TiDB cleanup failed; refusing to retry"; exit 1; \
+		fi; \
+		done; \
+		if [ "$$ready" != "1" ]; then echo "✗ TiDB failed after $(TIDB_STARTUP_RETRIES) attempts"; exit 1; fi; \
 	fi
 	@mysql -h 127.0.0.1 -P 4000 -u root -e "SET GLOBAL tidb_enable_dist_task=OFF; SET GLOBAL tidb_ddl_enable_fast_reorg=OFF;" 2>/dev/null
 	@mysql -h 127.0.0.1 -P 4000 -u root -e "CREATE DATABASE IF NOT EXISTS \`$(DB_NAME)\`" 2>/dev/null
@@ -287,8 +307,15 @@ hosts: ## Add github.localhost entries to /etc/hosts (requires sudo)
 	@if grep -q 'github.localhost' /etc/hosts 2>/dev/null; then \
 		echo "✓ /etc/hosts already has github.localhost"; \
 	else \
-		echo "Adding github.localhost to /etc/hosts (requires sudo)..."; \
-		sudo sh -c 'echo "127.0.0.1 github.localhost api.github.localhost uploads.github.localhost" >> /etc/hosts'; \
+		echo "Adding github.localhost to /etc/hosts"; \
+		if [ "$$(id -u)" = "0" ]; then \
+			sh -c 'echo "127.0.0.1 github.localhost api.github.localhost uploads.github.localhost" >> /etc/hosts'; \
+		elif command -v sudo >/dev/null 2>&1; then \
+			sudo sh -c 'echo "127.0.0.1 github.localhost api.github.localhost uploads.github.localhost" >> /etc/hosts'; \
+		else \
+			echo "✗ Need root or sudo to add github.localhost to /etc/hosts"; \
+			exit 1; \
+		fi; \
 		echo "✓ Added github.localhost entries to /etc/hosts"; \
 	fi
 
@@ -324,7 +351,13 @@ run-bg: build ## Build and run in background (auto-detects sudo, falls back to u
 	@# Try privileged mode first (for port 80/443) without any interactive sudo prompt.
 	@# Launch in a fresh session so long-running acceptance suites do not inherit this shell's lifecycle.
 	@health_urls=""; \
-	if timeout 5 sudo -n true 2>/dev/null; then \
+	if [ "$$(id -u)" = "0" ]; then \
+		echo "✓ running as root, starting privileged listeners on :80/:443"; \
+		PID=$$(pgrep -x -n "$(BINARY)" 2>/dev/null) && [ -n "$$PID" ] && ps -p $$PID > /dev/null 2>&1 && kill $$PID 2>/dev/null || true; \
+		sleep 1; \
+		setsid env ./$(BINARY) < /dev/null > $(LOG_FILE) 2>&1 & \
+		health_urls="http://$(TEST_HOST)/readyz http://127.0.0.1/readyz"; \
+	elif timeout 5 sudo -n true 2>/dev/null; then \
 		echo "✓ passwordless sudo available, starting privileged listeners on :80/:443"; \
 		PID=$$(pgrep -x -n "$(BINARY)" 2>/dev/null) && [ -n "$$PID" ] && ps -p $$PID > /dev/null 2>&1 && sudo -n kill $$PID 2>/dev/null || true; \
 		sleep 1; \
@@ -356,7 +389,13 @@ run-bg: build ## Build and run in background (auto-detects sudo, falls back to u
 
 .PHONY: stop
 stop: ## Stop running server
-	-sudo pkill -x "$(BINARY)" 2>/dev/null
+	@if [ "$$(id -u)" = "0" ]; then \
+		pkill -x "$(BINARY)" 2>/dev/null || true; \
+	elif command -v sudo >/dev/null 2>&1; then \
+		sudo pkill -x "$(BINARY)" 2>/dev/null || true; \
+	else \
+		pkill -x "$(BINARY)" 2>/dev/null || true; \
+	fi
 	@echo "✓ Server stopped"
 
 .PHONY: restart
@@ -470,8 +509,8 @@ test-script: test-preflight ## Run a single test script, e.g. make test-script S
 # ─── Verify ───────────────────────────────────────────────────────────────────
 
 .PHONY: check
-check: build vet ## Build + vet (fast pre-commit check)
-	@echo "✓ Build and vet passed"
+check: build-dev vet ## Compile + vet dirty development state (fast pre-commit check)
+	@echo "✓ Development compile and vet passed"
 
 .PHONY: audit
 audit: ## Report remaining db.DB calls outside service layer

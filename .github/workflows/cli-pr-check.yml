@@ -1,23 +1,25 @@
-name: CLI PR Check
-
+# The mandatory core client gate lives in Fork CI. This optional workflow
+# exercises the complete vendored CLI without consuming duplicate PR minutes.
+name: Full vendored CLI (manual)
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
-
+permissions:
+  contents: read
+concurrency:
+  group: full-cli-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   cli-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
-
-      - name: Run CLI tests
+      - name: Run full CLI tests without inherited credentials or UI settings
         working-directory: cli
-        run: go test ./...
+        run: env -u GITHUB_TOKEN -u GH_TOKEN -u NO_COLOR -u CLICOLOR -u PAGER -u GH_PAGER go test -p 2 ./... -count=1 -timeout=20m
