@@ -157,3 +157,18 @@ func TestRESTPrefix(t *testing.T) {
 		})
 	}
 }
+
+func TestAGSEndpointsFromEnv(t *testing.T) {
+	t.Setenv("AGS_URL", "http://localhost:6666")
+	t.Setenv("AGENT_GIT_SERVICE_URL", "")
+
+	if got, want := GraphQLEndpoint("localhost"), "http://localhost:6666/api/graphql"; got != want {
+		t.Fatalf("GraphQLEndpoint() = %q, want %q", got, want)
+	}
+	if got, want := RESTPrefix("localhost"), "http://localhost:6666/api/v3/"; got != want {
+		t.Fatalf("RESTPrefix() = %q, want %q", got, want)
+	}
+	if got, want := HostPrefix("localhost"), "http://localhost:6666/"; got != want {
+		t.Fatalf("HostPrefix() = %q, want %q", got, want)
+	}
+}

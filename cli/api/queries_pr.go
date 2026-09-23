@@ -35,6 +35,7 @@ type PullRequest struct {
 	State               string
 	Closed              bool
 	URL                 string
+	ExternalProjections []PullRequestExternalProjection
 	BaseRefName         string
 	BaseRefOid          string
 	HeadRefName         string
@@ -100,6 +101,29 @@ type PullRequest struct {
 	ReviewRequests ReviewRequests
 
 	ClosingIssuesReferences ClosingIssuesReferences
+}
+
+// PullRequestExternalProjection is an AGS-owned provider projection of one PR.
+// AGS number and provider number are independent locators.
+type PullRequestExternalProjection struct {
+	Provider       string `json:"provider"`
+	ExternalRepo   string `json:"externalRepo"`
+	ExternalNumber int    `json:"externalNumber"`
+	ExternalUrl    string `json:"externalUrl"`
+	SourceBranch   string `json:"sourceBranch"`
+	TargetBranch   string `json:"targetBranch"`
+	State          string `json:"state"`
+	LastSyncedSha  string `json:"lastSyncedSha"`
+}
+
+// ForgejoProjection returns the Forgejo row when one exists.
+func (pr PullRequest) ForgejoProjection() (PullRequestExternalProjection, bool) {
+	for _, row := range pr.ExternalProjections {
+		if strings.EqualFold(strings.TrimSpace(row.Provider), "forgejo") && row.ExternalNumber > 0 {
+			return row, true
+		}
+	}
+	return PullRequestExternalProjection{}, false
 }
 
 type StatusCheckRollupNode struct {

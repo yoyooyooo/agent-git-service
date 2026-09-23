@@ -2,6 +2,7 @@ package create
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -990,6 +991,10 @@ func submitPR(opts CreateOptions, ctx CreateContext, state shared.IssueMetadataS
 		}
 	}
 
+	if err := maybeAttachMulticaPRLinkToken(params, opts.IO.ErrOut, ctx.PRRefs.BaseRepo().RepoHost()); err != nil {
+		return err
+	}
+
 	opts.IO.StartProgressIndicator()
 	pr, err := api.CreatePullRequest(client, ctx.PRRefs.BaseRepo(), params)
 	opts.IO.StopProgressIndicator()
@@ -1003,6 +1008,118 @@ func submitPR(opts CreateOptions, ctx CreateContext, state shared.IssueMetadataS
 		return fmt.Errorf("pull request create failed: %w", err)
 	}
 	return nil
+}
+
+func maybeAttachMulticaPRLinkToken(params map[string]interface{}, errOut io.Writer, repoHost string) error {
+	multicaToken := strings.TrimSpace(os.Getenv("MULTICA_TOKEN"))
+	serverURL := strings.TrimRight(strings.TrimSpace(os.Getenv("MULTICA_SERVER_URL")), "/")
+	if multicaToken == "" || serverURL == "" || !strings.HasPrefix(multicaToken, "mat_") || !multicaPRLinkTokenTargetAllowed(repoHost) {
+		return nil
+	}
+	req, err := http.NewRequest(http.MethodPost, serverURL+"/api/integrations/external-pr/link-token", strings.NewReader("{}"))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+multicaToken)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request Multica PR link token: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("request Multica PR link token: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out struct {
+		LinkToken string `json:"link_token"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return fmt.Errorf("decode Multica PR link token: %w", err)
+	}
+	if strings.TrimSpace(out.LinkToken) == "" {
+		return fmt.Errorf("Multica PR link token response missing link_token")
+	}
+	bodyText, _ := params["body"].(string)
+	params["body"] = strings.TrimSpace(bodyText) + "\n\n<!-- multica-external-pr-link-token: " + strings.TrimSpace(out.LinkToken) + " -->"
+	if errOut != nil {
+		fmt.Fprintln(errOut, "Multica issue context verified for this pull request.")
+	}
+	return nil
+}
+
+func multicaPRLinkTokenTargetAllowed(repoHost string) bool {
+	repoHost = normalizeHostForMulticaPRLink(repoHost)
+	if repoHost == "" {
+		return false
+	}
+	allowedHosts := splitMulticaPRLinkHosts(os.Getenv("MULTICA_EXTERNAL_PR_LINK_TOKEN_ALLOWED_HOSTS"))
+	for _, rawURL := range []string{os.Getenv("AGS_URL"), os.Getenv("AGENT_GIT_SERVICE_URL")} {
+		if host := normalizeHostForMulticaPRLink(rawURL); host != "" {
+			allowedHosts = append(allowedHosts, host)
+		}
+	}
+	for _, host := range allowedHosts {
+		if multicaPRLinkHostsMatch(repoHost, host) {
+			return true
+		}
+	}
+	return false
+}
+
+func multicaPRLinkHostsMatch(repoHost, allowedHost string) bool {
+	repoHost = normalizeHostForMulticaPRLink(repoHost)
+	allowedHost = normalizeHostForMulticaPRLink(allowedHost)
+	if repoHost == "" || allowedHost == "" {
+		return false
+	}
+	if repoHost == allowedHost {
+		return true
+	}
+	repoName := hostnameOnlyForMulticaPRLink(repoHost)
+	allowedName := hostnameOnlyForMulticaPRLink(allowedHost)
+	return repoName != "" && allowedName != "" && repoName == allowedName
+}
+
+func splitMulticaPRLinkHosts(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if host := normalizeHostForMulticaPRLink(part); host != "" {
+			out = append(out, host)
+		}
+	}
+	return out
+}
+
+func normalizeHostForMulticaPRLink(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.ToLower(parsed.Host))
+}
+
+func hostnameOnlyForMulticaPRLink(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.ToLower(parsed.Hostname()))
 }
 
 func renderPullRequestPlain(w io.Writer, params map[string]interface{}, state *shared.IssueMetadataState) error {

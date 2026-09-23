@@ -137,6 +137,7 @@ var defaultFields = []string{
 	"isCrossRepository",
 	"isDraft",
 	"createdAt",
+	"externalProjections",
 }
 
 func listRun(opts *ListOptions) error {
@@ -230,7 +231,7 @@ func listRun(opts *ListOptions) error {
 	if !isTTY {
 		headers = append(headers, "STATE")
 	}
-	headers = append(headers, "CREATED AT")
+	headers = append(headers, "FORGEJO", "CREATED AT")
 
 	table := tableprinter.New(opts.IO, tableprinter.WithHeader(headers...))
 	for _, pr := range listResult.PullRequests {
@@ -245,6 +246,11 @@ func listRun(opts *ListOptions) error {
 		if !isTTY {
 			table.AddField(shared.PrStateWithDraft(&pr))
 		}
+		forgejoLabel := ""
+		if row, ok := pr.ForgejoProjection(); ok {
+			forgejoLabel = "#" + strconv.Itoa(row.ExternalNumber)
+		}
+		table.AddField(forgejoLabel)
 		table.AddTimeField(opts.Now(), pr.CreatedAt, cs.Muted)
 		table.EndRow()
 	}

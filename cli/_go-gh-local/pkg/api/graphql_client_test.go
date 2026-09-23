@@ -280,9 +280,10 @@ func TestGraphQLEndpoint(t *testing.T) {
 			wantEndpoint: "https://api.github.com/graphql",
 		},
 		{
-			name:         "localhost",
-			host:         "github.localhost",
-			wantEndpoint: "http://api.github.localhost/graphql",
+			name: "localhost",
+			host: "github.localhost",
+			// AGS routes local GraphQL directly; it does not require an api subdomain.
+			wantEndpoint: "http://github.localhost/api/graphql",
 		},
 		{
 			name:         "garage",

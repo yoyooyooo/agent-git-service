@@ -256,3 +256,36 @@ func TestHTTPHeaders(t *testing.T) {
 	}
 	assert.Equal(t, "", stderr.String())
 }
+
+func TestGraphQLRewritesExplicitAGSURL(t *testing.T) {
+	for _, hostname := range []string{"localhost", "localhost:6666"} {
+		t.Run(hostname, func(t *testing.T) {
+			t.Setenv("AGS_URL", "http://localhost:6666")
+			var gotURL string
+			client := NewClientFromHTTP(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				gotURL = req.URL.String()
+				return &http.Response{
+					StatusCode: 200,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(`{"data":{"viewer":{"login":"ags"}}}`)),
+					Request:    req,
+				}, nil
+			})})
+			var response struct {
+				Viewer struct {
+					Login string
+				}
+			}
+			if err := client.GraphQL(hostname, "QUERY", nil, &response); err != nil {
+				t.Fatalf("GraphQL: %v", err)
+			}
+			if gotURL != "http://localhost:6666/api/graphql" {
+				t.Fatalf("GraphQL URL = %q, want AGS URL", gotURL)
+			}
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }

@@ -222,11 +222,9 @@ func TestMigrationWriteErrors(t *testing.T) {
 func makeFileUnwriteable(t *testing.T, file string) {
 	t.Helper()
 
-	f, err := os.Create(file)
-	require.NoError(t, err)
-	f.Close()
-
-	require.NoError(t, os.Chmod(file, 0000))
+	blockedParent := filepath.Join(filepath.Dir(file), filepath.Base(file)+".blocked")
+	require.NoError(t, os.WriteFile(blockedParent, []byte("not a directory"), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join(blockedParent, "target"), file))
 }
 
 func mockMigration(doFunc func(config *ghConfig.Config) error) *ghmock.MigrationMock {

@@ -212,7 +212,7 @@ func testScriptParamsFor(tsEnv testScriptEnv, command string) testscript.Params 
 	return testscript.Params{
 		Dir:                 dir,
 		Files:               files,
-		Setup:               sharedSetup(tsEnv),
+		Setup:               sharedSetup(tsEnv, command),
 		Cmds:                sharedCmds(tsEnv),
 		RequireExplicitExec: true,
 		RequireUniqueNames:  true,
@@ -222,11 +222,14 @@ func testScriptParamsFor(tsEnv testScriptEnv, command string) testscript.Params 
 
 var keyT struct{}
 
-func sharedSetup(tsEnv testScriptEnv) func(ts *testscript.Env) error {
+func sharedSetup(tsEnv testScriptEnv, command string) func(ts *testscript.Env) error {
 	return func(ts *testscript.Env) error {
 		scriptName, ok := extractScriptName(ts.Vars)
 		if !ok {
 			ts.T().Fatal("script name not found")
+		}
+		if os.Getenv("GH_ACCEPTANCE_SKIP_WORKFLOW_EXEC") == "true" && acceptanceScriptRequiresWorkflowExec(command, scriptName) {
+			ts.T().Skip("workflow execution sandbox unavailable in this environment")
 		}
 
 		// When using script name to uniquely identify where test data comes from,
@@ -249,6 +252,28 @@ func sharedSetup(tsEnv testScriptEnv) func(ts *testscript.Env) error {
 		ts.Values[keyT] = ts.T()
 		return nil
 	}
+}
+
+func acceptanceScriptRequiresWorkflowExec(command, scriptName string) bool {
+	switch command {
+	case "secret":
+		switch scriptName {
+		case "secret-org", "secret-repo", "secret-repo-env":
+			return true
+		}
+	case "workflow":
+		switch scriptName {
+		case "cache-list-delete",
+			"run-cancel",
+			"run-delete",
+			"run-download",
+			"run-download-traversal",
+			"run-rerun",
+			"run-view":
+			return true
+		}
+	}
+	return false
 }
 
 // sharedCmds defines a collection of custom testscript commands for our use.

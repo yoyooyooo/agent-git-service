@@ -3,6 +3,8 @@ package ghinstance
 import (
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
 	"strings"
 
 	ghauth "github.com/cli/go-gh/v2/pkg/auth"
@@ -44,6 +46,9 @@ func HostnameValidator(hostname string) error {
 }
 
 func GraphQLEndpoint(hostname string) string {
+	if baseURL := agsBaseURLForHost(hostname); baseURL != "" {
+		return baseURL + "/api/graphql"
+	}
 	if isGarage(hostname) {
 		return fmt.Sprintf("https://%s/api/graphql", hostname)
 	}
@@ -57,6 +62,9 @@ func GraphQLEndpoint(hostname string) string {
 }
 
 func RESTPrefix(hostname string) string {
+	if baseURL := agsBaseURLForHost(hostname); baseURL != "" {
+		return baseURL + "/api/v3/"
+	}
 	if isGarage(hostname) {
 		return fmt.Sprintf("https://%s/api/v3/", hostname)
 	}
@@ -91,8 +99,32 @@ func GistHost(hostname string) string {
 }
 
 func HostPrefix(hostname string) string {
+	if baseURL := agsBaseURLForHost(hostname); baseURL != "" {
+		return baseURL + "/"
+	}
 	if strings.EqualFold(hostname, localhost) {
 		return fmt.Sprintf("http://%s/", hostname)
 	}
 	return fmt.Sprintf("https://%s/", hostname)
+}
+
+func agsBaseURLForHost(hostname string) string {
+	hostname = strings.TrimSpace(hostname)
+	if hostname == "" {
+		return ""
+	}
+	for _, envName := range []string{"AGS_URL", "AGENT_GIT_SERVICE_URL"} {
+		raw := strings.TrimSpace(os.Getenv(envName))
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			continue
+		}
+		if strings.EqualFold(hostname, u.Host) || strings.EqualFold(hostname, u.Hostname()) {
+			return strings.TrimRight(raw, "/")
+		}
+	}
+	return ""
 }

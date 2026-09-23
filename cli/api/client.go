@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"regexp"
 	"strings"
 
@@ -262,6 +264,9 @@ func generateScopesSuggestion(statusCode int, endpointNeedsScopes, tokenHasScope
 func clientOptions(hostname string, transport http.RoundTripper) ghAPI.ClientOptions {
 	// AuthToken, and Headers are being handled by transport,
 	// so let go-gh know that it does not need to resolve them.
+	if agsURL := agsBaseURLForHost(hostname); agsURL != nil {
+		transport = agsRewriteTransport{baseURL: agsURL, host: hostname, rt: transport}
+	}
 	opts := ghAPI.ClientOptions{
 		AuthToken: "none",
 		Headers: map[string]string{
@@ -274,4 +279,59 @@ func clientOptions(hostname string, transport http.RoundTripper) ghAPI.ClientOpt
 		LogIgnoreEnv:       true,
 	}
 	return opts
+}
+
+type agsRewriteTransport struct {
+	baseURL *url.URL
+	host    string
+	rt      http.RoundTripper
+}
+
+func (t agsRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req != nil && t.baseURL != nil && agsRequestHostMatches(req.URL.Hostname(), t.host) {
+		clone := req.Clone(req.Context())
+		clone.URL.Scheme = t.baseURL.Scheme
+		clone.URL.Host = t.baseURL.Host
+		req = clone
+	}
+	rt := t.rt
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	return rt.RoundTrip(req)
+}
+
+func agsBaseURLForHost(hostname string) *url.URL {
+	hostname = strings.TrimSpace(hostname)
+	if hostname == "" {
+		return nil
+	}
+	for _, envName := range []string{"AGS_URL", "AGENT_GIT_SERVICE_URL"} {
+		raw := strings.TrimSpace(os.Getenv(envName))
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			continue
+		}
+		if strings.EqualFold(hostname, u.Host) || strings.EqualFold(hostname, u.Hostname()) {
+			return u
+		}
+	}
+	return nil
+}
+
+func agsRequestHostMatches(requestHost, configuredHost string) bool {
+	requestHost = normalizeAGSRequestHost(requestHost)
+	configuredHost = normalizeAGSRequestHost(configuredHost)
+	return requestHost != "" && requestHost == configuredHost
+}
+
+func normalizeAGSRequestHost(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if parsed, err := url.Parse("//" + host); err == nil && parsed.Hostname() != "" {
+		host = parsed.Hostname()
+	}
+	return strings.TrimPrefix(host, "api.")
 }

@@ -82,7 +82,7 @@ func NewCmdView(f *cmdutil.Factory, runF func(*ViewOptions) error) *cobra.Comman
 }
 
 var defaultFields = []string{
-	"url", "number", "title", "state", "body", "author", "autoMergeRequest",
+	"url", "number", "title", "state", "body", "author", "autoMergeRequest", "externalProjections",
 	"isDraft", "maintainerCanModify", "mergeable", "additions", "deletions", "commitsCount",
 	"baseRefName", "headRefName", "headRepositoryOwner", "headRepository", "isCrossRepository",
 	"reviewRequests", "reviews", "assignees", "labels", "projectCards", "projectItems", "milestone",
@@ -161,6 +161,9 @@ func printRawPrPreview(io *iostreams.IOStreams, pr *api.PullRequest) error {
 	fmt.Fprintf(out, "milestone:\t%s\n", milestoneTitle)
 	fmt.Fprintf(out, "number:\t%d\n", pr.Number)
 	fmt.Fprintf(out, "url:\t%s\n", pr.URL)
+	if row, ok := pr.ForgejoProjection(); ok {
+		fmt.Fprintf(out, "forgejo:\t#%d\t%s\n", row.ExternalNumber, row.ExternalUrl)
+	}
 	fmt.Fprintf(out, "additions:\t%s\n", cs.Green(strconv.Itoa(pr.Additions)))
 	fmt.Fprintf(out, "deletions:\t%s\n", cs.Red(strconv.Itoa(pr.Deletions)))
 	var autoMerge string
@@ -288,6 +291,9 @@ func printHumanPrPreview(opts *ViewOptions, baseRepo ghrepo.Interface, pr *api.P
 
 	// Footer
 	fmt.Fprintf(out, cs.Muted("View this pull request on GitHub: %s\n"), pr.URL)
+	if row, ok := pr.ForgejoProjection(); ok {
+		fmt.Fprintf(out, cs.Muted("Forgejo projection: #%d %s\n"), row.ExternalNumber, row.ExternalUrl)
+	}
 
 	return nil
 }

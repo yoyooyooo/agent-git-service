@@ -89,10 +89,10 @@ func TestPRList(t *testing.T) {
 
 		Showing 3 of 3 open pull requests in OWNER/REPO
 
-		ID   TITLE                  BRANCH         CREATED AT
-		#32  New feature            feature        about 3 hours ago
-		#29  Fixed bad bug          hubot:bug-fix  about 1 month ago
-		#28  Improve documentation  docs           about 2 years ago
+		ID   TITLE                  BRANCH         FORGEJO  CREATED AT
+		#32  New feature            feature                 about 3 hours ago
+		#29  Fixed bad bug          hubot:bug-fix           about 1 month ago
+		#28  Improve documentation  docs                    about 2 years ago
 	`), output.String())
 	assert.Equal(t, ``, output.Stderr())
 }
@@ -110,10 +110,52 @@ func TestPRList_nontty(t *testing.T) {
 
 	assert.Equal(t, "", output.Stderr())
 
-	assert.Equal(t, `32	New feature	feature	DRAFT	2022-08-24T20:01:12Z
-29	Fixed bad bug	hubot:bug-fix	OPEN	2022-07-20T19:01:12Z
-28	Improve documentation	docs	MERGED	2020-01-26T19:01:12Z
+	assert.Equal(t, `32	New feature	feature	DRAFT		2022-08-24T20:01:12Z
+29	Fixed bad bug	hubot:bug-fix	OPEN		2022-07-20T19:01:12Z
+28	Improve documentation	docs	MERGED		2020-01-26T19:01:12Z
 `, output.String())
+}
+
+func TestPRList_forgejoProjection(t *testing.T) {
+	http := initFakeHTTP()
+	defer http.Verify(t)
+
+	http.Register(httpmock.GraphQL(`query PullRequestList\b`), httpmock.GraphQLQuery(`{
+		"data": {
+		  "repository": {
+			"pullRequests": {
+			  "totalCount": 1,
+			  "nodes": [
+				{
+				  "number": 28,
+				  "title": "docs onboard",
+				  "url": "https://ags.example/example-team/docs/pull/28",
+				  "createdAt": "2022-08-24T20:01:12Z",
+				  "headRefName": "docs/onboard",
+				  "state": "OPEN",
+				  "isDraft": false,
+				  "externalProjections": [
+					{
+					  "provider": "forgejo",
+					  "externalRepo": "example-team/docs",
+					  "externalNumber": 23,
+					  "externalUrl": "http://forgejo.example/example-team/docs/pulls/23",
+					  "state": "open"
+					}
+				  ]
+				}
+			  ],
+			  "pageInfo": { "hasNextPage": false, "endCursor": "" }
+			}
+		  }
+		}
+	}`, func(_ string, _ map[string]interface{}) {}))
+
+	output, err := runCommand(http, nil, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, "28\tdocs onboard\tdocs/onboard\tOPEN\t#23\t2022-08-24T20:01:12Z\n", output.String())
 }
 
 func TestPRList_filtering(t *testing.T) {

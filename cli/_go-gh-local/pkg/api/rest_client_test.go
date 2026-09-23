@@ -479,9 +479,10 @@ func TestRestPrefix(t *testing.T) {
 			wantEndpoint: "https://api.github.com/",
 		},
 		{
-			name:         "localhost",
-			host:         "github.localhost",
-			wantEndpoint: "http://api.github.localhost/",
+			name: "localhost",
+			host: "github.localhost",
+			// Match the canonical local AGS REST prefix used by restPrefix.
+			wantEndpoint: "http://github.localhost/api/v3/",
 		},
 		{
 			name:         "garage",

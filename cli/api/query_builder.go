@@ -352,6 +352,7 @@ var PullRequestFields = append(sharedIssuePRFields,
 	"closingIssuesReferences",
 	"commits",
 	"deletions",
+	"externalProjections",
 	"files",
 	"fullDatabaseId",
 	"headRefName",
@@ -431,6 +432,8 @@ func IssueGraphQL(fields []string) string {
 			q = append(q, StatusCheckRollupGraphQLWithoutCountByState(""))
 		case "statusCheckRollupWithCountByState": // pseudo-field
 			q = append(q, StatusCheckRollupGraphQLWithCountByState())
+		case "externalProjections":
+			q = append(q, `externalProjections{provider,externalRepo,externalNumber,externalUrl,sourceBranch,targetBranch,state,lastSyncedSha}`)
 		case "closingIssuesReferences":
 			q = append(q, prClosingIssuesReferences)
 		case "closedByPullRequestsReferences":

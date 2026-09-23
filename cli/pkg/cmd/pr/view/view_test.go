@@ -43,6 +43,7 @@ func TestJSONFields(t *testing.T) {
 		"commits",
 		"createdAt",
 		"deletions",
+		"externalProjections",
 		"files",
 		"fullDatabaseId",
 		"headRefName",

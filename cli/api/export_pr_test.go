@@ -217,6 +217,41 @@ func TestPullRequest_ExportData(t *testing.T) {
 			`),
 		},
 		{
+			name:   "external projections",
+			fields: []string{"number", "externalProjections"},
+			inputJSON: heredoc.Doc(`
+				{
+					"number": 28,
+					"externalProjections": [
+						{
+							"provider": "forgejo",
+							"externalRepo": "example-team/docs",
+							"externalNumber": 23,
+							"externalUrl": "http://forgejo.example/example-team/docs/pulls/23",
+							"state": "open"
+						}
+					]
+				}
+			`),
+			outputJSON: heredoc.Doc(`
+				{
+					"externalProjections": [
+						{
+							"externalNumber": 23,
+							"externalRepo": "example-team/docs",
+							"externalUrl": "http://forgejo.example/example-team/docs/pulls/23",
+							"lastSyncedSha": "",
+							"provider": "forgejo",
+							"sourceBranch": "",
+							"state": "open",
+							"targetBranch": ""
+						}
+					],
+					"number": 28
+				}
+			`),
+		},
+		{
 			name:   "milestone",
 			fields: []string{"number", "milestone"},
 			inputJSON: heredoc.Doc(`
