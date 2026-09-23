@@ -43,16 +43,22 @@ def validated_version(version):
 
 def api(path, *, method='GET', fields=(), missing=False):
     args=['gh','api','--method',method,path]
-    for key,value in fields: args += ['-f',key+'='+value]
+    for key,value in fields:
+        if isinstance(value,(bool,int)):
+            args += ['-F',key+'='+json.dumps(value)]
+        else:
+            args += ['-f',key+'='+value]
     result=subprocess.run(args,cwd=ROOT,capture_output=True,timeout=90)
     if result.returncode:
         if missing and b'(HTTP 404)' in result.stderr: return None
         raise RuntimeError('GitHub operation failed: '+method+' '+path)
     return json.loads(result.stdout) if result.stdout else None
 
-def gate(version, sha):
+def gate(version, sha, *, recovery_id=None):
     validated_version(version)
-    if not SHA.fullmatch(sha) or git('rev-parse','HEAD')!=sha: raise ValueError('source mismatch')
+    if not isinstance(sha,str) or not SHA.fullmatch(sha): raise ValueError('invalid source identity')
+    if recovery_id is None and git('rev-parse','HEAD')!=sha: raise ValueError('source mismatch')
+    if recovery_id is not None and (type(recovery_id) is not int or recovery_id<=0 or git('rev-parse',sha+'^{commit}')!=sha): raise ValueError('invalid exact recovery identity')
     meta=api('repos/'+REPOSITORY)
     if meta['id']!=REPOSITORY_ID or meta['private']: raise ValueError('wrong or nonpublic repository')
     branch=meta['default_branch']
@@ -69,11 +75,31 @@ def gate(version, sha):
         if jobs['total_count']>100 or len(jobs['jobs'])!=jobs['total_count'] or len(jobs['jobs'])<expected_min or any(j['conclusion']!='success' for j in jobs['jobs']):
             raise ValueError('CI jobs are incomplete, skipped or failed')
         receipts[path]=chosen['id']
-    if api('repos/'+REPOSITORY+'/releases/tags/'+version,missing=True) is not None: raise ValueError('release exists; never overwrite or silently resume it')
-    if api('repos/'+REPOSITORY+'/git/ref/tags/'+version,missing=True) is not None: raise ValueError('tag already exists')
+    if recovery_id is None:
+        if lookup_release(version) is not None: raise ValueError('release exists; never overwrite or silently resume it')
+        if api('repos/'+REPOSITORY+'/git/ref/tags/'+version,missing=True) is not None: raise ValueError('tag already exists')
+    else:
+        require_draft(api('repos/'+REPOSITORY+'/releases/'+str(recovery_id)),version,sha,recovery_id)
     # Repository immutability is configured by an administrator, never by a
     # build token. The publisher requires the resulting Release to be locked.
     return {'source':sha,'tree':git('rev-parse',sha+'^{tree}'),'version':version,'ci':receipts,'repository_id':REPOSITORY_ID}
+
+def lookup_release(version):
+    # Published lookup deliberately does not cover a draft with no Git tag.
+    published=api('repos/'+REPOSITORY+'/releases/tags/'+version,missing=True)
+    if published is not None: return published
+    matches=[]
+    for page in range(1,11):
+        rows=api('repos/'+REPOSITORY+'/releases?per_page=100&page='+str(page))
+        matches.extend(r for r in rows if r.get('tag_name')==version)
+        if len(matches)>1: raise ValueError('ambiguous release version')
+        if len(rows)<100: return matches[0] if matches else None
+    raise ValueError('release inventory exceeds lookup bound; no absence claim')
+
+def require_draft(release,version,sha,release_id=None):
+    if not release or not release.get('draft') or release.get('immutable') or release.get('tag_name')!=version or release.get('target_commitish')!=sha or type(release.get('id')) is not int or (release_id is not None and release['id']!=release_id):
+        raise ValueError('draft identity, source or publication state changed')
+    return release
 
 def environment(home):
     # Preserve only build tools/cache settings, not operator credentials/config.
@@ -202,37 +228,74 @@ def check_assets(directory,version,sha):
         assets.extend([bundle,manifest]);lines.append(expected+'  '+name)
     return assets,lines
 
-def publish(version,sha,directory):
-    gate(version,sha)
+def verified_assets(directory,version,sha):
     assets,lines=check_assets(directory,version,sha)
     for bundle in (p for p in assets if p.name.endswith('.tar.gz')):
         run(['gh','attestation','verify',str(bundle),'--repo',REPOSITORY,'--source-digest',sha,
              '--signer-workflow',REPOSITORY+'/.github/workflows/release.yml','--deny-self-hosted-runners'],timeout=120)
-    checks=Path(directory)/'SHA256SUMS'
-    if checks.exists(): raise ValueError('refusing to replace checksum manifest')
-    checks.write_text('\n'.join(lines)+'\n'); assets.append(checks)
-    # Draft is intentionally retained if upload/verification fails. Never
-    # republish a partial upload or reuse an already-published version.
+    checks=Path(directory)/'SHA256SUMS'; expected='\n'.join(lines)+'\n'
+    if checks.exists():
+        if checks.is_symlink() or checks.read_text()!=expected: raise ValueError('existing checksum manifest differs; refusing overwrite')
+    else:
+        with checks.open('x') as out: out.write(expected)
+    return [*assets,checks]
+
+def validate_uploaded(release,assets):
+    listed=release.get('assets',[])
+    if len(listed)!=len(assets) or {a['name'] for a in listed}!={p.name for p in assets}: raise ValueError('draft upload incomplete or ambiguous')
+    local={p.name:p for p in assets}
+    for asset in listed:
+        path=local[asset['name']]
+        if asset.get('state')!='uploaded' or asset.get('digest')!='sha256:'+digest(path) or asset['size']!=path.stat().st_size:
+            raise ValueError('GitHub upload state/digest/size mismatch')
+
+def finish_draft(version,sha,release_id,assets):
+    endpoint='repos/'+REPOSITORY+'/releases/'+str(release_id)
+    release=require_draft(api(endpoint),version,sha,release_id)
+    validate_uploaded(release,assets)
+    refpath='repos/'+REPOSITORY+'/git/ref/tags/'+version
+    ref=api(refpath,missing=True)
+    if ref is None:
+        # Draft creation need not create a tag. Create the exact pinned ref,
+        # never a moving branch name; a concurrent conflict is an explicit stop.
+        api('repos/'+REPOSITORY+'/git/refs',method='POST',fields=(('ref','refs/tags/'+version),('sha',sha)))
+        ref=api(refpath)
+    if ref['object']['type']!='commit' or ref['object']['sha']!=sha: raise ValueError('release tag differs from accepted source')
+    # Re-read after ref creation; publishing uses the numeric draft identity.
+    release=require_draft(api(endpoint),version,sha,release_id); validate_uploaded(release,assets)
+    api(endpoint,method='PATCH',fields=(('draft',False),('make_latest','false')))
+    release=api(endpoint)
+    if release.get('draft') or not release.get('immutable') or release.get('tag_name')!=version or release.get('id')!=release_id: raise ValueError('release was not locked after publication')
+    validate_uploaded(release,assets)
+    ref=api(refpath)
+    if ref['object']['type']!='commit' or ref['object']['sha']!=sha: raise ValueError('published tag identity mismatch')
+    return {'tag':version,'source':sha,'release_id':release_id,'immutable':True,'assets':len(assets),'release_url':release['html_url']}
+
+def publish(version,sha,directory):
+    gate(version,sha)
+    assets=verified_assets(directory,version,sha)
+    # Draft is retained on failure. An ordinary rerun will refuse this version.
     notes='Exact-source pre-release for controlled installation.\n\nSource: `'+sha+'`\n\nNative macOS ARM64 and Linux amd64 bundles contain gh-server, ags-edge, ags-replication, build metadata and license. Verify release assets and build attestations before execution. No service configuration or data is included. See docs/operations/releases.md for platform limits, staging and rollback.\n'
     args=['gh','release','create',version,'--repo',REPOSITORY,'--target',sha,'--draft','--title',version,'--notes',notes]
     if '-rc' in version: args.append('--prerelease')
     args.extend(str(p) for p in assets);run(args,timeout=180)
-    release=api('repos/'+REPOSITORY+'/releases/tags/'+version)
-    if not release['draft'] or {a['name'] for a in release['assets']}!={p.name for p in assets}: raise ValueError('draft upload incomplete')
-    ref=api('repos/'+REPOSITORY+'/git/ref/tags/'+version)
-    if ref['object']['type']!='commit' or ref['object']['sha']!=sha: raise ValueError('release tag differs from accepted source')
-    for asset in release['assets']:
-        p=Path(directory)/asset['name']
-        if asset.get('digest')!='sha256:'+digest(p) or asset['size']!=p.stat().st_size: raise ValueError('GitHub upload digest/size mismatch')
-    run(['gh','release','edit',version,'--repo',REPOSITORY,'--draft=false','--latest=false'],timeout=90)
-    release=api('repos/'+REPOSITORY+'/releases/tags/'+version)
-    if release['draft'] or not release.get('immutable'): raise ValueError('release was not locked after publication')
-    return {'tag':version,'source':sha,'immutable':True,'assets':len(assets),'release_url':release['html_url']}
+    release=require_draft(lookup_release(version),version,sha)
+    return finish_draft(version,sha,release['id'],assets)
+
+def recover_draft(version,sha,directory,release_id):
+    # Explicit operator recovery only. No new upload, source rebuild, version
+    # change or deletion; every existing artifact must match its provenance.
+    gate(version,sha,recovery_id=release_id)
+    assets=verified_assets(directory,version,sha)
+    return finish_draft(version,sha,release_id,assets)
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('mode',choices=['gate','build','publish']);p.add_argument('--version',required=True);p.add_argument('--sha');p.add_argument('--output');a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('mode',choices=['gate','build','publish','recover-draft']);p.add_argument('--version',required=True);p.add_argument('--sha');p.add_argument('--output');p.add_argument('--draft-id',type=int);a=p.parse_args()
     if a.mode=='build': result=build(a.version,a.output)
     elif a.mode=='gate': result=gate(a.version,a.sha)
+    elif a.mode=='recover-draft':
+        if a.draft_id is None: p.error('recovery requires --draft-id')
+        result=recover_draft(a.version,a.sha,a.output,a.draft_id)
     else: result=publish(a.version,a.sha,a.output)
     print(json.dumps(result,indent=2))
 if __name__=='__main__': main()

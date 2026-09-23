@@ -41,6 +41,7 @@ class ReleaseTests(unittest.TestCase):
                 rows=[{'conclusion':'success'} for _ in range(n)]
                 if skipped: rows[0]['conclusion']='skipped'
                 return {'total_count':n+int(incomplete),'jobs':rows}
+            if '/releases?per_page=' in path: return []
             if '/releases/tags/' in path or '/git/ref/tags/' in path: return {'exists':True} if existing else None
             raise AssertionError(path)
         return api
@@ -92,6 +93,43 @@ class ReleaseTests(unittest.TestCase):
             archive=self.make_bundle(Path(directory))
             for version,source,target in ((VER,'c'*40,'darwin_arm64'),(VER,SOURCE,'linux_amd64'),('fork-20260924.2',SOURCE,'darwin_arm64')):
                 with self.assertRaises(ValueError):installer.inspect_bundle(archive,version,source,target)
+
+    def test_draft_lookup_covers_unpublished_version_without_tag(self):
+        draft={'id':123,'tag_name':VER,'target_commitish':SOURCE,'draft':True,'immutable':False}
+        def api(path,**kwargs):
+            if '/releases/tags/' in path:return None
+            if '/releases?per_page=' in path:return [draft]
+            raise AssertionError(path)
+        with mock.patch.object(release,'api',side_effect=api):
+            self.assertEqual(release.lookup_release(VER)['id'],123)
+        for drift in ({'target_commitish':'main'},{'id':124},{'draft':False},{'tag_name':'other'}):
+            with self.assertRaises(ValueError):release.require_draft({**draft,**drift},VER,SOURCE,123)
+
+    def test_numeric_draft_finish_creates_exact_absent_tag_and_never_reuploads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            asset=Path(directory)/'fixture';asset.write_bytes(b'release-fixture')
+            row={'name':asset.name,'size':asset.stat().st_size,'digest':'sha256:'+release.digest(asset),'state':'uploaded'}
+            for case in ('absent-tag','existing-exact-tag','wrong-tag','asset-drift'):
+                state={'ref':None if case=='absent-tag' else {'object':{'type':'commit','sha':'c'*40 if case=='wrong-tag' else SOURCE}},'published':False,'writes':[],'reads':0}
+                def api(path,method='GET',fields=(),**kwargs):
+                    if path.endswith('/git/refs'):
+                        self.assertEqual(method,'POST');self.assertEqual(dict(fields),{'ref':'refs/tags/'+VER,'sha':SOURCE})
+                        state['ref']={'object':{'type':'commit','sha':SOURCE}};state['writes'].append('create-tag');return state['ref']
+                    if '/git/ref/tags/' in path:return state['ref']
+                    if path.endswith('/releases/123'):
+                        if method=='PATCH':
+                            self.assertEqual(dict(fields),{'draft':False,'make_latest':'false'});state['published']=True;state['writes'].append('publish')
+                        state['reads']+=1
+                        changed={**row,'digest':'sha256:'+'0'*64} if case=='asset-drift' else row
+                        return {'id':123,'tag_name':VER,'target_commitish':SOURCE,'draft':not state['published'],'immutable':state['published'],'assets':[changed],'html_url':'https://example.test/release'}
+                    raise AssertionError(path)
+                with mock.patch.object(release,'api',side_effect=api),mock.patch.object(release,'run',side_effect=AssertionError('no upload or command replay during finish')):
+                    if case in ('wrong-tag','asset-drift'):
+                        with self.assertRaises(ValueError):release.finish_draft(VER,SOURCE,123,[asset])
+                        self.assertNotIn('publish',state['writes'])
+                    else:
+                        self.assertTrue(release.finish_draft(VER,SOURCE,123,[asset])['immutable'])
+                        self.assertEqual(state['writes'],['create-tag','publish'] if case=='absent-tag' else ['publish'])
 
     def test_release_is_manual_and_uses_attested_native_targets(self):
         text=(ROOT/'.github/workflows/release.yml').read_text()

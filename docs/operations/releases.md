@@ -51,9 +51,18 @@ their provenance and uploaded digests before publishing the complete draft.
 The repository's immutable-release setting locks the published tag and assets.
 
 A failed draft/upload is retained for inspection. Re-running does not silently
-clobber a tag or finish an ambiguous release. Inspect the remote state first and
-use an explicitly reviewed recovery or a new version. A successful source test
-or release does not deploy anything.
+clobber a tag or finish an ambiguous release. Drafts without a Git tag are located
+through their numeric release identity, not assumed to exist at the published-tag
+endpoint. Before publication the exact pinned Git tag is created or verified,
+then the complete draft's identity and upload digests are checked again.
+
+An operator may explicitly resume a fully uploaded draft using `recover-draft`
+with its numeric `--draft-id`, exact `--sha`, version and locally downloaded
+original build artifacts. This path revalidates the source's full CI, provenance,
+embedded manifests and every remote upload; it never rebuilds, uploads, changes
+versions or overwrites content. It refuses an already published release or a
+mismatched tag. A tag-only or partial-upload failure requires separate inspection,
+not a blind retry. A successful source test or release does not deploy anything.
 
 ## Plan, verify and stage an installation
 
