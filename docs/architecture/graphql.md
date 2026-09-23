@@ -66,7 +66,7 @@ Does not own:
 | `gql_shapes.go` | Generic helper structs |
 | `gql_shapes_repo.go` | Repository, User |
 | `gql_shapes_issue.go` | Issue with lazy comment loading, state reason, linked branches |
-| `gql_shapes_pr.go` | PR with lazy diff stats, review loading, merge simulation, status check rollup |
+| `gql_shapes_pr.go` | PR with lazy diff stats, review loading, merge simulation, status check rollup, and delegated `agsActor`/`delegatedBy` projection |
 | `gql_shapes_project.go` | Project, fields, items (including draft issues) |
 | `gql_shapes_team.go` | Team with member nodes |
 | `gql_shapes_pr_status.go` | PR status shapes |
@@ -118,6 +118,21 @@ Request: repository { issues { nodes { id title } } }
 
 Without filtering, strict GraphQL clients such as `gh` CLI can reject the response.
 
+### Delegated PR Actor Projection
+
+A `PullRequest` exposes optional `agsActor` and `delegatedBy` fields. The shape
+uses GraphQL camelCase equivalents of the REST extension: `workspaceId`,
+`agentId`, `agentName`, `taskId`, optional `runId`/`issueId`/`issueKey`,
+`sessionId`, `sessionState`, `sessionCreatedAt`, `targetInstance`, and
+`displayName`. `delegatedBy` separates `principal` from an optional `human` and
+includes `bindingSource`.
+
+The ordinary `author` remains the stable AGS principal. Durable PRs return
+`agsActor: null` and `delegatedBy: null`. These fields are included in
+`PullRequest` type introspection and pass through normal field filtering. No
+credential, assertion/JTI, hash/fingerprint, or policy-snapshot data is part of
+the GraphQL shape.
+
 ### PR with Branch Comparison
 
 ```
@@ -132,12 +147,13 @@ query { repository { pullRequest(number: N) { ... baseRef { compare(headRef: ...
 ## Invariants and Design Constraints
 
 - **Field filtering is mandatory.** Every GraphQL response passes through `filterMap` before being sent to the client. This ensures compatibility with strict GraphQL client libraries.
-- **GraphQL builds its own response shapes.** The `gql_shapes_*.go` files are independent of `rest/transform`. REST and GraphQL contracts differ, and sharing shape code would create coupling.
+- **GraphQL builds its own response shapes.** The `gql_shapes_*.go` files are independent of `rest/transform`. REST and GraphQL contracts differ, and sharing shape code would create coupling. Delegated actor facts come from the shared service attribution projection, then receive GraphQL-specific camelCase shaping.
 - **GraphQL uses `rest/respond` for HTTP writing only.** This is acceptable because GraphQL builds its own data payloads; `rest/respond` only handles the HTTP JSON serialization.
 - **Repository authorization flows through `service.HasRepoAccess`.** `viewerPermission` now reports the richer `READ`/`TRIAGE`/`WRITE`/`MAINTAIN`/`ADMIN` vocabulary rather than a three-level model.
 - **Accepted `Svc.Git` coupling.** Several resolvers call `s.Svc.Git.*` directly for compare, mergeability, branch SHA lookup, repo detail, and revert operations. This is documented as accepted current coupling.
 - **Accepted `Svc.DB` coupling in Dependabot mutations.** `gql_mut_dependabot.go` queries `s.Svc.DB` directly to resolve alert records by ID. This is current technical debt that bypasses the intended persistence ownership.
 - **`Server` depends on concrete `*service.Service`.** The GraphQL server receives the full service struct, not a narrow interface. This is acceptable for now given the large resolver surface.
+- **Delegated GraphQL is closed to one numbered PR query.** Before resolver dispatch, auth middleware admits an `access_grant_transport` Session only for `pr.read` and only when a bounded JSON body contains exactly one `PullRequestByNumber` query shaped as `repository(owner:$owner,name:$repo) { pullRequest(number:$pr_number) { ... } }`. The owner/repository and positive PR number must equal the Session repository and `pull_request_number` constraint. Mutations, subscriptions, fragments, alternate aliases, noncanonical variable definitions, extra variables or top-level resources, malformed/oversized bodies, and mismatched repository/PR facts fail closed and are audited as surface denials. Durable tokens retain the normal GraphQL surface.
 
 For the full dependency-boundary rules see [module-contracts.md § graphql](../module-contracts.md#graphql).
 

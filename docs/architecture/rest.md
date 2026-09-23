@@ -101,6 +101,7 @@ Handlers access the service layer through `d.Svc` and Git operations through `d.
 | `handlers_dependabot.go` | Dependabot alerts |
 | `handlers_deployment.go` | Deployments and deployment statuses |
 | `handlers_ruleset.go` | Repository rulesets |
+| `handlers_integrations.go` | Durable operation authorization and signed Forgejo integration callbacks |
 | `handlers_wiki.go` | Wiki page list/get/put/delete, per-page history, labels, atomic move, search, and backlink lookup |
 | `handlers_misc.go` | Miscellaneous endpoints |
 | `handlers_templates.go` | Issue and PR templates |
@@ -155,6 +156,50 @@ Handlers follow a consistent pattern:
 5. Transform result: `transform.Repo(rep, stats)`
 6. Write response: `respond.JSON(w, http.StatusOK, result)`
 
+### Delegated PR Actor Extension
+
+PR create, get, and list responses retain the GitHub-compatible `user` as the
+stable AGS principal and add AGS-specific fields:
+
+```json
+{
+  "user": { "login": "example-executor" },
+  "ags_actor": {
+    "type": "multica_agent",
+    "provider": "multica",
+    "workspace_id": "...",
+    "workspace": "example-workspace",
+    "agent_id": "...",
+    "agent_name": "example-implementer",
+    "task_id": "...",
+    "run_id": "...",
+    "issue_id": "...",
+    "issue_key": "EX-541",
+    "session_id": "...",
+    "session_state": "active",
+    "session_created_at": "2026-07-14T13:30:00Z",
+    "target_instance": "primary-authority",
+    "display_name": "example-implementer [Multica Agent] via example-human · primary-authority"
+  },
+  "delegated_by": {
+    "principal": { "id": 4, "login": "example-executor", "user_kind": "agent" },
+    "human": { "id": 1, "login": "example-human", "user_kind": "human" },
+    "binding_source": "session_snapshot"
+  }
+}
+```
+
+Optional run/Issue fields may be absent. `human` may be `null` when no AGS-owned
+binding existed at issuance. `binding_source` is `session_snapshot` for newly
+issued bound sessions, `migration_backfill` when an older row could only be
+attributed from the binding present during migration, or `principal_only` when
+no human binding exists. For durable-profile PRs
+both extension fields are explicitly `null`. Identity fields otherwise come
+from the immutable session snapshot; only `session_state` is recomputed from
+current revoke/expiry facts. Credential,
+assertion/JTI, hash/fingerprint, and policy-snapshot material is never included.
+See [Delegated Agent Session](../design/delegated-agent-session.md#pr-actor-projection).
+
 ### Wiki Backlinks
 
 `GET /api/ext/v1/repos/{owner}/{repo}/wiki/pages/{slug}/backlinks` follows the standard REST pattern:
@@ -207,6 +252,34 @@ Wiki path-slug hierarchy rules:
 - create or resume one repo-scoped compaction job that performs a catalog-first compact and then materializes a `refs/heads/compacted-<timestamp>` git projection
 
 `GET /api/ext/v1/repos/{owner}/{repo}/wiki/compact/{job_id}` requires `RepoPermissionAdmin` and returns the current async job state.
+
+### Durable Operation Authorization
+
+`POST /api/v3/operations/authorize` is an authenticated additive endpoint for
+profile-backed `ags-cli` commands. `handlers_integrations.go` decodes the exact
+`service=ags`, `owner/repo`, normalized operation name, constraint map,
+malformed revisions, and trailing JSON. The handler passes the decoded scope to
+`service.AuthorizeDurableOperation`; it does not make authority decisions.
+
+The service—not the handler—uses the shared principal-session operation and
+resource-policy evaluator, current native repository grant, real policy
+revision, and the same default-operation constraint kernel used by workload
+verification and Session use time. It enforces empty repo/Git vectors, exact
+create refs, exact rebase coordinates, exact PR-read selector shapes, exact
+review-read numbers, and exactly three CI shapes: empty repository-wide scope,
+one JSON-safe positive `run_id`, or exact PR numbers plus optional lowercase
+full `head_sha`; JSON-safe integers and refs follow the same normalization in
+every consumer. CI `event`, SHA-only and mixed shapes, unknown,
+authority-shaped, secret-shaped, non-scalar, missing/extra, old read-path
+`exact_head`, and malformed constraints fail
+at that service boundary before receipt serialization. The response repeats
+only the exact normalized allowlisted constraints so the client can perform its
+strict name-plus-constraints scope comparison. Missing or
+ambiguous policy, insufficient native grant, disabled resource, and
+unauthenticated access fail closed without returning grant or credential
+material. See [delegated-agent-session.md](../design/delegated-agent-session.md)
+for the shared authority contract and [service.md](service.md) for the service
+flow.
 
 ### Git-Backed REST Request
 
@@ -284,6 +357,7 @@ For the full dependency-boundary rules see [module-contracts.md § rest](../modu
 ## Branch Protection Contract
 
 - `PUT /repos/{owner}/{repo}/branches/{branch}/protection` persists the raw GitHub-style branch-protection JSON.
+- `GET /repos/{owner}/{repo}/branches/{branch}` and branch-list responses derive `protected` from exact repository/branch protection rows; the REST transform receives that service-owned fact instead of hard-coding `false`.
 - Merge enforcement currently honors:
   - `required_pull_request_reviews.required_approving_review_count`
   - `required_pull_request_reviews.bypass_pull_request_allowances.users`

@@ -65,6 +65,7 @@ Optional benchmark inputs:
 |--------|-------------|------|
 | `agent-auth-flow.sh` | Agent registration, human binding, and OIDC-backed claim flow | Existing server plus mock OIDC |
 | `code-search-e2e.sh` | Code search indexing, query behavior, and qualifier checks | Self-contained TiDB |
+| `forgejo-large-pr-projection.sh` | AGS → Forgejo async PR projection with an team-share-fixture-style large binary payload; records runner label/image baseline and verifies idempotent retry | Existing AGS server with Forgejo projection enabled |
 | `oauth-device-flow.sh` | OAuth device-flow bootstrap and polling behavior | Existing server |
 | `oidc-provider-flow.sh` | Generic OIDC callback, lookup, repeated-login, and token-validity flow using the mock discovery server | Running server with `OIDC_PROVIDER`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_ALLOW_INSECURE_HTTP=1`; mock OIDC server |
 | `org-collaboration-governance.sh` | Org invitations, outside collaborators, and permission aliases | Existing server plus extra user tokens |

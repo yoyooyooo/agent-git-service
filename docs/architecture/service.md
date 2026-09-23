@@ -18,6 +18,8 @@ Owns:
 - GORM persistence reads and writes
 - Git orchestration through `gitstore`
 - cross-entity lifecycle changes (e.g., PR merge updates both Git history and DB state)
+- execution-context intake persistence after a registered fixed-egress pull
+- canonical runtime actor resolution, task/repository Access Grant lifecycle, invocation receipts, Human single-frontdoor provider operations, and exact provider-effect recovery
 - domain side effects such as workflow sync and embedding follow-up
 - sentinel error definitions consumed by surface layers
 
@@ -39,6 +41,8 @@ Defined in `repo.go`. Fields:
 | `Git` | `*gitstore.Store` | Git repository storage layer |
 | `BaseURL` | `string` | HTTP base URL for generated links |
 | `Embedder` | `embedding.Embedder` | Optional semantic search provider |
+| `ExecutionContextPuller` | narrow `executioncontext.Pull` interface | Optional immutable startup registry used only for source fact acquisition |
+| `ProviderIntegration` | narrow `ProviderPRIntegration` interface | Optional deployment-owned provider evidence/merge executor; callers never supply provider identity or credentials |
 | `AllowAnyToken` | `bool` | Dev convenience: accept any token when no tokens exist in DB |
 
 ### Service Contract Shape
@@ -58,7 +62,10 @@ Milestone vs label semantics:
 | Repository lifecycle | `repo.go`, `repo_fork.go`, `repo_query.go`, `branch.go` |
 | Repository authorization | `permission.go`, `repo_access.go` |
 | Issues | `issue.go` |
-| Pull requests | `pr.go`, `pr_merge.go` |
+| Pull requests | `pr.go`, `pr_merge.go`, `pr_actor.go`, `provider_merge.go` |
+| Execution context intake | `execution_context.go` |
+| Canonical actor and Access Grants | `access_grant.go`, `access_grant_merge.go`, `access_grant_merge_runtime.go` |
+| Principal-bound workload Sessions and durable operation authorization | `delegated_session.go`, `durable_authorize.go`, `principal_session_authority.go`, `delegation_policy.go` (migration inventory), `repo_access.go`, `audit.go` |
 | Comments and timeline | `comment.go`, `timeline.go`, `review_comment.go` |
 | Labels and milestones | `label.go`, `milestone.go` |
 | Reviews | `review.go` |
@@ -74,6 +81,176 @@ Milestone vs label semantics:
 | Infrastructure | `errors.go`, `crud.go`, `preload.go`, `embedding_hook.go` |
 
 ## Main Flows
+
+### Execution Context Intake
+
+```text
+IntakeExecutionContext(ctx, source selectors + locator + current source token)
+  → call the injected executioncontext puller
+  → registry resolves exactly one stable source and performs one fixed-egress GET
+  → closed adapter verifies running state and exact workspace/Agent/Task locator
+  → source token leaves scope and is never passed to persistence
+  → persist ags.execution-context-snapshot.v1 with canonical source ref/context/digest
+  → return ags.execution-context-intake.v1 credential-free receipt
+```
+
+The intake route is bootstrap fact acquisition, not authorization. It does not
+create a User, UserIdentity, repository grant, delegated Session, operation, or
+provider effect. `GetExecutionContextSnapshot` is an internal readback seam for
+a later AGS-owned canonical actor/access-grant evaluator. The source snapshot is
+immutable evidence and cannot be reinterpreted as source-issued AGS authority.
+See [execution-context intake](execution-context-intake.md).
+
+### Canonical Actor and Access Grant
+
+```text
+IssueAccessGrant(ctx, fresh source input + exact repo + optional intent)
+  → call IntakeExecutionContext and persist a credential-free snapshot
+  → resolve/JIT UserIdentity(execution_context, source/Agent)
+  → resolve one unambiguous active source/workspace default policy binding
+  → accept elevation only when the requested class is bound to that actor
+  → intersect class operations with exact resource/operation policy
+  → persist immutable actor/executor/task/repository authority facts
+  → return a maximum-30-minute bearer once; persist only its SHA-256 digest
+```
+
+Invalid optional Agent/class/operation requests degrade to the legal default
+with stable receipt warnings and cannot self-grant. Renewal requires a fresh
+matching source observation plus exact actor, executor, task, repository and
+authority continuity; it creates a new bearer and atomically revokes the old
+one. Use time reloads actor identity, executor, repository, source snapshot and
+the full policy revision before appending an invocation receipt.
+
+Generic authorization is receipt-only and does not make the grant bearer a
+generic Git or GitHub-compatible API credential. Exact `pr.merge` uses a separate effect method: it verifies
+AGS/provider PR coordinates, head/base, configured method, exact-head CI and
+protected provider authority. Definitive exact-fact drift before dispatch is
+persisted and returned as a GET-readable terminal `conflict` receipt with
+`provider_attempt=not_attempted`; otherwise the service persists a globally
+unique `planned` intent, then CASes to `dispatching + outcome_unknown` before
+the only Forgejo POST. Every later duplicate/restart/GET path reads the exact
+provider PR and cannot repeat the write, and locator collisions after that
+boundary never use HTTP 409. See [Canonical Actor and Access Grants](access-grants.md).
+
+### Access Grant Transport Session Derivation
+
+```text
+IssueAccessGrantTransportSession(ctx, grantBearer, operation)
+  → authenticate and reload the exact active parent Grant
+  → require one exact non-merge operation already present in effective_operations
+  → revalidate immutable source snapshot, canonical actor, selected executor, repository,
+    policy/class/resource revisions, and the executor's live native grant
+  → persist a hash-only access_grant_transport Session bound to the Grant ID/revision,
+    exact operation constraints, actor/executor split, and workload.context.v1 provenance
+  → append a not_attempted/not_applicable invocation receipt
+  → return the transport bearer once with Cache-Control: no-store
+```
+
+The transport Session adapts existing Git and GitHub-compatible API surfaces; it is not a second
+authority object. It cannot carry `pr.merge`, outlive or widen its parent Grant,
+or fall back to assertion exchange, a durable profile, provider credentials, or
+another principal. Grant renewal/revoke invalidates all dependent Sessions.
+Dynamic Session status/revoke routes are absent; only durable-site-admin exact-ID
+historical lifecycle readback remains. On the REST adapter, `repo.read` additionally
+admits only exact `GET /api/v3/repos/{owner}/{repo}/branches/{safe-branch}/protection`;
+the existing safe head-ref validation accepts slash refs and rejects protection
+subresources, list/wildcard variants, unsafe or missing refs, writes, provider-direct
+routes, and unrelated operations before handler dispatch. For numbered `pr.read`,
+the middleware also admits only one bounded `PullRequestByNumber` GraphQL query whose
+owner/repository/number variables match the Session repository and exact PR constraint;
+mutations, alternate query shapes, extra resources, and fact mismatch fail before resolver dispatch.
+
+### Durable Operation Authorization
+
+```text
+AuthorizeDurableOperation(ctx, authenticatedPrincipal, service, repository, operation, constraints)
+  → service boundary accepts only operation-allowlisted safe scalar constraint keys
+  → load the exact enabled repository
+  → use operationcatalog for AGS-owned operation/risk semantics and sessionauthority for the unique service/repository policy
+  → reject absent/inactive/target-ambiguous resource authority; exact disabled repo override blocks default fallback
+  → compute the authenticated principal's current native repository permission
+  → require the operation's shared read/write/admin level
+  → return exact normalized allowlisted constraints plus native-grant and real resource-policy revisions
+```
+
+This path does not resolve an assertion binding because token authentication has
+already selected the immutable principal. It does not maintain a second
+operation-to-permission switch and does not use credential mode as a synthetic
+policy revision. REST only decodes the request. Before any receipt, audit, or
+error serialization, the service boundary rejects unknown, authority-shaped, or
+secret-shaped keys, malformed values, and non-scalars; the receipt preserves
+only the operation-specific normalized map exactly.
+
+### Access Grant Transport PR Creation
+
+```text
+CreatePRWithResult(ctx, input)
+  → authenticate one pr.create access_grant_transport Session
+  → reload and revalidate its exact parent Grant, operation constraints, executor native grant,
+    repository, canonical actor, and immutable execution-context snapshot
+  → require the exact base_ref/head_ref pair stored in the Session
+  → transactionally create the PR and agent_session_id provenance
+  → attribute the PR to the canonical actor while recording the executor separately
+  → derive authoritative Multica Issue/Task/Run linkage and human initiator/originator only from
+    the immutable parent snapshot
+```
+
+The independent External PR link-token flow remains a correlation path for
+external-provider callbacks; it does not authorize this transport PR creation or
+select actor, executor, policy, operation, Grant, or provider credentials.
+
+Durable and Access Grant authority share the AGS-owned `operationcatalog`, which
+covers standard and privileged operations including `repo.read`, `git.read`,
+`git.push`, `pr.create`, `pr.rebase`, `pr.read`, `pr.merge`, `ci.read`,
+`review.read`, `review.submit`, `repo.admin`, and `repo.create` with shared
+read/write/admin risk requirements. Configuration may bind a principal to a
+class but cannot add an unknown operation or lower its risk. One constraint kernel is
+used by durable authorization, Access Grant transport Sessions, and use-time
+facts. Repository/Git operations, create refs, PR selectors, rebase coordinates,
+review reads, CI variants, and exact merge coordinates retain their closed
+operation-specific shapes; malformed, mixed, extra, secret-shaped, or
+noncanonical values fail closed.
+
+Access Grant transport adapters cover ordinary Git and GitHub-compatible API operations. They accept
+no workload assertion and production use-time evaluation rejects every other
+Session credential mode. Transport issuance explicitly rejects `repo.create`,
+`repo.admin`, and `review.submit`; these high-risk control-plane operations may
+only receive exact invocation admission and require dedicated effect ownership.
+The supported `ags-expert` import workflow reauthorizes pinned `repo.create` and
+`repo.admin` immediately before separately receipted AGS/provider effects. Exact
+`pr.merge` is a separate Access Grant effect
+adapter: it binds the provider mapping, head/base/method, CI, protected
+authority, and a global effect key; it persists `dispatching + outcome_unknown`
+before the only provider POST, then permits only provider-read recovery. The
+legacy assertion exchange and delegated merge gateway are absent. Durable-profile
+PR creation follows the existing path and leaves `agent_session_id` null.
+
+`PullRequestAttributionFor` resolves that immutable session snapshot into two
+presentation facts: the dynamic `AGSActor` and the stable `DelegatedBy`
+principal/human chain. REST, GraphQL, and Forgejo projection consume this same
+service result while owning their wire/body formatting. The method never
+returns credential, assertion, assertion JTI/correlation, verifier/fingerprint,
+or policy-snapshot material.
+
+### Human Single-Frontdoor Provider Merge
+
+```text
+MergeProviderPRAsHuman(ctx, currentHuman, agsRepo, agsPR, expectedHead, method)
+  → reject non-Human identities and authorize the live AGS repository/PR
+  → resolve the exact provider PR and executor from AGS projection/config state
+  → require expected/current head, current base ancestry, allowed method,
+    independent current-head approval/status, provider CI/protection and executor eligibility
+  → send at most one provider merge POST through the deployment-owned executor
+  → return operation state and projection convergence as separate fields
+```
+
+The request has no provider owner/repository/PR or provider credential field.
+Before dispatch, every authority/fact drift produces zero provider writes. If a
+confirmed provider merge is retried while the webhook has not yet converged the
+AGS PR, service reads the exact mapped provider PR and returns
+`projection.status=pending` without sending another POST. Access Grant
+`pr.merge` uses its own deterministic invocation locator but shares the
+independent current-head review/status policy.
 
 ### PR Merge
 

@@ -1,46 +1,49 @@
-# Repository Guidelines
+# Repository guidelines
 
-## Project Structure & Module Organization
-- `main.go` is the composition root (config, DB/Git wiring, listeners).
-- `internal/` contains backend modules by concern: `rest`, `graphql`, `service`, `db`, `gitstore`, `githttp`, `oauth`, `middleware`, `router`, and `testharness`.
-- `cli/` is the vendored GitHub CLI plus acceptance tests in `cli/acceptance/`.
-- `e2e/` contains shell-based end-to-end scripts (`bash` + `curl` + `jq`).
-- `docs/` is the architecture SSOT, especially `architecture.md`, `module-contracts.md`, and `test-strategy.md`.
+## Source workflow
 
-## Build, Test, and Development Commands
-- `make setup`: production/persistent bootstrap with an external TiDB Cloud Starter `DB_DSN`.
-- `make test-setup`: test-only bootstrap that starts TiDB via `tiup playground`.
-- `make build`: compile `gh-server`.
-- `make run-bg` / `make stop`: start or stop local server.
-- `make check`: fast pre-commit check (`make build` + `make vet`).
-- `make test-unit`: run all Go unit tests (`go test -v ./...`).
-- `make test`: run `cli` acceptance tests (requires running server).
-- `make test-e2e [SCRIPT=name]`: run all or one `e2e/*.sh` flow.
+This is a GitHub-maintained fork. Use ordinary Git and the official GitHub tooling against `origin`; `upstream` is the official source and must not receive pushes. Contributing and CI do not require an AGS deployment, provider account, private mesh or self-hosted runner. Optional integrations in the product do not change this repository's source authority.
 
-## Coding Style & Naming Conventions
-- Target Go `1.25.0` (see `go.mod`).
-- Indentation: rely on formatters (`gofmt`/`goimports` for Go tabs; follow existing style for non-Go files).
-- Format Go code with `make fmt` (`goimports` on root and `internal/`).
-- Keep transport layers thin: REST/GraphQL handlers should delegate business logic to `internal/service`.
-- Follow standard Go naming: exported `CamelCase`, unexported `camelCase`, package names lowercase.
-- Place tests beside code as `*_test.go`; prefer table-driven tests for business rules and handlers.
+Read [fork governance](fork/README.md) before changing generation history, version identity, CI or publication. Freeze upstream in `fork/UPSTREAM_BASELINE`; absence of an upstream release tag is explicit, not permission to invent a version. New generations reconstruct accepted capabilities from that baseline; older branches are private evidence, not an automatic replay queue. Keep feature changes linear and preserve upstream licenses and attribution.
 
-## API Surface Boundary
-- Use `/api/v3` and `/api/graphql` only for GitHub-compatible APIs. These routes primarily serve existing GitHub-speaking clients, including `gh`, GitHub REST/GraphQL SDKs, and Git-compatible automation.
-- A route may stay under `/api/v3` as a GitHub-shaped local shim only when it intentionally uses a GitHub-like path, request/response shape, or client behavior for compatibility. If behavior differs from GitHub.com, document it clearly as partial compatibility, a local shim, or an extension. Do not imply strict GitHub.com parity for local semantics.
-- Use `/api/ext/v1` for extension APIs that are not part of GitHub's API contract. New primitives such as agent runs, run-scoped token management, context packs, leases, agent policies, agent queues, scorecards, local wiki page APIs, aggregate views, and other platform control-plane features belong under `/api/ext/v1`.
-- Do not place extension APIs under `/api/v3` just because the resource is repo-scoped. Repo-scoped extension routes should use `/api/ext/v1/repos/{owner}/{repo}/...`.
-- Do not introduce new `/api/ags/...` routes. The extension namespace is `/api/ext/v1`; keep code constants, OpenAPI output, tests, docs, and compatibility matrices aligned with that path.
-- Discovery and OpenAPI output must keep the boundary explicit: `/api/v3` and `/api/v3/openapi.json` describe GitHub-compatible REST only, while `/api/ext/v1` and `/api/ext/v1/openapi.json` describe extension APIs only.
+`prepare/*` branches are working material. Neither a clean checkout nor a scanner pass authorizes public visibility, default-branch replacement, deployment, historical ref removal or mutation of running services. Follow [publication gates](fork/PUBLICATION.md). Never publish all local refs or private evidence as part of a normal push.
 
-## Testing Guidelines
-- Follow the test pyramid in `docs/test-strategy.md`: package/service tests first, then router/integration, then acceptance.
-- Use `internal/testharness` for integration tests with real router wiring.
-- Use `make test-run SUITE=TestName` for focused acceptance debugging.
-- Keep E2E scripts executable and descriptive (for example, `repo-transfer-lifecycle.sh`).
+## Layout and ownership
 
-## Commit & Pull Request Guidelines
-- Keep each commit scoped to one issue or behavior change.
-- Preferred commit subject patterns match repo history: `fix: ...`, `feat: ...`, `test: ...`, `docs: ...` (optionally with `(#123)` or `Fix #123:`).
-- PRs should include a clear description, exact test commands run, and updates to SSOT docs when boundaries or testing expectations change.
-- Complete the checklist in `.github/pull_request_template.md` for architecture/test-strategy drift.
+- `cmd/gh-server` is the primary command entry; `server` owns composition and lifecycle.
+- `cmd/ags-edge` is an independent optional read-replica process; it does not bootstrap business services or a business database.
+- `internal/service` owns domain authorization, durable facts and orchestration. Transports remain thin.
+- `internal/db` owns models and migrations; preserve deployed SQLite data and explicit database contracts while retaining upstream TiDB semantics.
+- `internal/gitstore` owns native Git behavior. `internal/gitbackend` executes already-authorized protocol requests.
+- `internal/edge`, `edgeprotocol`, `snapshotstore` and `replication` own the separated replica runtime and contracts.
+- `cli/` and `cli/_go-gh-local` are independent Go modules for client compatibility.
+- `docs/README.md` routes to architecture, module contracts, testing and operator guides. Private runtime observations do not become public product defaults.
+
+## Verification entries
+
+Use the Go version required by each `go.mod` and format changed Go files with `gofmt`.
+
+```bash
+go build ./...
+go vet ./...
+python3 fork/scripts/audit.py verify
+python3 fork/scripts/audit.py inventory --details
+PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_audit.py
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_edge_client_route.py
+```
+
+Full server tests require an isolated test database, never a deployed AGS database. GitHub-hosted CI provisions a job-owned loopback TiDB and checks all root packages exactly once. The operator-only publication policy remains outside the source tree. Full generation/PR CI includes root regression, Edge and authority race checks, and client contracts; preparation pushes deliberately run a smaller gate. A skipped suite is not a pass.
+
+Use real Git, real isolated storage, original-user authorization and explicit dependency boundaries in integration tests. Preserve the reproduction before fixing a bug. Do not weaken permission checks, foreign keys, exact-effect identity, source attribution or result assertions to obtain a green test.
+
+## API and safety contracts
+
+Use `/api/v3` and `/api/graphql` for GitHub-shaped APIs and `/api/ext/v1` for new extensions. Existing fork compatibility routes are explicit exceptions documented in the router/OpenAPI, not a reason to add new platform APIs to `/api/v3`.
+
+Source provenance, optional associations and display names do not grant authority. Peer replication permission is independent from the user's Git permission. Unknown provider writes use exact readback, not blind POST replay. A local cache cannot bypass revocation or substitute an unintended version.
+
+Configuration is opt-in, bounded and credential-free where persisted as a receipt. Diagnostic output must not contain tokens, private keys or user request bodies. Examples and fixtures use synthetic identities and documentation hosts; real operator topology and deployment evidence stay private.
+
+## Commit and review expectations
+
+Keep changes scoped by capability and include their owning tests and contract updates. Inventory modifications to upstream paths rather than hiding them behind artificial wrappers. Report source tests, hosted CI, private publication checks and runtime acceptance separately. Do not deploy an exact-source build merely because its compilation succeeded.

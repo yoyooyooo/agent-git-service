@@ -1,0 +1,25 @@
+title = "Fork secret scanning"
+
+[extend]
+useDefault = true
+
+# An exact code line validates a hexadecimal directory name. This exception
+# requires both the exact file and the whole line; it never skips a directory,
+# a commit, or another credential on the same file. test_secret_policy.py
+# verifies that a synthetic credential next to this line is still rejected.
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Hexadecimal validation alphabet is not a credential"
+condition = "AND"
+paths = ['''(?:^|/)internal/snapshotstore/retention\.go$''']
+regexTarget = "line"
+regexes = ['''^\s*if !item\.IsDir\(\) \|\| len\(key\) != 64 \|\| strings\.Trim\(key, "0123456789abcdef"\) != "" \{\s*$''']
+
+# The scanner's own regression embeds the same validation alphabet. Restrict
+# this exception to that exact non-secret value and the one fixture source.
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(?:^|/)fork/scripts/test_secret_policy\.py$''']
+regexTarget = "secret"
+regexes = ['''^0123456789abcdef$''']

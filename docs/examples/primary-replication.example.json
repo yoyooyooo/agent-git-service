@@ -1,0 +1,36 @@
+{
+  "version": "ags.primary.replication-config.v1",
+  "authority_id": "primary-authority",
+  "listen_addr": "127.0.0.1:7443",
+  "server_name": "primary-peer.internal.example",
+  "ca_file": "certificates/peer-ca.pem",
+  "certificate_file": "certificates/primary.pem",
+  "private_key_file": "certificates/primary-key.pem",
+  "snapshot_root": "replication-snapshots",
+  "managed_writes_only": true,
+  "min_free_bytes": 2147483648,
+  "export_policy_revision": "heads-tags-pull-v1",
+  "export_prefixes": ["refs/heads/", "refs/tags/", "refs/pull/"],
+  "peers": [
+    {
+      "edge_id": "edge-1",
+      "spki_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "stores": [
+        {
+          "authority_id": "primary-authority",
+          "store_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-repo",
+          "repository_id": 101,
+          "kind": "repo"
+        }
+      ]
+    }
+  ],
+  "max_pack_bytes": 4294967296,
+  "plan_ttl": "1m",
+  "request_timeout": "2m",
+  "concurrency": 2,
+  "max_snapshot_bytes": 8589934592,
+  "max_snapshot_views": 256,
+  "protect_recent": "15m",
+  "expire_idle": "24h"
+}

@@ -5,11 +5,18 @@
 **A self-hosted, GitHub-compatible API server for agents, automation, and
 developer workflows.**
 
-[![CI](https://github.com/ngaut/agent-git-service/actions/workflows/ci.yml/badge.svg)](https://github.com/ngaut/agent-git-service/actions/workflows/ci.yml)
+[![Upstream CI](https://github.com/ngaut/agent-git-service/actions/workflows/ci.yml/badge.svg)](https://github.com/ngaut/agent-git-service/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](go.mod)
 
 </div>
+
+This maintained fork uses GitHub for source collaboration and standard hosted CI.
+No running AGS, private network or self-hosted build runner is needed to contribute.
+See [fork governance](fork/README.md) for frozen upstream generations,
+[capability decisions](fork/CAPABILITIES.md) for the downstream review map, and
+[publication gates](fork/PUBLICATION.md) for the current private preparation limits.
+The upstream badge above is not evidence that this fork's code has passed CI.
 
 `agent-git-service` lets GitHub-speaking clients work with repositories you
 own, and its agent-first design treats AI agents as first-class citizens with
@@ -55,10 +62,12 @@ run where your agents run:
 |-------------|--------------|
 | Agent identities and governance | Durable agent accounts, API tokens, human binding/recovery, switch sessions, default repos, repository transfer flows, and direct repo/org/team permission grants |
 | GitHub-compatible core | REST v3, GraphQL compatibility, OAuth device flow, Git Smart HTTP, and `gh` acceptance coverage for common workflows |
-| Issue workspace | Typing signals, presence, attachments, read state, unread counts, pinned comments, and reactions |
+| Issue collaboration | Issues, labels, comments, pinned comments, and reactions; retired typing/presence/attachment/read-state APIs are not advertised as supported |
 | Wiki memory | Git-backed pages, history, search, labels, backlinks, page moves, reconcile, repair, and compact operations |
 | Semantic search | Optional embedding-backed issue and pull request search |
 | Self-hosted operations | Local data and Git storage, local rate-limit policy, Prometheus metrics, readiness checks, structured logs, and a Grafana dashboard |
+| Optional Edge read replicas | Unchanged primary Git URLs, original-user authorization, verified local snapshots, incremental transfer, explicit forwarding, bounded retention and diagnostics; writes remain primary-owned |
+| Fork authority and provider integration | Actor/executor separation, operation-scoped grants, exact effect recovery and opt-in provider projections; external metadata does not grant permission |
 
 Known GitHub-compatibility gaps are tracked in
 [`docs/github-api-compatibility-matrix.md`](docs/github-api-compatibility-matrix.md).
@@ -107,7 +116,7 @@ see [`docs/quickstart.md`](docs/quickstart.md).
 ```bash
 make build       # compile gh-server
 make check       # build + go vet
-make test-unit   # go test -v ./...
+make test-unit   # go test -timeout 20m -v ./...
 make test        # gh CLI acceptance tests; requires a running local server
 make test-e2e    # shell E2E flows under e2e/
 ```

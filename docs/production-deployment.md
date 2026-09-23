@@ -53,6 +53,12 @@ Use one application metadata database per deployed AGS environment. The same
 database stores users, tokens, repository metadata, issues, pull requests,
 workflow state, and other product records.
 
+The upstream control-plane/tenant router has been retired. A source locator is
+not a database selector; Access Grant rollout requires `CONTROL_PLANE_DSN` to be
+unset. Verify the exact runtime authority path, not just `/readyz` DB health or
+an endpoint's existence. Never silently reinterpret an old tenant configuration
+as access to the root database.
+
 ## Configure Runtime
 
 Set production values through environment variables rather than committing
@@ -176,6 +182,16 @@ proxy or network layer until an admission flow is in place.
 
 ## Optional Capabilities
 
+### Forgejo workflow actions
+
+Production Forgejo workflow actions require file-backed integration config with: an enabled Feishu `outbound.events.projection_drift` target; explicit repository mappings; `forgejo.authority_policy.enabled: true`; the public AGS webhook URL; the non-secret Forgejo integration-bot login; and explicit `forgejo.authority_policy.action_principal_bindings` for every human actor allowed to request label-first actions. Each binding value is an immutable numeric AGS principal ID; same-login or provider-role fallback is forbidden. Keep the Forgejo projection token, separate authority-policy operator token, webhook secret, and Feishu webhook URL in secret files. The operator token is used only for live branch-protection/policy reads and read-only inspection of a bound actor's effective repository permission; projection, label, status, and comment writes retain the least-privileged integration-bot token.
+
+Before enabling action traffic, run `go run ./cmd/forgejo-authority -config <path> -mode plan`, then `apply`, then `verify`. Confirm AGS projection status reports equal AGS/Forgejo base SHA and policy-managed head SHA values. `/readyz` returns `not_ready` when alerting initialization or live authority verification fails. Give the production readiness request at least a 30-second caller deadline; a shorter deadline can cancel a healthy multi-repository authority inspection. Explicit mappings with `enabled: false` are excluded from authority verification and periodic projection scans. `AGS_ALLOW_MISSING_PROJECTION_ALERTING=true` and `AGS_ALLOW_MISSING_FORGEJO_AUTHORITY_POLICY=true` are independent development/test-only opt-outs and remain visibly `degraded`.
+
+Upgrade in this order: configure and test the projection-drift target; converge Forgejo authority policy; verify actor-to-principal IDs and exact ref convergence; deploy; then enable action labels. A signed label request is admitted only after live Forgejo write permission and the shared AGS `pr.rebase` evaluator agree; the durable intent records a deterministic binding revision and revalidates it at later effect seams. Denial removes the action label and sets `ags/status-blocked`. To roll back, stop action traffic first. Do not use native Forgejo rebase/update, weaker base protection, unconditional force, or direct projection pushes as rollback procedures. See [Forgejo Integration](forgejo-integration.md#production-readiness-and-repository-onboarding).
+
+For a partial rebase incident, only the same nonterminal bound generation may resume its saved desired SHA and exact accepted-old-SHA lease after current authorization and ref checks. A fresh signed label or new action intent cannot adopt a pre-job, operator-inspected or newer head as recovery. Unknown source/provider drift requires explicit reconciliation; never repair it with an inferred lease, unconditional force or a manual provider push. See the [provider effect and recovery contract](architecture/provider-effects.md). Keep incident-specific deployment evidence outside public source.
+
 ### Browser Console And CORS
 
 Set the console URL and allowed browser origins:
@@ -237,10 +253,48 @@ GITHTTP_SPOOL_DIR=/data/spool
 An empty `GITHTTP_MAX_PUSH_BYTES` uses the default 2 GiB push limit. An empty
 `GITHTTP_SPOOL_DIR` uses the system temp directory.
 
+### Protected-branch source authority
+
+An AGS `BranchProtection` row is also a Git HTTP authority boundary. Before
+`git-http-backend` runs, AGS sends the exact protected refs to its managed
+pre-receive hook. Direct `receive-pack` updates to those refs are rejected for
+all Git HTTP credentials, including durable maintainers. Unprotected work
+branches remain writable according to normal repository permission. The
+service-owned PR merge and Forgejo merged-base synchronization paths operate
+inside the Git store rather than through Git HTTP, so they remain the approved
+way to advance a protected base.
+
+For a repository whose source contract is PR-only, create and verify protection
+for its base before declaring the contract enforced. A failed direct-push probe
+must leave the base SHA unchanged, and a later PR merge must still advance it.
+Do not treat Forgejo-only branch protection as proof that AGS origin rejects a
+direct push.
+
+If a protected base has already advanced without a source PR, do not reset,
+force-push, or restore an older runtime snapshot. Freeze further direct pushes,
+back up the runtime and relational/Git state, identify the exact authenticated
+writer and ref updates from non-secret request logs, audit the full linear
+range, and submit an additive adoption/remediation PR. That PR must state that
+the original range lacked PR provenance; required CI and its authorized merge
+establish a new reviewed authority tip without rewriting history. This section
+applies to repositories hosted by the AGS product, not this fork's GitHub source
+workflow. See [fork governance](../fork/README.md) and the
+[provider effect contract](architecture/provider-effects.md).
+
 ## Run From Source
 
-Build and run the binary with the production environment loaded by your process
-manager:
+Build and run the binary from an exact accepted Git archive with the production
+environment loaded by your process manager. `make build` rejects dirty or
+hidden-index checkout state, rejects symlink/gitlink/non-regular tree leaves
+and malformed raw tree modes, rejects standard/custom replace refs, disables
+replace objects for every Git read, pins the accepted 40-hex `HEAD`, and
+materializes that immutable commit into a
+retained audit candidate, builds there, and injects the same revision into the
+receipt source boundary. `make check` remains the dirty-worktree development
+compile/vet gate and does not produce an attributable artifact. An `unknown` or
+mismatched revision identifies an unsupported build: it fails closed and cannot
+produce Boundary Receipts. Same-owner
+adversarial mutation of Git object storage during the build is not claimed.
 
 ```bash
 make build
@@ -256,8 +310,13 @@ environment file and run the binary as an unprivileged user with write access to
 The Dockerfile builds a static `gh-server` binary and includes Git in the
 runtime image:
 
+Use the supported Make target so Docker receives the same verified archive
+context plus exact commit/tree marker files. A direct `docker build .` from the
+mutable checkout is not a supported attributable build. The Dockerfile rejects
+missing or mismatched commit/tree markers and build arguments.
+
 ```bash
-docker build -t gh-server:local .
+make docker-build
 docker run --rm \
   -p 8080:8080 \
   -e ENVIRONMENT=production \
@@ -282,12 +341,16 @@ migrations and TiDB full-text indexes are created:
 curl -fsS https://gh.example.com/readyz | jq .
 ```
 
-Expected ready response:
+For a supported deployment, `version` must equal the exact accepted 40-hex SHA
+used by `make build` or `make docker-build`. `unknown` denotes an unsupported,
+unattributed build and cannot support Boundary Receipt claims.
+
+Expected ready response (replace the example SHA with the accepted SHA):
 
 ```json
 {
   "status": "ready",
-  "version": "unknown",
+  "version": "78852533feba3ce8251358ec69eb1a59999ff89c",
   "checks": {
     "main_db": {
       "status": "ok"

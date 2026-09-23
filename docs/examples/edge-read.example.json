@@ -1,0 +1,34 @@
+{
+  "version": "ags.edge.read-config.v1",
+  "peer_url": "https://primary-peer.internal.example:7443",
+  "ca_file": "certificates/peer-ca.pem",
+  "certificate_file": "certificates/edge.pem",
+  "private_key_file": "certificates/edge-key.pem",
+  "cache_root": "snapshot-cache",
+  "bindings": [
+    {
+      "repository": "owner/repository",
+      "identity": {
+        "authority_id": "primary-authority",
+        "store_id": "operator-provisioned-store-id",
+        "repository_id": 101,
+        "kind": "repo"
+      }
+    }
+  ],
+  "read_concurrency": 2,
+  "sync_concurrency": 1,
+  "max_pending": 16,
+  "max_pack_bytes": 4294967296,
+  "sync_timeout": "2m",
+  "peer_timeout": "2m",
+  "recent_views": 8,
+  "recent_window": "5m",
+  "prewarm_interval": "30s",
+  "min_free_bytes": 2147483648,
+  "max_cache_bytes": 8589934592,
+  "max_cache_views": 256,
+  "protect_recent": "15m",
+  "expire_idle": "24h",
+  "maintenance_interval": "1m"
+}
