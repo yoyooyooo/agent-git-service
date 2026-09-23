@@ -22,6 +22,12 @@ python3 fork/scripts/audit.py inventory --details
 
 `paths` provides each additive/modified/deleted path, and `commits` provides its history relationship. The unclassified input probe is private test evidence, not a public product feature. Every semantic status begins as `pending` and must be reconciled against [capability decisions](CAPABILITIES.md).
 
+## Accepted generation inventory
+
+For exact source `2a2e19c4ae9b355db567f00d05ce878afc4c1522`, the delta from the frozen official baseline is **507 paths: 402 additions and 105 modifications**, with eight linear fork commits and no merges. The existing-upstream modifications are 66 primary/storage paths, 16 client paths, 13 documentation/governance paths, nine build/operations paths and one provider/delivery path under the inventory classifier. These group labels are a search aid, not an independent semantic proof.
+
+All 985 reviewed production Go files and 4,125 existing Go test entries survived reconstruction. The complete hosted regression and disclosure results are bound in the [accepted generation manifest](releases/main.20260924.md); [feature preservation](FEATURE_PARITY.md) distinguishes downstream retention from explicit upstream retirements. This remains a substantial fork, not a claim that the features are isolated behind a zero-invasion plugin API.
+
 ## Important integration seams
 
 | Seam | Owned invariant | Change policy |

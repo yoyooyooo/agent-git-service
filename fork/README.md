@@ -4,7 +4,7 @@ This source repository uses GitHub for collaboration and CI. Building or contrib
 
 ## Remotes and generations
 
-- `origin` is the maintained GitHub repository.
+- `origin` is `git@github.com:yoyooyooo/agent-git-service-fork.git`, the maintained clean GitHub repository.
 - `upstream` is the official `ngaut/agent-git-service` source. Never push to it.
 - `fork/<upstream-version>-main.<date>` identifies an accepted generation. If the official repository has no tags, use `fork/main.<date>` and pin its full baseline SHA; do not invent a release version.
 - `feat/*` and `fix/*` branch from the active generation. Merge accepted work linearly into that generation.
@@ -15,11 +15,11 @@ The selected source baseline is in `UPSTREAM_BASELINE`. `UPSTREAM_BASELINE_TAG` 
 
 A new upstream generation starts at the frozen upstream tree. Inventory the previous fork by **behavior**, then choose `upstream`, `keep`, `reimplement`, `externalize`, `retire`, or `blocked` for each capability. Old generations are evidence, not a queue of commits that must be replayed. In particular, do not move 290 historical commits into a public branch merely to preserve their messages.
 
-## Current preparation boundary
+## Accepted source and release boundary
 
 The selected generation is tracked by [its manifest](releases/main.20260924.md). The [capability decisions](CAPABILITIES.md) and [preservation matrix](FEATURE_PARITY.md) separate retained contracts, reviewed repairs and explicit upstream retirements. [Publication](PUBLICATION.md) owns disclosure gates. Private source checkpoints and deployment transcripts are kept outside the public generation.
 
-Do not force-push or remove previous GitHub history during this preparation. Older deployment records and backups stay outside the public source tree. Publicity and deployment are separate decisions: accepting source never upgrades a running primary or Edge.
+The active generation has completed its source and disclosure gates; the manifest records the exact fully tested source. Earlier trial and private operational history remain in separate private archives, not on this repository's refs. Do not publish local archive branches, use `git push --all`, or mirror the private object inventory into this destination. Public visibility and runtime deployment are separate explicit decisions: accepting source never upgrades a running primary or Edge.
 
 ## Verification
 

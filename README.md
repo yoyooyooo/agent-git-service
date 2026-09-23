@@ -5,6 +5,7 @@
 **A self-hosted, GitHub-compatible API server for agents, automation, and
 developer workflows.**
 
+[![Fork CI](https://github.com/yoyooyooo/agent-git-service-fork/actions/workflows/ci.yml/badge.svg)](https://github.com/yoyooyooo/agent-git-service-fork/actions/workflows/ci.yml)
 [![Upstream CI](https://github.com/ngaut/agent-git-service/actions/workflows/ci.yml/badge.svg)](https://github.com/ngaut/agent-git-service/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](go.mod)
@@ -13,10 +14,12 @@ developer workflows.**
 
 This maintained fork uses GitHub for source collaboration and standard hosted CI.
 No running AGS, private network or self-hosted build runner is needed to contribute.
+The active generation is [`fork/main.20260924`](fork/releases/main.20260924.md).
 See [fork governance](fork/README.md) for frozen upstream generations,
-[capability decisions](fork/CAPABILITIES.md) for the downstream review map, and
-[publication gates](fork/PUBLICATION.md) for the current private preparation limits.
-The upstream badge above is not evidence that this fork's code has passed CI.
+[capability preservation](fork/FEATURE_PARITY.md) for the downstream contract map,
+and [publication gates](fork/PUBLICATION.md) for source/disclosure boundaries.
+The release manifest binds the exact tested source to its own hosted CI;
+upstream CI alone is not evidence that this fork has passed verification.
 
 `agent-git-service` lets GitHub-speaking clients work with repositories you
 own, and its agent-first design treats AI agents as first-class citizens with
@@ -81,8 +84,8 @@ Install `curl` and `jq` before running this quickstart. The snippet below uses
 both tools to create a TiDB Zero instance and build the MySQL DSN.
 
 ```bash
-git clone https://github.com/ngaut/agent-git-service.git
-cd agent-git-service
+git clone --branch fork/main.20260924 https://github.com/yoyooyooo/agent-git-service-fork.git
+cd agent-git-service-fork
 cp .env.example .env
 
 ZERO_INSTANCE="$(
