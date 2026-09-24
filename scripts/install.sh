@@ -108,7 +108,8 @@ import base64,hashlib,json,os,sys
 meta=json.load(open(sys.argv[1]))
 if meta.get("type")!="file" or meta.get("path")!="scripts/install-release.py" or meta.get("encoding")!="base64":
     raise SystemExit("unexpected installer object")
-data=base64.b64decode(meta.get("content",""),validate=True)
+encoded="".join(str(meta.get("content","")).split())
+data=base64.b64decode(encoded,validate=True)
 if len(data)>1024*1024:
     raise SystemExit("installer source is oversized")
 oid=hashlib.sha1(b"blob "+str(len(data)).encode()+b"\0"+data).hexdigest()

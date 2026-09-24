@@ -41,6 +41,8 @@ class BootstrapTests(unittest.TestCase):
         self.bin=self.root/"fake-bin"; self.bin.mkdir()
         self.args_file=self.root/"args.json"
         payload=FAKE_INSTALLER.encode()
+        encoded=base64.b64encode(payload).decode()
+        wrapped="\\n".join(encoded[i:i+60] for i in range(0,len(encoded),60))
         gh=textwrap.dedent(f"""\
             #!/usr/bin/env python3
             import json, os, sys
@@ -52,7 +54,7 @@ class BootstrapTests(unittest.TestCase):
             elif path=="repos/yoyooyooo/agent-git-service/git/ref/tags/"+version:
                 print(json.dumps({{"object":{{"type":"commit","sha":source}}}}))
             elif path=="repos/yoyooyooo/agent-git-service/contents/scripts/install-release.py?ref="+source:
-                print(json.dumps({{"type":"file","path":"scripts/install-release.py","encoding":"base64","sha":"{blob_sha(payload)}","content":"{base64.b64encode(payload).decode()}"}}))
+                print(json.dumps({{"type":"file","path":"scripts/install-release.py","encoding":"base64","sha":"{blob_sha(payload)}","content":"{wrapped}"}}))
             else:
                 raise SystemExit("unexpected fake gh path: "+path)
         """)
