@@ -314,9 +314,12 @@ def publish(version,sha,directory):
     gate(version,sha)
     assets=verified_assets(directory,version,sha)
     # Draft is retained on failure. An ordinary rerun will refuse this version.
-    prerelease_flag=' --allow-prerelease' if '-rc' in version else ''
-    install='VERSION='+version+'; curl -fsSL "https://github.com/'+REPOSITORY+'/releases/download/$VERSION/install.sh" | bash -s -- install --version "$VERSION"'+prerelease_flag
-    upgrade='VERSION='+version+'; curl -fsSL "https://github.com/'+REPOSITORY+'/releases/download/$VERSION/install.sh" | bash -s -- upgrade --version "$VERSION"'+prerelease_flag
+    if '-rc' in version:
+        install='VERSION='+version+'; curl -fsSL "https://github.com/'+REPOSITORY+'/releases/download/$VERSION/install.sh" | bash -s -- install --version "$VERSION" --allow-prerelease'
+        upgrade='VERSION='+version+'; curl -fsSL "https://github.com/'+REPOSITORY+'/releases/download/$VERSION/install.sh" | bash -s -- upgrade --version "$VERSION" --allow-prerelease'
+    else:
+        install='curl -fsSL "https://github.com/'+REPOSITORY+'/releases/latest/download/install.sh" | bash -s -- install'
+        upgrade='curl -fsSL "https://github.com/'+REPOSITORY+'/releases/latest/download/install.sh" | bash -s -- upgrade'
     notes='Exact-source release for controlled installation.\n\nSource: `'+sha+'`\n\nNative macOS ARM64 and Linux amd64 bundles contain gh-server, ags-edge, ags-replication, build metadata and license. No service configuration or data is included.\n\nInstall:\n\n```bash\n'+install+'\n```\n\nUpgrade an existing installer-owned version:\n\n```bash\n'+upgrade+'\n```\n\nThe tagged Bash bootstrap is only a thin version selector. The executable archive is still verified using the immutable Release asset digest and GitHub build provenance before activation. Installation does not restart a service or migrate live data. See docs/operations/releases.md for platform limits, staging and rollback.\n'
     args=['gh','release','create',version,'--repo',REPOSITORY,'--target',sha,'--verify-tag','--draft','--title',version,'--notes',notes]
     if '-rc' in version: args.append('--prerelease')
