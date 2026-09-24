@@ -43,6 +43,8 @@ async function main(): Promise<void> {
   const lines = releaseLines(tags, context.date);
 
   if (options.command === "status") {
+    const rcCandidate = choosePromotableRc(lines);
+    const promotionBlocked = rcCandidate === null ? null : promotionSourceConflict(lines, rcCandidate);
     console.log(JSON.stringify({
       repository: REPOSITORY,
       branch: context.branch,
@@ -50,7 +52,8 @@ async function main(): Promise<void> {
       generation: context.date,
       latestLine: lines.at(-1) ?? null,
       nextRc: chooseNextRc(lines, context.date),
-      promotableRc: choosePromotableRc(lines),
+      promotableRc: promotionBlocked === null ? rcCandidate : null,
+      promotionBlocked,
     }, null, 2));
     return;
   }
@@ -207,11 +210,23 @@ export function choosePromotableRc(lines: ReleaseLine[]): string | null {
   return latest.rcs.at(-1)?.raw ?? null;
 }
 
+export function latestPublishedTag(lines: ReleaseLine[]): string | null {
+  const latest = lines.at(-1);
+  if (!latest) return null;
+  return latest.stable ?? latest.rcs.at(-1)?.raw ?? null;
+}
+
+export function previousStableTag(lines: ReleaseLine[], serial: number): string | null {
+  return [...lines]
+    .filter((line) => line.serial < serial && line.stable !== null)
+    .sort((a, b) => b.serial - a.serial)[0]?.stable ?? null;
+}
+
 function planRc(context: Context, lines: ReleaseLine[]): ReleasePlan {
   const tag = chooseNextRc(lines, context.date);
-  const latestRc = choosePromotableRc(lines);
-  if (latestRc !== null && remoteTagSha(latestRc) === context.head) {
-    fail(`HEAD is already published as ${latestRc}. Use stable or change source before another RC.`);
+  const latestTag = latestPublishedTag(lines);
+  if (latestTag !== null && remoteTagSha(latestTag) === context.head) {
+    fail(`HEAD is already published as ${latestTag}. Change source before creating another RC.`);
   }
   return { kind: "rc", tag, sha: context.head, fromRc: null };
 }
@@ -225,7 +240,22 @@ function planStable(context: Context, lines: ReleaseLine[], from: string | null)
   if (lines.find((line) => line.serial === parsed.serial)?.stable) fail(`Stable ${stable} already exists.`);
   const sha = remoteTagSha(rcTag);
   if (!sha) fail(`Remote RC tag does not exist: ${rcTag}`);
+  const conflict = promotionSourceConflict(lines, rcTag, sha);
+  if (conflict !== null) fail(conflict);
   return { kind: "stable", tag: stable, sha, fromRc: rcTag };
+}
+
+function promotionSourceConflict(lines: ReleaseLine[], rcTag: string, rcSha?: string): string | null {
+  const parsed = parseReleaseTag(rcTag);
+  if (!parsed || parsed.rc === null) return `Not an RC tag: ${rcTag}`;
+  const previousStable = previousStableTag(lines, parsed.serial);
+  if (previousStable === null) return null;
+  const candidateSha = rcSha ?? remoteTagSha(rcTag);
+  const stableSha = remoteTagSha(previousStable);
+  if (candidateSha !== null && stableSha === candidateSha) {
+    return `${rcTag} has the same source as previous stable ${previousStable}; change source before opening a new release line.`;
+  }
+  return null;
 }
 
 function formatPlan(plan: ReleasePlan, options: Options): string {

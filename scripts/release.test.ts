@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
   chooseNextRc,
   choosePromotableRc,
+  latestPublishedTag,
   parseReleaseTag,
+  previousStableTag,
   releaseLines,
 } from "./release";
 
@@ -45,7 +47,20 @@ describe("downstream release version decisions", () => {
     ].map(parseReleaseTag).filter((tag) => tag !== null);
     const lines = releaseLines(tags, "20260924");
     expect(choosePromotableRc(lines)).toBeNull();
+    expect(latestPublishedTag(lines)).toBe("fork-20260924.1");
     expect(chooseNextRc(lines, "20260924")).toBe("fork-20260924.2-rc1");
+  });
+
+  test("tracks the previous stable when a new RC line exists", () => {
+    const tags = [
+      "fork-20260924.1-rc7",
+      "fork-20260924.1",
+      "fork-20260924.2-rc1",
+    ].map(parseReleaseTag).filter((tag) => tag !== null);
+    const lines = releaseLines(tags, "20260924");
+    expect(latestPublishedTag(lines)).toBe("fork-20260924.2-rc1");
+    expect(previousStableTag(lines, 2)).toBe("fork-20260924.1");
+    expect(choosePromotableRc(lines)).toBe("fork-20260924.2-rc1");
   });
 
   test("other generations do not affect the current release line", () => {
