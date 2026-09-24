@@ -23,7 +23,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY = 'yoyooyooo/agent-git-service'
-REPOSITORY_ID = 1383799420
+REPOSITORY_ID = 1384519373
 VERSION = re.compile(r'fork-[0-9]{8}\.[1-9][0-9]*(?:-rc[1-9][0-9]*)?')
 SHA = re.compile(r'[0-9a-f]{40}')
 COMMANDS = ('gh-server', 'ags-edge', 'ags-replication')

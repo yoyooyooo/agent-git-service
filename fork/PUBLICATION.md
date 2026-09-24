@@ -22,7 +22,7 @@ The Git tree is only one publication surface. Inspect every remote branch and ta
 
 Fence the previous automatic publisher before using the old backup repository as source authority. Changing a local `origin` alone does not disable an AGS-to-GitHub mirror, queued provider writes, release automation or other workstation clones. A repository rename or HTTP redirect must not let an old publisher accidentally write private history into a new public destination.
 
-If the existing repository contains extensive private history, preserving it as a private archive and publishing only a separately reviewed clean generation is safer than assuming that deleting a few visible branch names erases all historical exposure. A normal Git fork workflow does not require a native GitHub fork badge; repository-network membership and visibility are separate platform decisions.
+If the existing repository contains extensive private history, preserve it as a private archive and publish only a separately reviewed clean generation. For this project, the maintained public destination is also attached to the official GitHub fork network so the parent relationship is explicit in the UI. Repository-network membership does not relax disclosure gates: only the public upstream history plus reviewed downstream generation may enter that fork; private historical refs remain outside it.
 
 ## Required evidence
 

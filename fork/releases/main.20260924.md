@@ -10,7 +10,7 @@ This is a source/disclosure checkpoint. It does not toggle repository visibility
 | --- | --- |
 | Formal branch | `fork/main.20260924` |
 | Source repository | `yoyooyooo/agent-git-service` on GitHub (same repository identity after public-name cutover) |
-| Repository identity | `1383799420` |
+| Repository identity | `1384519373` |
 | Frozen official upstream | `c7691f45cf2c02d6a32e4bf13a21eca40649aa24` |
 | Official tag at selection | None; the fetched tag inventory was empty |
 | Fully tested source | `2a2e19c4ae9b355db567f00d05ce878afc4c1522` |
@@ -66,9 +66,9 @@ Earlier failed trial runs remain private failure evidence. The failures caused b
 
 ## Disclosure and repository boundary
 
-The candidate was published only into a **fresh private GitHub repository** with a new repository identity. Earlier trial metadata, logs and commits remain in a distinct private review archive; the former source publisher targets a different private repository and has no configured mapping to this clean destination. No old repository was made public or deleted.
+The maintained destination is a **native public GitHub fork** of `ngaut/agent-git-service` with its own repository identity. The accepted downstream generation is carried on `fork/main.20260924`; the inherited `main` remains the upstream branch lineage. Earlier trial metadata, logs and commits remain in distinct private archives, and the former AGS source publisher has no configured mapping to this maintained fork.
 
-The accepted destination had one formal branch; the specifically probed old private-source and trial commits were unavailable through its commit API. It had no PRs, Issues, releases, artifacts, webhooks, configured Actions secrets or self-hosted runners. Wiki was disabled. New Actions history contains only this generation's verification. Workflows use read-only permissions and cannot approve reviews; checkout is pinned to the reviewed Node-24-compatible action revision.
+Before native-fork cutover, the clean standalone destination carried only the reviewed generation and no private-source/trial commits. The native fork adds the public upstream fork network and its inherited `main`, not the old private object inventory. Repository-specific Actions, releases and other writable surfaces are re-established only after the native fork's exact repository identity passes the same source/disclosure gates. Workflows use read-only permissions and cannot approve reviews; checkout is pinned to reviewed action revisions.
 
 The complete new reachable-history scan, including commit metadata and case-insensitive operator-specific rules, has **zero unreviewed findings**. Fifteen synthetic URL/private-key-shape test examples are explicitly reviewed by exact path/blob/rule; changes invalidate their approvals. They are negative-test fixtures, not real credentials. The public maintainer identity uses GitHub noreply attribution.
 

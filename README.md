@@ -12,7 +12,7 @@ developer workflows.**
 
 </div>
 
-This maintained fork uses GitHub for source collaboration and standard hosted CI.
+This maintained repository is the native GitHub fork of [`ngaut/agent-git-service`](https://github.com/ngaut/agent-git-service) and uses standard hosted CI.
 No running AGS, private network or self-hosted build runner is needed to contribute.
 The active generation is [`fork/main.20260924`](fork/releases/main.20260924.md).
 See [fork governance](fork/README.md) for frozen upstream generations,

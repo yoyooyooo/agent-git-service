@@ -1,11 +1,11 @@
 # Maintaining this fork
 
-This source repository uses GitHub for collaboration and CI. Building or contributing to it does **not** require an AGS, Forgejo, Multica, private network, or maintainer-managed runner. The AGS product can still integrate with those systems when an operator explicitly configures it.
+This source repository is a native GitHub fork of `ngaut/agent-git-service` and uses GitHub for collaboration and CI. Building or contributing to it does **not** require an AGS, Forgejo, Multica, private network, or maintainer-managed runner. The AGS product can still integrate with those systems when an operator explicitly configures it.
 
 ## Remotes and generations
 
-- `origin` is `git@github.com:yoyooyooo/agent-git-service.git`, the maintained clean GitHub repository.
-- `upstream` is the official `ngaut/agent-git-service` source. Never push to it.
+- `origin` is `git@github.com:yoyooyooo/agent-git-service.git`, the maintained native GitHub fork.
+- `upstream` is the fork parent, `ngaut/agent-git-service`. Never push to it.
 - `fork/<upstream-version>-main.<date>` identifies an accepted generation. If the official repository has no tags, use `fork/main.<date>` and pin its full baseline SHA; do not invent a release version.
 - `feat/*` and `fix/*` branch from the active generation. Merge accepted work linearly into that generation.
 - `prepare/*` is private working material, not an accepted generation and not safe to publish automatically.

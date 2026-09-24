@@ -17,7 +17,7 @@ import tarfile
 import tempfile
 
 REPO='yoyooyooo/agent-git-service'
-REPO_ID=1383799420
+REPO_ID=1384519373
 COMMANDS=('gh-server','ags-edge','ags-replication')
 VERSION=re.compile(r'fork-[0-9]{8}\.[1-9][0-9]*(?:-rc[1-9][0-9]*)?')
 SHA=re.compile(r'[0-9a-f]{40}')
