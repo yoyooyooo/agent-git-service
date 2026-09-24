@@ -56,6 +56,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_public_ranges.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_casefold_policy.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_release.py
+          PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_install_sh.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_edge_client_route.py
           (cd fork/tools && go test ./... -count=1)
       - name: Exercise repaired authorization and transport boundaries

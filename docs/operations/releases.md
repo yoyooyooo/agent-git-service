@@ -86,12 +86,56 @@ versions or overwrites content. It refuses an already published release or a
 mismatched tag. A tag-only or partial-upload failure requires separate inspection,
 not a blind retry. A successful source test or release does not deploy anything.
 
+## One-command install and upgrade
+
+Release archives are installation artifacts, not CI-only attachments. The
+public Bash bootstrap is intentionally thin: it resolves one explicit immutable
+Release tag, fetches the exact `scripts/install-release.py` blob from that tag,
+verifies its Git blob identity, and delegates all bundle/digest/attestation
+checks to the Python installer. It does not duplicate release-verification
+policy in shell.
+
+For a pre-release, pin the version explicitly:
+
+```bash
+VERSION=fork-20260924.1-rc4
+curl -fsSL "https://raw.githubusercontent.com/yoyooyooo/agent-git-service/$VERSION/scripts/install.sh" |
+  bash -s -- install --version "$VERSION" --allow-prerelease
+```
+
+An existing installer-owned installation can be upgraded with the same immutable
+bootstrap:
+
+```bash
+VERSION=fork-20260924.1-rc4
+curl -fsSL "https://raw.githubusercontent.com/yoyooyooo/agent-git-service/$VERSION/scripts/install.sh" |
+  bash -s -- upgrade --version "$VERSION" --allow-prerelease
+```
+
+The bootstrap requires Bash, Python 3.9+ and the GitHub CLI. It creates only
+installer-owned selectors plus `gh-server`, `ags-edge` and
+`ags-replication` symlinks under `~/.local/bin` by default. It refuses an
+unrelated file/symlink rather than replacing it. `stage` downloads and verifies
+without activation; `plan` does not install binaries. There is deliberately no
+implicit “latest prerelease” selector.
+
+The raw bootstrap itself comes from the immutable Release tag over GitHub HTTPS;
+the actual executable archive is then independently checked using GitHub's asset
+digest, immutable Release verification and build provenance. Operators requiring
+a separately reviewed bootstrap can download/inspect the tagged script before
+execution rather than piping it directly.
+
+**Install/upgrade here means software version selection only.** It does not
+restart launchd/systemd, migrate a live database, rewrite service configuration
+or rotate credentials/certificates. Runtime upgrades continue to use the
+separate rehearsal/backup/readback procedure below.
+
 ## Plan, verify and stage an installation
 
 Use Python 3.9+ and a GitHub CLI supporting `release verify-asset` and
-`attestation verify` (the delivery path is exercised with 2.86.0). Run the
-installer from a trusted checkout, not a shell command piped from an unverified
-URL. The default operation is a read-only plan:
+`attestation verify` (the delivery path is exercised with 2.86.0). The Python
+entry remains the lower-level interface and is useful for explicit staging or
+automation from a trusted checkout. The default operation is a read-only plan:
 
 ```bash
 python3 scripts/install-release.py --version fork-20260924.1-rc1 \

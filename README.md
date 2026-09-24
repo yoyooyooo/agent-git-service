@@ -80,7 +80,17 @@ Known GitHub-compatibility gaps are tracked in
 Native release bundles, signed provenance, platform requirements, installation and
 data-safe rollback are documented in [Release operations](docs/operations/releases.md).
 Release installation does not require building this repository or running an AGS
-instance. Publishing and service upgrades remain separate explicit actions.
+instance. An immutable tag also exposes a thin Bash bootstrap:
+
+```bash
+VERSION=<immutable-release-tag>
+curl -fsSL "https://raw.githubusercontent.com/yoyooyooo/agent-git-service/$VERSION/scripts/install.sh" |
+  bash -s -- install --version "$VERSION"
+```
+
+Add `--allow-prerelease` for an explicitly selected RC. Use `upgrade` instead
+of `install` when an installer-owned `current` selector already exists.
+Publishing and **runtime service** upgrades remain separate explicit actions.
 
 ## Quick Start
 
