@@ -75,7 +75,20 @@ run where your agents run:
 Known GitHub-compatibility gaps are tracked in
 [`docs/github-api-compatibility-matrix.md`](docs/github-api-compatibility-matrix.md).
 
-## Release installation
+## Release and installation
+
+Maintainers publish with a tag-driven helper:
+
+```bash
+bun scripts/release.ts status
+bun scripts/release.ts rc
+# once the chosen RC is accepted without changing its source:
+bun scripts/release.ts stable
+```
+
+The helper pushes one exact release tag; GitHub Actions builds and publishes from
+that tag. RC and stable releases are separate immutable tags, and stable
+promotion keeps the exact RC source SHA.
 
 Native release bundles, signed provenance, platform requirements, installation and
 data-safe rollback are documented in [Release operations](docs/operations/releases.md).

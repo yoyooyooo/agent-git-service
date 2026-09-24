@@ -35,9 +35,10 @@ class ReleaseTests(unittest.TestCase):
             for key in ('GITHUB_TOKEN','AGS_INTEGRATIONS_CONFIG','GIT_CONFIG_COUNT','GIT_ASKPASS','MULTICA_TOKEN'):
                 self.assertNotIn(key,env)
 
-    def gate_api(self, *, bad_sha=False, skipped=False, incomplete=False, existing=False):
+    def gate_api(self, *, bad_sha=False, skipped=False, incomplete=False, existing_release=False, tag_missing=False, tag_wrong=False):
         def api(path,**kwargs):
-            if path=='repos/'+release.REPOSITORY: return {'id':release.REPOSITORY_ID,'private':False,'default_branch':'fork/main.20260924'}
+            if path=='repos/'+release.REPOSITORY:
+                return {'id':release.REPOSITORY_ID,'private':False,'fork':True,'parent':{'full_name':'ngaut/agent-git-service'},'default_branch':'fork/main.20260924'}
             if '/actions/runs?' in path:
                 return {'workflow_runs':[{'id':n,'head_sha':('c'*40 if bad_sha else SOURCE),'path':p,'status':'completed','conclusion':'success','repository':{'id':release.REPOSITORY_ID}} for n,p in enumerate(('.github/workflows/ci.yml','.github/workflows/secret-scan.yml'),1)]}
             if '/jobs?' in path:
@@ -45,16 +46,19 @@ class ReleaseTests(unittest.TestCase):
                 rows=[{'conclusion':'success'} for _ in range(n)]
                 if skipped: rows[0]['conclusion']='skipped'
                 return {'total_count':n+int(incomplete),'jobs':rows}
+            if '/git/ref/tags/' in path:
+                if tag_missing: return None
+                return {'object':{'type':'commit','sha':'c'*40 if tag_wrong else SOURCE}}
+            if '/releases/tags/' in path: return {'id':99} if existing_release else None
             if '/releases?per_page=' in path: return []
-            if '/releases/tags/' in path or '/git/ref/tags/' in path: return {'exists':True} if existing else None
             raise AssertionError(path)
         return api
 
-    def test_release_gate_requires_exact_complete_ci_and_unused_version(self):
+    def test_release_gate_requires_preexisting_exact_tag_complete_ci_and_unused_release(self):
         def fake_git(*args): return TREE if '^{tree}' in args[-1] else SOURCE
         with mock.patch.object(release,'git',side_effect=fake_git),mock.patch.dict(os.environ,{},clear=True):
             with mock.patch.object(release,'api',side_effect=self.gate_api()): self.assertEqual(release.gate(VER,SOURCE)['source'],SOURCE)
-            for options in ({'bad_sha':True},{'skipped':True},{'incomplete':True},{'existing':True}):
+            for options in ({'bad_sha':True},{'skipped':True},{'incomplete':True},{'existing_release':True},{'tag_missing':True},{'tag_wrong':True}):
                 with mock.patch.object(release,'api',side_effect=self.gate_api(**options)),self.assertRaises(ValueError): release.gate(VER,SOURCE)
 
     def make_bundle(self,root,target='darwin_arm64',extra=None,go_version=PINNED_GO,diagnostics_verified=True):
@@ -132,31 +136,47 @@ class ReleaseTests(unittest.TestCase):
         for drift in ({'target_commitish':'main'},{'id':124},{'draft':False},{'tag_name':'other'}):
             with self.assertRaises(ValueError):release.require_draft({**draft,**drift},VER,SOURCE,123)
 
-    def test_numeric_draft_finish_creates_exact_absent_tag_and_never_reuploads(self):
+    def test_numeric_draft_finish_requires_preexisting_exact_tag_and_never_reuploads(self):
         with tempfile.TemporaryDirectory() as directory:
             asset=Path(directory)/'fixture';asset.write_bytes(b'release-fixture')
             row={'name':asset.name,'size':asset.stat().st_size,'digest':'sha256:'+release.digest(asset),'state':'uploaded'}
-            for case in ('absent-tag','existing-exact-tag','wrong-tag','asset-drift'):
-                state={'ref':None if case=='absent-tag' else {'object':{'type':'commit','sha':'c'*40 if case=='wrong-tag' else SOURCE}},'published':False,'writes':[],'reads':0}
-                def api(path,method='GET',fields=(),**kwargs):
-                    if path.endswith('/git/refs'):
-                        self.assertEqual(method,'POST');self.assertEqual(dict(fields),{'ref':'refs/tags/'+VER,'sha':SOURCE})
-                        state['ref']={'object':{'type':'commit','sha':SOURCE}};state['writes'].append('create-tag');return state['ref']
-                    if '/git/ref/tags/' in path:return state['ref']
+            for case in ('missing-tag','existing-exact-tag','wrong-tag','asset-drift'):
+                state={'published':False,'writes':[]}
+                def api(path,method='GET',fields=(),missing=False,**kwargs):
+                    if '/git/ref/tags/' in path:
+                        if case=='missing-tag': return None
+                        return {'object':{'type':'commit','sha':'c'*40 if case=='wrong-tag' else SOURCE}}
                     if path.endswith('/releases/123'):
                         if method=='PATCH':
-                            self.assertEqual(dict(fields),{'draft':False,'make_latest':'false'});state['published']=True;state['writes'].append('publish')
-                        state['reads']+=1
+                            self.assertEqual(dict(fields),{'draft':False,'make_latest':'false'})
+                            state['published']=True;state['writes'].append('publish')
                         changed={**row,'digest':'sha256:'+'0'*64} if case=='asset-drift' else row
                         return {'id':123,'tag_name':VER,'target_commitish':SOURCE,'draft':not state['published'],'immutable':state['published'],'assets':[changed],'html_url':'https://example.test/release'}
                     raise AssertionError(path)
                 with mock.patch.object(release,'api',side_effect=api),mock.patch.object(release,'run',side_effect=AssertionError('no upload or command replay during finish')):
-                    if case in ('wrong-tag','asset-drift'):
+                    if case in ('missing-tag','wrong-tag','asset-drift'):
                         with self.assertRaises(ValueError):release.finish_draft(VER,SOURCE,123,[asset])
                         self.assertNotIn('publish',state['writes'])
                     else:
                         self.assertTrue(release.finish_draft(VER,SOURCE,123,[asset])['immutable'])
-                        self.assertEqual(state['writes'],['create-tag','publish'] if case=='absent-tag' else ['publish'])
+                        self.assertEqual(state['writes'],['publish'])
+
+    def test_stable_publication_marks_release_latest(self):
+        stable='fork-20260924.1'
+        with tempfile.TemporaryDirectory() as directory:
+            asset=Path(directory)/'fixture';asset.write_bytes(b'release-fixture')
+            row={'name':asset.name,'size':asset.stat().st_size,'digest':'sha256:'+release.digest(asset),'state':'uploaded'}
+            state={'published':False,'make_latest':None}
+            def api(path,method='GET',fields=(),**kwargs):
+                if '/git/ref/tags/' in path:return {'object':{'type':'commit','sha':SOURCE}}
+                if path.endswith('/releases/123'):
+                    if method=='PATCH':
+                        state['make_latest']=dict(fields)['make_latest'];state['published']=True
+                    return {'id':123,'tag_name':stable,'target_commitish':SOURCE,'draft':not state['published'],'immutable':state['published'],'assets':[row],'html_url':'https://example.test/stable'}
+                raise AssertionError(path)
+            with mock.patch.object(release,'api',side_effect=api),mock.patch.object(release,'run',side_effect=AssertionError('no command replay during finish')):
+                release.finish_draft(stable,SOURCE,123,[asset])
+            self.assertEqual(state['make_latest'],'true')
 
     def test_toolchain_pin_is_exact_and_does_not_accept_aliases(self):
         for raw in ('1.26.8', '1.27.1'):
@@ -210,11 +230,14 @@ class ReleaseTests(unittest.TestCase):
             pins.extend(found)
         self.assertGreaterEqual(len(pins),7)
 
-    def test_release_is_manual_and_uses_attested_native_targets(self):
+    def test_release_is_tag_driven_and_uses_attested_native_targets(self):
         text=(ROOT/'.github/workflows/release.yml').read_text()
-        self.assertIn('workflow_dispatch:',text)
-        for trigger in ('pull_request:', 'pull_request_target:', 'workflow_run:', '\n  push:'):
+        self.assertIn("tags:\n      - 'fork-*'",text)
+        self.assertNotIn('workflow_dispatch:',text)
+        for trigger in ('pull_request:', 'pull_request_target:', 'workflow_run:'):
             self.assertNotIn(trigger,text)
+        self.assertIn('RELEASE_VERSION: ${{ github.ref_name }}',text)
+        self.assertIn("github.ref_type == 'tag'",text)
         self.assertIn('macos-15',text);self.assertIn('ubuntu-24.04',text)
         self.assertIn('persist-credentials: false',text);self.assertIn('attestations: write',text)
         self.assertIn('cancel-in-progress: false',text)

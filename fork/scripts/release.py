@@ -48,6 +48,16 @@ def pinned_toolchain(sha):
         raise ValueError('release toolchain requires an exact .go-version patch pin')
     return 'go'+version
 
+def tag_source(version):
+    ref=api('repos/'+REPOSITORY+'/git/ref/tags/'+version,missing=True)
+    if ref is None: return None
+    obj=ref.get('object',{})
+    if obj.get('type')=='tag':
+        obj=api('repos/'+REPOSITORY+'/git/tags/'+str(obj.get('sha'))).get('object',{})
+    if obj.get('type')!='commit' or not SHA.fullmatch(str(obj.get('sha',''))):
+        raise ValueError('release tag is not an exact commit')
+    return obj['sha']
+
 def verify_toolchain(sha):
     expected=pinned_toolchain(sha)
     actual=run(['go','env','GOVERSION'],env=environment(Path.home()),timeout=30).decode().strip()
@@ -73,10 +83,12 @@ def gate(version, sha, *, recovery_id=None):
     if recovery_id is None and git('rev-parse','HEAD')!=sha: raise ValueError('source mismatch')
     if recovery_id is not None and (type(recovery_id) is not int or recovery_id<=0 or git('rev-parse',sha+'^{commit}')!=sha): raise ValueError('invalid exact recovery identity')
     meta=api('repos/'+REPOSITORY)
-    if meta['id']!=REPOSITORY_ID or meta['private']: raise ValueError('wrong or nonpublic repository')
-    branch=meta['default_branch']
-    if os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('GITHUB_REF')!='refs/heads/'+branch:
-        raise ValueError('release workflow must run on the default generation')
+    if meta['id']!=REPOSITORY_ID or meta['private'] or not meta.get('fork') or meta.get('parent',{}).get('full_name')!='ngaut/agent-git-service':
+        raise ValueError('wrong, nonpublic or detached repository')
+    if tag_source(version)!=sha: raise ValueError('release tag is missing or differs from source')
+    if os.environ.get('GITHUB_ACTIONS')=='true':
+        if os.environ.get('GITHUB_REF_TYPE')!='tag' or os.environ.get('GITHUB_REF_NAME')!=version or os.environ.get('GITHUB_REF')!='refs/tags/'+version:
+            raise ValueError('release workflow must run from the exact release tag')
     runs=api('repos/'+REPOSITORY+'/actions/runs?head_sha='+sha+'&per_page=100')['workflow_runs']
     receipts={}
     for path in ('.github/workflows/ci.yml','.github/workflows/secret-scan.yml'):
@@ -90,7 +102,6 @@ def gate(version, sha, *, recovery_id=None):
         receipts[path]=chosen['id']
     if recovery_id is None:
         if lookup_release(version) is not None: raise ValueError('release exists; never overwrite or silently resume it')
-        if api('repos/'+REPOSITORY+'/git/ref/tags/'+version,missing=True) is not None: raise ValueError('tag already exists')
     else:
         require_draft(api('repos/'+REPOSITORY+'/releases/'+str(recovery_id)),version,sha,recovery_id)
     # Repository immutability is configured by an administrator, never by a
@@ -289,22 +300,14 @@ def finish_draft(version,sha,release_id,assets):
     endpoint='repos/'+REPOSITORY+'/releases/'+str(release_id)
     release=require_draft(api(endpoint),version,sha,release_id)
     validate_uploaded(release,assets)
-    refpath='repos/'+REPOSITORY+'/git/ref/tags/'+version
-    ref=api(refpath,missing=True)
-    if ref is None:
-        # Draft creation need not create a tag. Create the exact pinned ref,
-        # never a moving branch name; a concurrent conflict is an explicit stop.
-        api('repos/'+REPOSITORY+'/git/refs',method='POST',fields=(('ref','refs/tags/'+version),('sha',sha)))
-        ref=api(refpath)
-    if ref['object']['type']!='commit' or ref['object']['sha']!=sha: raise ValueError('release tag differs from accepted source')
+    if tag_source(version)!=sha: raise ValueError('release tag differs from accepted source')
     # Re-read after ref creation; publishing uses the numeric draft identity.
     release=require_draft(api(endpoint),version,sha,release_id); validate_uploaded(release,assets)
-    api(endpoint,method='PATCH',fields=(('draft',False),('make_latest','false')))
+    api(endpoint,method='PATCH',fields=(('draft',False),('make_latest','false' if '-rc' in version else 'true')))
     release=api(endpoint)
     if release.get('draft') or not release.get('immutable') or release.get('tag_name')!=version or release.get('id')!=release_id: raise ValueError('release was not locked after publication')
     validate_uploaded(release,assets)
-    ref=api(refpath)
-    if ref['object']['type']!='commit' or ref['object']['sha']!=sha: raise ValueError('published tag identity mismatch')
+    if tag_source(version)!=sha: raise ValueError('published tag identity mismatch')
     return {'tag':version,'source':sha,'release_id':release_id,'immutable':True,'assets':len(assets),'release_url':release['html_url']}
 
 def publish(version,sha,directory):
@@ -315,7 +318,7 @@ def publish(version,sha,directory):
     install='VERSION='+version+'; curl -fsSL "https://github.com/'+REPOSITORY+'/releases/download/$VERSION/install.sh" | bash -s -- install --version "$VERSION"'+prerelease_flag
     upgrade='VERSION='+version+'; curl -fsSL "https://github.com/'+REPOSITORY+'/releases/download/$VERSION/install.sh" | bash -s -- upgrade --version "$VERSION"'+prerelease_flag
     notes='Exact-source release for controlled installation.\n\nSource: `'+sha+'`\n\nNative macOS ARM64 and Linux amd64 bundles contain gh-server, ags-edge, ags-replication, build metadata and license. No service configuration or data is included.\n\nInstall:\n\n```bash\n'+install+'\n```\n\nUpgrade an existing installer-owned version:\n\n```bash\n'+upgrade+'\n```\n\nThe tagged Bash bootstrap is only a thin version selector. The executable archive is still verified using the immutable Release asset digest and GitHub build provenance before activation. Installation does not restart a service or migrate live data. See docs/operations/releases.md for platform limits, staging and rollback.\n'
-    args=['gh','release','create',version,'--repo',REPOSITORY,'--target',sha,'--draft','--title',version,'--notes',notes]
+    args=['gh','release','create',version,'--repo',REPOSITORY,'--target',sha,'--verify-tag','--draft','--title',version,'--notes',notes]
     if '-rc' in version: args.append('--prerelease')
     args.extend(str(p) for p in assets);run(args,timeout=180)
     release=require_draft(lookup_release(version),version,sha)

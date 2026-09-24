@@ -43,6 +43,10 @@ Hosted CI uses read-only GitHub permissions and disposable test dependencies. No
 
 [Release operations](../docs/operations/releases.md) owns exact-source native builds,
 artifact provenance, immutable assets, opt-in installation and data-safe rollback.
+Maintainers choose releases only through `bun scripts/release.ts rc|stable`;
+the resulting exact `fork-*` tag is the normal publication trigger. Stable
+promotion creates a new immutable tag at the accepted RC's exact source SHA; it
+does not rename or mutate the RC.
 The repository name has no `-fork` suffix; the `fork/*` branch prefix continues to
 identify a downstream generation. Prior private repository histories are not
 publication inputs. New metadata/build changes have their own exact-source CI;

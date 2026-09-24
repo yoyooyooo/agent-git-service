@@ -50,17 +50,38 @@ bundle does not install those dependencies, certificates or external providers.
 
 ## Controlled publication
 
-The `Release` workflow is manually dispatched from the current default generation:
+Release publication is tag-driven. Maintainers do not manually dispatch the
+build workflow or hand-type the next version. `scripts/release.ts` is the one
+release decision entry and follows the same model as the other maintained
+tag-driven projects:
 
 ```bash
-gh workflow run release.yml --repo yoyooyooo/agent-git-service \
-  --ref fork/main.20260924 -f version=fork-20260924.1-rc1
+bun scripts/release.ts status
+bun scripts/release.ts rc
+# after that RC is accepted without source changes:
+bun scripts/release.ts stable
 ```
 
-Use a new explicit version for every release; never move a published tag or
-replace an asset. The workflow admits only the maintained repository identity and
-its default branch. It checks successful **exact-source** full CI and history
-secret scan, including non-skipped jobs. Ordinary PRs and pushes cannot publish.
+`rc` continues the current `fork-YYYYMMDD.N` line with the next `-rcN`.
+Once a line has a stable release, the next `rc` starts
+`fork-YYYYMMDD.(N+1)-rc1`. `stable` selects the latest unpromoted RC, or an
+explicit `--from fork-YYYYMMDD.N-rcN`, and creates
+`fork-YYYYMMDD.N` at **the exact same source SHA**. The RC remains immutable.
+Use `--dry-run` to show and validate a plan without creating a tag,
+`--no-push` for a local-only tag, and `--no-watch` only when another operator
+will observe the resulting workflow.
+
+The script requires a clean, current default generation and verifies the native
+GitHub fork identity, exact remote branch state, successful exact-source full CI
+and secret scan, existing RC publication state for promotion, and absence of tag
+or Release collisions. Its only publication write is an exact tag ref. A push of
+`fork-*` is the sole normal trigger for `.github/workflows/release.yml`.
+
+The Release workflow treats the tag as immutable input; it **never creates or
+moves a tag**. It verifies that the tag already resolves to `github.sha`, then
+re-checks the exact-source CI/disclosure gates before building. Ordinary branch
+pushes and pull requests cannot publish. For a stable version the final Release
+is marked GitHub Latest; RCs remain prereleases and never replace Latest.
 
 Native standard GitHub-hosted runners build both targets. Actual binaries are
 checked for identity, primary SQLite startup/schema/integrity, Edge liveness,
@@ -73,18 +94,19 @@ their provenance and uploaded digests before publishing the complete draft.
 The repository's immutable-release setting locks the published tag and assets.
 
 A failed draft/upload is retained for inspection. Re-running does not silently
-clobber a tag or finish an ambiguous release. Drafts without a Git tag are located
-through their numeric release identity, not assumed to exist at the published-tag
-endpoint. Before publication the exact pinned Git tag is created or verified,
-then the complete draft's identity and upload digests are checked again.
+clobber a tag or finish an ambiguous release. The exact Git tag predates the
+workflow and is never created, replaced or moved by the publisher. Before final
+publication, the complete draft identity, uploaded digests and the pre-existing
+tag-to-source binding are checked again.
 
 An operator may explicitly resume a fully uploaded draft using `recover-draft`
 with its numeric `--draft-id`, exact `--sha`, version and locally downloaded
 original build artifacts. This path revalidates the source's full CI, provenance,
 embedded manifests and every remote upload; it never rebuilds, uploads, changes
 versions or overwrites content. It refuses an already published release or a
-mismatched tag. A tag-only or partial-upload failure requires separate inspection,
-not a blind retry. A successful source test or release does not deploy anything.
+mismatched tag. A tag-triggered run that fails before a complete upload requires
+separate inspection, not a blind new tag or source rebuild. A successful source
+test or release does not deploy anything.
 
 ## One-command install and upgrade
 
