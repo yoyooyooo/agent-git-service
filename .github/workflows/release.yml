@@ -23,6 +23,8 @@ env:
   RELEASE_VERSION: ${{ inputs.version }}
   RELEASE_SOURCE: ${{ github.sha }}
   GH_REPO: ${{ github.repository }}
+  GOTOOLCHAIN: local
+  GOENV: 'off'
 
 jobs:
   gate:
@@ -70,7 +72,7 @@ jobs:
           ref: ${{ github.sha }}
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
           cache-dependency-path: go.sum
       - name: Build exact source and smoke-test actual binaries
         run: python3 fork/scripts/release.py build --version "$RELEASE_VERSION" --output "$RUNNER_TEMP/ags-release-output"

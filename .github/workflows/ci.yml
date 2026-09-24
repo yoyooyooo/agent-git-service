@@ -26,6 +26,8 @@ defaults:
 env:
   GIT_TERMINAL_PROMPT: '0'
   GOMAXPROCS: '2'
+  GOTOOLCHAIN: local
+  GOENV: 'off'
 
 jobs:
   checks:
@@ -39,11 +41,12 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
           cache-dependency-path: go.sum
       - name: Verify exact source and complete package inventory
         run: |
           python3 fork/scripts/audit.py verify
+          python3 fork/scripts/release.py toolchain
           bash scripts/check-ci-package-coverage.sh
       - name: Test publication scanner and scoped operator routing
         run: |
@@ -112,7 +115,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
           cache-dependency-path: go.sum
       - name: Start disposable loopback-only TiDB
         run: bash fork/scripts/ci-database.sh start
@@ -138,7 +141,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
       - run: bash fork/scripts/ci-database.sh start
       - run: go test -race -p 1 -count=1 -timeout=15m ./internal/edge ./internal/snapshotstore ./internal/gitbackend ./internal/edgeprotocol ./internal/replication
       - run: go test -race ./internal/service -run 'TestExchangeDeviceCode|TestAccessGrantPRMergeConcurrentSameEffect|TestAuthorityBoundaryReceiptConcurrentCapture' -count=3 -timeout=5m
@@ -157,7 +160,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: cli/go.mod
+          go-version-file: .go-version
           cache-dependency-path: |
             cli/go.sum
             cli/_go-gh-local/go.sum

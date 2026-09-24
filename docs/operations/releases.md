@@ -18,6 +18,25 @@ network inventory, runtime configuration, databases or deployment receipts are
 packaged. Builds use a verified Git archive outside the checkout, `-trimpath`,
 read-only module resolution and explicit linker identities.
 
+The root `.go-version` is the exact supported compiler patch used by all hosted
+CI, client checks and native Release builds. The `go` directive in each `go.mod`
+remains the module's minimum language/toolchain requirement, not a release
+compiler selector. Changing the pin requires a new exact-source CI run and a new
+immutable release; published bundles are never rebuilt in place.
+
+`python3 fork/scripts/release.py toolchain` checks the installed compiler against
+the selected commit's pin. CI and builds use `GOTOOLCHAIN=local` and `GOENV=off`
+to prevent an implicit toolchain switch or operator Go configuration from
+changing it. Release construction checks before creating staging; publication
+also checks all three binaries' reported Go versions against the same source
+pin. A checksum-consistent bundle from a different compiler is rejected.
+
+Use `.go-version` for local release work as well; it does not automatically
+upgrade a workstation's Go installation or a running service. The initial
+release pin is Go 1.26.8, selected from the official supported release feed.
+Review Go security/maintenance releases regularly rather than leaving this
+pin at a historical minimum or following an unbounded `latest` selector.
+
 The first supported targets are:
 
 | Bundle | Platform | Runtime constraints |

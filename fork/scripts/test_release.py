@@ -17,6 +17,10 @@ def load(name,path):
 release=load('ags_release',Path(__file__).with_name('release.py'))
 installer=load('ags_installer',ROOT/'scripts/install-release.py')
 VER='fork-20260924.1-rc1';SOURCE='a'*40;TREE='b'*40
+PINNED_GO='go'+(ROOT/'.go-version').read_text().strip()
+
+def asset_git(*args):
+    return PINNED_GO.removeprefix('go') if args[0]=='show' and args[-1].endswith(':.go-version') else TREE
 
 class ReleaseTests(unittest.TestCase):
     def test_version_is_not_a_shell_or_path(self):
@@ -53,12 +57,12 @@ class ReleaseTests(unittest.TestCase):
             for options in ({'bad_sha':True},{'skipped':True},{'incomplete':True},{'existing':True}):
                 with mock.patch.object(release,'api',side_effect=self.gate_api(**options)),self.assertRaises(ValueError): release.gate(VER,SOURCE)
 
-    def make_bundle(self,root,target='darwin_arm64',extra=None):
+    def make_bundle(self,root,target='darwin_arm64',extra=None,go_version=PINNED_GO):
         binaries={};contents={}
         os_name,arch=target.split('_')
         for command in release.COMMANDS:
             raw=('synthetic-'+command).encode();contents['bin/'+command]=raw
-            identity={'schema':'ags.build.v1','command':command,'version':VER,'revision':SOURCE,'tree':TREE,'goos':os_name,'goarch':arch,'go_version':'go-fixture'}
+            identity={'schema':'ags.build.v1','command':command,'version':VER,'revision':SOURCE,'tree':TREE,'goos':os_name,'goarch':arch,'go_version':go_version}
             binaries[command]={'sha256':hashlib.sha256(raw).hexdigest(),'size':len(raw),'identity':identity,'cgo_enabled':command=='gh-server'}
         info={'schema':'ags.release.v1','repository':release.REPOSITORY,'repository_id':release.REPOSITORY_ID,'revision':SOURCE,'tree':TREE,'version':VER,'target':target,'binaries':binaries,'smoke':{'primary_readiness':True,'sqlite':True,'edge_liveness':True,'clean_shutdown':True}}
         contents['LICENSE']=b'Synthetic fixture license';contents['build-info.json']=json.dumps(info).encode()
@@ -75,7 +79,7 @@ class ReleaseTests(unittest.TestCase):
         return bundle
 
     def test_all_assets_are_exact_and_no_archive_path_escape_or_links(self):
-        with tempfile.TemporaryDirectory() as directory,mock.patch.object(release,'git',return_value=TREE):
+        with tempfile.TemporaryDirectory() as directory,mock.patch.object(release,'git',side_effect=asset_git):
             root=Path(directory)
             self.make_bundle(root);self.make_bundle(root,'linux_amd64')
             assets,lines=release.check_assets(root,VER,SOURCE)
@@ -130,6 +134,50 @@ class ReleaseTests(unittest.TestCase):
                     else:
                         self.assertTrue(release.finish_draft(VER,SOURCE,123,[asset])['immutable'])
                         self.assertEqual(state['writes'],['create-tag','publish'] if case=='absent-tag' else ['publish'])
+
+    def test_toolchain_pin_is_exact_and_does_not_accept_aliases(self):
+        for raw in ('1.26.8', '1.27.1'):
+            with mock.patch.object(release,'git',return_value=raw):
+                self.assertEqual(release.pinned_toolchain(SOURCE),'go'+raw)
+        for raw in ('1.26','stable','latest','go1.26.8','1.26.8rc1','1.26.8\nextra','1.26.8+auto'):
+            with mock.patch.object(release,'git',return_value=raw),self.assertRaises(ValueError):
+                release.pinned_toolchain(SOURCE)
+
+    def test_build_rejects_wrong_toolchain_before_staging_or_building(self):
+        def source_git(*args):
+            if args[0]=='show': return PINNED_GO.removeprefix('go')
+            return TREE if args[-1].endswith('^{tree}') else SOURCE
+        with tempfile.TemporaryDirectory() as directory,mock.patch.object(release,'git',side_effect=source_git),mock.patch.object(release.platform,'system',return_value='Darwin'),mock.patch.object(release.platform,'machine',return_value='arm64'),mock.patch.object(release,'run',return_value=b'go1.25.0\n') as runner:
+            output=Path(directory)/'output'
+            with self.assertRaisesRegex(ValueError,'toolchain'):
+                release.build(VER,output)
+            self.assertFalse(output.exists())
+            runner.assert_called_once()
+            self.assertEqual(runner.call_args.args[0],['go','env','GOVERSION'])
+            self.assertEqual(runner.call_args.kwargs['env']['GOTOOLCHAIN'],'local')
+            self.assertEqual(runner.call_args.kwargs['env']['GOENV'],'off')
+
+    def test_publication_rejects_internally_consistent_old_toolchain_bundle(self):
+        with tempfile.TemporaryDirectory() as directory,mock.patch.object(release,'git',side_effect=asset_git):
+            root=Path(directory)
+            self.make_bundle(root,go_version='go1.25.0')
+            self.make_bundle(root,'linux_amd64')
+            with self.assertRaisesRegex(ValueError,'toolchain'):
+                release.check_assets(root,VER,SOURCE)
+
+    def test_all_hosted_go_jobs_use_one_explicit_pin(self):
+        import re
+        pins=[]
+        for workflow in (ROOT/'.github/workflows').glob('*.yml'):
+            text=workflow.read_text()
+            if 'actions/setup-go@' not in text: continue
+            found=re.findall(r'^\s+go-version-file:\s*(\S+)\s*$',text,re.M)
+            self.assertEqual(len(found),text.count('actions/setup-go@'),str(workflow))
+            self.assertTrue(all(pin=='.go-version' for pin in found),str(workflow))
+            self.assertNotRegex(text,r'^\s+go-version:',str(workflow))
+            self.assertIn('GOTOOLCHAIN: local',text)
+            pins.extend(found)
+        self.assertGreaterEqual(len(pins),7)
 
     def test_release_is_manual_and_uses_attested_native_targets(self):
         text=(ROOT/'.github/workflows/release.yml').read_text()

@@ -8,6 +8,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  GOTOOLCHAIN: local
+  GOENV: 'off'
 concurrency:
   group: fork-license-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -21,6 +24,6 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
           cache-dependency-path: go.sum
       - run: python3 scripts/license_check.py --report "$RUNNER_TEMP/dependency-licenses.tsv"

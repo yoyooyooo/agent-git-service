@@ -41,6 +41,19 @@ def validated_version(version):
     if not VERSION.fullmatch(version): raise ValueError('expected fork-YYYYMMDD.N or fork-YYYYMMDD.N-rcN')
     return version
 
+def pinned_toolchain(sha):
+    if not isinstance(sha,str) or not SHA.fullmatch(sha): raise ValueError('invalid toolchain source')
+    version=git('show',sha+':.go-version')
+    if not re.fullmatch(r'1\.[1-9][0-9]*\.[0-9]+',version):
+        raise ValueError('release toolchain requires an exact .go-version patch pin')
+    return 'go'+version
+
+def verify_toolchain(sha):
+    expected=pinned_toolchain(sha)
+    actual=run(['go','env','GOVERSION'],env=environment(Path.home()),timeout=30).decode().strip()
+    if actual!=expected: raise ValueError('build toolchain mismatch: expected '+expected+', found '+actual)
+    return {'source':sha,'go_version':actual,'pin':'.go-version'}
+
 def api(path, *, method='GET', fields=(), missing=False):
     args=['gh','api','--method',method,path]
     for key,value in fields:
@@ -105,7 +118,7 @@ def environment(home):
     # Preserve only build tools/cache settings, not operator credentials/config.
     allowed=('PATH','TMPDIR','TEMP','TMP','GOROOT','GOPATH','GOCACHE','GOMODCACHE','GOPROXY','GOSUMDB','SSL_CERT_FILE','SYSTEMROOT')
     result={k:os.environ[k] for k in allowed if k in os.environ}
-    result.update(HOME=str(home),GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL=os.devnull,GIT_TERMINAL_PROMPT='0',GOWORK='off',GOTOOLCHAIN='local')
+    result.update(HOME=str(home),GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL=os.devnull,GIT_TERMINAL_PROMPT='0',GOWORK='off',GOTOOLCHAIN='local',GOENV='off')
     return result
 
 def unpack_source(payload, destination):
@@ -151,6 +164,8 @@ def build(version, output):
     arch={'arm64':'arm64','aarch64':'arm64','x86_64':'amd64','AMD64':'amd64'}.get(platform.machine())
     target=str(native_os)+'_'+str(arch)
     if target not in TARGETS: raise ValueError('unsupported native build platform')
+    # Check before creating staging or accepting a different local compiler.
+    toolchain=verify_toolchain(sha)['go_version']
     output=Path(output).absolute()
     if output.resolve().is_relative_to(ROOT) or output.exists(): raise ValueError('output must be a new external directory')
     verify_env=dict(os.environ,GIT_SHA=sha)
@@ -172,6 +187,7 @@ def build(version, output):
         reported=json.loads(run([str(binary),'--version'],cwd=stage,env=dict(env,DB_DSN='invalid-must-not-be-opened',AGS_EDGE_READ_CONFIG_FILE='/missing/version-must-not-open'),timeout=10))
         if reported['revision']!=sha or reported['tree']!=tree or reported['version']!=version or reported['command']!=command or reported['goos']!=native_os or reported['goarch']!=arch:
             raise ValueError('binary identity mismatch')
+        if reported.get('go_version')!=toolchain: raise ValueError('binary toolchain differs from pinned build compiler')
         if native_os=='darwin':
             deps=run(['otool','-L',str(binary)],env=env).decode().splitlines()[1:]
             if any(not line.strip().startswith(('/usr/lib/','/System/Library/')) for line in deps): raise ValueError('non-system dynamic dependency')
@@ -209,10 +225,13 @@ def check_assets(directory,version,sha):
     validated_version(version)
     if not SHA.fullmatch(sha): raise ValueError('invalid source identity')
     directory=Path(directory); assets=[]; lines=[]
+    toolchain=pinned_toolchain(sha)
     for target in TARGETS:
         name='ags-'+version+'-'+target+'.tar.gz'; bundle=directory/name; manifest=directory/('build-info-'+target+'.json')
         info=json.loads(manifest.read_text())
         if info['repository_id']!=REPOSITORY_ID or info['revision']!=sha or info['version']!=version or info['target']!=target or info['tree']!=git('rev-parse',sha+'^{tree}') or set(info['binaries'])!=set(COMMANDS): raise ValueError('asset source/platform mismatch')
+        if any(info['binaries'][command].get('identity',{}).get('go_version')!=toolchain for command in COMMANDS):
+            raise ValueError('asset toolchain differs from the exact source pin')
         if info.get('smoke')!={'primary_readiness':True,'sqlite':True,'edge_liveness':True,'clean_shutdown':True}: raise ValueError('asset smoke verification is incomplete')
         expected=digest(bundle)
         if (directory/(name+'.sha256')).read_text()!=expected+'  '+name+'\n': raise ValueError('asset checksum mismatch')
@@ -290,7 +309,10 @@ def recover_draft(version,sha,directory,release_id):
     return finish_draft(version,sha,release_id,assets)
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('mode',choices=['gate','build','publish','recover-draft']);p.add_argument('--version',required=True);p.add_argument('--sha');p.add_argument('--output');p.add_argument('--draft-id',type=int);a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('mode',choices=['toolchain','gate','build','publish','recover-draft']);p.add_argument('--version');p.add_argument('--sha');p.add_argument('--output');p.add_argument('--draft-id',type=int);a=p.parse_args()
+    if a.mode=='toolchain':
+        print(json.dumps(verify_toolchain(a.sha or git('rev-parse','HEAD')),indent=2)); return
+    if a.version is None: p.error('this operation requires --version')
     if a.mode=='build': result=build(a.version,a.output)
     elif a.mode=='gate': result=gate(a.version,a.sha)
     elif a.mode=='recover-draft':
