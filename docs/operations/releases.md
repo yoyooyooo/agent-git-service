@@ -117,24 +117,28 @@ verifies its Git blob identity, and delegates all bundle/digest/attestation
 checks to the Python installer. It does not duplicate release-verification
 policy in shell.
 
-For a pre-release, pin the version explicitly:
+The normal path follows GitHub Latest, which must be an immutable stable release:
 
 ```bash
-VERSION=fork-20260924.1-rc6
-curl -fsSL "https://github.com/yoyooyooo/agent-git-service/releases/download/$VERSION/install.sh" |
-  bash -s -- install --version "$VERSION" --allow-prerelease
+curl -fsSL "https://github.com/yoyooyooo/agent-git-service/releases/latest/download/install.sh" |
+  bash -s -- install
 ```
 
-An existing installer-owned installation can be upgraded with the same immutable
-bootstrap:
+An existing installer-owned installation upgrades to Latest stable with:
 
 ```bash
-VERSION=fork-20260924.1-rc6
-curl -fsSL "https://github.com/yoyooyooo/agent-git-service/releases/download/$VERSION/install.sh" |
-  bash -s -- upgrade --version "$VERSION" --allow-prerelease
+curl -fsSL "https://github.com/yoyooyooo/agent-git-service/releases/latest/download/install.sh" |
+  bash -s -- upgrade
 ```
 
-The bootstrap requires Bash, Python 3.9+ and the GitHub CLI. It creates only
+Use `--version fork-YYYYMMDD.N` to pin or roll back to a specific stable
+release. A prerelease is never selected implicitly; RC testing requires an
+explicit `--version fork-YYYYMMDD.N-rcN --allow-prerelease`.
+
+The bootstrap requires Bash, Python 3.9+ and a GitHub CLI with Release asset and
+attestation verification support. Without `--version`, it resolves
+`releases/latest` and rejects draft, prerelease, mutable, non-exact or
+unexpected tag identities before downloading anything. It creates only
 installer-owned selectors plus `gh-server`, `ags-edge` and
 `ags-replication` symlinks under `~/.local/bin` by default. It refuses an
 unrelated file/symlink rather than replacing it. `stage` downloads and verifies
