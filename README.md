@@ -96,14 +96,15 @@ Release installation does not require building this repository or running an AGS
 instance. An immutable tag also exposes a thin Bash bootstrap:
 
 ```bash
-VERSION=<immutable-release-tag>
-curl -fsSL "https://github.com/yoyooyooo/agent-git-service/releases/download/$VERSION/install.sh" |
-  bash -s -- install --version "$VERSION"
+curl -fsSL "https://github.com/yoyooyooo/agent-git-service/releases/latest/download/install.sh" |
+  bash -s -- install
 ```
 
-Add `--allow-prerelease` for an explicitly selected RC. Use `upgrade` instead
-of `install` when an installer-owned `current` selector already exists.
-Publishing and **runtime service** upgrades remain separate explicit actions.
+By default this follows GitHub Latest, which must be a stable immutable release.
+Use `--version fork-YYYYMMDD.N` to pin or roll back. RCs require an explicit
+`--version ...-rcN --allow-prerelease`. Use `upgrade` instead of `install`
+when an installer-owned `current` selector already exists. Publishing and
+**runtime service** upgrades remain separate explicit actions.
 
 ## Quick Start
 
