@@ -57,14 +57,15 @@ class ReleaseTests(unittest.TestCase):
             for options in ({'bad_sha':True},{'skipped':True},{'incomplete':True},{'existing':True}):
                 with mock.patch.object(release,'api',side_effect=self.gate_api(**options)),self.assertRaises(ValueError): release.gate(VER,SOURCE)
 
-    def make_bundle(self,root,target='darwin_arm64',extra=None,go_version=PINNED_GO):
+    def make_bundle(self,root,target='darwin_arm64',extra=None,go_version=PINNED_GO,diagnostics_verified=True):
         binaries={};contents={}
         os_name,arch=target.split('_')
         for command in release.COMMANDS:
             raw=('synthetic-'+command).encode();contents['bin/'+command]=raw
             identity={'schema':'ags.build.v1','command':command,'version':VER,'revision':SOURCE,'tree':TREE,'goos':os_name,'goarch':arch,'go_version':go_version}
             binaries[command]={'sha256':hashlib.sha256(raw).hexdigest(),'size':len(raw),'identity':identity,'cgo_enabled':command=='gh-server'}
-        info={'schema':'ags.release.v1','repository':release.REPOSITORY,'repository_id':release.REPOSITORY_ID,'revision':SOURCE,'tree':TREE,'version':VER,'target':target,'binaries':binaries,'smoke':{'primary_readiness':True,'sqlite':True,'edge_liveness':True,'clean_shutdown':True}}
+        info={'schema':'ags.release.v1','repository':release.REPOSITORY,'repository_id':release.REPOSITORY_ID,'revision':SOURCE,'tree':TREE,'version':VER,'target':target,'binaries':binaries,'smoke':{'primary_readiness':True,'sqlite':True,'edge_liveness':True,'edge_build_identity':True,'clean_shutdown':True}}
+        if not diagnostics_verified: info['smoke'].pop('edge_build_identity')
         contents['LICENSE']=b'Synthetic fixture license';contents['build-info.json']=json.dumps(info).encode()
         bundle=root/('ags-'+VER+'-'+target+'.tar.gz')
         with tarfile.open(bundle,'w:gz') as tf:
@@ -163,6 +164,14 @@ class ReleaseTests(unittest.TestCase):
             self.make_bundle(root,go_version='go1.25.0')
             self.make_bundle(root,'linux_amd64')
             with self.assertRaisesRegex(ValueError,'toolchain'):
+                release.check_assets(root,VER,SOURCE)
+
+    def test_release_requires_actual_edge_diagnostic_identity_smoke(self):
+        with tempfile.TemporaryDirectory() as directory,mock.patch.object(release,'git',side_effect=asset_git):
+            root=Path(directory)
+            self.make_bundle(root,diagnostics_verified=False)
+            self.make_bundle(root,'linux_amd64')
+            with self.assertRaisesRegex(ValueError,'smoke verification'):
                 release.check_assets(root,VER,SOURCE)
 
     def test_all_hosted_go_jobs_use_one_explicit_pin(self):

@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"net/url"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/ngaut/agent-git-service/config"
+	"github.com/ngaut/agent-git-service/internal/buildinfo"
 	"github.com/ngaut/agent-git-service/internal/snapshotstore"
 )
 
@@ -213,7 +215,7 @@ func (s *Server) DiagnosticsHandler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		result := map[string]any{"version": "ags.edge.diagnostics.v1", "edge_id": s.cfg.ID, "source_revision": edgeSourceRevision(), "unbound_reads": s.cfg.UnboundReads, "telemetry": s.telemetry.Snapshot()}
+		result := map[string]any{"version": "ags.edge.diagnostics.v1", "edge_id": s.cfg.ID, "source_revision": edgeSourceRevision(), "build": buildinfo.Current("ags-edge"), "unbound_reads": s.cfg.UnboundReads, "telemetry": s.telemetry.Snapshot()}
 		if s.operations != nil {
 			result["health"] = s.operations.Snapshot()
 			resources := s.operations.resources
@@ -227,6 +229,11 @@ func (s *Server) DiagnosticsHandler() http.Handler {
 	})
 }
 func edgeSourceRevision() string {
+	// Verified release archives deliberately omit Go's optional VCS metadata.
+	// Prefer their exact compiled identity; retain VCS fallback for local builds.
+	if revision := buildinfo.Revision; len(revision) == 40 && strings.Trim(revision, "0123456789abcdef") == "" {
+		return revision
+	}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, s := range info.Settings {
 			if s.Key == "vcs.revision" {

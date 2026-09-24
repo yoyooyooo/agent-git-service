@@ -134,7 +134,7 @@ def free_port():
     with socket.socket() as sock:
         sock.bind(('127.0.0.1',0)); return sock.getsockname()[1]
 
-def smoke(binary, env, cwd, endpoint, expected_revision=None):
+def smoke(binary, env, cwd, endpoint, expected_revision=None, *, diagnostics_endpoint=None, expected_build=None):
     log=cwd/(binary.name+'.smoke.log')
     with log.open('wb') as output:
         proc=subprocess.Popen([str(binary)],cwd=cwd,env=env,stdout=output,stderr=subprocess.STDOUT)
@@ -150,6 +150,11 @@ def smoke(binary, env, cwd, endpoint, expected_revision=None):
                         ok=True; break
                 except (OSError,ValueError): time.sleep(.2)
             if not ok: raise RuntimeError(binary.name+' did not become ready')
+            if diagnostics_endpoint is not None:
+                with opener.open(diagnostics_endpoint,timeout=5) as response:
+                    diagnostics=json.load(response)
+                if not expected_build or diagnostics.get('source_revision')!=expected_build['revision'] or diagnostics.get('build')!=expected_build:
+                    raise ValueError('actual Edge diagnostics lost or changed the release build identity')
         finally:
             if proc.poll() is None: proc.send_signal(signal.SIGTERM)
             try: result=proc.wait(timeout=30)
@@ -202,13 +207,15 @@ def build(version, output):
             if not db.execute('SELECT 1 FROM sqlite_master WHERE type=? AND name=?',('table',table)).fetchone(): raise ValueError('SQLite smoke missing table')
     finally: db.close()
     edge=stage/'edge-smoke'; edge.mkdir(); port=free_port()
-    edge_env=dict(env,AGS_EDGE_ID='release-smoke',AGS_EDGE_LISTEN_ADDR='127.0.0.1:'+str(port),AGS_EDGE_PRIMARY_URL='http://127.0.0.1:9',AGS_EDGE_CANONICAL_URL='http://primary.example.test')
-    smoke(package/'bin/ags-edge',edge_env,edge,'http://127.0.0.1:'+str(port)+'/livez')
+    diagnostics_port=free_port()
+    while diagnostics_port==port: diagnostics_port=free_port()
+    edge_env=dict(env,AGS_EDGE_ID='release-smoke',AGS_EDGE_LISTEN_ADDR='127.0.0.1:'+str(port),AGS_EDGE_PRIMARY_URL='http://127.0.0.1:9',AGS_EDGE_CANONICAL_URL='http://primary.example.test',AGS_EDGE_DIAGNOSTICS_ADDR='127.0.0.1:'+str(diagnostics_port))
+    smoke(package/'bin/ags-edge',edge_env,edge,'http://127.0.0.1:'+str(port)+'/livez',diagnostics_endpoint='http://127.0.0.1:'+str(diagnostics_port)+'/status',expected_build=infos['ags-edge']['identity'])
     for name in ('LICENSE','NOTICE'):
         if (source/name).is_file(): (package/name).write_bytes((source/name).read_bytes())
     info={'schema':'ags.release.v1','version':version,'repository':REPOSITORY,'repository_id':REPOSITORY_ID,'revision':sha,'tree':tree,'target':target,
           'minimum_platform':'macOS 15 (Apple Silicon)' if native_os=='darwin' else 'Ubuntu 24.04 / glibc 2.39 for gh-server; Edge and replication client are static',
-          'binaries':infos,'smoke':{'primary_readiness':True,'sqlite':True,'edge_liveness':True,'clean_shutdown':True},'apple_notarized':False}
+          'binaries':infos,'smoke':{'primary_readiness':True,'sqlite':True,'edge_liveness':True,'edge_build_identity':True,'clean_shutdown':True},'apple_notarized':False}
     (package/'build-info.json').write_text(json.dumps(info,indent=2)+'\n')
     archive=output/('ags-'+version+'-'+target+'.tar.gz')
     with tarfile.open(archive,'w:gz') as tf:
@@ -232,7 +239,7 @@ def check_assets(directory,version,sha):
         if info['repository_id']!=REPOSITORY_ID or info['revision']!=sha or info['version']!=version or info['target']!=target or info['tree']!=git('rev-parse',sha+'^{tree}') or set(info['binaries'])!=set(COMMANDS): raise ValueError('asset source/platform mismatch')
         if any(info['binaries'][command].get('identity',{}).get('go_version')!=toolchain for command in COMMANDS):
             raise ValueError('asset toolchain differs from the exact source pin')
-        if info.get('smoke')!={'primary_readiness':True,'sqlite':True,'edge_liveness':True,'clean_shutdown':True}: raise ValueError('asset smoke verification is incomplete')
+        if info.get('smoke')!={'primary_readiness':True,'sqlite':True,'edge_liveness':True,'edge_build_identity':True,'clean_shutdown':True}: raise ValueError('asset smoke verification is incomplete')
         expected=digest(bundle)
         if (directory/(name+'.sha256')).read_text()!=expected+'  '+name+'\n': raise ValueError('asset checksum mismatch')
         with tarfile.open(bundle) as tf:

@@ -63,8 +63,11 @@ its default branch. It checks successful **exact-source** full CI and history
 secret scan, including non-skipped jobs. Ordinary PRs and pushes cannot publish.
 
 Native standard GitHub-hosted runners build both targets. Actual binaries are
-checked for identity, primary SQLite startup/schema/integrity, Edge liveness and
-clean shutdown. Build provenance is attested for each archive. Only the final
+checked for identity, primary SQLite startup/schema/integrity, Edge liveness,
+loopback diagnostics matching the same compiled build identity, and clean shutdown.
+The Edge `/status` response carries `source_revision` plus the credential-free
+`build` record used by `--version`; release archives do not depend on Go's optional
+VCS metadata to remain diagnosable. Build provenance is attested for each archive. Only the final
 publish job has repository-content write permission. It verifies both bundles,
 their provenance and uploaded digests before publishing the complete draft.
 The repository's immutable-release setting locks the published tag and assets.
