@@ -1,21 +1,22 @@
 # Fork generation main.20260924
 
-**Status: source verified and ready for the maintainer's public-visibility decision.**
+**Status: native public GitHub fork active; exact source verified; first native-fork Release published.**
 
-This is a source/disclosure checkpoint. It does not toggle repository visibility, deploy a primary or Edge, migrate a live database, or certify every historical client and platform. The documentation tip may follow the exact tested source below without changing application code.
+This is the source/disclosure and delivery checkpoint for the maintained fork. Runtime deployment, database migration and historical-client compatibility remain separate operator decisions. Documentation-only tips may follow the exact tested source below without changing application code.
 
 ## Exact identity
 
 | Item | Accepted value |
 | --- | --- |
 | Formal branch | `fork/main.20260924` |
-| Source repository | `yoyooyooo/agent-git-service` on GitHub (same repository identity after public-name cutover) |
+| Source repository | `yoyooyooo/agent-git-service`, native GitHub fork of `ngaut/agent-git-service` |
 | Repository identity | `1384519373` |
 | Frozen official upstream | `c7691f45cf2c02d6a32e4bf13a21eca40649aa24` |
 | Official tag at selection | None; the fetched tag inventory was empty |
-| Fully tested source | `2a2e19c4ae9b355db567f00d05ce878afc4c1522` |
-| Fully tested source tree | `2d6e391bae8a165202f2f19a2926b6930ce390cf` |
-| Fork lineage at that source | Eight commits, zero merge commits |
+| Fully tested source | `d687bcfc6d05ebf399859c489149b04ae1a57e34` |
+| Fully tested source tree | `ee25a1b355b6eaf83e4ce6fbfbc4485439dc8530` |
+| Fork lineage at that source | Sixteen downstream commits, zero merge commits |
+| First native-fork Release | `fork-20260924.1-rc5`, immutable pre-release from the fully tested source |
 
 The generation name is a dated main snapshot, not an invented upstream release. Official upstream was re-read before final acceptance. The old private source and trial generation are not ancestors of this generation and were not pushed to this destination.
 
@@ -32,7 +33,7 @@ The generation name is a dated main snapshot, not an invented upstream release. 
 | `201e3c0` | Public product, capability and generation documentation |
 | `2a2e19c` | Exact hashes for reviewed synthetic rejection fixtures |
 
-These groups form one atomically verified generation; an intermediate group is not advertised as an independently deployable release. Subsequent documentation-only acceptance records do not change the tested application source.
+These first eight commits reconstruct and validate the retained downstream capability stack. Later commits on the same linear generation add public Release delivery, exact toolchain pinning, runtime build identity, the one-command installer bootstrap, and native GitHub-fork repository identity. They do not delete or replay the original capability groups, and only an exact fully tested tip is eligible for a Release.
 
 ## Preservation evidence
 
@@ -52,15 +53,15 @@ A separate old-schema upgrade harness exported exact historical and candidate so
 
 | Gate | Evidence / result |
 | --- | --- |
-| Complete GitHub-hosted Fork CI | Run **35887767869**, source `2a2e19c`, **10 jobs successful, zero non-success jobs** |
-| Root module behavior | Seven shards cover **all 60 packages exactly once** |
+| Complete GitHub-hosted Fork CI | Run **35949890626**, source `d687bcf`, **10 jobs successful, zero non-success jobs** |
+| Root module behavior | Seven shards cover **all 61 packages exactly once** |
 | Concurrency and failure boundaries | Selected Edge/snapshot/replication and authority/effect race suites passed |
 | Client compatibility | Full vendored CLI compilation, core Git/auth/PR behavior and complete local API-client suite passed |
 | Source checks | Build, vet, formatting, documentation and generation/audit regressions passed |
-| Independent history secret scan | Run **35887767751** passed for the exact source; local Gitleaks scan also passed |
-| Dependency licenses | Local check passed for **97 Go modules / six allowed license families** |
-| Primary build attribution | Exact accepted Git archive built with the full source revision and tree receipt |
-| Edge portability build | Linux amd64, CGO-disabled Edge command cross-build succeeded; not a deployment artifact acceptance |
+| Independent history secret scan | Run **35949890621** passed for the exact native-fork source; local Gitleaks scan also passed |
+| Dependency licenses | Run **35949890687** passed; the release source uses the repository's allowed dependency-license policy |
+| Native Release | Run **35951047996** built macOS ARM64 and Linux amd64 bundles, verified provenance, and published immutable `fork-20260924.1-rc5` |
+| Installer entry | The tagged Bash bootstrap delegates archive/digest/attestation verification to the exact tagged Python installer; fresh install and idempotent upgrade were accepted in an isolated prefix |
 
 Earlier failed trial runs remain private failure evidence. The failures caused by inconsistent anonymized request paths, YAML/JSON values, actor case variants and a fixed fixture checksum were reproduced and repaired without changing production policies or deleting the original assertions.
 
