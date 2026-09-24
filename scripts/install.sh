@@ -8,12 +8,16 @@ COMMANDS=(gh-server ags-edge ags-replication)
 usage() {
   cat <<'EOF'
 Usage:
-  install.sh plan    --version VERSION [--allow-prerelease] [--prefix DIR]
-  install.sh stage   --version VERSION [--allow-prerelease] [--prefix DIR]
-  install.sh install --version VERSION [--allow-prerelease] [--prefix DIR] [--bin-dir DIR]
-  install.sh upgrade --version VERSION [--allow-prerelease] [--prefix DIR] [--bin-dir DIR]
+  install.sh plan    [--version VERSION] [--allow-prerelease] [--prefix DIR]
+  install.sh stage   [--version VERSION] [--allow-prerelease] [--prefix DIR]
+  install.sh install [--version VERSION] [--allow-prerelease] [--prefix DIR] [--bin-dir DIR]
+  install.sh upgrade [--version VERSION] [--allow-prerelease] [--prefix DIR] [--bin-dir DIR]
 
-The wrapper bootstraps the exact Python installer from the immutable release tag.
+Without --version, GitHub Latest is resolved and must be an immutable stable release.
+Use --version to pin, roll back, or select an RC. RC installation also requires
+--allow-prerelease.
+
+The wrapper bootstraps the exact Python installer from the selected immutable tag.
 install/upgrade atomically select prefix/current after verification. They do not
 restart services or migrate live databases.
 EOF
@@ -40,7 +44,11 @@ while (($#)); do
   esac
 done
 
-[[ -n "$version" && "$version" =~ $VERSION_RE ]] || die "an explicit fork-YYYYMMDD.N[-rcN] --version is required"
+if [[ -n "$version" ]]; then
+  [[ "$version" =~ $VERSION_RE ]] || die "--version must match fork-YYYYMMDD.N[-rcN]"
+else
+  ((allow_prerelease == 0)) || die "--allow-prerelease requires an explicit --version"
+fi
 [[ -z ${MULTICA_TOKEN:-} ]] || die "workload context cannot install operator software"
 need gh
 need python3
@@ -69,7 +77,25 @@ print(p)
 PY
 )
 
-release_json=$(gh api "repos/$REPOSITORY/releases/tags/$version") || die "release not found: $version"
+if [[ -z "$version" ]]; then
+  release_json=$(gh api "repos/$REPOSITORY/releases/latest") || die "cannot resolve Latest stable release"
+  version=$(python3 - "$release_json" <<'PY'
+import json,re,sys
+release=json.loads(sys.argv[1])
+tag=str(release.get("tag_name",""))
+if release.get("draft") or release.get("prerelease") or not release.get("immutable"):
+    raise SystemExit("GitHub Latest is not an immutable stable release")
+if not re.fullmatch(r"fork-[0-9]{8}\.[1-9][0-9]*",tag):
+    raise SystemExit("GitHub Latest has an unsupported stable tag")
+if not re.fullmatch(r"[0-9a-f]{40}",str(release.get("target_commitish",""))):
+    raise SystemExit("GitHub Latest is not pinned to an exact source commit")
+print(tag)
+PY
+  ) || die "Latest stable release identity rejected"
+else
+  release_json=$(gh api "repos/$REPOSITORY/releases/tags/$version") || die "release not found: $version"
+fi
+
 source=$(python3 - "$release_json" "$version" "$allow_prerelease" <<'PY'
 import json,re,sys
 release=json.loads(sys.argv[1]); version=sys.argv[2]; allow=sys.argv[3]=="1"
