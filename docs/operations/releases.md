@@ -98,8 +98,8 @@ policy in shell.
 For a pre-release, pin the version explicitly:
 
 ```bash
-VERSION=fork-20260924.1-rc4
-curl -fsSL "https://raw.githubusercontent.com/yoyooyooo/agent-git-service/$VERSION/scripts/install.sh" |
+VERSION=fork-20260924.1-rc6
+curl -fsSL "https://github.com/yoyooyooo/agent-git-service/releases/download/$VERSION/install.sh" |
   bash -s -- install --version "$VERSION" --allow-prerelease
 ```
 
@@ -107,8 +107,8 @@ An existing installer-owned installation can be upgraded with the same immutable
 bootstrap:
 
 ```bash
-VERSION=fork-20260924.1-rc4
-curl -fsSL "https://raw.githubusercontent.com/yoyooyooo/agent-git-service/$VERSION/scripts/install.sh" |
+VERSION=fork-20260924.1-rc6
+curl -fsSL "https://github.com/yoyooyooo/agent-git-service/releases/download/$VERSION/install.sh" |
   bash -s -- upgrade --version "$VERSION" --allow-prerelease
 ```
 
@@ -119,11 +119,12 @@ unrelated file/symlink rather than replacing it. `stage` downloads and verifies
 without activation; `plan` does not install binaries. There is deliberately no
 implicit “latest prerelease” selector.
 
-The raw bootstrap itself comes from the immutable Release tag over GitHub HTTPS;
-the actual executable archive is then independently checked using GitHub's asset
-digest, immutable Release verification and build provenance. Operators requiring
-a separately reviewed bootstrap can download/inspect the tagged script before
-execution rather than piping it directly.
+The bootstrap is itself attached to the immutable Release and included in
+`SHA256SUMS`; it is copied from the exact tagged source by the publish job.
+The executable archive is then independently checked using GitHub's asset digest,
+immutable Release verification and build provenance. Operators requiring a
+separately reviewed bootstrap can download/inspect `install.sh` before execution
+rather than piping it directly.
 
 **Install/upgrade here means software version selection only.** It does not
 restart launchd/systemd, migrate a live database, rewrite service configuration

@@ -256,6 +256,16 @@ def check_assets(directory,version,sha):
 
 def verified_assets(directory,version,sha):
     assets,lines=check_assets(directory,version,sha)
+    bootstrap=Path(directory)/'install.sh'
+    expected_bootstrap=run(['git','--no-replace-objects','show',sha+':scripts/install.sh'])
+    mode=git('ls-tree',sha,'--','scripts/install.sh').split()[0]
+    if mode!='100755': raise ValueError('installer bootstrap must be executable in the exact source')
+    if bootstrap.exists():
+        if bootstrap.is_symlink() or bootstrap.read_bytes()!=expected_bootstrap: raise ValueError('existing installer bootstrap differs from exact source')
+    else:
+        with bootstrap.open('xb') as out: out.write(expected_bootstrap)
+        bootstrap.chmod(0o755)
+    assets.append(bootstrap); lines.append(digest(bootstrap)+'  '+bootstrap.name)
     for bundle in (p for p in assets if p.name.endswith('.tar.gz')):
         run(['gh','attestation','verify',str(bundle),'--repo',REPOSITORY,'--source-digest',sha,
              '--signer-workflow',REPOSITORY+'/.github/workflows/release.yml','--deny-self-hosted-runners'],timeout=120)
@@ -302,8 +312,8 @@ def publish(version,sha,directory):
     assets=verified_assets(directory,version,sha)
     # Draft is retained on failure. An ordinary rerun will refuse this version.
     prerelease_flag=' --allow-prerelease' if '-rc' in version else ''
-    install='VERSION='+version+'; curl -fsSL "https://raw.githubusercontent.com/'+REPOSITORY+'/$VERSION/scripts/install.sh" | bash -s -- install --version "$VERSION"'+prerelease_flag
-    upgrade='VERSION='+version+'; curl -fsSL "https://raw.githubusercontent.com/'+REPOSITORY+'/$VERSION/scripts/install.sh" | bash -s -- upgrade --version "$VERSION"'+prerelease_flag
+    install='VERSION='+version+'; curl -fsSL "https://github.com/'+REPOSITORY+'/releases/download/$VERSION/install.sh" | bash -s -- install --version "$VERSION"'+prerelease_flag
+    upgrade='VERSION='+version+'; curl -fsSL "https://github.com/'+REPOSITORY+'/releases/download/$VERSION/install.sh" | bash -s -- upgrade --version "$VERSION"'+prerelease_flag
     notes='Exact-source release for controlled installation.\n\nSource: `'+sha+'`\n\nNative macOS ARM64 and Linux amd64 bundles contain gh-server, ags-edge, ags-replication, build metadata and license. No service configuration or data is included.\n\nInstall:\n\n```bash\n'+install+'\n```\n\nUpgrade an existing installer-owned version:\n\n```bash\n'+upgrade+'\n```\n\nThe tagged Bash bootstrap is only a thin version selector. The executable archive is still verified using the immutable Release asset digest and GitHub build provenance before activation. Installation does not restart a service or migrate live data. See docs/operations/releases.md for platform limits, staging and rollback.\n'
     args=['gh','release','create',version,'--repo',REPOSITORY,'--target',sha,'--draft','--title',version,'--notes',notes]
     if '-rc' in version: args.append('--prerelease')

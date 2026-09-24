@@ -93,6 +93,28 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaises(ValueError): installer.inspect_bundle(archive,VER,SOURCE,'darwin_arm64')
                 self.assertFalse((root.parent/'outside').exists())
 
+    def test_verified_assets_include_exact_source_installer_bootstrap(self):
+        bootstrap=b'#!/usr/bin/env bash\necho synthetic-bootstrap\n'
+        def fake_git(*args):
+            if args[0]=='show' and args[-1].endswith(':.go-version'): return PINNED_GO.removeprefix('go')
+            if args[0]=='ls-tree': return '100755 blob deadbeef\tscripts/install.sh'
+            return TREE
+        def fake_run(args,**kwargs):
+            if args[:3]==['git','--no-replace-objects','show'] and args[-1]==SOURCE+':scripts/install.sh':
+                return bootstrap
+            if args[:3]==['gh','attestation','verify']:
+                return b''
+            raise AssertionError(args)
+        with tempfile.TemporaryDirectory() as directory,mock.patch.object(release,'git',side_effect=fake_git),mock.patch.object(release,'run',side_effect=fake_run):
+            root=Path(directory)
+            self.make_bundle(root); self.make_bundle(root,'linux_amd64')
+            assets=release.verified_assets(root,VER,SOURCE)
+            self.assertIn('install.sh',{p.name for p in assets})
+            self.assertEqual((root/'install.sh').read_bytes(),bootstrap)
+            self.assertEqual((root/'install.sh').stat().st_mode & 0o777,0o755)
+            sums=(root/'SHA256SUMS').read_text().splitlines()
+            self.assertIn(hashlib.sha256(bootstrap).hexdigest()+'  install.sh',sums)
+
     def test_download_manifest_source_and_platform_are_not_just_labels(self):
         with tempfile.TemporaryDirectory() as directory:
             archive=self.make_bundle(Path(directory))

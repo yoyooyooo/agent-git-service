@@ -84,7 +84,7 @@ instance. An immutable tag also exposes a thin Bash bootstrap:
 
 ```bash
 VERSION=<immutable-release-tag>
-curl -fsSL "https://raw.githubusercontent.com/yoyooyooo/agent-git-service/$VERSION/scripts/install.sh" |
+curl -fsSL "https://github.com/yoyooyooo/agent-git-service/releases/download/$VERSION/install.sh" |
   bash -s -- install --version "$VERSION"
 ```
 
