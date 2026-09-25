@@ -1110,6 +1110,16 @@ func (s *Service) deleteRepoCascade(tx *gorm.DB, repoID uint, fullName string) e
 		return err
 	}
 
+	// Projection facts belong to this repository. Remove them in the same
+	// transaction: FK-enabled databases otherwise reject the delete, and older
+	// SQLite connections without enforcement would retain orphaned alerts.
+	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.ProjectionRefState{})); err != nil {
+		return err
+	}
+	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.ProjectionEvent{})); err != nil {
+		return err
+	}
+
 	// Phase 8: Delete repo itself.
 	if err := tx.Delete(&db.Repository{ID: repoID}).Error; err != nil {
 		return err
