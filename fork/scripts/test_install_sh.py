@@ -3,7 +3,7 @@
 from __future__ import annotations
 import base64, hashlib, json, os
 from pathlib import Path
-import subprocess, tempfile, textwrap, unittest
+import shutil, subprocess, tempfile, textwrap, unittest
 
 ROOT=Path(__file__).resolve().parents[2]
 SCRIPT=ROOT/"scripts/install.sh"
@@ -13,6 +13,7 @@ SOURCE="a"*40
 
 FAKE_INSTALLER=r'''#!/usr/bin/env python3
 import json, os, pathlib, sys
+SCHEMA='ags.installation.v2'
 args=sys.argv[1:]
 path=pathlib.Path(os.environ["AGS_TEST_ARGS"])
 path.write_text(json.dumps(args))
@@ -20,14 +21,11 @@ def value(flag):
     i=args.index(flag); return args[i+1]
 version=value("--version"); prefix=pathlib.Path(value("--prefix"))
 if "--install" in args:
-    bindir=prefix/"releases"/version/"bin"; bindir.mkdir(parents=True,exist_ok=True)
+    bindir=prefix/"bin"; bindir.mkdir(parents=True,exist_ok=True)
     for name in ("gh-server","ags-edge","ags-replication"):
         p=bindir/name; p.write_text("#!/bin/sh\nexit 0\n"); p.chmod(0o755)
-if "--activate" in args:
-    prefix.mkdir(parents=True,exist_ok=True)
-    current=prefix/"current"
-    if current.is_symlink(): current.unlink()
-    current.symlink_to("releases/"+version)
+    state=prefix/"state"; state.mkdir(parents=True,exist_ok=True)
+    (state/"installation.json").write_text(json.dumps({"schema":SCHEMA,"version":version}))
 print(json.dumps({"version":version,"install":"--install" in args,"activate":"--activate" in args}))
 '''
 
@@ -41,6 +39,8 @@ class BootstrapTests(unittest.TestCase):
         self.root=Path(self.tmp.name).resolve()
         self.bin=self.root/"fake-bin"; self.bin.mkdir()
         self.args_file=self.root/"args.json"
+        # Exercise the standalone bootstrap, not the trusted adjacent Python file.
+        self.script=self.root/"install.sh"; shutil.copyfile(SCRIPT,self.script)
         payload=FAKE_INSTALLER.encode()
         encoded=base64.b64encode(payload).decode()
         wrapped="\\n".join(encoded[i:i+60] for i in range(0,len(encoded),60))
@@ -72,7 +72,7 @@ class BootstrapTests(unittest.TestCase):
         (self.root/"home").mkdir()
 
     def invoke(self,*args,ok=True):
-        result=subprocess.run(["/bin/bash",str(SCRIPT),*args],env=self.env,capture_output=True,text=True,timeout=30)
+        result=subprocess.run(["/bin/bash",str(self.script),*args],env=self.env,capture_output=True,text=True,timeout=30)
         self.assertEqual(result.returncode==0,ok,result.stderr)
         return result
 
@@ -93,35 +93,35 @@ class BootstrapTests(unittest.TestCase):
         self.invoke("plan","--allow-prerelease",ok=False)
         self.assertFalse(self.args_file.exists())
 
-    def test_default_install_activates_latest_and_links_commands(self):
+    def test_default_install_replaces_single_slot_and_links_commands(self):
         prefix=self.root/"prefix"; bin_dir=self.root/"commands"
         self.invoke("install","--prefix",str(prefix),"--bin-dir",str(bin_dir))
         args=json.loads(self.args_file.read_text())
         self.assertEqual(args[args.index("--version")+1],STABLE)
-        self.assertIn("--install",args); self.assertIn("--activate",args)
-        self.assertEqual(os.readlink(prefix/"current"),"releases/"+STABLE)
-        for name in ("gh-server","ags-edge","ags-replication"):
-            self.assertEqual(os.readlink(bin_dir/name),str(prefix/"current"/"bin"/name))
-
-    def test_stage_does_not_activate_or_link(self):
-        prefix=self.root/"prefix"; bin_dir=self.root/"commands"
-        self.invoke("stage","--version",VERSION,"--allow-prerelease","--prefix",str(prefix),"--bin-dir",str(bin_dir))
-        args=json.loads(self.args_file.read_text())
         self.assertIn("--install",args); self.assertNotIn("--activate",args)
-        self.assertFalse((prefix/"current").exists()); self.assertFalse(bin_dir.exists())
+        self.assertFalse((prefix/"current").exists()); self.assertFalse((prefix/"releases").exists())
+        for name in ("gh-server","ags-edge","ags-replication"):
+            self.assertEqual(os.readlink(bin_dir/name),str(prefix/"bin"/name))
 
-    def test_default_upgrade_requires_existing_owned_selector(self):
+    def test_stage_is_not_a_retained_version_surface(self):
+        prefix=self.root/"prefix"; bin_dir=self.root/"commands"
+        self.invoke("stage","--version",VERSION,"--allow-prerelease","--prefix",str(prefix),"--bin-dir",str(bin_dir),ok=False)
+        self.assertFalse(prefix.exists()); self.assertFalse(bin_dir.exists()); self.assertFalse(self.args_file.exists())
+
+    def test_default_upgrade_requires_existing_single_installation(self):
         prefix=self.root/"prefix"; bin_dir=self.root/"commands"
         self.invoke("upgrade","--prefix",str(prefix),"--bin-dir",str(bin_dir),ok=False)
-        current=prefix/"current"; prefix.mkdir(); current.symlink_to("releases/fork-20260924.1-rc8")
+        self.invoke("install","--prefix",str(prefix),"--bin-dir",str(bin_dir))
         self.invoke("upgrade","--prefix",str(prefix),"--bin-dir",str(bin_dir))
-        self.assertEqual(os.readlink(current),"releases/"+STABLE)
+        self.assertEqual(json.loads((prefix/"state/installation.json").read_text())["version"],STABLE)
+        self.assertFalse((prefix/"current").exists())
 
     def test_foreign_command_path_is_rejected_before_activation(self):
-        prefix=self.root/"prefix"; current=prefix/"current"; prefix.mkdir(); current.symlink_to("releases/fork-20260924.1-rc8")
+        prefix=self.root/"prefix"; (prefix/"state").mkdir(parents=True)
+        (prefix/"state/installation.json").write_text('{"schema":"ags.installation.v2"}')
         bin_dir=self.root/"commands"; bin_dir.mkdir(); (bin_dir/"gh-server").write_text("foreign")
         self.invoke("upgrade","--prefix",str(prefix),"--bin-dir",str(bin_dir),ok=False)
-        self.assertEqual(os.readlink(current),"releases/fork-20260924.1-rc8")
+        self.assertEqual((bin_dir/"gh-server").read_text(),"foreign")
         self.assertFalse(self.args_file.exists())
 
     def test_malformed_version_is_rejected_before_github(self):

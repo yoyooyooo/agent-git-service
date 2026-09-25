@@ -46,6 +46,7 @@ accepted direction, or incremental work that has not fully landed yet.
 
 - [Fork Governance](../fork/README.md) - GitHub source workflow, upstream generations, capability review and publication gates.
 - [Production Deployment](production-deployment.md)
+- [Single-root User Runtime](operations/user-runtime.md) - one installation under `~/.ags`, durable startup inputs, bounded logs and explicit migration.
 - [AGS Edge Host Gateway](operations/ags-edge-host-gateway.md) - global client routing, node-only prewarming, diagnostics and failure semantics.
 - [Edge Client Routing](operations/ags-edge-client-routing.md) - exact per-user configuration ownership, drift checks and rollback.
 - [AGS Edge Primary Listener](operations/ags-edge-primary-listener.md) - explicit mTLS startup, filesystem preflight, shutdown and remaining rollout gates.

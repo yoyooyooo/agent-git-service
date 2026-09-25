@@ -1236,9 +1236,14 @@ Development defaults remain explicitly unknown, not inferred from a machine path
 
 `fork/scripts/release.py` owns exact-source archive builds, platform smoke checks,
 complete-CI admission, manifest/archive validation and complete draft publication.
-`scripts/install-release.py` owns verification and version-directory selection,
-not service lifetime or schema changes. Installed, selected and running versions
-are separate facts. See [release operations](operations/releases.md).
+`scripts/install-release.py` owns verification and replacement of one installed
+program set under `~/.ags/bin`, not service lifetime or schema changes. There are
+no retained version slots. Installed and running identities remain separate facts.
+`scripts/ags-runtime.py` owns the optional single-root process launcher, startup
+dependency observations and bounded stdout/stderr; the service manager owns
+restart policy. It does not sweep authoritative data or live snapshot leases.
+See [release operations](operations/releases.md) and
+[single-root runtime](operations/user-runtime.md).
 
 ### Provider Git process credentials
 

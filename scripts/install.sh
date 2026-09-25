@@ -9,17 +9,17 @@ usage() {
   cat <<'EOF'
 Usage:
   install.sh plan    [--version VERSION] [--allow-prerelease] [--prefix DIR]
-  install.sh stage   [--version VERSION] [--allow-prerelease] [--prefix DIR]
   install.sh install [--version VERSION] [--allow-prerelease] [--prefix DIR] [--bin-dir DIR]
   install.sh upgrade [--version VERSION] [--allow-prerelease] [--prefix DIR] [--bin-dir DIR]
 
 Without --version, GitHub Latest is resolved and must be an immutable stable release.
-Use --version to pin, roll back, or select an RC. RC installation also requires
+Use --version to select exact program bytes, including an RC. RC installation requires
 --allow-prerelease.
 
-The wrapper bootstraps the exact Python installer from the selected immutable tag.
-install/upgrade atomically select prefix/current after verification. They do not
-restart services or migrate live databases.
+One installation lives at ~/.ags/bin; there are no retained version slots.
+A trusted adjacent installer is used when present; a standalone bootstrap obtains
+its installer from Latest stable, independently of the requested binary version.
+install/upgrade verify and replace programs, never restart services or migrate data.
 EOF
 }
 
@@ -27,10 +27,10 @@ die() { printf 'agent-git-service install: %s\n' "$*" >&2; exit 2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 
 action=${1:-}
-case "$action" in plan|stage|install|upgrade) shift ;; -h|--help|"") usage; exit 0 ;; *) die "unknown action: $action" ;; esac
+case "$action" in plan|install|upgrade) shift ;; -h|--help|"") usage; exit 0 ;; *) die "unknown action: $action" ;; esac
 
 version=
-prefix="${HOME}/.local/lib/agent-git-service"
+prefix="${HOME}/.ags"
 bin_dir="${HOME}/.local/bin"
 allow_prerelease=0
 while (($#)); do
@@ -123,12 +123,36 @@ PY
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ags-installer.XXXXXXXX")
 chmod 700 "$tmp"
-# The bootstrap directory contains only public source metadata and is left for
-# the host's normal temporary-file lifecycle. Do not turn cleanup into a broad
-# deletion primitive.
+# The trap only removes this invocation's owner-only, freshly-created directory.
+cleanup() {
+  python3 - "$tmp" <<'PY'
+import pathlib,shutil,sys
+p=pathlib.Path(sys.argv[1])
+if p.name.startswith('ags-installer.') and p.is_dir() and not p.is_symlink():
+    shutil.rmtree(p)
+PY
+}
+trap cleanup EXIT
 metadata="$tmp/install-release.json"
 installer="$tmp/install-release.py"
-gh api "repos/$REPOSITORY/contents/scripts/install-release.py?ref=$source" >"$metadata" || die "cannot fetch exact installer source"
+companion=""
+if [[ -n ${BASH_SOURCE[0]:-} ]]; then
+  companion="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install-release.py"
+fi
+if [[ -n "$companion" && -f "$companion" && ! -L "$companion" ]]; then
+  installer="$companion"
+else
+  # Old binary releases must not reintroduce their old multi-version installer.
+  installer_release=$(gh api "repos/$REPOSITORY/releases/latest") || die "cannot resolve installer release"
+  installer_source=$(python3 - "$installer_release" <<'PY'
+import json,re,sys
+r=json.loads(sys.argv[1]); source=r.get('target_commitish','')
+if r.get('draft') or r.get('prerelease') or not r.get('immutable') or not re.fullmatch('[0-9a-f]{40}',source):
+    raise SystemExit('installer release must be exact, immutable and stable')
+print(source)
+PY
+  ) || die "installer source rejected"
+  gh api "repos/$REPOSITORY/contents/scripts/install-release.py?ref=$installer_source" >"$metadata" || die "cannot fetch exact installer source"
 python3 - "$metadata" "$installer" <<'PY' || die "installer source identity rejected"
 import base64,hashlib,json,os,sys
 meta=json.load(open(sys.argv[1]))
@@ -144,6 +168,12 @@ if oid!=meta.get("sha"):
 fd=os.open(sys.argv[2],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 with os.fdopen(fd,"wb") as out: out.write(data)
 PY
+fi
+python3 - "$installer" <<'PY' || die "installer predates the single-root contract; use a current trusted checkout"
+import pathlib,sys
+if 'ags.installation.v2' not in pathlib.Path(sys.argv[1]).read_text():
+    raise SystemExit('single-root installer is required')
+PY
 
 if [[ "$action" == install || "$action" == upgrade ]]; then
   if [[ -e "$bin_dir" && ! -d "$bin_dir" ]] || [[ -L "$bin_dir" ]]; then
@@ -151,7 +181,7 @@ if [[ "$action" == install || "$action" == upgrade ]]; then
   fi
   for command in "${COMMANDS[@]}"; do
     link="$bin_dir/$command"
-    expected="$prefix/current/bin/$command"
+    expected="$prefix/bin/$command"
     if [[ -L "$link" ]]; then
       [[ "$(readlink "$link")" == "$expected" ]] || die "refusing to replace foreign symlink: $link"
     elif [[ -e "$link" ]]; then
@@ -164,23 +194,22 @@ args=(--version "$version" --prefix "$prefix")
 ((allow_prerelease)) && args+=(--allow-prerelease)
 case "$action" in
   plan) ;;
-  stage) args+=(--install) ;;
-  install) args+=(--install --activate) ;;
+  install) args+=(--install) ;;
   upgrade)
-    [[ -L "$prefix/current" ]] || die "upgrade requires an existing installer-owned current selector; use install for first setup"
-    args+=(--install --activate)
+    [[ -f "$prefix/state/installation.json" && ! -L "$prefix/state/installation.json" ]] || die "upgrade requires an existing single-root installation; use install for first setup"
+    args+=(--install)
     ;;
 esac
 
 python3 "$installer" "${args[@]}"
 
 if [[ "$action" == install || "$action" == upgrade ]]; then
-  [[ -L "$prefix/current" ]] || die "activation succeeded without an owned current selector"
+  [[ -f "$prefix/state/installation.json" ]] || die "installation succeeded without its current receipt"
   mkdir -p "$bin_dir"
   chmod 755 "$bin_dir"
   for command in "${COMMANDS[@]}"; do
-    target="$prefix/current/bin/$command"
-    [[ -x "$target" ]] || die "activated command missing: $command"
+    target="$prefix/bin/$command"
+    [[ -x "$target" ]] || die "installed command missing: $command"
     link="$bin_dir/$command"
     if [[ -L "$link" ]]; then
       existing=$(readlink "$link")

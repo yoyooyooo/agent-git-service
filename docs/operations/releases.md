@@ -111,11 +111,11 @@ test or release does not deploy anything.
 ## One-command install and upgrade
 
 Release archives are installation artifacts, not CI-only attachments. The
-public Bash bootstrap is intentionally thin: it resolves one explicit immutable
-Release tag, fetches the exact `scripts/install-release.py` blob from that tag,
-verifies its Git blob identity, and delegates all bundle/digest/attestation
-checks to the Python installer. It does not duplicate release-verification
-policy in shell.
+Bash bootstrap selects exact binary bytes and delegates bundle/digest/attestation
+checks to the Python installer. A trusted adjacent installer is used when present;
+a standalone bootstrap fetches the exact installer blob from immutable Latest
+stable, independently of the selected binary version. An older target must not
+revive an older multi-version installation policy. See [single-root runtime](user-runtime.md).
 
 The normal path follows GitHub Latest, which must be an immutable stable release:
 
@@ -138,12 +138,12 @@ explicit `--version fork-YYYYMMDD.N-rcN --allow-prerelease`.
 The bootstrap requires Bash, Python 3.9+ and a GitHub CLI with Release asset and
 attestation verification support. Without `--version`, it resolves
 `releases/latest` and rejects draft, prerelease, mutable, non-exact or
-unexpected tag identities before downloading anything. It creates only
-installer-owned selectors plus `gh-server`, `ags-edge` and
-`ags-replication` symlinks under `~/.local/bin` by default. It refuses an
-unrelated file/symlink rather than replacing it. `stage` downloads and verifies
-without activation; `plan` does not install binaries. There is deliberately no
-implicit “latest prerelease” selector.
+unexpected tag identities before downloading anything. It links `gh-server`,
+`ags-edge` and `ags-replication` under `~/.local/bin` to the current programs in
+`~/.ags/bin`. It refuses an unrelated file/symlink rather than replacing it.
+`plan` does not install binaries. There is no retained staging/activation surface
+and no implicit latest-prerelease selector. Legacy installation roots require an
+explicit migration, not an implicit recursive cleanup.
 
 The bootstrap is itself attached to the immutable Release and included in
 `SHA256SUMS`; it is copied from the exact tagged source by the publish job.
@@ -152,17 +152,16 @@ immutable Release verification and build provenance. Operators requiring a
 separately reviewed bootstrap can download/inspect `install.sh` before execution
 rather than piping it directly.
 
-**Install/upgrade here means software version selection only.** It does not
-restart launchd/systemd, migrate a live database, rewrite service configuration
-or rotate credentials/certificates. Runtime upgrades continue to use the
-separate rehearsal/backup/readback procedure below.
+**Install/upgrade here replaces the single installed program set only.** It does
+not restart launchd/systemd, migrate live data, rewrite service configuration or
+rotate credentials/certificates. Runtime changes use scoped acceptance below;
+ordinary program replacement does not retain a complete historical environment.
 
-## Plan, verify and stage an installation
+## Plan, verify and replace the single installation
 
 Use Python 3.9+ and a GitHub CLI supporting `release verify-asset` and
 `attestation verify` (the delivery path is exercised with 2.86.0). The Python
-entry remains the lower-level interface and is useful for explicit staging or
-automation from a trusted checkout. The default operation is a read-only plan:
+entry remains the lower-level interface for automation from a trusted checkout. The default operation is a read-only plan:
 
 ```bash
 python3 scripts/install-release.py --version fork-20260924.1-rc1 \
@@ -177,34 +176,37 @@ repository's `release.yml`, exact source digest, archive paths/member types,
 embedded identities and binary hashes. Verification failure is not bypassed by a
 checksum-only fallback.
 
-The default prefix is `~/.local/lib/agent-git-service`. A version is staged at
-`releases/<version>/`. Reinstalling an intact identical version is idempotent;
-content drift is an error, not permission to overwrite it. Downloads and receipts
-remain private under the prefix for diagnosis. Add `--activate` to atomically
-select the verified version using the owned `current` symlink:
+The default root is `~/.ags`. Verified commands replace the current files in
+`bin/`; there are no `releases/<version>` directories or `current` selectors.
+An intact repeated installation is safe; unowned or drifted files are rejected.
+Transaction downloads/candidates are cleaned on success or exceptions. A small
+current receipt and interruption marker live in `state/`, not inside downloads.
 
 ```bash
 python3 scripts/install-release.py --version fork-20260924.1-rc1 \
-  --allow-prerelease --install --activate
-~/.local/lib/agent-git-service/current/bin/gh-server --version
+  --allow-prerelease --install
+~/.ags/bin/gh-server --version
 ```
 
-Activation does not stop/start a service, migrate a database, rewrite an existing
-launchd/systemd unit or alter user credentials. Those remain an operator's
-separately backed-up deployment decision. No unattended auto-updater is enabled.
+An interrupted replacement prevents startup until the same exact verified
+installation completes. No unattended auto-updater is enabled. Installed and
+running identities are separate facts; neither a receipt nor a successful
+installation claims that an existing process was restarted.
 
 ## Runtime upgrade sequence
 
-First rehearse using a consistent copy of the actual database and separate Git
-storage/ports. Disable external writes, background deliveries and real provider
-integrations in the isolated process. Do not run two primary processes against
-one Git store: their in-process mutation barriers are not shared.
+Scope acceptance to the change. A canary normally uses explicit settings,
+a dedicated test repository and bounded diagnostics, not a permanent clone of
+the deployment. Schema-changing work may require a consistent isolated data
+rehearsal/backup with an explicit storage budget and disposal condition. Disable
+external effects in such a fixture. Never run two primaries against one Git store.
 
-Before switching, fence old source publishers by repository identity, drain the
-owning primary, and preserve the old binary, configuration, stable replication
-identity, database and relevant Git/storage state. Start the release binary with
-the existing approved configuration; do not regenerate repositories, users,
-node identities or certificates just because the binary changed.
+Coordinate with the owning service, preserve approved persistent configuration,
+repository/storage identities and live data, and replace only the intended
+programs. Do not regenerate users, node identities or certificates merely because
+a binary changed. Keep startup inputs under the durable root, never a dated
+deployment or build directory. A database backup is a separate recovery decision,
+not an automatic copy of every installation.
 
 Verify the exact `/readyz` source, personal and automation access, normal Git
 reads, an independent canary push/readback, the existing Edge replica path and
