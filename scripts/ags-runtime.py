@@ -118,8 +118,12 @@ def inspect(root: Path) -> dict:
         if value:
             path = Path(value)
             checks[key.lower()] = 'ok' if durable_path(root, path) and path.exists() else 'outside_root_or_missing'
-    if env.get('DB_DSN', '').startswith('sqlite://'):
-        path = Path(env['DB_DSN'][len('sqlite://'):].split('?', 1)[0])
+    dsn = env.get('DB_DSN', '')
+    if dsn.startswith('sqlite:'):
+        # Both forms are supported by the native server. sqlite:/absolute/path
+        # is used by existing Linux deployments; do not silently omit its check.
+        prefix = 'sqlite://' if dsn.startswith('sqlite://') else 'sqlite:'
+        path = Path(dsn[len(prefix):].split('?', 1)[0])
         if not path.is_absolute():
             path = root / path
         checks['database_path'] = 'ok' if durable_path(root, path) and path.is_file() else 'outside_root_or_missing'

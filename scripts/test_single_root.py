@@ -120,6 +120,18 @@ class SingleRootTests(unittest.TestCase):
         self.assertFalse((self.root / 'state/installing.json').exists())
         self.assertEqual(list(self.root.glob('.install-*')), [])
 
+    def test_single_colon_sqlite_dsn_is_checked_like_native_linux_runtime(self):
+        self.configured()
+        env = self.root / 'config/runtime.env'
+        env.write_text('DB_DSN="sqlite:' + str(self.root / 'data/fixture.db') + '?_pragma=foreign_keys(ON)"\n')
+        report = runtime.inspect(self.root)
+        self.assertTrue(report['ready_to_start'])
+        self.assertEqual(report['checks']['database_path'], 'ok')
+        env.write_text('DB_DSN="sqlite:' + str(self.directory / 'outside.db') + '"\n')
+        report = runtime.inspect(self.root)
+        self.assertFalse(report['ready_to_start'])
+        self.assertEqual(report['checks']['database_path'], 'outside_root_or_missing')
+
     def test_doctor_detects_missing_dependency_and_never_prints_token(self):
         self.configured()
         self.assertTrue(runtime.inspect(self.root)['ready_to_start'])
