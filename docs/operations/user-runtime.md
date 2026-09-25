@@ -73,7 +73,10 @@ python3 ~/.ags/bin/ags-runtime.py --root ~/.ags serve
 The launcher reads `config/runtime.env`, preserves ordinary authentication, starts
 one owning primary with `<root>` as its working directory, forwards termination
 to its process group, and waits for the child. It never starts a second primary
-against a live Git directory. The service manager owns restart policy.
+against a live Git directory. The service manager owns restart policy. The program
+identity query completes before spawning the primary; failures after spawn always
+reap the child. Requested shutdown permits an 80-second drain before terminating
+the remaining process group, so the service manager needs a longer exit time.
 
 Before launch, and once per minute while running, it checks the installed primary
 hash, interrupted-install marker, environment, durable Git/database paths and
@@ -82,6 +85,13 @@ referenced replication files/certificate lifetime. It writes the latest
 bounded diagnostic; it does **not** kill a still-working primary. This is startup
 dependency visibility, not a substitute for primary/Edge readiness, full protocol
 acceptance, online revocation checking or an external alert delivery service.
+
+Malformed, unsafe or out-of-range retention configuration fails startup rather
+than silently falling back to normal operation. A bounded diagnostic still records
+the failed check. Program-identity and process-lifecycle failures update the fixed
+`state/runtime-failure.json` with stage and error type only, never exception text,
+subprocess output, credentials or user request content. A failed state write after
+spawn cannot leave an unowned primary running.
 
 Default stdout/stderr retention is five segments of 10 MiB each, including the
 current file. `config/retention.json` can set `log_segment_bytes` (64 KiB–64 MiB)

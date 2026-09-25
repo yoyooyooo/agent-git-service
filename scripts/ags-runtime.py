@@ -6,6 +6,7 @@ on a health failure. The service manager owns restart policy. No deployment slot
 """
 from __future__ import annotations
 import argparse
+import contextlib
 import datetime as dt
 import fcntl
 import hashlib
@@ -63,15 +64,37 @@ def durable_path(root: Path, path: Path) -> bool:
         return False
 
 
+def retention_limits(root: Path) -> dict:
+    path = root / 'config/retention.json'
+    if not path.exists() and not path.is_symlink():
+        return {'log_segment_bytes': 10 * 1024 * 1024, 'log_backups': 4}
+    if not private_file(path) or path.stat().st_size > 65536:
+        raise ValueError('unsafe retention configuration')
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict):
+        raise ValueError('invalid retention configuration')
+    maximum = value.get('log_segment_bytes', 10 * 1024 * 1024)
+    backups = value.get('log_backups', 4)
+    if (type(maximum) is not int or not 65536 <= maximum <= 64 * 1024 * 1024
+            or type(backups) is not int or not 0 <= backups <= 8):
+        raise ValueError('invalid retention limits')
+    return {'log_segment_bytes': maximum, 'log_backups': backups}
+
+
 def inspect(root: Path) -> dict:
     checks: dict[str, str] = {}
     root_ok = root.is_dir() and not root.is_symlink() and root.resolve() == root.absolute()
-    checks['root'] = 'ok' if root_ok and root.stat().st_mode & 0o077 == 0 else 'unsafe'
+    checks['root'] = 'ok' if root_ok and root.stat().st_uid == os.getuid() and root.stat().st_mode & 0o077 == 0 else 'unsafe'
     marker = root / 'state/installing.json'
     checks['installation'] = 'interrupted' if marker.exists() or marker.is_symlink() else 'ok'
     for name in ('bin', 'config', 'state', 'logs'):
         directory = root / name
         checks[name + '_directory'] = 'ok' if directory.is_dir() and not directory.is_symlink() and directory.resolve() == directory.absolute() else 'missing_or_unsafe'
+    try:
+        retention_limits(root)
+        checks['retention_config'] = 'ok'
+    except (OSError, ValueError, TypeError):
+        checks['retention_config'] = 'invalid_or_unsafe'
     env_file = root / 'config/runtime.env'
     checks['runtime_environment'] = 'ok' if private_file(env_file) else 'missing_or_unsafe'
     env: dict[str, str] = {}
@@ -88,7 +111,7 @@ def inspect(root: Path) -> dict:
         expected = receipt['binaries']['gh-server']['sha256']
         if receipt.get('schema') != 'ags.installation.v2' or hashlib.sha256(binary.read_bytes()).hexdigest() != expected:
             checks['binary'] = 'identity_drift'
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError):
         checks['binary'] = 'identity_unverified'
     for key in ('AGS_INTEGRATIONS_CONFIG', 'GIT_REPO_DIR'):
         value = env.get(key)
@@ -120,7 +143,7 @@ def inspect(root: Path) -> dict:
                     cert = config_path.parent / cert
                 result = subprocess.run(['openssl', 'x509', '-in', str(cert), '-noout', '-checkend', '0'], capture_output=True, timeout=5)
                 checks['replication_certificate_valid'] = 'ok' if result.returncode == 0 else 'expired_or_invalid'
-            except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+            except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
                 checks['replication_config'] = 'invalid'
     report = {'schema': 'ags.startup-health.v1', 'checked_at': dt.datetime.now(dt.timezone.utc).isoformat(),
               'ready_to_start': all(value == 'ok' for value in checks.values()), 'checks': checks}
@@ -130,7 +153,8 @@ def inspect(root: Path) -> dict:
 class BoundedLog:
     """One current file plus a fixed number of segments; byte-bounded writes."""
     def __init__(self, directory: Path, maximum: int, backups: int):
-        if not 65536 <= maximum <= 64 * 1024 * 1024 or not 0 <= backups <= 8:
+        if (type(maximum) is not int or not 65536 <= maximum <= 64 * 1024 * 1024
+                or type(backups) is not int or not 0 <= backups <= 8):
             raise ValueError('log limits out of range')
         self.path = directory / 'runtime.log'
         self.maximum, self.backups = maximum, backups
@@ -171,9 +195,76 @@ class BoundedLog:
             self.fd = None
 
 
+def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock) -> int:
+    child = subprocess.Popen([str(root / 'bin/gh-server')], cwd=root, env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    selector = None
+    previous = {}
+    stop_deadline = None
+
+    def forward(signum, frame=None):
+        nonlocal stop_deadline
+        if signum in (signal.SIGTERM, signal.SIGINT) and stop_deadline is None:
+            stop_deadline = time.monotonic() + 80
+        try:
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
+
+    # Every operation after spawn is inside this scope, including receipt writes.
+    # A bad state directory must not leave an unowned primary process behind.
+    try:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            previous[sig] = signal.signal(sig, forward)
+        current = {'schema': 'ags.runtime.v1', 'supervisor_pid': os.getpid(), 'pid': child.pid,
+                   'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'root': str(root), 'build': build}
+        atomic_json(root / 'state/runtime.json', current)
+        install_lock.close()
+        selector = selectors.DefaultSelector()
+        selector.register(child.stdout, selectors.EVENT_READ)
+        next_check = time.monotonic() + 60
+        last_checks = None
+        while selector.get_map():
+            if stop_deadline is not None and time.monotonic() >= stop_deadline:
+                forward(signal.SIGKILL)
+            for key, _ in selector.select(1):
+                data = os.read(key.fileobj.fileno(), 65536)
+                if data:
+                    log.write(data)
+                else:
+                    selector.unregister(key.fileobj)
+            if time.monotonic() >= next_check:
+                report = inspect(root)
+                atomic_json(root / 'state/startup-health.json', report)
+                if not report['ready_to_start'] and report['checks'] != last_checks:
+                    log.write((json.dumps(report) + '\n').encode())
+                elif last_checks is not None and report['ready_to_start']:
+                    log.write((json.dumps(report) + '\n').encode())
+                last_checks = report['checks'] if not report['ready_to_start'] else None
+                next_check = time.monotonic() + 60
+        code = child.wait()
+        current.update(exit_code=code, stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())
+        atomic_json(root / 'state/runtime.json', current)
+        return code
+    finally:
+        if selector is not None:
+            selector.close()
+        if child.poll() is None:
+            forward(signal.SIGTERM)
+            try:
+                child.wait(timeout=80)
+            except subprocess.TimeoutExpired:
+                forward(signal.SIGKILL)
+                child.wait()
+        child.stdout.close()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
 def serve(root: Path) -> int:
     os.umask(0o077)
-    if not root.is_dir() or root.is_symlink() or root.resolve() != root.absolute() or root.stat().st_mode & 0o077:
+    if (not root.is_dir() or root.is_symlink() or root.resolve() != root.absolute()
+            or root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077):
         raise ValueError('runtime root must be an existing private canonical directory')
     for name in ('state', 'logs'):
         path = root / name
@@ -181,75 +272,48 @@ def serve(root: Path) -> int:
             raise ValueError('unsafe managed directory')
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
     lockfd = os.open(root / 'state/runtime.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(lockfd, 'w') as lock:
+    with os.fdopen(lockfd, 'w') as lock, contextlib.ExitStack() as resources:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        limits_file = root / 'config/retention.json'
-        limits = json.loads(limits_file.read_text()) if private_file(limits_file) else {}
-        log = BoundedLog(root / 'logs', limits.get('log_segment_bytes', 10 * 1024 * 1024), limits.get('log_backups', 4))
-        report = inspect(root)
-        atomic_json(root / 'state/startup-health.json', report)
-        if not report['ready_to_start']:
-            log.write((json.dumps(report) + '\n').encode())
-            log.close()
-            return 78
-        # Serialize startup validation/spawn with the installer's complete replacement.
-        install_lockfd = os.open(root / 'state/install.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        install_lock = os.fdopen(install_lockfd, 'w')
-        fcntl.flock(install_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        report = inspect(root)
-        if not report['ready_to_start']:
-            install_lock.close()
-            log.close()
-            return 78
-        env = os.environ.copy()
-        env.update(environment(root / 'config/runtime.env'))
-        env['AGS_HOME'] = str(root)
-        env['PATH'] = str(root / 'bin') + ':' + env.get('PATH', '')
-        child = subprocess.Popen([str(root / 'bin/gh-server')], cwd=root, env=env,
-                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
-        def forward(signum, frame):
-            try:
-                os.killpg(child.pid, signum)
-            except ProcessLookupError:
-                pass
-        previous = {sig: signal.signal(sig, forward) for sig in (signal.SIGTERM, signal.SIGINT)}
-        runtime = {'schema': 'ags.runtime.v1', 'supervisor_pid': os.getpid(), 'pid': child.pid,
-                   'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'root': str(root),
-                   'build': json.loads(subprocess.check_output([str(root / 'bin/gh-server'), '--version'], env=env, timeout=10))}
-        atomic_json(root / 'state/runtime.json', runtime)
-        install_lock.close()
-        selector = selectors.DefaultSelector()
-        selector.register(child.stdout, selectors.EVENT_READ)
-        next_check = time.monotonic() + 60
-        last_ready = True
         try:
-            while selector.get_map():
-                for key, _ in selector.select(1):
-                    data = os.read(key.fileobj.fileno(), 65536)
-                    if data:
-                        log.write(data)
-                    else:
-                        selector.unregister(key.fileobj)
-                if time.monotonic() >= next_check:
-                    report = inspect(root)
-                    atomic_json(root / 'state/startup-health.json', report)
-                    if report['ready_to_start'] != last_ready:
-                        log.write((json.dumps(report) + '\n').encode())
-                    last_ready = report['ready_to_start']
-                    next_check = time.monotonic() + 60
-            code = child.wait()
-            runtime.update(exit_code=code, stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())
-            atomic_json(root / 'state/runtime.json', runtime)
-            return code
-        finally:
-            selector.close()
-            if child.poll() is None:
-                forward(signal.SIGTERM, None)
-                child.wait(timeout=90)
-            child.stdout.close()
-            log.close()
-            for sig, handler in previous.items():
-                signal.signal(sig, handler)
+            limits = retention_limits(root)
+        except (OSError, ValueError, TypeError):
+            # Invalid limits fail startup; defaults are used only to record that failure.
+            limits = {'log_segment_bytes': 10 * 1024 * 1024, 'log_backups': 4}
+        log = BoundedLog(root / 'logs', limits['log_segment_bytes'], limits['log_backups'])
+        resources.callback(log.close)
+        stage = 'startup_dependencies'
+        try:
+            install_lockfd = os.open(root / 'state/install.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            install_lock = resources.enter_context(os.fdopen(install_lockfd, 'w'))
+            fcntl.flock(install_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            report = inspect(root)
+            atomic_json(root / 'state/startup-health.json', report)
+            if not report['ready_to_start']:
+                log.write((json.dumps(report) + '\n').encode())
+                return 78
+            env = os.environ.copy()
+            env.update(environment(root / 'config/runtime.env'))
+            env['AGS_HOME'] = str(root)
+            env['PATH'] = str(root / 'bin') + ':' + env.get('PATH', '')
+            stage = 'program_identity'
+            result = subprocess.run([str(root / 'bin/gh-server'), '--version'], env=env,
+                                    capture_output=True, check=True, timeout=10)
+            build = json.loads(result.stdout)
+            receipt = json.loads((root / 'state/installation.json').read_text())
+            if build != receipt['binaries']['gh-server']['identity']:
+                raise ValueError('program identity mismatch')
+            stage = 'process_lifecycle'
+            return supervise(root, env, build, log, install_lock)
+        except Exception as error:
+            # Do not serialize exception text: subprocess output/config can be sensitive.
+            failure = {'schema': 'ags.runtime-failure.v1', 'stage': stage,
+                       'error_type': type(error).__name__, 'at': dt.datetime.now(dt.timezone.utc).isoformat()}
+            try:
+                atomic_json(root / 'state/runtime-failure.json', failure)
+            except OSError:
+                pass
+            log.write((json.dumps(failure) + '\n').encode())
+            return 78
 
 
 def main() -> int:

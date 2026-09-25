@@ -161,6 +161,55 @@ class SingleRootTests(unittest.TestCase):
         self.assertFalse(report['ready_to_start'])
         self.assertEqual(report['checks']['config_directory'], 'missing_or_unsafe')
 
+    def test_invalid_retention_is_visible_without_starting_primary(self):
+        self.configured()
+        for value in ([], {'log_segment_bytes': 1.5}, {'log_backups': True}):
+            runtime.atomic_json(self.root / 'config/retention.json', value)
+            report = runtime.inspect(self.root)
+            self.assertFalse(report['ready_to_start'])
+            self.assertEqual(report['checks']['retention_config'], 'invalid_or_unsafe')
+            with patch.object(runtime, 'supervise') as spawn:
+                self.assertEqual(runtime.serve(self.root), 78)
+                spawn.assert_not_called()
+        log = (self.root / 'logs/runtime.log').read_text()
+        self.assertIn('invalid_or_unsafe', log)
+        self.assertNotIn('never-print-me', log)
+
+    def test_bad_version_identity_is_recorded_before_primary_spawn(self):
+        self.configured()
+        with patch.object(runtime.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, b'{}', b'')):
+            with patch.object(runtime, 'supervise') as spawn:
+                self.assertEqual(runtime.serve(self.root), 78)
+                spawn.assert_not_called()
+        failure = json.loads((self.root / 'state/runtime-failure.json').read_text())
+        self.assertEqual(failure['stage'], 'program_identity')
+        self.assertFalse((self.root / 'state/runtime.json').exists())
+
+    def test_failed_initial_receipt_reaps_real_child_and_redacts_error(self):
+        self.configured()
+        real_write = runtime.atomic_json
+        real_spawn = subprocess.Popen
+        children = []
+        def fail_receipt(path, value):
+            if path.name == 'runtime.json':
+                raise OSError('never-print-me')
+            return real_write(path, value)
+        def track_spawn(args, **kwargs):
+            child = real_spawn(args, **kwargs)
+            if len(args) == 1 and args[0] == str(self.root / 'bin/gh-server'):
+                children.append(child)
+            return child
+        with patch.object(runtime, 'atomic_json', side_effect=fail_receipt):
+            with patch.object(runtime.subprocess, 'Popen', side_effect=track_spawn):
+                self.assertEqual(runtime.serve(self.root), 78)
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].poll())
+        with self.assertRaises(ProcessLookupError): os.kill(children[0].pid, 0)
+        diagnostic = (self.root / 'state/runtime-failure.json').read_text()
+        self.assertEqual(json.loads(diagnostic)['stage'], 'process_lifecycle')
+        self.assertNotIn('never-print-me', diagnostic)
+        self.assertNotIn('never-print-me', (self.root / 'logs/runtime.log').read_text())
+
     def test_real_supervisor_forwards_stop_and_reaps_child(self):
         self.configured()
         process = subprocess.Popen([sys.executable, str(HERE / 'ags-runtime.py'), '--root', str(self.root), 'serve'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
