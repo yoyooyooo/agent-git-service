@@ -15,6 +15,12 @@ func (s *Server) statusCheckRollupGQL(ctx context.Context, pr db.PullRequest) an
 	if pr.HeadSHA == "" {
 		return nil
 	}
+	// Full PR shape construction is reused by mutations and list/view queries.
+	// Do not contact CI just because a response has a potential commits field;
+	// only a selection that actually asks for the rollup owns that remote work.
+	if state, ok := ctx.Value(responseErrorsKey{}).(*responseErrors); ok && !queryHasAny(state.query, "statusCheckRollup") {
+		return ciRollupConnection(pr.HeadSHA, []any{})
+	}
 	selected, err := s.Svc.CISelection(pr.Repository.FullName)
 	if err != nil {
 		addResponseError(ctx, service.CIErrorMessage(err))

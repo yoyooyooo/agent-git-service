@@ -72,6 +72,12 @@ func TestForgejoNativeRunTaskAndExplicitLogBridge(t *testing.T) {
 	if e != nil || !bytes.Contains(log, []byte("fixture log")) {
 		t.Fatal(e, string(log))
 	}
+	inventoryBefore := 0
+	for _, call := range calls {
+		if strings.HasSuffix(call, "/actions/tasks") {
+			inventoryBefore++
+		}
+	}
 	archive, e := backend.RunLogs(context.Background(), "ci/project", "17")
 	if e != nil {
 		t.Fatal(e)
@@ -88,6 +94,15 @@ func TestForgejoNativeRunTaskAndExplicitLogBridge(t *testing.T) {
 	_ = r.Close()
 	if !bytes.Equal(contents, log) {
 		t.Fatal("archive lost job log")
+	}
+	inventoryAfter := 0
+	for _, call := range calls {
+		if strings.HasSuffix(call, "/actions/tasks") {
+			inventoryAfter++
+		}
+	}
+	if inventoryAfter-inventoryBefore != 1 {
+		t.Fatal("whole-run logs repeatedly enumerated repository task history")
 	}
 	before := len(calls)
 	if e := backend.Action(context.Background(), "ci/project", "17", "rerun"); !errors.Is(e, ErrUnsupported) || len(calls) != before {

@@ -254,7 +254,7 @@ func (f *Forgejo) JobLogs(ctx context.Context, repo, id string) ([]byte, error) 
 	if f.config.LogBridge == nil {
 		return nil, fmt.Errorf("%w: Forgejo log bridge is not configured", ErrUnsupported)
 	}
-	runID, taskID, e := forgejoJobParts(id)
+	runID, _, e := forgejoJobParts(id)
 	if e != nil {
 		return nil, e
 	}
@@ -266,7 +266,17 @@ func (f *Forgejo) JobLogs(ctx context.Context, repo, id string) ([]byte, error) 
 	if e != nil {
 		return nil, e
 	}
-	if job.HeadSHA != run.HeadSHA {
+	return f.boundJobLogs(ctx, repo, run, job)
+}
+
+// Reuse already verified run/job facts when collecting a whole run. Repeating
+// the complete repository inventory for each job adds no binding evidence.
+func (f *Forgejo) boundJobLogs(ctx context.Context, repo string, run Run, job Job) ([]byte, error) {
+	if f.config.LogBridge == nil {
+		return nil, fmt.Errorf("%w: Forgejo log bridge is not configured", ErrUnsupported)
+	}
+	runID, taskID, e := forgejoJobParts(job.Key)
+	if e != nil || runID != run.Key || job.Run != run.Key || job.HeadSHA != run.HeadSHA {
 		return nil, ErrInvalid
 	}
 	query := url.Values{"provider_pr": {"0"}, "head_sha": {run.HeadSHA}}
@@ -323,6 +333,13 @@ func (f *Forgejo) JobLogs(ctx context.Context, repo, id string) ([]byte, error) 
 	return []byte(log.Text), nil
 }
 func (f *Forgejo) RunLogs(ctx context.Context, repo, id string) ([]byte, error) {
+	if f.config.LogBridge == nil {
+		return nil, fmt.Errorf("%w: Forgejo log bridge is not configured", ErrUnsupported)
+	}
+	run, e := f.Run(ctx, repo, id)
+	if e != nil {
+		return nil, e
+	}
 	jobs, e := f.Jobs(ctx, repo, id)
 	if e != nil {
 		return nil, e
@@ -331,7 +348,7 @@ func (f *Forgejo) RunLogs(ctx context.Context, repo, id string) ([]byte, error) 
 	writer := zip.NewWriter(&b)
 	total := 0
 	for index, j := range jobs.Items {
-		body, e := f.JobLogs(ctx, repo, j.Key)
+		body, e := f.boundJobLogs(ctx, repo, run, j)
 		if e != nil {
 			return nil, e
 		}
