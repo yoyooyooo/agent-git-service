@@ -18,6 +18,7 @@ ci:
       kind: forgejo
       url: https://forgejo.example.test
       token_file: private/ci-forgejo.token
+      task_page_limit: 100
       log_bridge:
         url: https://logs.example.test
         token_file: private/ci-logs.token
@@ -72,11 +73,14 @@ observed workflow identities is available, with state `unknown`; this is not a
 list of enabled workflows.
 
 Forgejo jobs are selected by exact run number, workflow and head from its bounded
-ActionTask inventory. The current bound is 20 pages of 50 tasks. If a complete
-inventory cannot be established within that bound, the response is unavailable,
-not an empty/successful job set. High-history repositories may therefore need a
-future provider API or explicitly typed indexed bridge before production rollout;
-this implementation does not silently drop older jobs to meet the bound.
+ActionTask inventory. The default work budget is 100 pages of 50 tasks, with an
+explicit `task_page_limit` (1–1000) and an independent request deadline. The total
+count must stay stable, page IDs must not overlap, and the unique observed count
+must match the reported total. If completeness cannot be established within the
+budget, the response is unavailable, never an empty/successful job set. An operator
+can tune observation work without changing resource identity; very large/high-churn
+repositories still benefit from a future run-specific API or typed indexed bridge.
+Older jobs are not silently dropped to meet the budget.
 
 ## Logs
 

@@ -29,6 +29,8 @@ type BackendConfig struct {
 	AllowHTTP        bool             `yaml:"allow_http" json:"allow_http"`
 	LogDownloadHosts []string         `yaml:"log_download_hosts" json:"log_download_hosts,omitempty"`
 	LogBridge        *LogBridgeConfig `yaml:"log_bridge" json:"log_bridge,omitempty"`
+	// Bounded inventory work for Forgejo APIs without a run-specific jobs route.
+	TaskPageLimit int `yaml:"task_page_limit" json:"task_page_limit,omitempty"`
 }
 type Binding struct {
 	Backend    string `yaml:"backend" json:"backend"`
@@ -80,6 +82,9 @@ func Validate(c Config) error {
 		}
 		if b.Kind != "forgejo" && b.Kind != "github-actions" {
 			return fmt.Errorf("CI backend %s has unsupported kind", name)
+		}
+		if b.TaskPageLimit < 0 || b.TaskPageLimit > 1000 || (b.TaskPageLimit != 0 && b.Kind != "forgejo") {
+			return fmt.Errorf("CI task_page_limit must be 1–1000 for a Forgejo backend")
 		}
 		u, err := url.Parse(b.URL)
 		if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && !(u.Scheme == "http" && b.AllowHTTP)) {

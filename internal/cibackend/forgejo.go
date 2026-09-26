@@ -149,9 +149,16 @@ func (f *Forgejo) Jobs(ctx context.Context, repo, id string) (Jobs, error) {
 		return Jobs{}, e
 	}
 	result := Jobs{Items: []Job{}}
+	limit := f.config.TaskPageLimit
+	if limit == 0 {
+		limit = 100
+	}
+	seen := map[int64]bool{}
+	expectedTotal := -1
 	// The native task listing has no run filter. Exhaust its bounded pages before
-	// claiming job completeness; a truncated task inventory is never an empty run.
-	for page := 1; page <= 20; page++ {
+	// claiming job completeness; a truncated or moving inventory is never empty
+	// success. The explicit work budget can be tuned without changing CI identity.
+	for page := 1; page <= limit; page++ {
 		data, e := f.request(ctx, "GET", fmt.Sprintf("%stasks?page=%d&limit=50", prefix, page), false)
 		if e != nil {
 			return Jobs{}, e
@@ -166,7 +173,16 @@ func (f *Forgejo) Jobs(ctx context.Context, repo, id string) (Jobs, error) {
 		if len(body.Items) > 50 || body.Total < 0 {
 			return Jobs{}, ErrInvalid
 		}
+		if expectedTotal < 0 {
+			expectedTotal = body.Total
+		} else if expectedTotal != body.Total {
+			return Jobs{}, fmt.Errorf("%w: CI task inventory changed during observation", ErrUnavailable)
+		}
 		for _, task := range body.Items {
+			if task.ID <= 0 || seen[task.ID] {
+				return Jobs{}, fmt.Errorf("%w: repeated task in paged CI inventory", ErrUnavailable)
+			}
+			seen[task.ID] = true
 			if task.RunNumber != run.Number {
 				continue
 			}
@@ -185,6 +201,9 @@ func (f *Forgejo) Jobs(ctx context.Context, repo, id string) (Jobs, error) {
 			result.Items = append(result.Items, Job{Key: id + ":" + strconv.FormatInt(task.ID, 10), Run: id, Name: task.Name, HeadSHA: run.HeadSHA, Status: status, Conclusion: conclusion, URL: task.URL, StartedAt: task.Started, CompletedAt: stopped, Steps: []Step{}})
 		}
 		if len(body.Items) < 50 || body.Total > 0 && page*50 >= body.Total {
+			if len(seen) != expectedTotal {
+				return Jobs{}, fmt.Errorf("%w: incomplete CI task inventory", ErrUnavailable)
+			}
 			result.Complete = true
 			result.Total = len(result.Items)
 			return result, nil
