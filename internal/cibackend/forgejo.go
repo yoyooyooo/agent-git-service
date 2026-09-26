@@ -281,8 +281,37 @@ func (f *Forgejo) boundJobLogs(ctx context.Context, repo string, run Run, job Jo
 	}
 	query := url.Values{"provider_pr": {"0"}, "head_sha": {run.HeadSHA}}
 	if len(run.PullRequests) == 1 {
-		query.Set("provider_pr", strconv.Itoa(run.PullRequests[0]))
-		query.Set("head_ref", "")
+		number := run.PullRequests[0]
+		query.Set("provider_pr", strconv.Itoa(number))
+		// The typed log contract carries the source branch even for a PR run.
+		// #<number> is a Forgejo display ref, not the source Git branch. Read it
+		// from the exact provider PR rather than guessing an AGS PR number/name.
+		prefix, err := f.prefix(repo)
+		if err != nil {
+			return nil, err
+		}
+		payload, err := f.request(ctx, "GET", strings.TrimSuffix(prefix, "actions/")+"pulls/"+strconv.Itoa(number), false)
+		if err != nil {
+			return nil, err
+		}
+		var pr struct {
+			Number int `json:"number"`
+			Head   struct {
+				Ref string `json:"ref"`
+			} `json:"head"`
+			Base struct {
+				Repo struct {
+					FullName string `json:"full_name"`
+				} `json:"repo"`
+			} `json:"base"`
+		}
+		if err = decode(payload, &pr); err != nil {
+			return nil, err
+		}
+		if pr.Number != number || pr.Head.Ref == "" || len(pr.Head.Ref) > 1024 || strings.TrimSpace(pr.Head.Ref) != pr.Head.Ref || strings.ContainsAny(pr.Head.Ref, "\r\n\x00") || (pr.Base.Repo.FullName != "" && pr.Base.Repo.FullName != repo) {
+			return nil, ErrInvalid
+		}
+		query.Set("head_ref", pr.Head.Ref)
 	} else {
 		query.Set("head_ref", run.Branch)
 	}
