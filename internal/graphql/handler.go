@@ -71,6 +71,8 @@ func (s *Server) Handler(w http.ResponseWriter, r *http.Request) {
 	isMutation := strings.Contains(strings.ToLower(req.Query[:min(len(req.Query), 30)]), "mutation")
 
 	var result map[string]any
+	fieldErrors := &responseErrors{query: req.Query}
+	r = r.WithContext(context.WithValue(r.Context(), responseErrorsKey{}, fieldErrors))
 
 	if isMutation {
 		result = s.routeMutation(r.Context(), req, op, ast)
@@ -83,6 +85,10 @@ func (s *Server) Handler(w http.ResponseWriter, r *http.Request) {
 		result["data"] = filterMap(d, ast, fragments)
 	}
 
+	if len(fieldErrors.items) > 0 {
+		if prior, ok := result["errors"].([]any); ok { fieldErrors.items = append(prior, fieldErrors.items...) }
+		result["errors"] = fieldErrors.items
+	}
 	respond.JSON(w, 200, result)
 }
 

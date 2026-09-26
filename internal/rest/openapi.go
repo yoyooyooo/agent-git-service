@@ -220,6 +220,13 @@ func buildGitHubCompatibleOpenAPIPaths() map[string]any {
 
 func buildRESTOpenAPIPaths() map[string]any {
 	return map[string]any{
+		"/api/ext/v1/client-runs": map[string]any{"post": operation("startClientRun", "Create one short-lived native actor run identity. Context association is best-effort, never a permission grant.", auth(), clientRunOpenAPIBody(), nil, clientRunOpenAPIResponses(true))},
+		"/api/ext/v1/client-runs/{run_id}": map[string]any{
+			"get":    operation("getClientRun", "Read the owned run receipt; current identifies the authenticating run.", auth(), nil, pathParams(param("run_id", "string")), clientRunOpenAPIResponses(false)),
+			"delete": operation("revokeClientRun", "Revoke this actor's run without revoking the native parent; a run credential may revoke only itself.", auth(), nil, pathParams(param("run_id", "string")), response(204, "Run revoked")),
+		},
+		"/api/ext/v1/repos/{owner}/{repo}/ci":                     map[string]any{"get": operation("getCIBackend", "Observe the independently configured CI backend and explicit required policy. Git hosting and merge authority remain separate.", auth(), nil, pathParams(param("owner", "string"), param("repo", "string")), response(200, "Backend binding and required-check policy, without credentials"))},
+		"/api/ext/v1/repos/{owner}/{repo}/pulls/{number}/context": map[string]any{"get": operation("getPullRequestRunLinks", "Read bounded run association and provider projection links. Missing association does not block PR collaboration.", auth(), nil, pathParams(param("owner", "string"), param("repo", "string"), param("number", "integer")), response(200, "Run receipts, provider links, head and observation completeness"))},
 		"/api/ext/v1": map[string]any{
 			"get": operation("getExtensionAPIDiscovery", "Get extension API discovery links.", nil, nil, nil, response(200, "extension API discovery document")),
 		},

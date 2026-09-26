@@ -19,31 +19,37 @@ const (
 
 // MergeOptions defines options for the Merge operation.
 type MergeOptions struct {
-	FullName     string
-	BaseBranch   string
-	HeadBranch   string
-	Committer    string
-	Email        string
-	MergeMessage string
+	FullName        string
+	BaseBranch      string
+	HeadBranch      string
+	Committer       string
+	Email           string
+	MergeMessage    string
+	ExpectedHeadSHA string
+	ExpectedBaseSHA string
 }
 
 // SquashMergeOptions defines options for the SquashMerge operation.
 type SquashMergeOptions struct {
-	FullName      string
-	BaseBranch    string
-	HeadBranch    string
-	Committer     string
-	Email         string
-	SquashMessage string
+	FullName        string
+	BaseBranch      string
+	HeadBranch      string
+	Committer       string
+	Email           string
+	SquashMessage   string
+	ExpectedHeadSHA string
+	ExpectedBaseSHA string
 }
 
 // RebaseOptions defines options for the Rebase operation.
 type RebaseOptions struct {
-	FullName   string
-	BaseBranch string
-	HeadBranch string
-	Committer  string
-	Email      string
+	FullName        string
+	BaseBranch      string
+	HeadBranch      string
+	Committer       string
+	Email           string
+	ExpectedHeadSHA string
+	ExpectedBaseSHA string
 }
 
 // UpdatePRBranchOptions defines options for the UpdatePRBranch operation.
@@ -89,6 +95,9 @@ type tempCloneOptions struct {
 	email          string
 	pushBranch     string
 	allowForcePush bool
+	headBranch     string
+	expectedHead   string
+	expectedBase   string
 }
 
 func (s *Store) withTempClone(ctx context.Context, fullName string, opts tempCloneOptions, fn func(tmpDir string) error) (string, error) {
@@ -127,6 +136,11 @@ func (s *Store) withTempClone(ctx context.Context, fullName string, opts tempClo
 		return "", err
 	}
 
+	if opts.expectedHead != "" {
+		if err := verifyMergePreconditions(ctx, tmpDir, opts); err != nil {
+			return "", err
+		}
+	}
 	if err := fn(tmpDir); err != nil {
 		return "", err
 	}
@@ -137,6 +151,12 @@ func (s *Store) withTempClone(ctx context.Context, fullName string, opts tempClo
 	}
 	sha := strings.TrimSpace(string(out))
 
+	if opts.pushBranch != "" && opts.expectedHead != "" {
+		if err := publishCheckedMerge(ctx, repoDir, tmpDir, sha, opts); err != nil {
+			return "", err
+		}
+		return sha, nil
+	}
 	if opts.pushBranch != "" {
 		if pushOut, err := exec.CommandContext(ctx, "git", "-C", tmpDir, "push", "origin", opts.pushBranch).CombinedOutput(); err != nil {
 			if opts.allowForcePush {
@@ -204,6 +224,7 @@ func (s *Store) Merge(ctx context.Context, opts MergeOptions) (string, error) {
 		committer:  opts.Committer,
 		email:      opts.Email,
 		pushBranch: opts.BaseBranch,
+		headBranch: opts.HeadBranch, expectedHead: opts.ExpectedHeadSHA, expectedBase: opts.ExpectedBaseSHA,
 	}, func(tmpDir string) error {
 		// Checkout base branch
 		if out, err := exec.CommandContext(ctx, "git", "-C", tmpDir, "checkout", opts.BaseBranch).CombinedOutput(); err != nil {
@@ -229,6 +250,7 @@ func (s *Store) SquashMerge(ctx context.Context, opts SquashMergeOptions) (strin
 		committer:  opts.Committer,
 		email:      opts.Email,
 		pushBranch: opts.BaseBranch,
+		headBranch: opts.HeadBranch, expectedHead: opts.ExpectedHeadSHA, expectedBase: opts.ExpectedBaseSHA,
 	}, func(tmpDir string) error {
 		// Checkout base branch
 		if out, err := exec.CommandContext(ctx, "git", "-C", tmpDir, "checkout", opts.BaseBranch).CombinedOutput(); err != nil {
@@ -258,6 +280,7 @@ func (s *Store) Rebase(ctx context.Context, opts RebaseOptions) (string, error) 
 		committer:  opts.Committer,
 		email:      opts.Email,
 		pushBranch: opts.BaseBranch,
+		headBranch: opts.HeadBranch, expectedHead: opts.ExpectedHeadSHA, expectedBase: opts.ExpectedBaseSHA,
 	}, func(tmpDir string) error {
 		// Checkout the head branch and rebase it onto base
 		if out, err := exec.CommandContext(ctx, "git", "-C", tmpDir, "checkout", opts.HeadBranch).CombinedOutput(); err != nil {

@@ -322,6 +322,7 @@ func (s *Service) CreatePR(ctx context.Context, in CreatePRInput) (db.PullReques
 				}
 			}(pr)
 		}
+		s.ObserveClientRunPR(ctx, pr)
 		return pr, nil
 	}
 	return db.PullRequest{}, fmt.Errorf("service: create pr: failed after %d retries", maxRetries)

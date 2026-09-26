@@ -630,6 +630,7 @@ func (d *Deps) MergePR(w http.ResponseWriter, r *http.Request) {
 		CommitTitle   string `json:"commit_title"`
 		CommitMessage string `json:"commit_message"`
 		MergeMethod   string `json:"merge_method"` // merge, squash, rebase
+		SHA           string `json:"sha"`
 	}
 	if err := decodeBodyStrictOptional(r, &body); err != nil {
 		respond.ValidationFailed(w, "invalid body")
@@ -638,7 +639,14 @@ func (d *Deps) MergePR(w http.ResponseWriter, r *http.Request) {
 	if body.MergeMethod == "" {
 		body.MergeMethod = "merge"
 	}
-	pr, err := d.Svc.MergePR(r.Context(), full, num, body.MergeMethod, body.CommitTitle)
+	message := body.CommitTitle
+	if body.CommitMessage != "" {
+		if message != "" {
+			message += "\n\n"
+		}
+		message += body.CommitMessage
+	}
+	pr, err := d.Svc.MergeStandardPR(r.Context(), full, num, body.MergeMethod, message, body.SHA)
 	if err != nil {
 		respond.ServiceErrorRequest(r, w, err)
 		return

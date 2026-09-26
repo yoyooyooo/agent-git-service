@@ -34,6 +34,9 @@ coverage.out
 /cli/output*.txt
 /cli/test-results.txt
 
+# Bounded local acceptance receipts and candidates (not publication evidence)
+.test-build/
+
 # Frontend/tool caches
 .vite/
 visualization/.vite/

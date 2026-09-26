@@ -368,6 +368,9 @@ func registerAgentBindingRoutes(r chi.Router, handlers *rest.Deps) {
 func registerUserScopedRoutes(r chi.Router, handlers *rest.Deps) {
 	// Current user and exact-ID historical Session lifecycle audit.
 	r.Get("/api/v3/user", handlers.GetAuthenticatedUser)
+	r.Post("/api/ext/v1/client-runs", handlers.StartClientRun)
+	r.Get("/api/ext/v1/client-runs/{run_id}", handlers.GetClientRun)
+	r.Delete("/api/ext/v1/client-runs/{run_id}", handlers.RevokeClientRun)
 	for _, prefix := range extensionPrefixes(handlers.LegacyExtensionAliases) {
 		r.Get(prefix+"/viewer/summary", handlers.GetViewerSummary)
 	}
@@ -573,6 +576,9 @@ func registerRepoCoreRoutes(r chi.Router, handlers *rest.Deps) {
 		r.Get(prefix+"/repos/{owner}/{repo}/summary", handlers.GetRepoSummary)
 	}
 	r.Get("/api/v3/repos/{owner}/{repo}", handlers.GetRepo)
+	r.Head("/api/v3/repos/{owner}/{repo}", handlers.HeadRepo)
+	r.Get("/api/ext/v1/repos/{owner}/{repo}/ci", handlers.GetCIBackend)
+	r.Get("/api/ext/v1/repos/{owner}/{repo}/pulls/{number}/context", handlers.GetClientRunLinks)
 	r.Patch("/api/v3/repos/{owner}/{repo}", handlers.UpdateRepo)
 	r.Delete("/api/v3/repos/{owner}/{repo}", handlers.DeleteRepo)
 	r.Post("/api/v3/repos/{owner}/{repo}/transfer", handlers.TransferRepo)
@@ -720,10 +726,10 @@ func registerAutolinkRoutes(r chi.Router, handlers *rest.Deps) {
 
 func registerCheckRoutes(r chi.Router, handlers *rest.Deps) {
 	// Check runs / check suites / status
-	r.Get("/api/v3/repos/{owner}/{repo}/check-runs/{check_run_id}", handlers.GetCheckRun)
-	r.Get("/api/v3/repos/{owner}/{repo}/check-runs/{check_run_id}/annotations", handlers.ListCheckRunAnnotations)
-	r.Get("/api/v3/repos/{owner}/{repo}/commits/{ref}/check-runs", handlers.ListCheckRunsForRef)
-	r.Get("/api/v3/repos/{owner}/{repo}/commits/{ref}/check-suites", handlers.ListCheckSuitesForRef)
+	r.Get("/api/v3/repos/{owner}/{repo}/check-runs/{check_run_id}", handlers.CI(handlers.GetCheckRun, "unsupported"))
+	r.Get("/api/v3/repos/{owner}/{repo}/check-runs/{check_run_id}/annotations", handlers.CI(handlers.ListCheckRunAnnotations, "unsupported"))
+	r.Get("/api/v3/repos/{owner}/{repo}/commits/{ref}/check-runs", handlers.CI(handlers.ListCheckRunsForRef, "unsupported"))
+	r.Get("/api/v3/repos/{owner}/{repo}/commits/{ref}/check-suites", handlers.CI(handlers.ListCheckSuitesForRef, "unsupported"))
 	r.Post("/api/v3/repos/{owner}/{repo}/statuses/{sha}", handlers.CreateCommitStatus)
 	r.Get("/api/v3/repos/{owner}/{repo}/commits/{ref}/statuses", handlers.ListCommitStatuses)
 	r.Get("/api/v3/repos/{owner}/{repo}/commits/{ref}/status", handlers.CombinedStatus)
@@ -845,11 +851,11 @@ func registerActionsRoutes(r chi.Router, handlers *rest.Deps) {
 
 func registerActionsVariableRoutes(r chi.Router, handlers *rest.Deps) {
 	// Actions: Variables (repo)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/variables", handlers.ListRepoVariables)
-	r.Post("/api/v3/repos/{owner}/{repo}/actions/variables", handlers.CreateRepoVariable)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/variables/{name}", handlers.GetRepoVariable)
-	r.Patch("/api/v3/repos/{owner}/{repo}/actions/variables/{name}", handlers.UpdateRepoVariable)
-	r.Delete("/api/v3/repos/{owner}/{repo}/actions/variables/{name}", handlers.DeleteRepoVariable)
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/variables", handlers.CI(handlers.ListRepoVariables, "unsupported"))
+	r.Post("/api/v3/repos/{owner}/{repo}/actions/variables", handlers.CI(handlers.CreateRepoVariable, "unsupported"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/variables/{name}", handlers.CI(handlers.GetRepoVariable, "unsupported"))
+	r.Patch("/api/v3/repos/{owner}/{repo}/actions/variables/{name}", handlers.CI(handlers.UpdateRepoVariable, "unsupported"))
+	r.Delete("/api/v3/repos/{owner}/{repo}/actions/variables/{name}", handlers.CI(handlers.DeleteRepoVariable, "unsupported"))
 
 	// Actions: Variables (org)
 	r.Get("/api/v3/orgs/{org}/actions/variables", handlers.ListOrgVariables)
@@ -928,47 +934,47 @@ func registerEnvironmentRoutes(r chi.Router, handlers *rest.Deps) {
 
 func registerWorkflowRoutes(r chi.Router, handlers *rest.Deps) {
 	// Actions: Workflows
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/workflows", handlers.ListWorkflows)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}", handlers.GetWorkflow)
-	r.Put("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}/enable", handlers.EnableWorkflow)
-	r.Put("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}/disable", handlers.DisableWorkflow)
-	r.Post("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches", handlers.DispatchWorkflow)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs", handlers.ListWorkflowRunsByWorkflow)
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/workflows", handlers.CI(handlers.ListWorkflows, "workflows"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}", handlers.CI(handlers.GetWorkflow, "workflow"))
+	r.Put("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}/enable", handlers.CI(handlers.EnableWorkflow, "unsupported"))
+	r.Put("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}/disable", handlers.CI(handlers.DisableWorkflow, "unsupported"))
+	r.Post("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches", handlers.CI(handlers.DispatchWorkflow, "unsupported"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs", handlers.CI(handlers.ListWorkflowRunsByWorkflow, "runs"))
 }
 
 func registerRepositoryDispatchRoutes(r chi.Router, handlers *rest.Deps) {
 	// Dispatch (repository_dispatch)
-	r.Post("/api/v3/repos/{owner}/{repo}/dispatches", handlers.CreateRepositoryDispatch)
+	r.Post("/api/v3/repos/{owner}/{repo}/dispatches", handlers.CI(handlers.CreateRepositoryDispatch, "unsupported"))
 }
 
 func registerWorkflowRunRoutes(r chi.Router, handlers *rest.Deps) {
 	// Actions: Workflow Runs
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs", handlers.ListWorkflowRuns)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}", handlers.GetWorkflowRun)
-	r.Post("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/cancel", handlers.CancelWorkflowRun)
-	r.Delete("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}", handlers.DeleteWorkflowRun)
-	r.Post("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/rerun", handlers.RerunWorkflowRun)
-	r.Post("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs", handlers.RerunWorkflowRun)
-	r.Post("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/force-cancel", handlers.ForceCancelWorkflowRun)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/logs", handlers.GetWorkflowRunLogs)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/artifacts", handlers.ListRepoArtifacts)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts", handlers.ListWorkflowRunArtifacts)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/jobs", handlers.ListWorkflowRunJobs)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}", handlers.GetWorkflowRunByAttempt)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs", handlers.ListWorkflowRunJobsByAttempt)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/logs", handlers.GetWorkflowRunLogsByAttempt)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip", handlers.DownloadArtifact)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/jobs/{job_id}", handlers.GetWorkflowJob)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/jobs/{job_id}/logs", handlers.GetWorkflowJobLogs)
-	r.Post("/api/v3/repos/{owner}/{repo}/actions/jobs/{job_id}/rerun", handlers.RerunWorkflowRunJob)
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs", handlers.CI(handlers.ListWorkflowRuns, "runs"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}", handlers.CI(handlers.GetWorkflowRun, "run"))
+	r.Post("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/cancel", handlers.CI(handlers.CancelWorkflowRun, "cancel"))
+	r.Delete("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}", handlers.CI(handlers.DeleteWorkflowRun, "unsupported"))
+	r.Post("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/rerun", handlers.CI(handlers.RerunWorkflowRun, "rerun"))
+	r.Post("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs", handlers.CI(handlers.RerunWorkflowRun, "rerun-failed-jobs"))
+	r.Post("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/force-cancel", handlers.CI(handlers.ForceCancelWorkflowRun, "cancel"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/logs", handlers.CI(handlers.GetWorkflowRunLogs, "run-logs"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/artifacts", handlers.CI(handlers.ListRepoArtifacts, "unsupported"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts", handlers.CI(handlers.ListWorkflowRunArtifacts, "unsupported"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/jobs", handlers.CI(handlers.ListWorkflowRunJobs, "run-jobs"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}", handlers.CI(handlers.GetWorkflowRunByAttempt, "run"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs", handlers.CI(handlers.ListWorkflowRunJobsByAttempt, "run-jobs"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/logs", handlers.CI(handlers.GetWorkflowRunLogsByAttempt, "run-logs"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip", handlers.CI(handlers.DownloadArtifact, "unsupported"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/jobs/{job_id}", handlers.CI(handlers.GetWorkflowJob, "job"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/jobs/{job_id}/logs", handlers.CI(handlers.GetWorkflowJobLogs, "job-logs"))
+	r.Post("/api/v3/repos/{owner}/{repo}/actions/jobs/{job_id}/rerun", handlers.CI(handlers.RerunWorkflowRunJob, "unsupported"))
 }
 
 func registerActionsCacheRoutes(r chi.Router, handlers *rest.Deps) {
 	// Actions: Cache
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/caches", handlers.ListActionsCaches)
-	r.Delete("/api/v3/repos/{owner}/{repo}/actions/caches", handlers.DeleteActionsCaches)
-	r.Delete("/api/v3/repos/{owner}/{repo}/actions/caches/{cache_id}", handlers.DeleteActionsCacheByID)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/cache/usage", handlers.GetCacheUsage)
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/caches", handlers.CI(handlers.ListActionsCaches, "unsupported"))
+	r.Delete("/api/v3/repos/{owner}/{repo}/actions/caches", handlers.CI(handlers.DeleteActionsCaches, "unsupported"))
+	r.Delete("/api/v3/repos/{owner}/{repo}/actions/caches/{cache_id}", handlers.CI(handlers.DeleteActionsCacheByID, "unsupported"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/cache/usage", handlers.CI(handlers.GetCacheUsage, "unsupported"))
 }
 
 func registerRulesetRoutes(r chi.Router, handlers *rest.Deps) {

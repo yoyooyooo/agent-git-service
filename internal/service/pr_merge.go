@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -168,35 +169,42 @@ func (s *Service) mergePRRecordWithActor(ctx context.Context, actor db.User, pr 
 	}
 	var sha string
 	var mergeErr error
+	condition, _ := ctx.Value(mergePreconditionKey{}).(mergePrecondition)
 	switch mergeMethod {
 	case "rebase":
 		sha, mergeErr = s.Git.Rebase(ctx, gitstore.RebaseOptions{
-			FullName:   pr.Repository.FullName,
-			BaseBranch: pr.BaseRef,
-			HeadBranch: pr.HeadRef,
-			Committer:  actor.Login,
-			Email:      actor.Email,
+			FullName:        pr.Repository.FullName,
+			BaseBranch:      pr.BaseRef,
+			HeadBranch:      pr.HeadRef,
+			ExpectedHeadSHA: condition.Head, ExpectedBaseSHA: condition.Base,
+			Committer: actor.Login,
+			Email:     actor.Email,
 		})
 	case "squash":
 		sha, mergeErr = s.Git.SquashMerge(ctx, gitstore.SquashMergeOptions{
-			FullName:      pr.Repository.FullName,
-			BaseBranch:    pr.BaseRef,
-			HeadBranch:    pr.HeadRef,
-			Committer:     actor.Login,
-			Email:         actor.Email,
-			SquashMessage: commitMsg,
+			FullName:        pr.Repository.FullName,
+			BaseBranch:      pr.BaseRef,
+			HeadBranch:      pr.HeadRef,
+			Committer:       actor.Login,
+			Email:           actor.Email,
+			SquashMessage:   commitMsg,
+			ExpectedHeadSHA: condition.Head, ExpectedBaseSHA: condition.Base,
 		})
 	default:
 		sha, mergeErr = s.Git.Merge(ctx, gitstore.MergeOptions{
-			FullName:     pr.Repository.FullName,
-			BaseBranch:   pr.BaseRef,
-			HeadBranch:   pr.HeadRef,
-			Committer:    actor.Login,
-			Email:        actor.Email,
-			MergeMessage: commitMsg,
+			FullName:        pr.Repository.FullName,
+			BaseBranch:      pr.BaseRef,
+			HeadBranch:      pr.HeadRef,
+			Committer:       actor.Login,
+			Email:           actor.Email,
+			MergeMessage:    commitMsg,
+			ExpectedHeadSHA: condition.Head, ExpectedBaseSHA: condition.Base,
 		})
 	}
 	if mergeErr != nil {
+		if errors.Is(mergeErr, gitstore.ErrMergePrecondition) {
+			return fmt.Errorf("%w: merge head or base changed", ErrConflict)
+		}
 		if isMergeConflict(mergeErr) {
 			return fmt.Errorf("%w: merge conflict: %v", ErrConflict, mergeErr)
 		}

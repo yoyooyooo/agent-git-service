@@ -95,10 +95,9 @@ func TestJobToCheckNode_DefaultStatusAndConclusion(t *testing.T) {
 
 	node := jobToCheckNode(job, wf, run, "https://github.com", "org/repo")
 
-	// Empty status should default to COMPLETED
-	require.Equal(t, "COMPLETED", node["status"])
-	// Empty conclusion should default to SUCCESS
-	require.Equal(t, "SUCCESS", node["conclusion"])
+	// Missing evidence is pending/unknown, never a successful completed check.
+	require.Equal(t, "QUEUED", node["status"])
+	require.Equal(t, "", node["conclusion"])
 }
 
 func TestJobToCheckNode_CaseNormalization(t *testing.T) {
@@ -111,9 +110,9 @@ func TestJobToCheckNode_CaseNormalization(t *testing.T) {
 		wantConcl  string
 	}{
 		{"lowercase", "completed", "success", "COMPLETED", "SUCCESS"},
-		{"uppercase", "IN_PROGRESS", "FAILURE", "IN_PROGRESS", "FAILURE"},
+		{"uppercase", "IN_PROGRESS", "FAILURE", "IN_PROGRESS", ""},
 		{"mixed", "CoMpLeTeD", "SuCcEsS", "COMPLETED", "SUCCESS"},
-		{"queued", "queued", "pending", "QUEUED", "PENDING"},
+		{"queued", "queued", "pending", "QUEUED", ""},
 	}
 
 	for _, tc := range testCases {
@@ -145,7 +144,7 @@ func TestJobToCheckNode_EdgeStatuses(t *testing.T) {
 		wantStatus string
 		wantConcl  string
 	}{
-		{"pending_status", "pending", "", "PENDING", "SUCCESS"},
+		{"pending_status", "pending", "", "QUEUED", ""},
 		{"failure_conclusion", "completed", "failure", "COMPLETED", "FAILURE"},
 		{"neutral_conclusion", "completed", "neutral", "COMPLETED", "NEUTRAL"},
 		{"cancelled_conclusion", "completed", "cancelled", "COMPLETED", "CANCELLED"},
@@ -548,7 +547,7 @@ func TestStatusCheckRollup_ComputedFromJobs(t *testing.T) {
 	require.Equal(t, "SUCCESS", conclusions[0])
 	require.Equal(t, "FAILURE", conclusions[1])
 	require.Equal(t, "SUCCESS", conclusions[2])
-	require.Equal(t, "SUCCESS", conclusions[3]) // empty conclusion defaults to SUCCESS
+	require.Equal(t, "", conclusions[3]) // unfinished evidence has no conclusion
 
 	// Verify count by state
 	counts := countChecksByState(checkNodes)
@@ -560,8 +559,9 @@ func TestStatusCheckRollup_ComputedFromJobs(t *testing.T) {
 		countMap[state] = count
 	}
 
-	require.Equal(t, 3, countMap["SUCCESS"])
+	require.Equal(t, 2, countMap["SUCCESS"])
 	require.Equal(t, 1, countMap["FAILURE"])
+	require.Equal(t, 1, countMap["UNKNOWN"])
 }
 
 func TestStatusCheckRollup_MixedCheckStates(t *testing.T) {
@@ -599,7 +599,8 @@ func TestStatusCheckRollup_MixedCheckStates(t *testing.T) {
 				{Name: "build", Status: "completed", Conclusion: "success", StartedAt: now, CompletedAt: now},
 				{Name: "test", Status: "in_progress", Conclusion: "", StartedAt: now, CompletedAt: now},
 			},
-			wantSuccess: 2, // in_progress with empty conclusion -> COMPLETED/SUCCESS (defaults applied)
+			wantSuccess: 1,
+			wantOther:   map[string]int{"UNKNOWN": 1},
 		},
 		{
 			name: "all_failures",

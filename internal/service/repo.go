@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/ngaut/agent-git-service/internal/db"
+	"github.com/ngaut/agent-git-service/internal/cibackend"
 	"github.com/ngaut/agent-git-service/internal/delegationpolicy"
 	"github.com/ngaut/agent-git-service/internal/embedding"
 	"github.com/ngaut/agent-git-service/internal/executioncontext"
@@ -51,6 +52,8 @@ type Service struct {
 	OIDC               OIDCProvider
 	ConnectedLogin     ConnectedLoginProvider
 	ForgejoIntegration *forgejointegration.Integration
+	// CI is selected independently of Git hosting/projection. Nil means native Actions.
+	CI *cibackend.Registry
 	// DisableForgejoProjectionWorker leaves admitted durable Forgejo PR projection
 	// jobs queued without starting the in-process worker. Delegated admission
 	// denials are persisted failed_terminal before this flag is considered.
@@ -942,6 +945,11 @@ func (s *Service) deleteRepoCascade(tx *gorm.DB, repoID uint, fullName string) e
 	if err := del(tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").First(&db.Repository{}, repoID)); err != nil {
 		return err
 	}
+
+	// CI namespaces and run provenance belong to this repository too; clean
+	// them explicitly even when an embedded database has FK enforcement off.
+	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.CIResource{})); err != nil { return err }
+	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.ClientRunLink{})); err != nil { return err }
 
 	// Phase 1: Detach forks.
 	if err := del(tx.Model(&db.Repository{}).Where("parent_id = ?", repoID).

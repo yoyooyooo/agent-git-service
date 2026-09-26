@@ -211,7 +211,7 @@ func parseExpectedBinding(r *http.Request) (expectedBinding, error) {
 	providerPR, err := strconv.ParseInt(providerPRRaw, 10, 64)
 	headRef := query.Get("head_ref")
 	headSHA := query.Get("head_sha")
-	if err != nil || providerPR <= 0 || strconv.FormatInt(providerPR, 10) != providerPRRaw || !safeHeadRef(headRef) || !canonicalSHA(headSHA) {
+	if err != nil || providerPR < 0 || strconv.FormatInt(providerPR, 10) != providerPRRaw || (headRef != "" && !safeHeadRef(headRef)) || (providerPR == 0 && headRef == "") || !canonicalSHA(headSHA) {
 		return expectedBinding{}, errors.New("invalid provider log binding request")
 	}
 	return expectedBinding{ProviderPR: providerPR, HeadRef: headRef, HeadSHA: headSHA}, nil
@@ -224,11 +224,11 @@ func verifyBinding(binding logBinding, expected expectedBinding) (verifiedBindin
 	providerRef := strings.TrimSpace(binding.ProviderRef)
 	event := strings.TrimSpace(binding.Event)
 	pullRef := "refs/pull/" + strconv.FormatInt(expected.ProviderPR, 10) + "/head"
-	if providerRef == pullRef && event == "pull_request" {
+	if expected.ProviderPR > 0 && providerRef == pullRef && event == "pull_request" {
 		return verifiedBinding{ProviderPR: expected.ProviderPR, ProviderRef: providerRef, Event: event}, nil
 	}
 	branchRef := "refs/heads/" + expected.HeadRef
-	if providerRef == branchRef && event == "workflow_dispatch" {
+	if expected.HeadRef != "" && providerRef == branchRef && (event == "workflow_dispatch" || event == "push") {
 		return verifiedBinding{HeadRef: expected.HeadRef, ProviderRef: providerRef, Event: event}, nil
 	}
 	return verifiedBinding{}, errors.New("provider log ref binding mismatch")

@@ -28,6 +28,8 @@ Retain the original source comparison and commit-to-capability ledger privately.
 | Edge gateway operations | Unchanged primary remote, explicit unbound forwarding, no ambiguous write replay | Fresh clone/push/readback, aliases, private/unbound paths and connection boundary tests |
 | Edge observation and warming | Node-only periodic warming, current readiness and loopback diagnostics | Control/data separation, telemetry limits, expiry, error and queue tests |
 | Client compatibility | Existing primary API/credential routing, PR and native Git workflows | Complete CLI compile, core behavior tests and complete local API-client suite |
+| Official gh / configurable CI | Standard draft/HEAD/checks/run/log and expected-head merge; explicit native/none/Forgejo/GitHub Actions selection independent from merge authority | No shim or per-command routing overrides; unsupported provider actions remain explicit, no fallback to unrelated native facts |
+| Native task-run association | Existing native actor with short-lived run credential, optional Task/Run metadata and durable PR/provider links | Association is not a permission grant; parent/user revocation and concurrent tasks verified; live task-launcher integration remains an explicit rollout |
 | Source delivery | GitHub origin and hosted CI; no private runner or running AGS needed to contribute | Complete package inventory, exact-source build, disposable database ownership and publication tests |
 
 The generation's complete hosted run must include all 60 root-module packages, the client gate and the selected race gate. A preparation push with skipped jobs is not full acceptance. Exact job receipts belong to the release manifest.

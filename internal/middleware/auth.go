@@ -253,6 +253,24 @@ func handleAuthError(w http.ResponseWriter, r *http.Request, token string, mode 
 // resolveTokenAndInjectContext resolves the token and injects user/DB context.
 // Returns (newContext, shouldReturn). If shouldReturn is true, the handler should return immediately.
 func resolveTokenAndInjectContext(w http.ResponseWriter, r *http.Request, token string, svc *service.Service) (context.Context, bool) {
+	if service.IsClientRunCredential(token) {
+		user, run, err := svc.ResolveClientRun(r.Context(), token)
+		if err != nil {
+			return nil, handleAuthError(w, r, token, "client_run", "invalid_client_run", err)
+		}
+		ctx := service.ContextWithUser(r.Context(), user)
+		ctx = service.ContextWithClientRun(ctx, run)
+		ctx = service.ContextWithRepoCache(ctx)
+		// Parallel run credentials share an actor budget; creating another
+		// association session must not multiply request capacity.
+		ctx = ratelimit.WithActor(ctx, "client-run-user:"+strconv.FormatUint(uint64(user.ID), 10))
+		if !clientRunCredentialManagementAllowed(r) {
+			respond.Error(w, http.StatusForbidden, "A task run credential cannot manage durable account credentials")
+			return nil, true
+		}
+		applog.AddAttrs(ctx, slog.String("auth_mode", "client_run"), slog.String("user_login", user.Login), slog.String("client_run_id", run.ID), slog.String("association_status", run.AssociationStatus))
+		return ctx, false
+	}
 	if service.IsDelegatedSessionCredential(token) {
 		user, session, err := svc.ResolveDelegatedSessionCredential(r.Context(), token)
 		if err != nil {

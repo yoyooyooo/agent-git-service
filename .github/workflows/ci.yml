@@ -69,6 +69,10 @@ jobs:
           go test -race ./internal/buildinfo ./internal/gitbackend ./internal/gittransport ./config -count=1 -timeout=2m
           go test -race ./internal/service -run '^TestExchangeDeviceCodeRevalidatesApproverBeforeTokenWrite$' -count=3 -timeout=2m
           go test ./internal/edge -run '^TestAliasIngressKeepsCanonicalUpstreamAndReadGates$' -count=1 -timeout=2m
+          go test -race ./internal/cibackend -count=1 -timeout=2m
+          go test ./internal/service -run '^Test(ClientRun|CIBackend|CIChecks|CIPolicy|CICancel)' -count=1 -timeout=2m
+          go test ./internal/gitstore -run '^TestCheckedMerge' -count=1 -timeout=2m
+          go test ./internal/providerlogbridge -run '^TestCIBridge' -count=1 -timeout=2m
       - name: Check documents
         run: python3 scripts/doc_lint.py
       - name: Build and vet
@@ -108,7 +112,7 @@ jobs:
           - name: edge
             packages: ./cmd/ags-edge ./cmd/ags-replication ./internal/edge ./internal/edgeprotocol ./internal/gitbackend ./internal/replication ./internal/replicationadmin ./internal/snapshotstore
           - name: fork-integrations
-            packages: ./cmd/forgejo-authority ./internal/delegationpolicy ./internal/executioncontext ./internal/forgejointegration ./internal/githubintegration ./internal/gitlabintegration ./internal/integrations ./internal/multicafailures ./internal/multicaprojection ./internal/notifications ./internal/operationcatalog ./internal/operationconstraints ./internal/projectionwatch ./internal/providerlogbridge ./internal/providerlogprotocol ./internal/sessionauthority ./internal/tenant ./internal/workloadidentity
+            packages: ./cmd/forgejo-authority ./internal/cibackend ./internal/delegationpolicy ./internal/executioncontext ./internal/forgejointegration ./internal/githubintegration ./internal/gitlabintegration ./internal/integrations ./internal/multicafailures ./internal/multicaprojection ./internal/notifications ./internal/operationcatalog ./internal/operationconstraints ./internal/projectionwatch ./internal/providerlogbridge ./internal/providerlogprotocol ./internal/sessionauthority ./internal/tenant ./internal/workloadidentity
           - name: misc
             packages: ./auth ./cmd/gh-server ./config ./e2e/cmd/mock-embedding-server ./e2e/cmd/mock-oidc-server ./internal/apperrors ./internal/buildinfo ./internal/connectedlogin ./internal/crypto ./internal/embedding ./internal/httputil ./internal/logging ./internal/mentions ./internal/metrics ./internal/middleware ./internal/oauth ./internal/oidc ./internal/randutil ./internal/ratelimit
     env:
@@ -179,3 +183,22 @@ jobs:
       - name: Exercise complete local API client
         working-directory: cli/_go-gh-local
         run: go test -p 2 ./... -count=1 -timeout=5m
+
+  official-gh:
+    name: Official gh and CI backend acceptance
+    needs: checks
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/fork/') || inputs.full_regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: .go-version
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22.22.0
+      - name: Run official client against an isolated primary and CI fixtures
+        run: node scripts/gh-native-acceptance.mjs --privileged-namespace

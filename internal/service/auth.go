@@ -478,6 +478,13 @@ func (s *Service) ValidateAndResolveToken(ctx context.Context, token string) (db
 // ValidateAndResolveTokenDetailed validates the token and returns a stable
 // failure classification for logging and diagnostics.
 func (s *Service) ValidateAndResolveTokenDetailed(ctx context.Context, token string) (db.User, TokenValidationFailure, error) {
+	// Replication/read adapters resolve the same native actor as the HTTP
+	// middleware; run tokens cannot fall through to legacy token bypass.
+	if IsClientRunCredential(token) {
+		user, _, err := s.ResolveClientRun(ctx, token)
+		if err != nil { return db.User{}, TokenValidationFailureUnknownToken, err }
+		return user, TokenValidationFailureNone, nil
+	}
 	// Happy path: look up token directly (1 query instead of COUNT + SELECT).
 	var tok db.Token
 	// Use retry logic for token lookup to handle TiDB PD timeouts

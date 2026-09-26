@@ -91,6 +91,14 @@ func (s *Server) doCreatePR(ctx context.Context, req gqlRequest) map[string]any 
 	if err != nil {
 		return errResp("authentication required")
 	}
+	draft := false
+	if raw, present := inp["draft"]; present {
+		var valid bool
+		draft, valid = raw.(bool)
+		if !valid {
+			return errResp("draft must be a boolean")
+		}
+	}
 	pr, err := s.Svc.CreatePR(ctx, service.CreatePRInput{
 		RepoFullName:        fullName,
 		HeadRepoFullName:    headRepoFullName,
@@ -99,6 +107,7 @@ func (s *Server) doCreatePR(ctx context.Context, req gqlRequest) map[string]any 
 		HeadRef:             headRef,
 		BaseRef:             baseRef,
 		MaintainerCanModify: maintainerCanModify,
+		Draft:               draft,
 		AuthorLogin:         u.Login,
 	})
 	if err != nil {
@@ -131,6 +140,7 @@ func (s *Server) doMergePR(ctx context.Context, req gqlRequest) map[string]any {
 	}
 
 	var mergeErr error
+	var merged db.PullRequest
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -148,14 +158,14 @@ func (s *Server) doMergePR(ctx context.Context, req gqlRequest) map[string]any {
 				commitMsg = commitBody
 			}
 		}
-		mergeErr = s.Svc.MergePRByID(ctx, dbID, mergeMethod, commitMsg)
+		merged, mergeErr = s.Svc.MergeStandardPRByID(ctx, dbID, mergeMethod, commitMsg, strFrom(inp, "expectedHeadOid"))
 	}()
 	if mergeErr != nil {
 		return errResp(mergeErr.Error())
 	}
 	return wrap("mergePullRequest", map[string]any{
 		"clientMutationId": "",
-		"pullRequest":      map[string]any{"merged": true, "state": db.StateMerged},
+		"pullRequest":      s.prGQL(ctx, merged),
 	})
 }
 

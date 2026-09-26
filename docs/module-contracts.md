@@ -68,6 +68,7 @@ document the relevant contract below in the same change.
 |---|---|
 | `apperrors` | shared sentinel error catalog and helpers |
 | `crypto` | NaCl-based secret encryption helpers |
+| `cibackend` | independently configured CI observation adapters, exact backend-local identities and bounded logs; no user authorization, Git hosting or merge authority |
 | `db` | relational schema, migrations, seed data, and model types |
 | `delegationpolicy` | legacy delegation v1/v2 validation and non-executable migration inventory |
 | `edge` | database-free runtime, fixed-primary forwarding and explicitly configured packet-driven local reads with per-RPC authority, verified Mirror and bounded view selection |
@@ -123,11 +124,15 @@ document the relevant contract below in the same change.
 | `middleware` | auth extraction, request guards, context injection | `service` auth methods, `rest/respond`, `logging`, `metrics`, `ratelimit` | `db`, `gitstore`, REST handlers, GraphQL resolvers |
 | `rest` | HTTP request decode, REST response codes, REST JSON shapes | `service`, `rest/respond`, `rest/transform`, `ratelimit`, `db` model types, `Svc.Git` via `*service.Service` | GORM queries, GraphQL helpers |
 | `graphql` | GraphQL request parse, resolver dispatch, GraphQL response shapes, field filtering | `service`, `db` model types, `rest/respond` for HTTP JSON writeout, selected `Svc.Git` and `Svc.DB` access via `*service.Service` | `rest/transform` |
-| `service` | business rules, persistence orchestration, Git orchestration, domain side effects | `db`, `gitstore`, `sessionauthority`, `operationcatalog`, `operationconstraints`, `delegationpolicy`, `workloadidentity`, `executioncontext`, `embedding`, `oidc`, `connectedlogin`, `forgejointegration`, `edgeprotocol`, `snapshotstore` | `router`, `middleware`, `rest`, `graphql`, HTTP response helpers |
+| `service` | business rules, persistence orchestration, Git orchestration, domain side effects | `db`, `gitstore`, `cibackend`, `sessionauthority`, `operationcatalog`, `operationconstraints`, `delegationpolicy`, `workloadidentity`, `executioncontext`, `embedding`, `oidc`, `connectedlogin`, `forgejointegration`, `edgeprotocol`, `snapshotstore` | `router`, `middleware`, `rest`, `graphql`, HTTP response helpers |
 | `db` | schema, migrations, seed data, relational model types, shared state constants | GORM and standard library only | `service`, `rest`, `graphql`, `gitstore` |
 | `gitstore` | Git-native repo lifecycle, refs, merge/rebase/diff/content/archive operations | system `git`, go-git, filesystem | `db`, `rest`, `graphql` |
 
 ## Layer Contracts
+
+### `cibackend`
+
+Owns typed provider run/job/workflow observations and bounded transport, not their public AGS IDs or permissions. `service` authorizes repository access, selects an explicitly configured backend, maps durable IDs and binds current-head evidence before REST or GraphQL renders it. Git hosting, CI choice and merge authority are independent. Missing provider capabilities or incomplete evidence never trigger a fallback to another backend. See [CI backends](architecture/ci-backends.md) and [official gh operations](operations/official-gh.md).
 
 ### `router`
 

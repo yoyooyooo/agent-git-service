@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ngaut/agent-git-service/internal/cibackend"
 	"github.com/ngaut/agent-git-service/internal/delegationpolicy"
 	"github.com/ngaut/agent-git-service/internal/executioncontext"
 	"github.com/ngaut/agent-git-service/internal/forgejointegration"
@@ -24,6 +25,7 @@ const maxTypedOutboundDispatchTimeout = 2 * time.Minute
 
 // Config is the file-backed integration configuration.
 type Config struct {
+	CI         cibackend.Config        `yaml:"ci"`
 	Delegation delegationpolicy.Config `yaml:"delegation"`
 	// TeamAuthority is the current Multica workspace → AGS principal binding
 	// surface (AGS-T022 Stage 5). It replaces the retired principal_sessions
@@ -517,6 +519,26 @@ func LoadFile(path string) (Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("decode integrations config: %w", err)
+	}
+	// CI is a new explicit contract: misspelled selectors must not quietly
+	// revert a repository to native execution while appearing configured.
+	var sections map[string]yaml.Node
+	if err := yaml.Unmarshal(data, &sections); err != nil {
+		return Config{}, fmt.Errorf("invalid integrations document")
+	}
+	if node, exists := sections["ci"]; exists {
+		encoded, err := yaml.Marshal(&node)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid CI configuration")
+		}
+		decoder := yaml.NewDecoder(strings.NewReader(string(encoded)))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(&cfg.CI); err != nil {
+			return Config{}, fmt.Errorf("CI configuration has unknown or invalid fields")
+		}
+	}
+	if err := cibackend.Validate(cfg.CI); err != nil {
+		return Config{}, err
 	}
 	if _, err := parseOptionalDuration("forgejo.push_timeout", cfg.Forgejo.PushTimeout); err != nil {
 		return Config{}, err

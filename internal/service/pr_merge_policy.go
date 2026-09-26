@@ -120,6 +120,9 @@ func (s *Service) enforceMergePolicy(ctx context.Context, currentUser db.User, p
 		return fmt.Errorf("%w: merge requires repository write access", ErrForbidden)
 	}
 
+	if err := s.enforceConfiguredCIForMerge(ctx, *pr); err != nil {
+		return err
+	}
 	bp, err := s.GetBranchProtection(ctx, pr.RepositoryID, pr.BaseRef)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -277,6 +280,20 @@ func collectRequiredStatusCheckContexts(required branchProtectionRequiredStatusC
 
 func (s *Service) latestStatusChecksForPR(ctx context.Context, pr db.PullRequest) (map[string]mergeStatusState, error) {
 	states := make(map[string]mergeStatusState)
+	selected, err := s.CISelection(pr.Repository.FullName)
+	if err != nil {
+		return nil, err
+	}
+	if selected.Name != "native" {
+		observed, err := s.ReadCIChecks(ctx, pr)
+		if err != nil {
+			return nil, err
+		}
+		for _, check := range observed.Checks {
+			states[check.Name] = mergeStatusState{Completed: check.Status == "completed", Passed: check.Status == "completed" && (check.Conclusion == "success" || check.Conclusion == "neutral" || check.Conclusion == "skipped")}
+		}
+		return states, nil
+	}
 
 	runs, err := s.ListWorkflowRunsBySHA(ctx, pr.RepositoryID, pr.HeadSHA)
 	if err != nil {

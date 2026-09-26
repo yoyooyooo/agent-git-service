@@ -290,6 +290,8 @@ func initServiceDeps(cfg config.Config, database *gorm.DB, store *gitstore.Store
 		return deps, fmt.Errorf("access grant require ci: %w", err)
 	}
 
+	ciBackends, err := initCIBackends(cfg)
+	if err != nil { return deps, fmt.Errorf("CI backends: %w", err) }
 	svcDeps := &service.Service{
 		Ctx:                                srvCtx,
 		DB:                                 database,
@@ -301,6 +303,7 @@ func initServiceDeps(cfg config.Config, database *gorm.DB, store *gitstore.Store
 		Embedder:                           embedder,
 		AllowAnyToken:                      cfg.AllowAnyToken,
 		ForgejoIntegration:                 forgejoIntegration,
+		CI:                                 ciBackends,
 		ForgejoProjectionWorkerTimeout:     cfg.ForgejoProjectionWorkerTimeout,
 		ForgejoProjectionWorkerMaxAttempts: cfg.ForgejoProjectionWorkerMaxAttempts,
 		ForgejoProjectionWorkerRetryDelay:  cfg.ForgejoProjectionWorkerRetryDelay,

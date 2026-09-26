@@ -144,11 +144,15 @@ func mergeCommitGQL(p db.PullRequest) any {
 func jobToCheckNode(job db.WorkflowRunJob, wf db.Workflow, run db.WorkflowRun, htmlBaseURL, repoFullName string) map[string]any {
 	status := strings.ToUpper(job.Status)
 	conclusion := strings.ToUpper(job.Conclusion)
-	if status == "" {
-		status = "COMPLETED"
+	switch status {
+	case "", "PENDING", "WAITING", "REQUESTED":
+		status = "QUEUED"
+	case "RUNNING":
+		status = "IN_PROGRESS"
 	}
-	if conclusion == "" {
-		conclusion = "SUCCESS"
+	// Empty evidence never implies a successful completed job.
+	if status != "COMPLETED" {
+		conclusion = ""
 	}
 	return map[string]any{
 		"__typename":  "CheckRun",
@@ -191,24 +195,55 @@ func countChecksByState(checkNodes []any) []any {
 }
 
 // statusCheckRollupGQL builds the statusCheckRollup from real workflow runs.
-func (s *Server) statusCheckRollupGQL(ctx context.Context, p db.PullRequest) any {
+func (s *Server) nativeStatusCheckRollupGQL(ctx context.Context, p db.PullRequest) any {
 	if p.HeadSHA == "" {
 		return nil
 	}
-	runs, _ := s.Svc.ListWorkflowRunsBySHA(ctx, p.RepositoryID, p.HeadSHA)
-	if len(runs) == 0 {
-		return nil
+	runs, err := s.Svc.ListWorkflowRunsBySHA(ctx, p.RepositoryID, p.HeadSHA)
+	if err != nil {
+		addResponseError(ctx, "Native CI observation failed")
+		return ciRollupConnection(p.HeadSHA, []any{})
 	}
-
-	var checkNodes []any
+	required, _, err := s.Svc.CIRequiredChecks(ctx, p)
+	if err != nil {
+		addResponseError(ctx, "Native CI policy observation failed")
+		return ciRollupConnection(p.HeadSHA, []any{})
+	}
+	pending := map[string]bool{}
+	for name := range required {
+		pending[name] = true
+	}
+	checkNodes := make([]any, 0)
+	seen := map[uint]bool{}
 	for _, run := range runs {
-		wf, _ := s.Svc.GetWorkflowByID(ctx, run.WorkflowID)
-		jobs, _ := s.Svc.ListWorkflowRunJobsByRun(ctx, run.ID)
+		if seen[run.WorkflowID] {
+			continue
+		}
+		seen[run.WorkflowID] = true
+		wf, err := s.Svc.GetWorkflowByID(ctx, run.WorkflowID)
+		if err != nil {
+			addResponseError(ctx, "Native CI workflow unavailable")
+			continue
+		}
+		jobs, err := s.Svc.ListWorkflowRunJobsByRun(ctx, run.ID)
+		if err != nil {
+			addResponseError(ctx, "Native CI jobs unavailable")
+			continue
+		}
 		for _, job := range jobs {
-			checkNodes = append(checkNodes, jobToCheckNode(job, wf, run, s.Svc.HTMLBaseURL(), p.Repository.FullName))
+			node := jobToCheckNode(job, wf, run, s.Svc.HTMLBaseURL(), p.Repository.FullName)
+			node["isRequired"] = required[job.Name]
+			checkNodes = append(checkNodes, node)
+			delete(pending, job.Name)
 		}
 	}
+	for name := range pending {
+		checkNodes = append(checkNodes, pendingCICheck(name))
+	}
+	return ciRollupConnection(p.HeadSHA, checkNodes)
+}
 
+func ciRollupConnection(head string, checkNodes []any) any {
 	contexts := map[string]any{
 		"checkRunCount":              len(checkNodes),
 		"checkRunCountsByState":      countChecksByState(checkNodes),
@@ -222,7 +257,7 @@ func (s *Server) statusCheckRollupGQL(ctx context.Context, p db.PullRequest) any
 		"nodes": []any{
 			map[string]any{
 				"commit": map[string]any{
-					"oid": p.HeadSHA,
+					"oid": head,
 					"statusCheckRollup": map[string]any{
 						"contexts": contexts,
 					},

@@ -411,6 +411,16 @@ func (i *Integration) ProviderMergeBindingForBase(repoFullName string, repositor
 	return i.providerMergeBinding(repoFullName, repositoryID, targetInstance, baseRef, true)
 }
 
+// ConfiguredMergeMethod reports an explicit repository merge authority choice.
+// CI backend selection never changes this policy. A broken configured binding
+// must remain an error, not permission to merge locally instead.
+func (i *Integration) ConfiguredMergeMethod(repository string) (string, bool) {
+	if i == nil { return "", false }
+	mapping, ok := i.cfg.RepoMap[strings.TrimSpace(repository)]
+	if !ok || strings.TrimSpace(mapping.DelegatedMergeMethod) == "" { return "", false }
+	return strings.TrimSpace(mapping.DelegatedMergeMethod), true
+}
+
 // FastForwardAckEnabled reports the repo-local acknowledgement path. Default is off.
 func (i *Integration) FastForwardAckEnabled(repoFullName string) bool {
 	if i == nil || i.cfg.RepoMap == nil {

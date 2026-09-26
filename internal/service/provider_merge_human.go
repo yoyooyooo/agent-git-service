@@ -42,6 +42,14 @@ type HumanProviderMergeReceipt struct {
 // executes the mapped provider merge with the deployment-owned integration
 // executor. It never accepts a provider token, login, repository, or PR number.
 func (s *Service) ExecuteHumanProviderMerge(ctx context.Context, repository string, prNumber int, input HumanProviderMergeInput) (HumanProviderMergeReceipt, error) {
+	return s.executeNativeProviderMerge(ctx, repository, prNumber, input, true)
+}
+
+// The standard API accepts authenticated native actors with their OWN live repo
+// permission. It never promotes a workload grant executor into a native actor;
+// delegated-session requests remain under their existing dedicated effect path.
+func (s *Service) executeNativeProviderMerge(ctx context.Context, repository string, prNumber int, input HumanProviderMergeInput, humanOnly bool) (HumanProviderMergeReceipt, error) {
+	if _, delegated := DelegatedSessionIDFromContext(ctx); delegated { return HumanProviderMergeReceipt{}, ErrForbidden }
 	if s == nil || s.ForgejoIntegration == nil || s.Git == nil {
 		return HumanProviderMergeReceipt{}, fmt.Errorf("%w: provider merge executor is unavailable", ErrInvalidState)
 	}
@@ -61,7 +69,7 @@ func (s *Service) ExecuteHumanProviderMerge(ctx context.Context, repository stri
 	if err != nil {
 		return HumanProviderMergeReceipt{}, err
 	}
-	if actor.UserKind != db.UserKindHuman {
+	if humanOnly && actor.UserKind != db.UserKindHuman {
 		return HumanProviderMergeReceipt{}, fmt.Errorf("%w: Human provider merge requires a Human AGS identity", ErrForbidden)
 	}
 	pr, err := s.GetPR(ctx, repository, prNumber)

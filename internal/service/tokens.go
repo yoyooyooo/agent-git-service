@@ -51,6 +51,9 @@ func issueUserTokenTx(tx *gorm.DB, userID uint, now time.Time, name string, expi
 
 // ListTokens returns all tokens for a user.
 func (s *Service) ListTokens(ctx context.Context, userID uint) ([]db.Token, error) {
+	if _, run := ClientRunFromContext(ctx); run {
+		return nil, ErrForbidden
+	}
 	var tokens []db.Token
 	if err := s.DBForCtx(ctx).
 		Where("user_id = ?", userID).
@@ -64,6 +67,9 @@ func (s *Service) ListTokens(ctx context.Context, userID uint) ([]db.Token, erro
 
 // CreateUserToken creates a new token for a user, enforcing token caps.
 func (s *Service) CreateUserToken(ctx context.Context, userID uint, name string, expiresAt *time.Time) (db.Token, error) {
+	if _, run := ClientRunFromContext(ctx); run {
+		return db.Token{}, ErrForbidden
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return db.Token{}, fmt.Errorf("%w: name is required", ErrValidation)
@@ -89,19 +95,39 @@ func (s *Service) CreateUserToken(ctx context.Context, userID uint, name string,
 
 // DeleteTokenByID deletes a token by ID scoped to the user.
 func (s *Service) DeleteTokenByID(ctx context.Context, userID, tokenID uint) error {
+	if _, run := ClientRunFromContext(ctx); run {
+		return ErrForbidden
+	}
 	if tokenID == 0 {
 		return fmt.Errorf("%w: token_id is required", ErrValidation)
 	}
-	return checkAffected(s.DBForCtx(ctx).Where("user_id = ? AND id = ?", userID, tokenID).Delete(&db.Token{}))
+	return s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&db.ClientRunSession{}).Where("user_id = ? AND parent_token_id = ?", userID, tokenID).Updates(map[string]any{"parent_token_id": nil, "revoked_at": time.Now().UTC()}).Error; err != nil {
+			return err
+		}
+		return checkAffected(tx.Where("user_id = ? AND id = ?", userID, tokenID).Delete(&db.Token{}))
+	})
 }
 
 // DeleteTokenByValue deletes a token by raw token value scoped to the user.
 func (s *Service) DeleteTokenByValue(ctx context.Context, userID uint, tokenValue string) error {
+	if _, run := ClientRunFromContext(ctx); run {
+		return ErrForbidden
+	}
 	tokenValue = strings.TrimSpace(tokenValue)
 	if tokenValue == "" {
 		return fmt.Errorf("%w: token is required", ErrValidation)
 	}
-	return checkAffected(s.DBForCtx(ctx).Where("user_id = ? AND value = ?", userID, tokenValue).Delete(&db.Token{}))
+	return s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
+		var token db.Token
+		if err := tx.Where("user_id = ? AND value = ?", userID, tokenValue).First(&token).Error; err != nil {
+			return wrapErr(err)
+		}
+		if err := tx.Model(&db.ClientRunSession{}).Where("user_id = ? AND parent_token_id = ?", userID, token.ID).Updates(map[string]any{"parent_token_id": nil, "revoked_at": time.Now().UTC()}).Error; err != nil {
+			return err
+		}
+		return checkAffected(tx.Where("user_id = ? AND id = ?", userID, token.ID).Delete(&db.Token{}))
+	})
 }
 
 // TouchToken updates last_used_at for a token for recency tracking.
