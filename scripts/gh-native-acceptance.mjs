@@ -22,10 +22,11 @@ function run(command, args, options = {}) {
   return p.stdout;
 }
 // Ubuntu hosted runners can restrict unprivileged user namespaces. The
-// explicit CI flag elevates only the disposable namespace worker, not builds or
-// arbitrary host commands, and never falls back to a production network.
+// explicit CI flag elevates namespace creation only. Map namespace root back
+// to the original host UID/GID so the worker can read its owner's private build
+// artifacts without host-root access or widening filesystem permissions.
 const namespace = process.argv.includes("--privileged-namespace")
-  ? ["sudo", "-n", "unshare", "--user", "--map-root-user", "--net"]
+  ? ["sudo", "-n", "unshare", "--user", `--map-users=0:${process.getuid()}:1`, `--map-groups=0:${process.getgid()}:1`, "--setuid=0", "--setgid=0", "--net"]
   : ["unshare", "--user", "--map-root-user", "--net"];
 run(namespace[0], [...namespace.slice(1), "true"]);
 const temp = mkdtempSync(join(tmpdir(), "ags-stock-gh-"));
