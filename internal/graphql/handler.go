@@ -86,7 +86,9 @@ func (s *Server) Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(fieldErrors.items) > 0 {
-		if prior, ok := result["errors"].([]any); ok { fieldErrors.items = append(prior, fieldErrors.items...) }
+		if prior, ok := result["errors"].([]any); ok {
+			fieldErrors.items = append(prior, fieldErrors.items...)
+		}
 		result["errors"] = fieldErrors.items
 	}
 	respond.JSON(w, 200, result)

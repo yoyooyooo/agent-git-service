@@ -49,7 +49,9 @@ func (s *Service) ExecuteHumanProviderMerge(ctx context.Context, repository stri
 // permission. It never promotes a workload grant executor into a native actor;
 // delegated-session requests remain under their existing dedicated effect path.
 func (s *Service) executeNativeProviderMerge(ctx context.Context, repository string, prNumber int, input HumanProviderMergeInput, humanOnly bool) (HumanProviderMergeReceipt, error) {
-	if _, delegated := DelegatedSessionIDFromContext(ctx); delegated { return HumanProviderMergeReceipt{}, ErrForbidden }
+	if _, delegated := DelegatedSessionIDFromContext(ctx); delegated {
+		return HumanProviderMergeReceipt{}, ErrForbidden
+	}
 	if s == nil || s.ForgejoIntegration == nil || s.Git == nil {
 		return HumanProviderMergeReceipt{}, fmt.Errorf("%w: provider merge executor is unavailable", ErrInvalidState)
 	}

@@ -15,8 +15,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/cibackend"
+	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/delegationpolicy"
 	"github.com/ngaut/agent-git-service/internal/embedding"
 	"github.com/ngaut/agent-git-service/internal/executioncontext"
@@ -948,8 +948,12 @@ func (s *Service) deleteRepoCascade(tx *gorm.DB, repoID uint, fullName string) e
 
 	// CI namespaces and run provenance belong to this repository too; clean
 	// them explicitly even when an embedded database has FK enforcement off.
-	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.CIResource{})); err != nil { return err }
-	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.ClientRunLink{})); err != nil { return err }
+	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.CIResource{})); err != nil {
+		return err
+	}
+	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.ClientRunLink{})); err != nil {
+		return err
+	}
 
 	// Phase 1: Detach forks.
 	if err := del(tx.Model(&db.Repository{}).Where("parent_id = ?", repoID).

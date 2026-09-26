@@ -291,7 +291,9 @@ func initServiceDeps(cfg config.Config, database *gorm.DB, store *gitstore.Store
 	}
 
 	ciBackends, err := initCIBackends(cfg)
-	if err != nil { return deps, fmt.Errorf("CI backends: %w", err) }
+	if err != nil {
+		return deps, fmt.Errorf("CI backends: %w", err)
+	}
 	svcDeps := &service.Service{
 		Ctx:                                srvCtx,
 		DB:                                 database,

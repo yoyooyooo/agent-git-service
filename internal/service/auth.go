@@ -482,7 +482,9 @@ func (s *Service) ValidateAndResolveTokenDetailed(ctx context.Context, token str
 	// middleware; run tokens cannot fall through to legacy token bypass.
 	if IsClientRunCredential(token) {
 		user, _, err := s.ResolveClientRun(ctx, token)
-		if err != nil { return db.User{}, TokenValidationFailureUnknownToken, err }
+		if err != nil {
+			return db.User{}, TokenValidationFailureUnknownToken, err
+		}
 		return user, TokenValidationFailureNone, nil
 	}
 	// Happy path: look up token directly (1 query instead of COUNT + SELECT).

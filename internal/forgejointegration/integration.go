@@ -415,9 +415,13 @@ func (i *Integration) ProviderMergeBindingForBase(repoFullName string, repositor
 // CI backend selection never changes this policy. A broken configured binding
 // must remain an error, not permission to merge locally instead.
 func (i *Integration) ConfiguredMergeMethod(repository string) (string, bool) {
-	if i == nil { return "", false }
+	if i == nil {
+		return "", false
+	}
 	mapping, ok := i.cfg.RepoMap[strings.TrimSpace(repository)]
-	if !ok || strings.TrimSpace(mapping.DelegatedMergeMethod) == "" { return "", false }
+	if !ok || strings.TrimSpace(mapping.DelegatedMergeMethod) == "" {
+		return "", false
+	}
 	return strings.TrimSpace(mapping.DelegatedMergeMethod), true
 }
 
