@@ -198,7 +198,20 @@ try {
     await companionCall("session.show",{directory:sessionDir});
     await companionCall("session.end",{directory:sessionDir,caFile:join(work,"cert.pem"),apply:true});
     const ended=JSON.parse(readFileSync(join(sessionDir,"session.json"),"utf8"));assertions(ended.phase==="ended","companion did not clean its session");
-    report.companionIntegrated={source:JSON.parse(readFileSync(join(companion,"build-manifest.json"),"utf8")).source,officialGitPush:true,officialGhCreate:true,perCommandRoutingOverrides:false,unrelatedHostPreserved:true};
+    // A different canonical Git hostname may use the explicit official api_host
+    // setting. This preserves legacy HTTP origins without a client command shim.
+    await git(["remote","set-url","origin","http://127.0.0.2:6666/"+repo+".git"]);
+    const aliasPlan=await companionCall("setup.plan",{...common,host:"127.0.0.2",apiHost:"127.0.0.1",tokenFile:parentFile});
+    await companionCall("setup.apply",{...common,host:"127.0.0.2",apiHost:"127.0.0.1",tokenFile:parentFile,expectedPlan:aliasPlan.expectedPlan,apply:true});
+    await ghCheck("official api_host origin routing",["pr","view","3","--json","number,headRefOid"],[0],{GH_CONFIG_DIR:config});
+    await companionCall("ci.backend",common);
+    const aliasDir=join(work,"alias-task");
+    const aliasSession=await companionCall("session.start",{...common,directory:aliasDir,context:{task:"api-host-task",run:"api-host-run"},apply:true});
+    const aliasEnv=JSON.parse(readFileSync(aliasSession.environmentFile,"utf8"));const aliasTask={...env,...aliasEnv.set};for(const key of aliasEnv.unset)aliasTask[key]=undefined;
+    const aliasRead=await cmd("git",["ls-remote","origin","refs/heads/main"],checkout,aliasTask);assertions(aliasRead.code===0,"Git origin with distinct official API host failed: "+aliasRead.stderr);
+    await ghCheck("official api_host task identity",["pr","view","3","--json","number"],[0],aliasTask);
+    await companionCall("session.end",{directory:aliasDir,caFile:join(work,"cert.pem"),apply:true});
+    report.companionIntegrated={source:JSON.parse(readFileSync(join(companion,"build-manifest.json"),"utf8")).source,officialGitPush:true,officialGhCreate:true,perCommandRoutingOverrides:false,unrelatedHostPreserved:true,distinctApiHost:true};
   }
   report.passed = true; report.gh = (await cmd(gh, ["--version"])).stdout; report.runCredentialsSeparated = true; report.externalBackendSwitch = { githubRun, forgejoRun }; report.expectedHeadEnforced = true;
 } catch (e) { report.passed = false; report.failure = { stage, message: clean(e.message), server: clean(serverLog).slice(-2000) }; }
