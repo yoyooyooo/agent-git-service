@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -45,7 +44,7 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 		defer cancel()
 		r = r.WithContext(ctx)
-		base := strings.TrimRight(d.Svc.HTMLBaseURL(), "/") + "/api/v3/repos/" + repo.FullName
+		base := d.Svc.APIBaseURL() + "/api/v3/repos/" + repo.FullName
 		readID := func(param string) (uint64, bool) {
 			id, e := strconv.ParseUint(chi.URLParam(r, param), 10, 64)
 			if e != nil || id == 0 {
@@ -82,7 +81,7 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 				q.Set("page", strconv.Itoa(page+1))
 				next := *r.URL
 				next.RawQuery = q.Encode()
-				w.Header().Set("Link", fmt.Sprintf("<%s%s>; rel=\"next\"", strings.TrimRight(d.Svc.HTMLBaseURL(), "/"), next.String()))
+				w.Header().Set("Link", fmt.Sprintf("<%s%s>; rel=\"next\"", d.Svc.APIBaseURL(), next.String()))
 			}
 			respond.JSON(w, 200, map[string]any{"total_count": result.Total, "workflows": rows, "ags_catalog_scope": result.Scope})
 			return
@@ -121,7 +120,7 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 				q.Set("page", strconv.Itoa(page+1))
 				next := *r.URL
 				next.RawQuery = q.Encode()
-				w.Header().Set("Link", fmt.Sprintf("<%s%s>; rel=\"next\"", strings.TrimRight(d.Svc.HTMLBaseURL(), "/"), next.String()))
+				w.Header().Set("Link", fmt.Sprintf("<%s%s>; rel=\"next\"", d.Svc.APIBaseURL(), next.String()))
 			}
 			respond.JSON(w, 200, map[string]any{"total_count": result.Total, "workflow_runs": rows})
 			return

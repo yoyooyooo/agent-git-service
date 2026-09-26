@@ -301,6 +301,7 @@ func initServiceDeps(cfg config.Config, database *gorm.DB, store *gitstore.Store
 		WikiCatalog:                        wikiCat,
 		WikiBlob:                           wikiBlob,
 		BaseURL:                            cfg.BaseURL,
+		PublicAPIBaseURL:                   cfg.APIBaseURL,
 		SourceRevision:                     strings.ToLower(strings.TrimSpace(gitSHA)),
 		Embedder:                           embedder,
 		AllowAnyToken:                      cfg.AllowAnyToken,
@@ -1123,7 +1124,7 @@ func buildHTTPMux(cfg httpMuxConfig) (muxDeps, error) {
 
 	hostMux := router.RegisterRoutes(r, handlers, cfg.GitHandler, cfg.GQLServer, cfg.OAuthHandler, cfg.Cfg.ConsoleBaseURL, cfg.EmbeddedAuth)
 	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		transform.Wrap(cfg.Cfg.BaseURL, func() {
+		transform.WrapEndpoints(cfg.Cfg.BaseURL, cfg.Cfg.APIBaseURL, func() {
 			hostMux.ServeHTTP(w, req)
 		})
 	})

@@ -12,8 +12,11 @@ import (
 
 // Config holds all server configuration.
 type Config struct {
-	Port       string
-	BaseURL    string
+	Port    string
+	BaseURL string
+	// APIBaseURL is an optional advertised API origin, independent of Git clone
+	// URLs and callbacks. It is explicit operator configuration, never Host input.
+	APIBaseURL string
 	DBdsn      string
 	GitRepoDir string
 	// ControlPlaneDSN is retained only to reject retired deployment settings.
@@ -163,6 +166,7 @@ func New() (Config, error) {
 	cfg := Config{
 		Port:                                    os.Getenv("PORT"),
 		BaseURL:                                 os.Getenv("BASE_URL"),
+		APIBaseURL:                              os.Getenv("AGS_API_BASE_URL"),
 		ConsoleBaseURL:                          os.Getenv("CONSOLE_BASE_URL"),
 		OAuthDeviceVerificationURL:              os.Getenv("OAUTH_DEVICE_VERIFICATION_URL"),
 		DBdsn:                                   os.Getenv("DB_DSN"),
@@ -322,6 +326,14 @@ func Normalize(cfg Config) (Config, error) {
 	}
 	cfg.Port = firstNonEmpty(cfg.Port, "8080")
 	cfg.BaseURL = firstNonEmpty(cfg.BaseURL, "http://localhost:8080")
+	cfg.APIBaseURL = strings.TrimSpace(cfg.APIBaseURL)
+	if cfg.APIBaseURL != "" {
+		value, err := url.Parse(cfg.APIBaseURL)
+		if err != nil || value.Hostname() == "" || value.User != nil || value.RawQuery != "" || value.Fragment != "" || value.RawPath != "" || (value.Path != "" && value.Path != "/") || (value.Scheme != "https" && value.Scheme != "http") {
+			return Config{}, fmt.Errorf("AGS_API_BASE_URL must be an absolute credential-free HTTP(S) origin")
+		}
+		cfg.APIBaseURL = strings.TrimRight(value.String(), "/")
+	}
 	cfg.ConsoleBaseURL = firstNonEmpty(cfg.ConsoleBaseURL, "http://localhost:5173")
 	cfg.OAuthDeviceVerificationURL = strings.TrimSpace(cfg.OAuthDeviceVerificationURL)
 	cfg.GitRepoDir = firstNonEmpty(cfg.GitRepoDir, "gitrepos")

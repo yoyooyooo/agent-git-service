@@ -20,6 +20,7 @@ import (
 
 type state struct {
 	baseURL string
+	apiURL  string
 }
 
 var defaultState atomic.Value
@@ -36,17 +37,27 @@ func init() {
 func Init(base string) {
 	next := state{
 		baseURL: base,
+		apiURL:  base,
 	}
 	defaultState.Store(next)
 }
 
 // Wrap scopes transform URL state to a single handler invocation.
 func Wrap(base string, next func()) {
+	WrapEndpoints(base, base, next)
+}
+
+// WrapEndpoints keeps API links independent of the canonical Git/browser origin.
+// Only explicit server configuration supplies api; forwarded/Host headers never do.
+func WrapEndpoints(base, api string, next func()) {
+	if api == "" {
+		api = base
+	}
 	gid, ok := currentGoroutineID()
 	if !ok {
 		prev := currentState()
-		Init(base)
-		defer Init(prev.baseURL)
+		defaultState.Store(state{baseURL: base, apiURL: api})
+		defer defaultState.Store(prev)
 		next()
 		return
 	}
@@ -54,6 +65,7 @@ func Wrap(base string, next func()) {
 	prev, hadPrev := overrideStates.Load(gid)
 	overrideStates.Store(gid, state{
 		baseURL: base,
+		apiURL:  api,
 	})
 	defer func() {
 		if hadPrev {
@@ -100,12 +112,12 @@ func Base() string { return currentState().baseURL }
 
 func apiBase() string {
 	st := currentState()
-	return strings.TrimRight(st.baseURL, "/") + APIPrefix()
+	return strings.TrimRight(st.apiURL, "/") + APIPrefix()
 }
 
 func extensionAPIBase() string {
 	st := currentState()
-	return strings.TrimRight(st.baseURL, "/") + ExtensionAPIPrefix()
+	return strings.TrimRight(st.apiURL, "/") + ExtensionAPIPrefix()
 }
 
 // APIBase returns the absolute API base URL for handlers that build URLs
@@ -140,9 +152,9 @@ func APIPrefix() string { return "/api/v3" }
 
 func ExtensionAPIPrefix() string { return "/api/ext/v1" }
 
-func repoAPIURL(fullName string) string  { return base() + APIPrefix() + "/repos/" + fullName }
+func repoAPIURL(fullName string) string  { return apiBase() + "/repos/" + fullName }
 func repoHTMLURL(fullName string) string { return htmlBase() + "/" + fullName }
-func userAPIURL(login string) string     { return base() + APIPrefix() + "/users/" + login }
+func userAPIURL(login string) string     { return apiBase() + "/users/" + login }
 func userHTMLURL(login string) string    { return htmlBase() + "/" + login }
 
 func canonicalRepositoryPermission(value string) string {
@@ -170,7 +182,7 @@ func nodeID(typ string, id any) string {
 }
 
 func actionRunURL(fullName string, runID uint) string {
-	return fmt.Sprintf("%s%s/repos/%s/actions/runs/%d", base(), APIPrefix(), fullName, runID)
+	return fmt.Sprintf("%s/repos/%s/actions/runs/%d", apiBase(), fullName, runID)
 }
 
 // User converts a db.User to a GitHub REST API user object.

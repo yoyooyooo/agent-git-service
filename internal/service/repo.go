@@ -44,6 +44,9 @@ type Service struct {
 	WikiCatalog *wikicatalog.Catalog
 	WikiBlob    *wikicatalog.BlobStore
 	BaseURL     string
+	// PublicAPIBaseURL overrides generated API links without changing canonical
+	// Git URLs, callback destinations or browser URLs.
+	PublicAPIBaseURL string
 	// SourceRevision is the exact build-time AGS source SHA. Durable authority
 	// receipts fail closed when it is absent or not a full Git object ID.
 	SourceRevision     string
@@ -398,6 +401,15 @@ func (s *Service) ServerCtx() context.Context {
 // GitHub always uses https:// for browser URLs; the CLI tests assert this.
 func (s *Service) HTMLBaseURL() string {
 	return strings.Replace(s.BaseURL, "http://", "https://", 1)
+}
+
+// APIBaseURL is the configured absolute origin for machine-followed API links.
+// An HTML URL must not decide jobs/logs/download routing or force HTTP to HTTPS.
+func (s *Service) APIBaseURL() string {
+	if s.PublicAPIBaseURL != "" {
+		return strings.TrimRight(s.PublicAPIBaseURL, "/")
+	}
+	return strings.TrimRight(s.BaseURL, "/")
 }
 
 // CreateRepoInput holds parameters for creating a repository.

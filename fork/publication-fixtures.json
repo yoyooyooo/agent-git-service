@@ -1,6 +1,7 @@
 {
   "version": 1,
   "examples": [
+    {"path":"config/api_origin_test.go","object":"67e63d5df9ed5336c35e15eb7c7fc49f547a089e","rule":"credential-in-url","reason":"The literal user/secret example.test origin is a synthetic invalid API configuration; parsing rejects it before any request and no real credential is present."},
     {"path":"config/edge_alias_test.go","object":"b7520eb70f60821b9bfd24520edffab6fcaf07e5","rule":"credential-in-url","reason":"Literal user/password URL is an invalid canonical-alias input; normalization must reject it without network access."},
     {"path":"config/edge_test.go","object":"eb86419aa13688c4dc6e6915de91998c000c77a9","rule":"credential-in-url","reason":"Literal secret/password values are synthetic invalid configuration inputs and are rejected by the Edge normalizer."},
     {"path":"fork/scripts/test_audit.py","object":"4d7b9c53221c71e05bfc5823f14d398cb8fb3820","rule":"credential-in-url","reason":"Synthetic example.test URL is created in disposable Git history to prove exact reviewed-fixture and historical scanning behavior."},
