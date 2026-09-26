@@ -3,7 +3,7 @@
  * auth, network, or databases are inherited. Each run owns disposable artifacts.
  */
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, chmodSync, copyFileSync, lstatSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { resolve, dirname, join } from "node:path";
@@ -22,11 +22,12 @@ function run(command, args, options = {}) {
   return p.stdout;
 }
 // Ubuntu hosted runners can restrict unprivileged user namespaces. The
-// explicit CI flag elevates namespace creation only. Map namespace root back
-// to the original host UID/GID so the worker can read its owner's private build
-// artifacts without host-root access or widening filesystem permissions.
-const namespace = process.argv.includes("--privileged-namespace")
-  ? ["sudo", "-n", "unshare", "--user", `--map-users=0:${process.getuid()}:1`, `--map-groups=0:${process.getgid()}:1`, "--setuid=0", "--setgid=0", "--net"]
+// Elevated creation handles hosted-runner user-namespace restrictions. Only
+// public build artifacts are copied into a readable temporary launch directory;
+// no access to the runner's private home or alternate UID mapping is required.
+const privileged = process.argv.includes("--privileged-namespace");
+const namespace = privileged
+  ? ["sudo", "-n", "unshare", "--user", "--map-root-user", "--net"]
   : ["unshare", "--user", "--map-root-user", "--net"];
 run(namespace[0], [...namespace.slice(1), "true"]);
 const temp = mkdtempSync(join(tmpdir(), "ags-stock-gh-"));
@@ -41,7 +42,25 @@ try {
   const dirty = run("git", ["status", "--porcelain"]).trim() !== "";
   const binary = join(temp, "gh-server");
   run("go", ["build", "-p", "2", "-mod=readonly", "-trimpath", "-ldflags=-X github.com/ngaut/agent-git-service/server.gitSHA=" + source, "-o", binary, "./cmd/gh-server"], { env: { ...process.env, GOMAXPROCS: "3" } });
-  const result = run(namespace[0], [...namespace.slice(1), process.execPath, join(root, "scripts/gh-native-worker.mjs"), binary, join(temp, ghPath), ...(companion ? [companion] : [])], { timeout: 240000 });
+  const worker = join(temp, "gh-native-worker.mjs");
+  writeFileSync(worker, readFileSync(join(root,"scripts/gh-native-worker.mjs")), {mode:0o644});
+  let workerCompanion = companion;
+  if (privileged) {
+    // This directory contains public source/build bytes only. All credentials
+    // and databases are generated later in the worker's own private directory.
+    chmodSync(temp,0o755); chmodSync(binary,0o755); chmodSync(join(temp,ghPath),0o755);
+    if (companion) {
+      workerCompanion=join(temp,"companion");mkdirSync(workerCompanion,{mode:0o755});
+      const manifest=JSON.parse(readFileSync(join(companion,"build-manifest.json"),"utf8"));
+      for(const name of [...Object.keys(manifest.files),"build-manifest.json"]){
+        const sourceFile=resolve(companion,name),targetFile=resolve(workerCompanion,name);
+        if(!sourceFile.startsWith(companion+"/")||!targetFile.startsWith(workerCompanion+"/")||!lstatSync(sourceFile).isFile())throw new Error("Unsafe companion candidate path");
+        mkdirSync(dirname(targetFile),{recursive:true,mode:0o755});copyFileSync(sourceFile,targetFile);chmodSync(targetFile,0o644);
+        if(name!=="build-manifest.json"&&createHash("sha256").update(readFileSync(targetFile)).digest("hex")!==manifest.files[name])throw new Error("Companion file identity mismatch");
+      }
+    }
+  }
+  const result = run(namespace[0], [...namespace.slice(1), process.execPath, worker, binary, join(temp, ghPath), ...(workerCompanion ? [workerCompanion] : [])], { cwd:temp, timeout: 240000 });
   const receipt = { ...JSON.parse(result), source: { commit: source, dirty }, ghFixture };
   mkdirSync(join(root, ".test-build"), { recursive: true });
   writeFileSync(join(root, ".test-build/gh-native.json"), JSON.stringify(receipt, null, 2) + "\n", { mode: 0o600 });
