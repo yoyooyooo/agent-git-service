@@ -412,7 +412,10 @@ func Normalize(cfg Config) (Config, error) {
 			return Config{}, fmt.Errorf("invalid OAUTH_DEVICE_VERIFICATION_URL %q: must use http or https", cfg.OAuthDeviceVerificationURL)
 		}
 	}
-	if cfg.ForgejoIntegrationEnabled {
+	// An integrations file owns the Forgejo switch/options as one unit. Ignore
+	// stale environment-only options; the selected active config is validated
+	// again by server composition after file resolution.
+	if cfg.ForgejoIntegrationEnabled && cfg.IntegrationsConfigFile == "" {
 		if cfg.ForgejoIntegrationBaseURL == "" {
 			return Config{}, fmt.Errorf("FORGEJO_INTEGRATION_BASE_URL is required when FORGEJO_INTEGRATION_ENABLED=1")
 		}

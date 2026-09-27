@@ -121,7 +121,10 @@ func (s *Server) doCreatePR(ctx context.Context, req gqlRequest) map[string]any 
 		pr = reloaded
 	}
 	logErr(ctx, "CreatePR: external integrations", s.Svc.EnqueuePullRequestCreatedIntegrations(ctx, pr))
-	return wrap("createPullRequest", map[string]any{"pullRequest": s.prGQL(ctx, pr)})
+	// Honor projection fields explicitly requested on the creation response.
+	// Stock gh selects only id/url; do not block it on provider convergence or
+	// substitute an external provider URL for the canonical AGS PR URL.
+	return wrap("createPullRequest", map[string]any{"pullRequest": s.prGQL(ctx, pr, req.Query)})
 }
 
 func (s *Server) doMergePR(ctx context.Context, req gqlRequest) map[string]any {

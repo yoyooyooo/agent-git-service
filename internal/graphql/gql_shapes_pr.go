@@ -69,6 +69,7 @@ func (s *Server) prGQL(ctx context.Context, p db.PullRequest, queries ...string)
 		"merged":                  p.Merged,
 		"url":                     fmt.Sprintf("%s/%s/pull/%d", s.Svc.HTMLBaseURL(), p.Repository.FullName, p.Number),
 		"externalProjections":     s.externalProjectionsGQL(ctx, p, q),
+		"projectionJob":           s.projectionJobGQL(ctx, p, q),
 		"author":                  s.authorGQL(p.Author),
 		"agsActor":                agsActor,
 		"delegatedBy":             delegatedBy,
@@ -163,7 +164,9 @@ func (s *Server) externalProjectionsGQL(ctx context.Context, p db.PullRequest, q
 	rows, err := s.Svc.ListPullRequestProjections(ctx, p.ID)
 	if err != nil {
 		logErr(ctx, "externalProjections GraphQL", err)
-		return []map[string]any{}
+		// null means unavailable, unlike [] (successfully observed no mapping).
+		// An optional observation cannot turn a committed PR into a failed create.
+		return nil
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {

@@ -540,43 +540,47 @@ func LoadFile(path string) (Config, error) {
 	if err := cibackend.Validate(cfg.CI); err != nil {
 		return Config{}, err
 	}
-	if _, err := parseOptionalDuration("forgejo.push_timeout", cfg.Forgejo.PushTimeout); err != nil {
-		return Config{}, err
+	// Disabled means inactive: no Forgejo-only validation or credential I/O.
+	// A separately selected CI backend retains its own independent validation.
+	if cfg.Forgejo.Enabled {
+		if _, err := parseOptionalDuration("forgejo.push_timeout", cfg.Forgejo.PushTimeout); err != nil {
+			return Config{}, err
+		}
+		if cfg.Forgejo.AuthorityPolicy.Enabled {
+			if strings.TrimSpace(cfg.Forgejo.AuthorityPolicy.WebhookURL) == "" {
+				return Config{}, fmt.Errorf("forgejo.authority_policy.webhook_url is required when authority policy is enabled")
+			}
+			if strings.TrimSpace(cfg.Forgejo.AuthorityPolicy.IntegrationBot) == "" {
+				return Config{}, fmt.Errorf("forgejo.authority_policy.integration_bot is required when authority policy is enabled")
+			}
+			if strings.TrimSpace(cfg.Forgejo.AuthorityPolicy.OperatorToken) == "" && strings.TrimSpace(cfg.Forgejo.AuthorityPolicy.OperatorTokenFile) == "" {
+				return Config{}, fmt.Errorf("forgejo.authority_policy.operator_token_file is required when authority policy is enabled")
+			}
+		}
+		if strings.TrimSpace(cfg.Forgejo.ActionsLogBridgeURL) != "" {
+			if strings.TrimSpace(cfg.Forgejo.ActionsLogBridgeTokenFile) == "" {
+				return Config{}, fmt.Errorf("forgejo.actions_log_bridge_token_file is required when actions_log_bridge_url is configured")
+			}
+			secret, err := readOwnerOnlySecretFile(cfg.Forgejo.ActionsLogBridgeTokenFile)
+			if err != nil {
+				return Config{}, fmt.Errorf("read Forgejo actions log bridge token file: %w", err)
+			}
+			cfg.Forgejo.ActionsLogBridgeToken = secret
+		}
+		seenActionActors := map[string]uint{}
+		for actor, principalID := range cfg.Forgejo.AuthorityPolicy.ActionPrincipalBindings {
+			cleanActor := strings.ToLower(strings.TrimSpace(actor))
+			if cleanActor == "" || len(cleanActor) > 255 || strings.ContainsAny(cleanActor, "/\\\t\r\n ") ||
+				sessionauthority.IsSecretShapedValue(cleanActor) || principalID == 0 {
+				return Config{}, fmt.Errorf("forgejo.authority_policy.action_principal_bindings contains an invalid actor-to-principal binding")
+			}
+			if previous, ok := seenActionActors[cleanActor]; ok && previous != principalID {
+				return Config{}, fmt.Errorf("forgejo.authority_policy.action_principal_bindings contains an ambiguous Forgejo actor")
+			}
+			seenActionActors[cleanActor] = principalID
+		}
+		cfg.Forgejo.AuthorityPolicy.ActionPrincipalBindings = seenActionActors
 	}
-	if cfg.Forgejo.AuthorityPolicy.Enabled {
-		if strings.TrimSpace(cfg.Forgejo.AuthorityPolicy.WebhookURL) == "" {
-			return Config{}, fmt.Errorf("forgejo.authority_policy.webhook_url is required when authority policy is enabled")
-		}
-		if strings.TrimSpace(cfg.Forgejo.AuthorityPolicy.IntegrationBot) == "" {
-			return Config{}, fmt.Errorf("forgejo.authority_policy.integration_bot is required when authority policy is enabled")
-		}
-		if strings.TrimSpace(cfg.Forgejo.AuthorityPolicy.OperatorToken) == "" && strings.TrimSpace(cfg.Forgejo.AuthorityPolicy.OperatorTokenFile) == "" {
-			return Config{}, fmt.Errorf("forgejo.authority_policy.operator_token_file is required when authority policy is enabled")
-		}
-	}
-	if strings.TrimSpace(cfg.Forgejo.ActionsLogBridgeURL) != "" {
-		if strings.TrimSpace(cfg.Forgejo.ActionsLogBridgeTokenFile) == "" {
-			return Config{}, fmt.Errorf("forgejo.actions_log_bridge_token_file is required when actions_log_bridge_url is configured")
-		}
-		secret, err := readOwnerOnlySecretFile(cfg.Forgejo.ActionsLogBridgeTokenFile)
-		if err != nil {
-			return Config{}, fmt.Errorf("read Forgejo actions log bridge token file: %w", err)
-		}
-		cfg.Forgejo.ActionsLogBridgeToken = secret
-	}
-	seenActionActors := map[string]uint{}
-	for actor, principalID := range cfg.Forgejo.AuthorityPolicy.ActionPrincipalBindings {
-		cleanActor := strings.ToLower(strings.TrimSpace(actor))
-		if cleanActor == "" || len(cleanActor) > 255 || strings.ContainsAny(cleanActor, "/\\\t\r\n ") ||
-			sessionauthority.IsSecretShapedValue(cleanActor) || principalID == 0 {
-			return Config{}, fmt.Errorf("forgejo.authority_policy.action_principal_bindings contains an invalid actor-to-principal binding")
-		}
-		if previous, ok := seenActionActors[cleanActor]; ok && previous != principalID {
-			return Config{}, fmt.Errorf("forgejo.authority_policy.action_principal_bindings contains an ambiguous Forgejo actor")
-		}
-		seenActionActors[cleanActor] = principalID
-	}
-	cfg.Forgejo.AuthorityPolicy.ActionPrincipalBindings = seenActionActors
 	if strings.TrimSpace(cfg.Multica.LinkTokenSecret) == "" && strings.TrimSpace(cfg.Multica.LinkTokenSecretFile) != "" {
 		secret, err := readTrimmedSecretFile(cfg.Multica.LinkTokenSecretFile)
 		if err != nil {

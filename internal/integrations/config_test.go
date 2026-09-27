@@ -300,7 +300,7 @@ func TestLoadFileRejectsInvalidForgejoActionPrincipalBindings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "integrations.yaml")
-			body := "forgejo:\n  authority_policy:\n    action_principal_bindings:\n      " + tc.binding + "\n"
+			body := "forgejo:\n  enabled: true\n  authority_policy:\n    action_principal_bindings:\n      " + tc.binding + "\n"
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}

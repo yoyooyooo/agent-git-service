@@ -5,7 +5,7 @@ AGS can optionally mirror selected post-push branch updates into Forgejo so Forg
 ## Responsibility split
 
 - AGS is the source for agent/human branch ingress and commit authorship.
-- Forgejo is the PR, Actions, runner, CI-log, and merge-execution projection. An authenticated AGS Human decides merge timing; provider CI may continue asynchronously and is required before final release/acceptance claims rather than every Human merge.
+- When enabled, Forgejo is a configured branch/PR projection and may also own merge execution. CI is selected independently: enabling this projection does not select Forgejo as the default CI backend, and disabling it does not disable a separately configured CI backend. See [independent CI backends](architecture/ci-backends.md). Native AGS PR identity and repository permissions remain authoritative.
 - The integration is one-way for ordinary branch ingress: AGS pushes are mirrored to Forgejo.
 - Forgejo is a projection/CI surface, not a second origin. Operators and agents must not repair routine CI issues by pushing a Forgejo remote directly.
 - Ordinary PR verification reads the exact provider PR and exact-head Actions runs through authenticated AGS `/pulls/{number}/provider/projection` and `/provider/ci/runs`; AGS owns the provider credential, revalidates delegated authority immediately before provider I/O, requires the observed PR number to match the stored binding, exhausts bounded Actions pagination, and emits a secret-safe correlation receipt/audit. Anonymous requests, client-selected provider repo/number mismatches, incomplete pagination, and late authority drift fail closed before a successful observation.
@@ -24,7 +24,76 @@ git push AGS refs/heads/agent/demo
   -> Forgejo Runner executes jobs
 ```
 
+## Native gh creation and projection links
+
+PR creation and provider projection have different completion times. AGS commits
+its native PR and queues durable Forgejo work; the HTTP response must not wait
+for Git push, Forgejo availability or CI completion. A projected PR number is not
+the AGS PR number. Never construct a Forgejo URL by substituting that number.
+
+The creation response can carry an already-recorded mapping. GraphQL callers may
+explicitly request it in the same mutation:
+
+```graphql
+mutation Create($input: CreatePullRequestInput!) {
+  createPullRequest(input: $input) {
+    pullRequest {
+      id
+      number
+      url
+      externalProjections {
+        provider
+        externalRepo
+        externalNumber
+        externalUrl
+        lastSyncedSha
+      }
+      projectionJob {
+        provider
+        phase
+        status
+        externalNumber
+        externalUrl
+        lastErrorType
+      }
+    }
+  }
+}
+```
+
+`externalProjections: []` means no recorded mapping was observed; `null` means
+observation was unavailable, not an empty successful result. `projectionJob` is
+null when no generic Forgejo projection job exists; queued/running/failed phases
+are the existing durable worker facts, and observation failure is `unavailable`.
+No raw provider error body is exposed in this GraphQL job summary. The native PR
+result remains usable even when this optional presentation is unavailable. REST
+continues to expose its existing `external_projections` and `projection_job`.
+
+These fields are read on selection; ordinary native creation does not acquire
+unrequested CI/projection reads. No projection job or integration database read
+is needed when all provider integrations are disabled.
+
+**This is not a change to official `gh pr create` terminal output.** Stock gh
+requests only the native `id` and `url` and prints the one PR URL. Additional API
+fields and response headers cannot make it print a second URL. Do not substitute
+the Forgejo URL, append a second URL/newline to the native URL field, or return a
+GraphQL error as a notification: those break identity, URL parsing or success
+semantics. A client presenting both links must explicitly consume the enriched
+response and, if projection is still pending, optionally observe the same PR
+without repeating creation. There is no implicit gh shim or new PR CLI here.
+
 ## Configuration
+
+The Forgejo integration is **off by default**. Omitting `forgejo` or setting
+`forgejo.enabled: false` does not load its token/log-bridge files or validate
+inactive settings. Disabling only `authority_policy` also stops reading its
+operator-token file. Syntactically malformed YAML is still rejected.
+
+When enabled, the resolved configuration must supply a usable HTTP(S) `base_url`
+and a nonempty server token (inline or file-backed). Token ownership remains on
+the server. A selected integrations file owns the entire Forgejo configuration;
+stale environment-only options cannot re-enable it. CI remains an independent
+section with its own defaults and validation.
 
 Prefer one file-backed integration config:
 

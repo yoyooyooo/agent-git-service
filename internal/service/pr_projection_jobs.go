@@ -87,7 +87,7 @@ func nonTerminalGenericProjectionConflictWhere() clause.Where {
 // and keeps non-Forgejo integrations best-effort. REST/GraphQL PR creation uses this
 // instead of running Forgejo git push/PR ensure in the request context.
 func (s *Service) EnqueuePullRequestCreatedIntegrations(ctx context.Context, pr db.PullRequest) error {
-	if s == nil {
+	if s == nil || (s.ForgejoIntegration == nil && s.GitLabIntegration == nil && s.GitHubIntegration == nil) {
 		return nil
 	}
 	bgCtx := s.projectionBackgroundContext(ctx)

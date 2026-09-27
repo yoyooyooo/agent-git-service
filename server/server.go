@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -495,18 +496,27 @@ func initForgejoIntegration(cfg config.Config) (*forgejointegration.Integration,
 		slog.Info("forgejo integration disabled", "reason", "not configured")
 		return nil, nil
 	}
+	endpoint, endpointErr := url.Parse(integrationCfg.BaseURL)
+	if endpointErr != nil || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || (endpoint.Scheme != "https" && endpoint.Scheme != "http") {
+		return nil, fmt.Errorf("enabled Forgejo integration requires a credential-free HTTP(S) base URL")
+	}
 	var err error
 	integrationCfg, err = forgejointegration.LoadTokenFile(integrationCfg)
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(integrationCfg.Token) == "" || strings.ContainsAny(integrationCfg.Token, "\r\n\x00") {
+		return nil, fmt.Errorf("enabled Forgejo integration requires a nonempty single-line server token")
+	}
 	integrationCfg, err = forgejointegration.LoadWebhookSecretFile(integrationCfg)
 	if err != nil {
 		return nil, err
 	}
-	integrationCfg, err = forgejointegration.LoadAuthorityPolicyTokenFile(integrationCfg)
-	if err != nil {
-		return nil, err
+	if integrationCfg.AuthorityPolicyEnabled {
+		integrationCfg, err = forgejointegration.LoadAuthorityPolicyTokenFile(integrationCfg)
+		if err != nil {
+			return nil, err
+		}
 	}
 	integrationCfg, err = forgejointegration.LoadRepoMapFile(integrationCfg)
 	if err != nil {
