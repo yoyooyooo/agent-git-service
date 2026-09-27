@@ -32,18 +32,19 @@ type entry struct {
 // No alternate/source-path dependency survives. GC refuses pins.
 // Staging directories are never returned by Acquire, even after a crash.
 type Store struct {
-	root      string
-	maxPack   int64
-	lock      *os.File
-	mu        sync.Mutex
-	entries   map[string]*entry
-	closed    bool
-	active    int
-	retention *RetentionPolicy
-	lastUse   map[string]time.Time
-	openedAt  time.Time
-	now       func() time.Time
-	minFree   uint64
+	root        string
+	maxPack     int64
+	lock        *os.File
+	mu          sync.Mutex
+	entries     map[string]*entry
+	closed      bool
+	active      int
+	retention   *RetentionPolicy
+	lastUse     map[string]time.Time
+	restoredUse map[string]time.Time
+	openedAt    time.Time
+	now         func() time.Time
+	minFree     uint64
 }
 
 func Open(root string, maxPack int64) (*Store, error) {
@@ -88,6 +89,12 @@ func Open(root string, maxPack int64) (*Store, error) {
 			return nil, errors.New("snapshot subdirectories must be private real directories")
 		}
 	}
+	// Consume clean-close age evidence before removing abandoned staging.
+	// An older owner uses the same cleanup and safely discards that evidence.
+	if err := s.restoreRetentionAge(); err != nil {
+		_ = unlockRoot(lock)
+		return nil, err
+	}
 	// Owning the process lock proves no live producer can still own staging.
 	staging, err := os.ReadDir(filepath.Join(root, "staging"))
 	if err != nil {
@@ -118,6 +125,9 @@ func (s *Store) Close() error {
 	}
 	if s.active != 0 {
 		return errors.New("snapshot imports are still running")
+	}
+	if err := s.saveRetentionAge(); err != nil {
+		return err
 	}
 	s.closed = true
 	return unlockRoot(s.lock)

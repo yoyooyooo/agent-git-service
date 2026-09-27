@@ -54,9 +54,9 @@ type RetentionStats struct {
 }
 
 // ConfigureRetention is called before runtime admission. Persisted views are
-// inventoried, but no object/hash verification is skipped by Acquire. On restart
-// every existing view gets a fresh MinAge grace because in-memory access times
-// are not durable evidence of when a Git negotiation began.
+// inventoried, but no object/hash verification is skipped by Acquire. A clean
+// shutdown preserves retention ages. An unclean/unknown shutdown still grants
+// every existing view fresh MinAge protection for interrupted negotiations.
 func (s *Store) ConfigureRetention(policy RetentionPolicy) error {
 	if err := policy.Validate(); err != nil {
 		return err
@@ -115,13 +115,7 @@ func (s *Store) inventoryLocked(ctx context.Context) ([]retainedInfo, error) {
 		if err != nil {
 			return nil, err
 		}
-		used := info.ModTime()
-		if used.Before(s.openedAt) {
-			used = s.openedAt
-		}
-		if last := s.lastUse[key]; last.After(used) {
-			used = last
-		}
+		used := s.retentionUsedAt(key, info.ModTime())
 		pinned := false
 		if e := s.entries[key]; e != nil {
 			pinned = e.refs > 0
