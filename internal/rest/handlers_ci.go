@@ -29,7 +29,7 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 			return
 		}
 		if selected.Name == "native" {
-			for _, param := range []string{"run_id", "job_id", "workflow_id"} {
+			for _, param := range []string{"run_id", "job_id", "workflow_id", "check_run_id"} {
 				if value := chi.URLParam(r, param); value != "" {
 					n, _ := strconv.ParseUint(value, 10, 64)
 					if n >= service.CIExternalIDBase {
@@ -54,6 +54,30 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 			return id, true
 		}
 		switch operation {
+		case "check-run", "check-annotations":
+			id, ok := readID("check_run_id")
+			if !ok {
+				return
+			}
+			// External check IDs are the same AGS-owned job IDs exposed to gh.
+			// Resolve repository/backend/parent binding before any response; never
+			// treat a foreign or retired ID as an empty successful observation.
+			job, e := d.Svc.CIJob(r.Context(), repo.FullName, id)
+			if e != nil {
+				ciHTTPError(w, e)
+				return
+			}
+			if operation == "check-annotations" {
+				// This adapter does not publish a structured annotation collection.
+				// An absent optional resource is 404 (stock gh tolerates it), NOT
+				// a fabricated successful [] or a provider/permission failure. Logs
+				// remain available through their independently validated endpoint.
+				w.Header().Set("X-AGS-CI-Annotations", "not-projected")
+				respond.Error(w, 404, "This CI adapter does not publish structured check annotations; use job logs")
+				return
+			}
+			respond.JSON(w, 200, ciCheckRunJSON(job, base))
+			return
 		case "workflows":
 			q := r.URL.Query()
 			page, _ := strconv.Atoi(q.Get("page"))
@@ -237,6 +261,11 @@ func ciJobJSON(v service.CIJob, base string) map[string]any {
 	}
 	return map[string]any{"id": v.ID, "run_id": v.RunID, "name": j.Name, "head_sha": j.HeadSHA, "status": j.Status, "conclusion": nilIfEmpty(j.Conclusion), "html_url": j.URL, "url": fmt.Sprintf("%s/actions/jobs/%d", base, v.ID), "run_url": fmt.Sprintf("%s/actions/runs/%d", base, v.RunID), "started_at": j.StartedAt, "completed_at": j.CompletedAt, "steps": steps, "labels": []string{}, "ags_ci_backend": v.Backend}
 }
+func ciCheckRunJSON(value service.CIJob, base string) map[string]any {
+	j := value.Job
+	return map[string]any{"id": value.ID, "name": j.Name, "head_sha": j.HeadSHA, "status": j.Status, "conclusion": nilIfEmpty(j.Conclusion), "started_at": j.StartedAt, "completed_at": j.CompletedAt, "html_url": j.URL, "url": fmt.Sprintf("%s/check-runs/%d", base, value.ID), "check_suite": map[string]any{"id": value.RunID}, "output": map[string]any{"title": j.Name, "summary": "CI job status; structured annotations are not projected. See job logs."}, "ags_ci_backend": value.Backend, "ags_annotations_status": "not-projected"}
+}
+
 func ciWorkflowJSON(value service.CIWorkflow, base string) map[string]any {
 	w := value.Workflow
 	return map[string]any{"id": value.ID, "name": w.Name, "path": w.Path, "state": w.State, "html_url": w.URL, "created_at": w.CreatedAt, "updated_at": w.UpdatedAt, "url": fmt.Sprintf("%s/actions/workflows/%d", base, value.ID), "ags_ci_backend": value.Backend}

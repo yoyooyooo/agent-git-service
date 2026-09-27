@@ -18,7 +18,7 @@ const clean = value => secrets.reduce((s, secret) => s.split(secret).join("[REDA
 const env = { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: work, LANG: "C.UTF-8", NO_PROXY: "*", GH_CONFIG_DIR: ghHome, GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1", GH_NO_EXTENSION_UPDATE_NOTIFIER: "1", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.test", SSL_CERT_FILE: join(work, "cert.pem") };
 const repo = "fixture/gh-native", base = "http://127.0.0.1:6666";
 const report = { schema: "ags.official-gh-acceptance.v1", network: "isolated loopback-only user+network namespace", productionData: false, productionCredentials: false, shim: false, routingOverrides: false, checks: [], startedAt: new Date().toISOString() };
-let primary, front, provider, stage = "start", serverLog = "", head = "a".repeat(40), outcome = "failure", currentBackend = "native", effects = 0;
+let primary, front, provider, stage = "start", serverLog = "", head = "a".repeat(40), outcome = "failure", currentBackend = "native", effects = 0, annotationReads = 0;
 const assertions = (value, message) => { if (!value) throw new Error(message); };
 async function cmd(executable, args, cwd = work, extra = {}) {
   return new Promise((resolve, reject) => {
@@ -90,7 +90,7 @@ try {
   writeFileSync(join(ghHome, "config.yml"), "telemetry: disabled\nprompt: disabled\n", { mode: 0o600 });
   writeFileSync(join(ghHome, "hosts.yml"), `127.0.0.1:\n  user: fixture\n  oauth_token: ${JSON.stringify(token)}\n  git_protocol: https\n`, { mode: 0o600 });
   writeFileSync(join(work, "provider.token"), providerToken, { mode: 0o600 }); writeFileSync(join(work, "bridge.token"), bridgeToken, { mode: 0o600 });
-  front = https.createServer({ key: readFileSync(join(work, "key.pem")), cert: readFileSync(join(work, "cert.pem")) }, (request, response) => { const upstream = http.request(base + request.url, { method: request.method, headers: request.headers }, r => { response.writeHead(r.statusCode, r.headers); r.pipe(response); }); upstream.on("error", () => { response.writeHead(502); response.end(); }); request.pipe(upstream); });
+  front = https.createServer({ key: readFileSync(join(work, "key.pem")), cert: readFileSync(join(work, "cert.pem")) }, (request, response) => { if(request.url.includes("/annotations")) annotationReads++; const upstream = http.request(base + request.url, { method: request.method, headers: request.headers }, r => { response.writeHead(r.statusCode, r.headers); r.pipe(response); }); upstream.on("error", () => { response.writeHead(502); response.end(); }); request.pipe(upstream); });
   await new Promise(r => front.listen(443, "127.0.0.1", r));
   provider = http.createServer((req, res) => {
     const url = new URL(req.url, "http://127.0.0.1:7000"), bridge = url.pathname.startsWith("/api/internal/provider-logs/");
@@ -121,6 +121,8 @@ try {
   await ghCheck("HEAD discovery", ["browse", "--no-browser"]);
   await ghCheck("draft create", ["pr", "create", "--base", "main", "--title", "Official gh fixture", "--body", "isolated", "--draft"]);
   response = await api("/api/v3/repos/" + repo + "/pulls/1"); assertions(response.status === 200 && response.data.draft === true, "draft flag silently ignored");
+  const openTimes = await ghCheck("open PR nullable timestamps", ["pr", "view", "1", "--json", "number,closedAt,mergedAt,statusCheckRollup"]);
+  assertions(JSON.parse(openTimes.stdout).closedAt === null && JSON.parse(openTimes.stdout).mergedAt === null, "open PR invented closing or merge times");
   await ghCheck("ready for review", ["pr", "ready", "1"]);
   const noCI = await ghCheck("no CI still has commit", ["pr", "checks", "1"], [1]); assertions(!noCI.stderr.includes("no commit found"), "missing CI removed commit shape");
   await start("github");
@@ -135,6 +137,25 @@ try {
   const forgejoListed = await ghCheck("Forgejo native run shape", ["run", "list", "--json", "databaseId,workflowName,status,conclusion,headSha"]); const forgejoRun = JSON.parse(forgejoListed.stdout)[0].databaseId; assertions(forgejoRun !== githubRun, "backend switch aliased a historical ID");
   response = await api(`/api/v3/repos/${repo}/actions/runs/${githubRun}`); assertions(response.status === 404, "old backend run remains addressable as new backend");
   const forgejoLogs = await ghCheck("Forgejo exact bridge logs", ["run", "view", String(forgejoRun), "--log"]); assertions(forgejoLogs.stdout.includes("unit fixture log") && forgejoLogs.stdout.includes("lint fixture log"), "Forgejo job logs missing");
+  outcome = "pending";
+  const beforeAnnotations = annotationReads;
+  const successTimer = setTimeout(() => { outcome = "success"; }, 1800);
+  try { await ghCheck("Forgejo watch transitions to success without structured annotations", ["run", "watch", String(forgejoRun), "--exit-status", "--interval", "1"]); } finally { clearTimeout(successTimer); }
+  assertions(annotationReads > beforeAnnotations, "watch shortcut skipped annotation observation");
+  const boundJobs = await api(`/api/v3/repos/${repo}/actions/runs/${forgejoRun}/jobs`);
+  const checkID = boundJobs.data.jobs[0].id;
+  const check = await api(`/api/v3/repos/${repo}/check-runs/${checkID}`);
+  assertions(check.status === 200 && check.data.id === checkID && check.data.head_sha === head, "check run lost repository/job identity");
+  const absentAnnotations = await api(`/api/v3/repos/${repo}/check-runs/${checkID}/annotations`);
+  assertions(absentAnnotations.status === 404, "unprojected annotations were advertised as an observed empty collection");
+  outcome = "pending";
+  const failureTimer = setTimeout(() => { outcome = "failure"; }, 1800);
+  let failedWatch;
+  try { failedWatch = await ghCheck("Forgejo watch preserves CI failure", ["run", "watch", String(forgejoRun), "--exit-status", "--interval", "1"], [1]); } finally { clearTimeout(failureTimer); }
+  assertions(!failedWatch.stderr.includes("failed to get annotations"), "watch reports observation failure instead of the actual CI outcome");
+  outcome = "pending";
+  await ghCheck("Forgejo pending check timestamps", ["pr", "view", "1", "--json", "number,closedAt,mergedAt,statusCheckRollup"]);
+  outcome = "success";
   await ghCheck("Forgejo unsupported cancel", ["run", "cancel", String(forgejoRun)], [1]); assertions(effects === 1, "unsupported backend mutation fell back");
   const before = await git(["rev-parse", "origin/main"]);
   await ghCheck("wrong head merge", ["pr", "merge", "1", "--merge", "--match-head-commit", "b".repeat(40)], [1]);

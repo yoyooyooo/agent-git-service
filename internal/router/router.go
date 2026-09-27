@@ -726,8 +726,8 @@ func registerAutolinkRoutes(r chi.Router, handlers *rest.Deps) {
 
 func registerCheckRoutes(r chi.Router, handlers *rest.Deps) {
 	// Check runs / check suites / status
-	r.Get("/api/v3/repos/{owner}/{repo}/check-runs/{check_run_id}", handlers.CI(handlers.GetCheckRun, "unsupported"))
-	r.Get("/api/v3/repos/{owner}/{repo}/check-runs/{check_run_id}/annotations", handlers.CI(handlers.ListCheckRunAnnotations, "unsupported"))
+	r.Get("/api/v3/repos/{owner}/{repo}/check-runs/{check_run_id}", handlers.CI(handlers.GetCheckRun, "check-run"))
+	r.Get("/api/v3/repos/{owner}/{repo}/check-runs/{check_run_id}/annotations", handlers.CI(handlers.ListCheckRunAnnotations, "check-annotations"))
 	r.Get("/api/v3/repos/{owner}/{repo}/commits/{ref}/check-runs", handlers.CI(handlers.ListCheckRunsForRef, "unsupported"))
 	r.Get("/api/v3/repos/{owner}/{repo}/commits/{ref}/check-suites", handlers.CI(handlers.ListCheckSuitesForRef, "unsupported"))
 	r.Post("/api/v3/repos/{owner}/{repo}/statuses/{sha}", handlers.CreateCommitStatus)

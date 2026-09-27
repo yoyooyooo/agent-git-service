@@ -17,12 +17,12 @@ func (s *Server) prGQL(ctx context.Context, p db.PullRequest, queries ...string)
 	if p.Merged {
 		state = "MERGED"
 	}
-	closedAt := ""
-	if p.ClosedAt != nil {
+	var closedAt any
+	if p.ClosedAt != nil && !p.ClosedAt.IsZero() {
 		closedAt = p.ClosedAt.Format(time.RFC3339)
 	}
-	mergedAt := ""
-	if p.MergedAt != nil {
+	var mergedAt any
+	if p.MergedAt != nil && !p.MergedAt.IsZero() {
 		mergedAt = p.MergedAt.Format(time.RFC3339)
 	}
 

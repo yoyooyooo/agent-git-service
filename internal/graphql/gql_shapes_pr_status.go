@@ -159,8 +159,8 @@ func jobToCheckNode(job db.WorkflowRunJob, wf db.Workflow, run db.WorkflowRun, h
 		"name":        job.Name,
 		"status":      status,
 		"conclusion":  conclusion,
-		"startedAt":   job.StartedAt.Format(time.RFC3339),
-		"completedAt": job.CompletedAt.Format(time.RFC3339),
+		"startedAt":   nullableCheckTime(job.StartedAt),
+		"completedAt": nullableCheckTime(job.CompletedAt),
 		"detailsUrl":  fmt.Sprintf("%s/%s/actions/runs/%d", htmlBaseURL, repoFullName, run.ID),
 		"isRequired":  false,
 		"checkSuite": map[string]any{
@@ -171,6 +171,15 @@ func jobToCheckNode(job db.WorkflowRunJob, wf db.Workflow, run db.WorkflowRun, h
 			},
 		},
 	}
+}
+
+// A check which has not started or finished has no timestamp. Empty strings
+// are invalid GitHub DateTimes; year-one timestamps manufacture an event.
+func nullableCheckTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value.Format(time.RFC3339)
 }
 
 // countChecksByState builds count-by-conclusion summaries from check nodes.

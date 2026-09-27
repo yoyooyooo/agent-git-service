@@ -115,7 +115,17 @@ outages and incomplete pagination are errors, not empty success.
 `HEAD /repos/...` preserves GET visibility for stock gh discovery. No-CI PRs still
 return a commit connection, with empty check contexts rather than a fictitious
 missing commit. Draft creation and standard merge expected-head semantics are
-handled by their ordinary AGS owners, not by the CI adapter.
+handled by their ordinary AGS owners, not by the CI adapter. Unset PR/check times
+are JSON null, never an empty string or a fabricated year-one event.
+
+Job-backed `GET check-runs/{id}` retains the exact repository/backend/job binding.
+Structured check annotations are not currently projected by external adapters:
+the optional annotations resource returns 404 with
+`X-AGS-CI-Annotations: not-projected`, not a successful empty collection. Official
+gh handles a missing optional annotation resource and still reports the actual
+run outcome. Repository access failures and provider outages remain errors; they
+are never converted to 404 for this purpose. Use the separately implemented job
+logs for provider diagnostics. No synthetic file/line annotations are invented.
 
 ## Verification and scope
 
@@ -127,6 +137,6 @@ are disposable in a loopback-only user/network namespace. Backend fixtures use t
 published API shapes; they are not evidence of running real hosted CI jobs.
 
 This is a standard-client slice, not complete GitHub Actions API equivalence.
-Unsupported external artifacts/caches/settings/check-run REST resources fail
+Unsupported external artifacts/caches/settings and commit check-list resources fail
 explicitly rather than using unrelated native state. Provider provisioning and a
 production TLS/credential/log-bridge rollout are separate explicit operations.
