@@ -16,8 +16,8 @@ func (s *Server) issueGQL(ctx context.Context, i db.Issue, queries ...string) ma
 		q = queries[0]
 	}
 
-	closedAt := ""
-	if i.ClosedAt != nil {
+	var closedAt any
+	if i.ClosedAt != nil && !i.ClosedAt.IsZero() {
 		closedAt = i.ClosedAt.Format(time.RFC3339)
 	}
 

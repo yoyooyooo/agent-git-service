@@ -428,11 +428,11 @@ func requireGraphQLTimeField(t *testing.T, body map[string]any, key string, want
 	t.Helper()
 	v, ok := body[key]
 	require.True(t, ok, "missing %s", key)
-	str, ok := v.(string)
-	require.True(t, ok, "expected %s string", key)
 	if wantSet {
+		str, ok := v.(string)
+		require.True(t, ok, "expected %s string", key)
 		require.NotEmpty(t, str, "expected %s to be set", key)
 		return
 	}
-	require.Empty(t, str, "expected %s to be empty", key)
+	require.Nil(t, v, "unset GraphQL DateTime %s must be null, not an invalid empty string", key)
 }
