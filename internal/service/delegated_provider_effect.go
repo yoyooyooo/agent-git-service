@@ -68,7 +68,7 @@ func (s *Service) validateForgejoActionLiveFacts(ctx context.Context, intent db.
 	}
 	var pr db.PullRequest
 	if err := s.DBForCtx(ctx).Preload("Repository").First(&pr, intent.PullRequestID).Error; err != nil {
-		return fmt.Errorf("reload exact action pull request: %w", err)
+		return forgejoActionReadError("reload exact action pull request", err)
 	}
 	if pr.RepositoryID != intent.RepositoryID || pr.Number != intent.AGSPRNumber || pr.Repository.FullName != intent.Repository ||
 		pr.State != db.StateOpen || pr.Merged || pr.HeadRef != intent.HeadRef || pr.BaseRef != intent.BaseRef {
@@ -76,7 +76,7 @@ func (s *Service) validateForgejoActionLiveFacts(ctx context.Context, intent db.
 	}
 	var projection db.PullRequestProjection
 	if err := s.DBForCtx(ctx).Where("pull_request_id = ? AND provider = ?", intent.PullRequestID, ProjectionProviderForgejo).First(&projection).Error; err != nil {
-		return fmt.Errorf("reload exact action projection: %w", err)
+		return forgejoActionReadError("reload exact action projection", err)
 	}
 	if projection.ExternalRepo != intent.ForgejoRepo || projection.ExternalNumber != intent.ForgejoPRNumber ||
 		projection.SourceBranch != intent.HeadRef || projection.TargetBranch != intent.BaseRef || projection.State != ProjectionStateOpen {
@@ -84,7 +84,7 @@ func (s *Service) validateForgejoActionLiveFacts(ctx context.Context, intent db.
 	}
 	repoPath, err := s.Git.GetRepoPath(ctx, intent.Repository)
 	if err != nil {
-		return fmt.Errorf("resolve exact action repository: %w", err)
+		return forgejoActionReadError("resolve exact action repository", err)
 	}
 	expectedAGSHead := intent.ExpectedHeadSHA
 	projectedHead := ""
@@ -97,26 +97,29 @@ func (s *Service) validateForgejoActionLiveFacts(ctx context.Context, intent db.
 	}
 	headSHA, err := s.Git.HeadSHA(ctx, intent.Repository, intent.HeadRef)
 	if err != nil {
-		return fmt.Errorf("read exact action AGS head: %w", err)
+		return forgejoActionReadError("read exact action AGS head", err)
 	}
 	baseSHA, err := s.Git.HeadSHA(ctx, intent.Repository, intent.BaseRef)
 	if err != nil {
-		return fmt.Errorf("read exact action AGS base: %w", err)
+		return forgejoActionReadError("read exact action AGS base", err)
 	}
 	if !exactGitSHA(pr.HeadSHA, expectedAGSHead) || !exactGitSHA(headSHA, expectedAGSHead) {
 		return fmt.Errorf("exact action AGS head/base drift")
 	}
 	forgejoHead, checked, err := s.ForgejoIntegration.RemoteBranchSHA(ctx, intent.Repository, repoPath, intent.HeadRef)
 	if err != nil || !checked {
-		return fmt.Errorf("read exact action Forgejo head: %w", firstNonNil(err, fmt.Errorf("live remote ref inspection unavailable")))
+		return forgejoActionObservationError("read exact action Forgejo head", firstNonNil(err, fmt.Errorf("live remote ref inspection unavailable")))
 	}
 	forgejoBase, checked, err := s.ForgejoIntegration.RemoteBranchSHA(ctx, intent.Repository, repoPath, intent.BaseRef)
 	if err != nil || !checked {
-		return fmt.Errorf("read exact action Forgejo base: %w", firstNonNil(err, fmt.Errorf("live remote base inspection unavailable")))
+		return forgejoActionObservationError("read exact action Forgejo base", firstNonNil(err, fmt.Errorf("live remote base inspection unavailable")))
 	}
 	forgejoPR, found, err := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, intent.Repository, intent.ForgejoRepo, intent.ForgejoPRNumber)
-	if err != nil || !found {
-		return fmt.Errorf("read exact action Forgejo pull request: %w", firstNonNil(err, fmt.Errorf("live pull request unavailable")))
+	if err != nil {
+		return forgejoActionObservationError("read exact action Forgejo pull request", err)
+	}
+	if !found {
+		return fmt.Errorf("exact action Forgejo pull request is missing")
 	}
 	if forgejoPR.Number != intent.ForgejoPRNumber || forgejoPR.State != "open" || forgejoPR.HeadRef != intent.HeadRef || forgejoPR.BaseRef != intent.BaseRef ||
 		!exactActionHeadAllowed(forgejoHead, intent.ExpectedHeadSHA, projectedHead) ||
@@ -124,6 +127,9 @@ func (s *Service) validateForgejoActionLiveFacts(ctx context.Context, intent db.
 		return fmt.Errorf("exact action Forgejo head/base drift")
 	}
 	if _, err := agreeLiveRebaseBase(ctx, repoPath, intent.ExpectedBaseSHA, baseSHA, forgejoBase); err != nil {
+		if IsForgejoActionObservationUnavailable(err) {
+			return err
+		}
 		return fmt.Errorf("exact action Forgejo head/base drift")
 	}
 	return nil
@@ -135,6 +141,9 @@ func (s *Service) validateForgejoActionLiveFacts(ctx context.Context, intent db.
 // never use a newer intent for the same PR. Every seam reloads the originating
 // principal/repository authority and exact live facts before the external write.
 func (s *Service) revalidateCurrentDelegatedProviderWrite(ctx context.Context, forgejoRepo string, forgejoPRNumber int) error {
+	if err := ctx.Err(); err != nil {
+		return forgejoActionObservationError("action validation canceled", err)
+	}
 	binding, bound := forgejoActionBindingFromContext(ctx)
 	forgejoRepo = strings.TrimSpace(forgejoRepo)
 	if !bound || forgejoRepo == "" || forgejoPRNumber <= 0 {
@@ -144,6 +153,10 @@ func (s *Service) revalidateCurrentDelegatedProviderWrite(ctx context.Context, f
 	database := s.DBForCtx(ctx)
 	var intent db.PullRequestActionIntent
 	if err := database.First(&intent, "id = ?", binding.IntentID).Error; err != nil {
+		readErr := forgejoActionReadError("read exact action intent", err)
+		if IsForgejoActionObservationUnavailable(readErr) {
+			return readErr
+		}
 		return fmt.Errorf("exact action intent unavailable: %w", delegatedUseTimeDenied(DelegatedDenialConstraintMismatch))
 	}
 	activeStates := forgejoActionActiveStates()
@@ -153,7 +166,14 @@ func (s *Service) revalidateCurrentDelegatedProviderWrite(ctx context.Context, f
 	var boundJob *db.PullRequestProjectionJob
 	if binding.JobID != 0 {
 		var job db.PullRequestProjectionJob
-		if err := database.First(&job, "id = ?", binding.JobID).Error; err != nil || !sameActionIntentJobBinding(job, binding) ||
+		if err := database.First(&job, "id = ?", binding.JobID).Error; err != nil {
+			readErr := forgejoActionReadError("read exact action job", err)
+			if IsForgejoActionObservationUnavailable(readErr) {
+				return readErr
+			}
+			return fmt.Errorf("exact action job missing: %w", delegatedUseTimeDenied(DelegatedDenialConstraintMismatch))
+		}
+		if !sameActionIntentJobBinding(job, binding) ||
 			job.Trigger != ForgejoProjectionTriggerActionRebase || job.PullRequestID != intent.PullRequestID ||
 			job.RepositoryID != intent.RepositoryID || !sameOptionalString(job.AgentSessionID, intent.AgentSessionID) {
 			return fmt.Errorf("exact action job generation mismatch: %w", delegatedUseTimeDenied(DelegatedDenialConstraintMismatch))
@@ -206,6 +226,9 @@ func (s *Service) revalidateCurrentDelegatedProviderWrite(ctx context.Context, f
 		}
 	}
 	if err := s.validateForgejoActionLiveFacts(ctx, intent, boundJob); err != nil {
+		if IsForgejoActionObservationUnavailable(err) {
+			return err
+		}
 		denial := delegatedUseTimeDenied(DelegatedDenialConstraintMismatch)
 		_ = s.terminalDenyForgejoAction(ctx, intent.ID, binding.JobID, "exact_action_fact_drift", "live AGS or Forgejo facts changed before provider effect", "")
 		return fmt.Errorf("%v: %w", err, denial)

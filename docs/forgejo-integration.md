@@ -63,8 +63,11 @@ mutation Create($input: CreatePullRequestInput!) {
 
 `externalProjections: []` means no recorded mapping was observed; `null` means
 observation was unavailable, not an empty successful result. `projectionJob` is
-null when no generic Forgejo projection job exists; queued/running/failed phases
-are the existing durable worker facts, and observation failure is `unavailable`.
+null when no supported Forgejo job exists. It includes the action job when rebase
+has reused the same provider row; `trigger`, `actionGeneration` and
+`nextRepairAction` distinguish it from ordinary PR projection. Queued/running/failed
+phases are durable phase records, not proof that an executor is currently alive;
+observation failure is `unavailable`.
 No raw provider error body is exposed in this GraphQL job summary. The native PR
 result remains usable even when this optional presentation is unavailable. REST
 continues to expose its existing `external_projections` and `projection_job`.
@@ -607,6 +610,32 @@ Configure a Forgejo repository webhook for `pull_request` and `delete` events, a
 The legacy delegated merge gateway and Multica delegation introspection/consume/effect protocol are retired. `POST .../actions/pr.merge` and its intent GET are absent and return `404`; no feature flag can re-enable them.
 
 The canonical Access Grant merge adapter does not call Multica introspect/consume/effect storage. A workload Grant receives `pr.merge` only when the source Agent custom environment contains `AGS_ACCESS_ROLE=maintainer` or `AGS_ACCESS_ROLE=admin`; those values are intentionally equivalent and do not authorize any other privileged operation. AGS derives provider repository/base/method from its own mapping, reads the live AGS base head, requires the exact PR head to contain that current base, and matches the exact provider PR head/base, mergeability, newest exact-head CI and protected integration-bot authority. The PR creation-time `base_sha` remains historical metadata rather than a permanent merge gate, so a reviewed candidate can roll forward with monotonic `main`. Definitive pre-dispatch exact-fact drift stores and returns a terminal `provider_attempt=not_attempted` receipt available through invocation GET; otherwise AGS stores a cross-grant effect key and `dispatching + outcome_unknown` before one provider POST. Duplicate calls, renewed grants and invocation readback cannot repeat the write; locator collisions after dispatch do not return 409, and only exact provider GET evidence completes recovery. This route still uses the same server-only Forgejo credential and does not make the grant bearer a provider credential.
+
+### Interrupted rebase observation
+
+The synchronous webhook still has a bounded execution window. A transport or
+cancellation error while observing live action facts does not prove an authority
+or SHA mismatch. Such errors prohibit provider writes but preserve the original
+cause as observation-unavailable; observed missing identities, mismatched refs
+and revoked authority retain their existing denial behavior.
+
+After the attempt returns, a separate five-second context may save only local
+recovery facts in the exact bound intent/job generation. A stale generation or a
+terminal denial/completion cannot be resurrected; original expiry and durable
+old/desired SHAs are unchanged. The saved job is `failed_retryable`, not `running`.
+`next_run_at` is empty: cleanup has not scheduled a worker, and the next action is
+the existing explicit retry/startup recovery path with fresh authorization. The
+cleanup never runs Git, pushes, comments, changes labels or renews authority.
+
+The HTTP response for unavailable action observation is 503, not a malformed
+webhook 400. It does not claim the whole action had no effect; inspect the existing
+native PR and action job rather than recreating the request. A Forgejo status
+label can remain stale until an authorized presentation/recovery operation reaches
+that provider. The original action-receipt principal boundary is unchanged.
+
+Decoupling all admitted work from webhook lifetime is a separate
+[proposed execution change](design/forgejo-rebase-execution-lifetime.md), not an
+implemented queue or automatic recovery guarantee.
 
 The same signed `pull_request` webhook treats AGS workflow action labels as delivery events, never authority. Two request adapters feed one durable kernel. Automation may first obtain `pr.rebase` authority constrained by exactly `pull_request_number`, `forgejo_pull_request_number`, `expected_head_sha`, and `expected_base_sha`, then call `POST /api/v3/repos/{owner}/{repo}/pulls/{number}/actions/pr.rebase` with an immutable idempotency key, the same exact AGS/Forgejo PR mapping and canonical lowercase 40-hex expected head/base SHAs, plus complete pre/post label sets. For the human Forgejo surface, adding `ags/action-rebase` to an open mapped PR asks the signed-webhook adapter to resolve the exact `authority_policy.action_principal_bindings` actor login to an immutable numeric AGS principal, verify that actor's live Forgejo write permission through the read-only authority-policy client when configured, load the current AGS base SHA and complete live label set, and call the same durable `pr.rebase` evaluator. The adapter records request source, actor, deterministic binding content revision, principal, authority snapshot, exact head/base/label transition, and a delivery-derived idempotency key before entering the existing rebase kernel; duplicate deliveries read the same terminal/nonterminal intent and never repeat the Git/provider effect. Both SHA JSON values must be non-null strings whose original bytes already match that form: AGS does not trim or case-normalize them, rejects leading/trailing whitespace, uppercase, null, and non-40 values before intent/provider writes, and preserves the accepted bytes exactly through the durable intent, POST/GET receipt, and startup recovery. Old ref/`exact_head`, mixed, missing, unknown, or tampered Session constraints fail closed; provider refs remain independent coordinates. AGS authorizes `pr.rebase` through the shared durable/delegated principal-session evaluator (canonical repo ∩ live write grant ∩ active policy class ∩ target default/exact exception), persists a secret-safe durable intent, and CASes `planned -> dispatching` before its integration credential can add `ags/action-rebase`. `dispatching` is an outcome-unknown, restart-retryable state: the webhook may consume exactly one matching unexpired `dispatching` or `dispatched` intent under the same per-PR lease even while the provider call is still returning. Provider success CASes only `dispatching -> dispatched`; a zero-row CAS must reload and preserve a legal webhook-advanced state, while provider error keeps `dispatching` for idempotent startup recovery rather than returning to `planned`. The webhook revalidates full labels, AGS/Forgejo mapping, head and base before rebase. The label adapter fails closed when delivery identity, actor binding, live Forgejo write permission, mapped projection, active immutable principal, shared AGS authorization, head/base, or complete labels are missing or drifted. It removes the action label and converges the idempotent status projection to `ags/status-blocked` without creating an intent/job or executing Git; cleanup/status failure is returned for retry. An event whose live action label is already absent and has no matching delivery intent is stale and is ignored, preventing delayed webhooks from regressing a completed request. Binding changes invalidate admitted label-originated durable authority at later write/recovery seams. Existing-intent fact, label, expiry, or delegated-Session drift is terminally denied without treating the invalid Session as cleanup authority. Webhook signature and provider role prove event transport/provider facts only; same-login coincidence, profile/name, label ownership, repository ownership, and `repo.admin` are not action authority inputs. `GET /api/v3/repos/{owner}/{repo}/pulls/{number}/actions/pr.rebase/{intent_id}` returns only a secret-safe receipt. Normal preflight requires the mapped AGS branch, AGS PR head, Forgejo branch, Forgejo PR head, webhook head, and durable `last_synced_sha` to agree; the AGS and Forgejo base heads must also agree. Only a configured mirror/PR-eligible, non-base, non-default, same-repository work branch may continue.
 

@@ -19,6 +19,17 @@ const (
 	forgejoWebhookProcessingTimeout = 2 * time.Minute
 )
 
+// An authenticated action can fail to observe a dependency after it has already
+// changed native Git. Do not label that as an invalid webhook (400), and never
+// expose private provider diagnostics or recommend blindly repeating creation.
+func respondForgejoWebhookFailure(w http.ResponseWriter, err error) {
+	if service.IsForgejoActionObservationUnavailable(err) {
+		respond.Error(w, http.StatusServiceUnavailable, "Forgejo action observation unavailable; inspect the existing action before retrying")
+		return
+	}
+	respond.Error(w, http.StatusBadRequest, "invalid forgejo webhook")
+}
+
 // AuthorizeOperationContractRevision is the expected contract revision for
 // durable operation authorization requests.
 const AuthorizeOperationContractRevision = sessionauthority.ContractRevision
@@ -142,7 +153,7 @@ func (d *Deps) ForgejoWebhook(w http.ResponseWriter, r *http.Request) {
 	result, err := d.Svc.HandleForgejoWebhook(webhookCtx, r.Header, body)
 	if err != nil {
 		slog.WarnContext(r.Context(), "forgejo webhook failed", "error", err)
-		respond.Error(w, http.StatusBadRequest, "invalid forgejo webhook")
+		respondForgejoWebhookFailure(w, err)
 		return
 	}
 	respond.JSON(w, http.StatusAccepted, map[string]any{

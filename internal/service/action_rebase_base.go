@@ -27,7 +27,7 @@ func agreeLiveRebaseBase(ctx context.Context, repoPath, expectedBase, liveAGS, l
 	}
 	forward, err := gitCommitIsAncestor(ctx, repoPath, expectedBase, liveAGS)
 	if err != nil {
-		return "", fmt.Errorf("prove base fast-forward: %w", err)
+		return "", forgejoActionObservationError("prove base fast-forward", err)
 	}
 	if !forward {
 		return "", fmt.Errorf("live base %s is not a fast-forward of intent base %s", liveAGS, expectedBase)

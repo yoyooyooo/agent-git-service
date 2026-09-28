@@ -198,8 +198,8 @@ type forgejoActionRebasePreflight struct {
 	RebaseExistingAGSHead bool
 }
 
-func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event forgejointegration.PullRequestActionLabelEvent) (ForgejoWebhookResult, error) {
-	result := ForgejoWebhookResult{Handled: true, RepoFullName: event.RepoFullName, PRNumber: event.PRNumber, BaseBranch: event.BaseBranch, WorkflowAction: "rebase", WorkflowLabel: event.LabelName, WorkflowStatus: "queued"}
+func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event forgejointegration.PullRequestActionLabelEvent) (result ForgejoWebhookResult, resultErr error) {
+	result = ForgejoWebhookResult{Handled: true, RepoFullName: event.RepoFullName, PRNumber: event.PRNumber, BaseBranch: event.BaseBranch, WorkflowAction: "rebase", WorkflowLabel: event.LabelName, WorkflowStatus: "queued"}
 	if event.LabelName != forgejointegration.AGSActionRebaseLabel {
 		result.WorkflowStatus = "ignored"
 		return result, nil
@@ -291,8 +291,25 @@ func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event
 		ctx = delegatedCtx
 	}
 	ctx = contextWithForgejoActionIntent(ctx, intent.ID)
+	defer func() {
+		if !IsForgejoActionObservationUnavailable(resultErr) {
+			return
+		}
+		recorded, err := s.recordForgejoActionInterruption(ctx)
+		if err != nil {
+			resultErr = fmt.Errorf("save interrupted Forgejo action: %w (execution: %w)", err, resultErr)
+			return
+		}
+		if recorded {
+			result.WorkflowStatus = "recovery_needed"
+		}
+	}()
 	var agsPR db.PullRequest
 	if err := s.DBForCtx(ctx).Preload("Repository").First(&agsPR, intent.PullRequestID).Error; err != nil {
+		readErr := forgejoActionReadError("read admitted action PR", err)
+		if IsForgejoActionObservationUnavailable(readErr) {
+			return result, readErr
+		}
 		_ = s.actionIntentState(ctx, intent.ID, ForgejoActionIntentDenied, "projection_missing", "projected pull request is unavailable", "")
 		result.WorkflowStatus = "denied"
 		return result, nil
@@ -303,6 +320,9 @@ func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event
 	}
 	preflight, err := s.preflightForgejoActionRebase(ctx, event, agsPR, intent)
 	if err != nil {
+		if IsForgejoActionObservationUnavailable(err) {
+			return result, err
+		}
 		if terminalErr := s.terminalDenyForgejoAction(ctx, intent.ID, 0, "exact_action_fact_drift", "live action facts do not match intent", ""); terminalErr != nil {
 			return result, fmt.Errorf("terminalize exact action fact drift: %w", terminalErr)
 		}
@@ -345,6 +365,9 @@ func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event
 		ctx = contextWithForgejoActionJob(ctx, actionJob)
 		res, err := s.resumeForgejoActionRebaseJob(ctx, event, agsPR, actionJob, result)
 		if err != nil {
+			if IsForgejoActionObservationUnavailable(err) {
+				return res, err
+			}
 			state, code := ForgejoActionIntentRecovery, "resume_failed"
 			if errors.Is(err, ErrDelegatedSessionUseTimeDenied) {
 				state, code = ForgejoActionIntentDenied, DelegatedSessionDenialReason(err)
@@ -398,6 +421,9 @@ func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event
 	}
 	ctx = contextWithForgejoActionJob(ctx, actionJob)
 	if err := s.revalidateCurrentDelegatedProviderWrite(ctx, event.RepoFullName, event.PRNumber); err != nil {
+		if IsForgejoActionObservationUnavailable(err) {
+			return result, err
+		}
 		code := DelegatedSessionDenialReason(err)
 		if terminalErr := s.terminalDenyForgejoAction(ctx, intent.ID, actionJob.ID, code, "delegated authority changed during action preflight", preflight.HeadSHA); terminalErr != nil {
 			return result, fmt.Errorf("terminalize post-job action preflight denial: %w", terminalErr)
@@ -425,6 +451,9 @@ func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event
 		slog.WarnContext(ctx, "add Forgejo PR rebasing status label failed", "forgejo_repo", event.RepoFullName, "forgejo_pr", event.PRNumber, "error", err)
 	}
 	if err := s.revalidateCurrentDelegatedProviderWrite(ctx, event.RepoFullName, event.PRNumber); err != nil {
+		if IsForgejoActionObservationUnavailable(err) {
+			return result, err
+		}
 		code := DelegatedSessionDenialReason(err)
 		if terminalErr := s.terminalDenyForgejoAction(ctx, intent.ID, actionJob.ID, code, "delegated authority changed before AGS rebase", preflight.HeadSHA); terminalErr != nil {
 			return result, fmt.Errorf("terminalize post-job AGS rebase denial: %w", terminalErr)
@@ -434,6 +463,9 @@ func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event
 	}
 	updatedPR, sha, err := s.rebaseAGSPrBranchFromForgejoLabel(ctx, agsPR)
 	if err != nil {
+		if IsForgejoActionObservationUnavailable(err) {
+			return result, err
+		}
 		result.WorkflowStatus = "failed"
 		failureCode := "rebase_failed"
 		if isLikelyRebaseConflict(err) {
@@ -456,6 +488,9 @@ func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event
 	}
 	result.SyncedSHA = sha
 	if moved, detail, checkErr := s.forgejoActionBaseChanged(ctx, preflight, sha); checkErr != nil {
+		if IsForgejoActionObservationUnavailable(checkErr) {
+			return result, checkErr
+		}
 		result.WorkflowStatus = "projection_failed"
 		_ = s.actionIntentState(ctx, intent.ID, ForgejoActionIntentDenied, "projection_failed", "post-rebase base verification failed", sha)
 		provider := PullRequestProviderResult{Provider: ProjectionProviderForgejo, Required: true, Attempted: true, DesiredSHA: sha, Err: checkErr}
@@ -489,6 +524,9 @@ func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event
 		},
 	})
 	if err != nil {
+		if IsForgejoActionObservationUnavailable(err) {
+			return result, err
+		}
 		result.WorkflowStatus = "projection_failed"
 		if errors.Is(err, ErrDelegatedSessionUseTimeDenied) {
 			if terminalErr := s.terminalDenyForgejoAction(ctx, intent.ID, actionJob.ID, DelegatedSessionDenialReason(err), "delegated authority changed during provider projection", sha); terminalErr != nil {
@@ -517,6 +555,9 @@ func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event
 		return result, fmt.Errorf("persist Forgejo action ref verification phase: %w", err)
 	}
 	if moved, detail, checkErr := s.forgejoActionBaseChanged(ctx, preflight, sha); checkErr != nil {
+		if IsForgejoActionObservationUnavailable(checkErr) {
+			return result, checkErr
+		}
 		result.WorkflowStatus = "projection_failed"
 		_ = s.actionIntentState(ctx, intent.ID, ForgejoActionIntentDenied, "projection_failed", "post-push base verification failed", sha)
 		provider := dispatch.Forgejo
@@ -544,6 +585,9 @@ func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event
 		return result, fmt.Errorf("persist Forgejo action PR verification phase: %w", err)
 	}
 	if err := s.verifyForgejoActionConvergence(ctx, event, updatedPR, preflight, sha); err != nil {
+		if IsForgejoActionObservationUnavailable(err) {
+			return result, err
+		}
 		result.WorkflowStatus = "projection_failed"
 		_ = s.actionIntentState(ctx, intent.ID, ForgejoActionIntentDenied, "projection_failed", "convergence verification failed", sha)
 		provider := dispatch.Forgejo
@@ -599,7 +643,10 @@ func (s *Service) preflightForgejoActionRebase(ctx context.Context, event forgej
 		intent.ForgejoPRNumber != event.PRNumber || intent.HeadRef != pr.HeadRef || intent.BaseRef != pr.BaseRef {
 		return forgejoActionRebasePreflight{}, forgejoActionProjectionError(pr, event, intent.ExpectedHeadSHA, pr.HeadSHA, forgejointegration.ProjectionFailurePullRequestAuthorityMissing, "live action coordinate does not match the exact intent")
 	}
-	projection, ok := s.forgejoProjectionForPullRequest(ctx, pr.ID)
+	projection, ok, readErr := s.readForgejoActionProjection(ctx, pr.ID)
+	if readErr != nil {
+		return forgejoActionRebasePreflight{}, readErr
+	}
 	if !ok {
 		return forgejoActionRebasePreflight{}, forgejoActionProjectionError(pr, event, pr.HeadSHA, "", forgejointegration.ProjectionFailurePullRequestProjectionMissing, "durable Forgejo pull request mapping is missing")
 	}
@@ -634,20 +681,20 @@ func (s *Service) preflightForgejoActionRebase(ctx context.Context, event forgej
 	}
 	headSHA, err := s.Git.HeadSHA(ctx, repoFullName, head)
 	if err != nil {
-		return forgejoActionRebasePreflight{}, fmt.Errorf("read AGS PR branch for rebase preflight: %w", err)
+		return forgejoActionRebasePreflight{}, forgejoActionReadError("read AGS PR branch for rebase preflight", err)
 	}
 	baseSHA, err := s.Git.HeadSHA(ctx, repoFullName, base)
 	if err != nil {
-		return forgejoActionRebasePreflight{}, fmt.Errorf("read AGS base branch for rebase preflight: %w", err)
+		return forgejoActionRebasePreflight{}, forgejoActionReadError("read AGS base branch for rebase preflight", err)
 	}
 	accepted := strings.TrimSpace(intent.ExpectedHeadSHA)
 	forgejoHead, checked, err := s.ForgejoIntegration.RemoteBranchSHA(ctx, repoFullName, repoPath, head)
 	if err != nil || !checked {
-		return forgejoActionRebasePreflight{}, fmt.Errorf("read Forgejo PR branch for rebase preflight: %w", firstNonNil(err, fmt.Errorf("live remote ref inspection unavailable")))
+		return forgejoActionRebasePreflight{}, forgejoActionObservationError("read Forgejo PR branch for rebase preflight", firstNonNil(err, fmt.Errorf("live remote ref inspection unavailable")))
 	}
 	forgejoPR, found, err := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, repoFullName, projection.ExternalRepo, event.PRNumber)
 	if err != nil {
-		return forgejoActionRebasePreflight{}, fmt.Errorf("read Forgejo PR for rebase preflight: %w", err)
+		return forgejoActionRebasePreflight{}, forgejoActionObservationError("read Forgejo PR for rebase preflight", err)
 	}
 	if !found || forgejoPR.State != "open" || forgejoPR.HeadRef != head || forgejoPR.BaseRef != base {
 		actual := ""
@@ -658,10 +705,13 @@ func (s *Service) preflightForgejoActionRebase(ctx context.Context, event forgej
 	}
 	forgejoBase, checked, err := s.ForgejoIntegration.RemoteBranchSHA(ctx, repoFullName, repoPath, base)
 	if err != nil || !checked {
-		return forgejoActionRebasePreflight{}, fmt.Errorf("read Forgejo base for rebase preflight: %w", firstNonNil(err, fmt.Errorf("live remote base inspection unavailable")))
+		return forgejoActionRebasePreflight{}, forgejoActionObservationError("read Forgejo base for rebase preflight", firstNonNil(err, fmt.Errorf("live remote base inspection unavailable")))
 	}
 	liveBase, err := agreeLiveRebaseBase(ctx, repoPath, intent.ExpectedBaseSHA, baseSHA, forgejoBase)
 	if err != nil {
+		if IsForgejoActionObservationUnavailable(err) {
+			return forgejoActionRebasePreflight{}, err
+		}
 		return forgejoActionRebasePreflight{}, forgejoActionProjectionError(pr, event, intent.ExpectedBaseSHA, firstNonEmpty(baseSHA, forgejoBase), forgejointegration.ProjectionFailureSHADrift, "live AGS and Forgejo base facts are not a fast-forward of the exact intent: "+err.Error())
 	}
 	for label, actual := range map[string]string{
@@ -704,11 +754,11 @@ func exactGitSHA(a, b string) bool {
 func (s *Service) forgejoActionBaseChanged(ctx context.Context, preflight forgejoActionRebasePreflight, headSHA string) (bool, string, error) {
 	agsBase, err := s.Git.HeadSHA(ctx, preflight.RepoFullName, preflight.Projection.TargetBranch)
 	if err != nil {
-		return false, "", fmt.Errorf("read AGS base after rebase: %w", err)
+		return false, "", forgejoActionReadError("read AGS base after rebase", err)
 	}
 	forgejoBase, checked, err := s.ForgejoIntegration.RemoteBranchSHA(ctx, preflight.RepoFullName, preflight.RepoPath, preflight.Projection.TargetBranch)
 	if err != nil || !checked {
-		return false, "", fmt.Errorf("read Forgejo base after rebase: %w", firstNonNil(err, fmt.Errorf("live remote base inspection unavailable")))
+		return false, "", forgejoActionObservationError("read Forgejo base after rebase", firstNonNil(err, fmt.Errorf("live remote base inspection unavailable")))
 	}
 	if !exactGitSHA(agsBase, preflight.BaseSHA) || !exactGitSHA(forgejoBase, preflight.ForgejoBaseSHA) || !exactGitSHA(agsBase, forgejoBase) {
 		return true, fmt.Sprintf("Base `%s` changed during the action window: preflight AGS/Forgejo `%s`, current AGS `%s`, current Forgejo `%s`.", preflight.Projection.TargetBranch, preflight.BaseSHA, agsBase, forgejoBase), nil
@@ -726,28 +776,28 @@ func (s *Service) forgejoActionBaseChanged(ctx context.Context, preflight forgej
 func (s *Service) verifyForgejoActionConvergence(ctx context.Context, event forgejointegration.PullRequestActionLabelEvent, pr db.PullRequest, preflight forgejoActionRebasePreflight, expectedSHA string) error {
 	agsBranch, err := s.Git.HeadSHA(ctx, preflight.RepoFullName, pr.HeadRef)
 	if err != nil {
-		return fmt.Errorf("read AGS branch during convergence verification: %w", err)
+		return forgejoActionReadError("read AGS branch during convergence verification", err)
 	}
 	if !exactGitSHA(agsBranch, expectedSHA) {
 		return forgejoActionProjectionError(pr, event, expectedSHA, agsBranch, forgejointegration.ProjectionFailureSHADrift, "AGS branch changed before convergence verification")
 	}
 	freshPR, err := s.GetPR(ctx, preflight.RepoFullName, pr.Number)
 	if err != nil {
-		return fmt.Errorf("read AGS PR during convergence verification: %w", err)
+		return forgejoActionReadError("read AGS PR during convergence verification", err)
 	}
 	if !exactGitSHA(freshPR.HeadSHA, expectedSHA) {
 		return forgejoActionProjectionError(pr, event, expectedSHA, freshPR.HeadSHA, forgejointegration.ProjectionFailureSHADrift, "AGS PR head did not converge")
 	}
 	forgejoBranch, checked, err := s.ForgejoIntegration.RemoteBranchSHA(ctx, preflight.RepoFullName, preflight.RepoPath, pr.HeadRef)
 	if err != nil || !checked {
-		return fmt.Errorf("read Forgejo branch during convergence verification: %w", firstNonNil(err, fmt.Errorf("live remote ref inspection unavailable")))
+		return forgejoActionObservationError("read Forgejo branch during convergence verification", firstNonNil(err, fmt.Errorf("live remote ref inspection unavailable")))
 	}
 	if !exactGitSHA(forgejoBranch, expectedSHA) {
 		return forgejoActionProjectionError(pr, event, expectedSHA, forgejoBranch, forgejointegration.ProjectionFailureSHADrift, "Forgejo branch did not converge")
 	}
 	forgejoPR, found, err := s.ForgejoIntegration.PullRequestSnapshot(ctx, preflight.RepoFullName, preflight.Projection.ExternalRepo, event.PRNumber)
 	if err != nil {
-		return fmt.Errorf("read Forgejo PR during convergence verification: %w", err)
+		return forgejoActionObservationError("read Forgejo PR during convergence verification", err)
 	}
 	if !found || forgejoPR.HeadRef != pr.HeadRef || forgejoPR.BaseRef != pr.BaseRef || !exactGitSHA(forgejoPR.HeadSHA, expectedSHA) {
 		actual := ""
@@ -756,7 +806,10 @@ func (s *Service) verifyForgejoActionConvergence(ctx context.Context, event forg
 		}
 		return forgejoActionProjectionError(pr, event, expectedSHA, actual, forgejointegration.ProjectionFailurePullRequestStateDrift, "Forgejo PR head did not converge")
 	}
-	projection, ok := s.forgejoProjectionForPullRequest(ctx, pr.ID)
+	projection, ok, readErr := s.readForgejoActionProjection(ctx, pr.ID)
+	if readErr != nil {
+		return readErr
+	}
 	if !ok || projection.ExternalRepo != event.RepoFullName || projection.ExternalNumber != event.PRNumber || !exactGitSHA(projection.LastSyncedSHA, expectedSHA) {
 		actual := ""
 		if ok {

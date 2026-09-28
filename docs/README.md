@@ -41,6 +41,7 @@ accepted direction, or incremental work that has not fully landed yet.
 - [Principal-Bound Operation-Scoped Session](design/delegated-agent-session.md)
 - [Authorization Layer](design/authz-layer.md)
 - [Wiki Storage Re-Architecture](design/wiki-storage-rearchitecture.md)
+- [Forgejo Rebase Execution Lifetime](design/forgejo-rebase-execution-lifetime.md) - proposed handoff to the existing worker; not implemented or approved.
 
 ## Testing And Operations
 

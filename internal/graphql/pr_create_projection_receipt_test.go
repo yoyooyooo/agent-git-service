@@ -101,6 +101,15 @@ func TestCreatePRProjectionReceiptKeepsNativeSuccessAndHonorsSelection(t *testin
 	if ready["projectionJob"].(map[string]any)["externalUrl"] != externalURL {
 		t.Fatal("durable job URL missing")
 	}
+	// The provider row is reused for a rebase action. It must not disappear
+	// from the PR-level projection summary merely because its trigger changed.
+	if err = database.Model(&job).Updates(map[string]any{"trigger": service.ForgejoProjectionTriggerActionRebase, "action_generation": 2, "phase": service.ForgejoProjectionPhaseFailedRetryable}).Error; err != nil {
+		t.Fatal(err)
+	}
+	actionSummary := render()["projectionJob"].(map[string]any)
+	if actionSummary["trigger"] != service.ForgejoProjectionTriggerActionRebase || actionSummary["actionGeneration"] != uint(2) || actionSummary["nextRepairAction"] != "call_projection_retry" {
+		t.Fatal("action job hidden or recovery misrepresented", actionSummary)
+	}
 	// A stock gh query must not eagerly query projection tables just because they
 	// exist. Its id/url contract is unchanged and it never receives a fake URL.
 	queried := 0

@@ -93,8 +93,8 @@ func (s *Service) ListPullRequestProjectionsBatch(ctx context.Context, pullReque
 }
 
 // PullRequestProjectionJob returns the durable Forgejo projection state for one
-// AGS PR. It is a presentation read only: creation remains AGS-authoritative and
-// the asynchronous worker remains the sole owner of provider convergence.
+// AGS PR, including a rebase action that took over the same provider job row.
+// It is a presentation read only; it never dispatches or retries an action.
 func (s *Service) PullRequestProjectionJob(ctx context.Context, pullRequestID uint) (ProjectionJobStatus, bool, error) {
 	if pullRequestID == 0 {
 		return ProjectionJobStatus{}, false, fmt.Errorf("projection job requires pull request ID")
@@ -103,7 +103,7 @@ func (s *Service) PullRequestProjectionJob(ctx context.Context, pullRequestID ui
 	err := s.DBForCtx(ctx).
 		Preload("Attempts").
 		Where("pull_request_id = ? AND provider = ?", pullRequestID, ProjectionProviderForgejo).
-		Where(clause.Eq{Column: "trigger", Value: ForgejoProjectionTriggerPullRequest}).
+		Where(clause.IN{Column: "trigger", Values: []any{ForgejoProjectionTriggerPullRequest, ForgejoProjectionTriggerActionRebase}}).
 		First(&job).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return ProjectionJobStatus{}, false, nil
