@@ -194,8 +194,10 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 	if err != nil {
 		return receipt, err
 	}
+	s.recordMaintenanceAttempt(receipt.StartedAt)
+	defer func() { s.recordMaintenanceResult(receipt) }()
 	err = s.withRepositoryMaintenance(ctx, fullName, func(runCtx context.Context) (runErr error) {
-		receipt.Phase = "storage_lock"
+		s.setMaintenancePhase(&receipt, "storage_lock")
 		release, e := lockRepositoryMaintenance(dir)
 		if e != nil {
 			return e
@@ -213,13 +215,13 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 				}
 			}
 		}()
-		receipt.Phase = "storage_inventory"
+		s.setMaintenancePhase(&receipt, "storage_inventory")
 		before, e := inspectStorage(runCtx, dir)
 		if e != nil {
 			return e
 		}
 		receipt.Before = before
-		receipt.Phase = "application_inventory"
+		s.setMaintenancePhase(&receipt, "application_inventory")
 		if loadRoots == nil {
 			return errors.New("application object protection is required")
 		}
@@ -233,7 +235,7 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 			receipt.ErrorCode, receipt.InventorySource = rootInventoryDiagnostic(e)
 			return errors.New("application object inventory failed")
 		}
-		receipt.Phase = "root_validation"
+		s.setMaintenancePhase(&receipt, "root_validation")
 		set := map[string]bool{}
 		if len(roots) > 100000 {
 			return errors.New("application object inventory exceeds budget")
@@ -252,7 +254,7 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 			ordered = append(ordered, oid)
 		}
 		sort.Strings(ordered)
-		receipt.Phase = "object_inventory"
+		s.setMaintenancePhase(&receipt, "object_inventory")
 		if len(ordered) > 0 {
 			out, e := maintenanceGit(runCtx, dir, []byte(strings.Join(ordered, "\n")+"\n"), "cat-file", "--batch-check=%(objectname) %(objecttype)")
 			if e != nil {
@@ -315,11 +317,11 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 		if e != nil {
 			return e
 		}
-		receipt.Phase = "space_preflight"
+		s.setMaintenancePhase(&receipt, "space_preflight")
 		if e = maintenanceSpaceAvailable(dir, before); e != nil {
 			return e
 		}
-		receipt.Phase = "connectivity_preflight"
+		s.setMaintenancePhase(&receipt, "connectivity_preflight")
 		if _, e = maintenanceGit(runCtx, dir, nil, "fsck", "--connectivity-only", "--no-dangling"); e != nil {
 			return e
 		}
@@ -333,15 +335,15 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 			receipt.PruningEnabled = true
 			args = append(args, "gc", "--quiet", "--prune=2.weeks.ago")
 		}
-		receipt.Phase = "native_maintenance"
+		s.setMaintenancePhase(&receipt, "native_maintenance")
 		if _, e = maintenanceGit(runCtx, dir, nil, args...); e != nil {
 			return e
 		}
-		receipt.Phase = "connectivity_readback"
+		s.setMaintenancePhase(&receipt, "connectivity_readback")
 		if _, e = maintenanceGit(runCtx, dir, nil, "fsck", "--connectivity-only", "--no-dangling"); e != nil {
 			return e
 		}
-		receipt.Phase = "ref_readback"
+		s.setMaintenancePhase(&receipt, "ref_readback")
 		afterRefs, e := maintenanceGit(runCtx, dir, nil, "for-each-ref", "--format=%(refname) %(objectname)")
 		if e != nil {
 			return e
@@ -349,10 +351,10 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 		if !bytes.Equal(pinned, afterRefs) {
 			return errors.New("repository refs changed during maintenance")
 		}
-		receipt.Phase = "storage_readback"
+		s.setMaintenancePhase(&receipt, "storage_readback")
 		receipt.After, e = inspectStorage(runCtx, dir)
 		if e == nil {
-			receipt.Phase = "complete"
+			s.setMaintenancePhase(&receipt, "complete")
 		}
 		return e
 	})

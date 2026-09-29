@@ -1167,6 +1167,7 @@ func buildHTTPMux(cfg httpMuxConfig) (muxDeps, error) {
 		ProjectionAlertingOptOut:     cfg.Cfg.AllowMissingProjectionAlerting,
 		AuthorityPolicyCheck:         authorityPolicyCheck,
 		AuthorityPolicyOptOut:        cfg.Cfg.AllowMissingForgejoAuthorityPolicy,
+		GitMaintenanceHealth:         cfg.ServiceDeps.Git.MaintenanceHealth,
 	}))
 
 	return muxDeps{handlers: handlers, router: r, mux: mux}, nil
@@ -1629,6 +1630,7 @@ type readyzConfig struct {
 	ProjectionAlertingOptOut     bool
 	AuthorityPolicyCheck         func(context.Context) error
 	AuthorityPolicyOptOut        bool
+	GitMaintenanceHealth         func() gitstore.MaintenanceHealth
 }
 
 func readyzHandler(cfg readyzConfig) http.HandlerFunc {
@@ -1713,10 +1715,16 @@ func readyzHandler(cfg readyzConfig) http.HandlerFunc {
 		}
 		metrics.ObserveReadyz(status)
 		w.WriteHeader(code)
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		response := map[string]any{
 			"status":  status,
 			"version": cfg.Version,
 			"checks":  checks,
-		})
+		}
+		// Storage housekeeping is observable but never turns an otherwise
+		// healthy primary unavailable merely because it yielded to a user.
+		if cfg.GitMaintenanceHealth != nil {
+			response["git_maintenance"] = cfg.GitMaintenanceHealth()
+		}
+		_ = json.NewEncoder(w).Encode(response)
 	}
 }

@@ -39,6 +39,15 @@ cancelled database preflight remains `deferred`, not a persisted failure;
 upgrades recheck older unclassified failures without manual receipt removal.
 This version does not add external notification delivery.
 
+The existing `/readyz` response also includes a bounded `git_maintenance`
+runtime record: whether the worker started, its last scan and attempt, current
+phase, outcome counters and aggregate admission counts. It contains no repository
+names, object IDs, SQL or credentials. A deferred attempt is observable even when
+the on-disk receipt still describes an older completed/failed operation; it does
+not overwrite that useful durable receipt or count as a success. Housekeeping
+being busy or deferred does not by itself make the primary unready. Startup and
+bounded deferred attempts are also logged with their finite phase.
+
 ## Protection and outcomes
 
 `internal/service/git_maintenance.go` enumerates local object identities from

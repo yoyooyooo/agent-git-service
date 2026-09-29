@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -9,7 +10,42 @@ import (
 	"time"
 
 	"github.com/ngaut/agent-git-service/internal/gitstore"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
+
+func TestMaintenanceHealthReadinessIsInformational(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := database.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	handler := readyzHandler(readyzConfig{
+		MainDB: database,
+		GitMaintenanceHealth: func() gitstore.MaintenanceHealth {
+			return gitstore.MaintenanceHealth{WorkerState: "running", Attempts: 1, Deferred: 1, LastResult: "deferred", LastPhase: "application_inventory"}
+		},
+	})
+	response := httptest.NewRecorder()
+	handler(response, httptest.NewRequest("GET", "/readyz", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("maintenance yield made primary unavailable: %d", response.Code)
+	}
+	var body struct {
+		Status      string                     `json:"status"`
+		Maintenance gitstore.MaintenanceHealth `json:"git_maintenance"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "ready" || body.Maintenance.LastResult != "deferred" || body.Maintenance.LastPhase != "application_inventory" || body.Maintenance.Completed != 0 {
+		t.Fatalf("missing or misleading maintenance evidence: %+v", body)
+	}
+}
 
 func TestMaintenanceLoopStartsAutomaticallyAndStops(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

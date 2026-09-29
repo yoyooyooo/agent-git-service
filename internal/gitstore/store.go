@@ -37,6 +37,7 @@ type Store struct {
 	captureSem  *semaphore.Weighted
 
 	maintenanceAccess repositoryMaintenanceAccess
+	maintenanceHealth maintenanceHealthState
 
 	commitTreeCacheMu    sync.Mutex
 	commitTreeCache      map[string]commitTreeCacheEntry

@@ -16,9 +16,22 @@ import (
 // Maintenance belongs to the primary lifecycle, not cron or an admin console.
 // One serial, paginated scan also visits repositories that receive no pushes.
 func startGitMaintenanceWorker(deps *bootstrapDeps) {
-	if deps == nil || deps.SvcDeps == nil || deps.Store == nil || deps.DB == nil || deps.SrvCtx == nil || deps.Cfg.GitMaintenanceDisabled || deps.Options.authenticator != nil {
+	if deps == nil || deps.Store == nil {
 		return
 	}
+	if deps.Cfg.GitMaintenanceDisabled {
+		deps.Store.SetMaintenanceWorkerState("disabled")
+		return
+	}
+	if deps.Options.authenticator != nil {
+		deps.Store.SetMaintenanceWorkerState("embedded_auth")
+		return
+	}
+	if deps.SvcDeps == nil || deps.DB == nil || deps.SrvCtx == nil {
+		deps.Store.SetMaintenanceWorkerState("dependencies_missing")
+		return
+	}
+	deps.Store.SetMaintenanceWorkerState("running")
 	interval := deps.Cfg.GitMaintenanceInterval
 	if interval <= 0 {
 		interval = time.Hour
@@ -31,10 +44,13 @@ func startGitMaintenanceWorker(deps *bootstrapDeps) {
 	svc.Wg.Add(1)
 	go func() {
 		defer svc.Wg.Done()
+		defer deps.Store.SetMaintenanceWorkerState("stopped")
+		slog.InfoContext(deps.SrvCtx, "git maintenance worker started", "interval", interval.String(), "timeout", timeout.String())
 		var cursor uint
 		var retryBatch []db.Repository
 		retries := 0
 		runMaintenanceLoop(deps.SrvCtx, 30*time.Second, interval, func(ctx context.Context) bool {
+			deps.Store.RecordMaintenanceScan()
 			var repos []db.Repository
 			retrying := len(retryBatch) > 0
 			if retrying {
@@ -85,7 +101,8 @@ func startGitMaintenanceWorker(deps *bootstrapDeps) {
 						slog.WarnContext(ctx, "git maintenance preserved all objects because application references are missing", "repository_id", repo.ID, "missing_objects", receipt.MissingApplicationObjects, "pruning_enabled", false)
 					}
 				case errors.Is(err, gitstore.ErrMaintenanceBusy), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-					slog.DebugContext(ctx, "git repository maintenance deferred", "repository_id", repo.ID)
+					activity := deps.Store.MaintenanceHealth()
+					slog.InfoContext(ctx, "git repository maintenance deferred", "repository_id", repo.ID, "phase", receipt.Phase, "global_operations", activity.GlobalOperations, "scoped_operations", activity.ScopedOperations)
 					// Two near-term retries are enough to catch a quiet window without
 					// indefinitely starving the next bounded inventory page.
 					if retries < 2 && ctx.Err() == nil {
