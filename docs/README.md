@@ -48,6 +48,7 @@ accepted direction, or incremental work that has not fully landed yet.
 - [Fork Governance](../fork/README.md) - GitHub source workflow, upstream generations, capability review and publication gates.
 - [Production Deployment](production-deployment.md)
 - [Single-root User Runtime](operations/user-runtime.md) - one installation under `~/.ags`, durable startup inputs, bounded logs and explicit migration.
+- [Automatic Git Maintenance](operations/git-maintenance.md) - primary-owned storage housekeeping, application object protection and explicit history-retirement boundaries.
 - [Official gh and Task Runs](operations/official-gh.md) - origin-based official clients, native run identity and association without command shims.
 - [Independent CI Backends](architecture/ci-backends.md) - configurable native/none/Forgejo/GitHub Actions evidence, namespaced IDs and explicit capability limits.
 - [AGS Edge Host Gateway](operations/ags-edge-host-gateway.md) - global client routing, node-only prewarming, diagnostics and failure semantics.

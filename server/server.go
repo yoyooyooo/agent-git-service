@@ -1115,11 +1115,12 @@ func buildHTTPMux(cfg httpMuxConfig) (muxDeps, error) {
 		return muxDeps{}, err
 	}
 	handlers := &rest.Deps{
-		Svc:                    cfg.ServiceDeps,
-		ReplicationAuthorityID: cfg.Cfg.ReplicationAuthorityID,
-		LegacyExtensionAliases: !cfg.Cfg.DisableLegacyExtensionAliases,
-		ConsoleBaseURL:         cfg.Cfg.ConsoleBaseURL,
-		ProviderLogBridge:      providerLogBridge,
+		Svc:                            cfg.ServiceDeps,
+		ReplicationAuthorityID:         cfg.Cfg.ReplicationAuthorityID,
+		LegacyExtensionAliases:         !cfg.Cfg.DisableLegacyExtensionAliases,
+		ConsoleBaseURL:                 cfg.Cfg.ConsoleBaseURL,
+		ProviderLogBridge:              providerLogBridge,
+		RepositoryMaintenanceAdmission: func(next http.Handler) http.Handler { return repositoryMaintenanceAdmission(cfg.ServiceDeps.Git, next) },
 	}
 
 	r := chi.NewRouter()

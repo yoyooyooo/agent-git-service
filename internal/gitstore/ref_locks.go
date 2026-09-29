@@ -41,7 +41,7 @@ func refLockPath(repoDir, ref string) (string, error) {
 // RepairRefLock removes a stale git ref lock when it is old enough, or when
 // force is true. Fresh locks are left in place and return ErrRefLockActive.
 func (s *Store) RepairRefLock(ctx context.Context, fullName, ref string, staleAfter time.Duration, force bool) (RefLockRepairResult, error) {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return RefLockRepairResult{}, err
 	}

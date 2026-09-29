@@ -275,6 +275,20 @@ func pathParam(r *http.Request, key string) string {
 	return raw
 }
 
+// admitMaintenance follows repository authorization and spans native CGI plus
+// its database follow-up. It does not authorize a Git request.
+func (h *Handler) admitMaintenance(w http.ResponseWriter, r *http.Request, fullName string) (func(), bool) {
+	if h.Svc == nil || h.Svc.Git == nil {
+		return func() {}, true
+	}
+	release, err := h.Svc.Git.BeginMaintenanceAccess(r.Context(), fullName)
+	if err != nil {
+		http.Error(w, "repository operation cancelled", http.StatusServiceUnavailable)
+		return nil, false
+	}
+	return release, true
+}
+
 // InfoRefs handles GET /{owner}/{repo}.git/info/refs?service=git-*
 func (h *Handler) InfoRefs(w http.ResponseWriter, r *http.Request) {
 	svc := r.URL.Query().Get("service")
@@ -286,6 +300,11 @@ func (h *Handler) InfoRefs(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	releaseMaintenance, admitted := h.admitMaintenance(w, r, repoCtx.gitRepoFullName)
+	if !admitted {
+		return
+	}
+	defer releaseMaintenance()
 	if _, delegated := service.DelegatedSessionIDFromContext(r.Context()); delegated {
 		if err := h.revalidateDelegatedGit(r.Context(), repoCtx.repositoryID, svc); err != nil {
 			respond.Error(w, http.StatusForbidden, "Delegated session authority changed before Git operation")
@@ -310,6 +329,11 @@ func (h *Handler) UploadPack(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	releaseMaintenance, admitted := h.admitMaintenance(w, r, repoCtx.gitRepoFullName)
+	if !admitted {
+		return
+	}
+	defer releaseMaintenance()
 	if _, delegated := service.DelegatedSessionIDFromContext(r.Context()); delegated {
 		if err := h.revalidateDelegatedGit(r.Context(), repoCtx.repositoryID, "git-upload-pack"); err != nil {
 			respond.Error(w, http.StatusForbidden, "Delegated session authority changed before Git operation")
@@ -338,6 +362,11 @@ func (h *Handler) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		h.logDelegatedGitWrite(r.Context(), "denied", "body_too_large")
 		return
 	}
+	releaseMaintenance, admitted := h.admitMaintenance(w, r, repoCtx.gitRepoFullName)
+	if !admitted {
+		return
+	}
+	defer releaseMaintenance()
 	var configuredProtectedBranches []string
 	if !repoCtx.isWikiBacking {
 		var err error
@@ -370,7 +399,7 @@ func (h *Handler) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		// mutation lease before WithRepoLock could deadlock a queued capture.
 		r := r
 		if h.Svc.Git != nil {
-			ctx, release, err := h.Svc.Git.BeginMutation(r.Context())
+			ctx, release, err := h.Svc.Git.BeginMutation(r.Context(), repoCtx.gitRepoFullName)
 			if err != nil {
 				return err
 			}
@@ -505,7 +534,7 @@ func (h *Handler) ReceivePack(w http.ResponseWriter, r *http.Request) {
 	applog.AddAttrs(followupCtx, slog.String("repo", repoCtx.repoFullName))
 	if err := h.store.WithRepoLock(followupCtx, repoCtx.gitRepoFullName, func() error {
 		if h.Svc.Git != nil {
-			_, release, err := h.Svc.Git.BeginMutation(followupCtx)
+			_, release, err := h.Svc.Git.BeginMutation(followupCtx, repoCtx.gitRepoFullName)
 			if err != nil {
 				return err
 			}

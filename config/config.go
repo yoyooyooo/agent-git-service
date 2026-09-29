@@ -19,6 +19,11 @@ type Config struct {
 	APIBaseURL string
 	DBdsn      string
 	GitRepoDir string
+	// Automatic maintenance is enabled by default; only explicit configuration
+	// disables it. It never authorizes a history rewrite.
+	GitMaintenanceDisabled bool
+	GitMaintenanceInterval time.Duration
+	GitMaintenanceTimeout  time.Duration
 	// ControlPlaneDSN is retained only to reject retired deployment settings.
 	// It must never silently fall back to the single application database.
 	ControlPlaneDSN string
@@ -470,6 +475,9 @@ func Normalize(cfg Config) (Config, error) {
 		cfg.ConnectedLoginAvatarURLClaim = firstNonEmpty(cfg.ConnectedLoginAvatarURLClaim, "avatar_url")
 		cfg.ConnectedLoginDescriptionClaim = firstNonEmpty(cfg.ConnectedLoginDescriptionClaim, "description")
 		cfg.ConnectedLoginScopeClaim = firstNonEmpty(cfg.ConnectedLoginScopeClaim, "scope")
+	}
+	if err := loadGitMaintenance(&cfg); err != nil {
+		return Config{}, err
 	}
 	return cfg, nil
 }

@@ -13,6 +13,11 @@ import (
 
 // HeadSHA returns the commit SHA of the named branch.
 func (s *Store) HeadSHA(ctx context.Context, fullName, branch string) (string, error) {
+	ctx, release, err := s.beginObjectRead(ctx, fullName)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	repo, err := s.open(ctx, fullName)
 	if err != nil {
 		return "", err
@@ -26,7 +31,7 @@ func (s *Store) HeadSHA(ctx context.Context, fullName, branch string) (string, e
 
 // CreateBranch creates branchName pointing at fromBranch HEAD.
 func (s *Store) CreateBranch(ctx context.Context, fullName, branchName, fromBranch string) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return err
 	}
@@ -45,7 +50,7 @@ func (s *Store) CreateBranch(ctx context.Context, fullName, branchName, fromBran
 
 // CreateBranchFromOid creates a new branch starting at a specific commit OID.
 func (s *Store) CreateBranchFromOid(ctx context.Context, fullName, branchName, oid string) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return err
 	}
@@ -85,7 +90,7 @@ func (s *Store) CreateBranchFromOid(ctx context.Context, fullName, branchName, o
 // CreatePRRef creates a refs/pull/ID/head reference in the base repository,
 // fetching the commit from the head repository if necessary.
 func (s *Store) CreatePRRef(ctx context.Context, baseRepo, headRepo, headSHA string, number int) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, baseRepo, headRepo)
 	if err != nil {
 		return err
 	}
@@ -99,7 +104,7 @@ func (s *Store) CreatePRRef(ctx context.Context, baseRepo, headRepo, headSHA str
 		if err != nil {
 			return err
 		}
-		cmd := exec.CommandContext(ctx, "git", "fetch", headDir, headSHA)
+		cmd := exec.CommandContext(ctx, "git", "fetch", "--no-auto-maintenance", headDir, headSHA)
 		cmd.Dir = baseDir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git fetch %s %s: %v\n%s", headDir, headSHA, err, out)
@@ -116,7 +121,7 @@ func (s *Store) CreatePRRef(ctx context.Context, baseRepo, headRepo, headSHA str
 
 // UpdateRef updates a git reference to point to a new SHA.
 func (s *Store) UpdateRef(ctx context.Context, fullName, ref, sha string) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return err
 	}
@@ -137,7 +142,7 @@ func (s *Store) UpdateRef(ctx context.Context, fullName, ref, sha string) error 
 
 // UpdateRefCAS atomically updates ref from expectedOldSHA to newSHA.
 func (s *Store) UpdateRefCAS(ctx context.Context, fullName, ref, newSHA, expectedOldSHA string) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return err
 	}
@@ -192,7 +197,7 @@ var ErrNonFastForward = errors.New("non-fast-forward update")
 // which is what callers like the audit-ref CAS workflow on
 // refs/locks/* depend on.
 func (s *Store) UpdateRefSafe(ctx context.Context, fullName, ref, newSHA string, force bool) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return err
 	}
@@ -278,7 +283,7 @@ var ErrRefNotFound = errors.New("ref not found")
 // is race-safe even under concurrent POSTs because git refuses the update
 // in the loser's transaction log.
 func (s *Store) CreateRef(ctx context.Context, fullName, ref, sha string) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return err
 	}
@@ -379,7 +384,7 @@ func (s *Store) ListRefsWithPrefix(ctx context.Context, fullName, prefix string)
 
 // DeleteRef deletes a git reference (branch or tag).
 func (s *Store) DeleteRef(ctx context.Context, fullName, ref string) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return err
 	}
@@ -407,6 +412,11 @@ type BranchInfo struct {
 
 // ListBranches returns all branches in a bare git repository.
 func (s *Store) ListBranches(ctx context.Context, fullName string) ([]BranchInfo, error) {
+	ctx, release, err := s.beginObjectRead(ctx, fullName)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	repo, err := s.open(ctx, fullName)
 	if err != nil {
 		return nil, err
@@ -431,7 +441,7 @@ func (s *Store) ListBranches(ctx context.Context, fullName string) ([]BranchInfo
 // CreateTagIfNotExists creates an annotated tag if it doesn't already exist.
 // Returns nil if the tag already exists.
 func (s *Store) CreateTagIfNotExists(ctx context.Context, fullName, tagName, message, sha string) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return err
 	}

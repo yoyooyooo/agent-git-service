@@ -36,6 +36,8 @@ type Store struct {
 	captureOnce sync.Once
 	captureSem  *semaphore.Weighted
 
+	maintenanceAccess repositoryMaintenanceAccess
+
 	commitTreeCacheMu    sync.Mutex
 	commitTreeCache      map[string]commitTreeCacheEntry
 	commitTreeCacheOrder []string
@@ -145,7 +147,7 @@ var ErrNotFound = errors.New("repository not found in gitstore")
 
 // SetupConfig sets remote origin URL in the repo config.
 func (s *Store) SetupConfig(ctx context.Context, fullName, baseURL string) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return err
 	}

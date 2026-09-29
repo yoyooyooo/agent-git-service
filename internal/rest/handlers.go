@@ -127,6 +127,9 @@ type Deps struct {
 	Svc                    *service.Service
 	ConsoleBaseURL         string
 	ProviderLogBridge      http.Handler
+	// Owning-primary storage admission is applied after route authentication
+	// and rate limiting. It never supplies identity or repository permission.
+	RepositoryMaintenanceAdmission func(http.Handler) http.Handler
 	// Empty disables operator registration. Set only by the owning strict
 	// single-DB primary, never taken from client or peer requests.
 	ReplicationAuthorityID string

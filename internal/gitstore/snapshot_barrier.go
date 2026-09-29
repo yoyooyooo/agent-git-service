@@ -18,9 +18,10 @@ const captureWeight int64 = 1 << 30
 type mutationContextKey struct{}
 type snapshotCaptureKey struct{}
 type mutationLease struct {
-	store *Store
-	mu    sync.Mutex
-	refs  int
+	store              *Store
+	mu                 sync.Mutex
+	refs               int
+	maintenanceRelease func()
 }
 
 func (held *mutationLease) retain() bool {
@@ -43,6 +44,7 @@ func (held *mutationLease) releaseFunc() func() {
 			held.mu.Unlock()
 			if last {
 				held.store.captureBarrier().Release(1)
+				held.maintenanceRelease()
 			}
 		})
 	}
@@ -59,25 +61,45 @@ func (s *Store) captureBarrier() *semaphore.Weighted {
 	return s.captureSem
 }
 
+// beginObjectRead protects go-git's lazily opened pack indexes from repacking.
+// A snapshot callback already excludes maintenance, so its read-only access is
+// legal without acquiring a nested shared lease.
+func (s *Store) beginObjectRead(ctx context.Context, names ...string) (context.Context, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return ctx, nil, err
+	}
+	if captured, _ := ctx.Value(snapshotCaptureKey{}).(*Store); captured == s {
+		return ctx, func() {}, nil
+	}
+	return s.BeginMutation(ctx, names...)
+}
+
 // BeginMutation follows any existing repo-local lock; captures never acquire
 // repo locks. Pass the returned context to nested Store methods so they do not
 // deadlock behind a queued capture. Never acquire a repo lock while holding an
 // outer mutation lease. The
 // context is lexical: do not carry it into detached background goroutines.
-func (s *Store) BeginMutation(ctx context.Context) (context.Context, func(), error) {
+func (s *Store) BeginMutation(ctx context.Context, names ...string) (context.Context, func(), error) {
 	if captured, _ := ctx.Value(snapshotCaptureKey{}).(*Store); captured == s {
 		return ctx, nil, errors.New("cannot mutate inside snapshot capture")
 	}
 	if err := ctx.Err(); err != nil {
 		return ctx, nil, err
 	}
-	if held, _ := ctx.Value(mutationContextKey{}).(*mutationLease); held != nil && held.store == s && held.retain() {
-		return ctx, held.releaseFunc(), nil
-	}
-	if err := s.captureBarrier().Acquire(ctx, 1); err != nil {
+	accessRelease, err := s.BeginMaintenanceAccess(ctx, names...)
+	if err != nil {
 		return ctx, nil, err
 	}
-	held := &mutationLease{store: s, refs: 1}
+	if held, _ := ctx.Value(mutationContextKey{}).(*mutationLease); held != nil && held.store == s && held.retain() {
+		sharedRelease := held.releaseFunc()
+		var once sync.Once
+		return ctx, func() { once.Do(func() { sharedRelease(); accessRelease() }) }, nil
+	}
+	if err := s.captureBarrier().Acquire(ctx, 1); err != nil {
+		accessRelease()
+		return ctx, nil, err
+	}
+	held := &mutationLease{store: s, refs: 1, maintenanceRelease: accessRelease}
 	return context.WithValue(ctx, mutationContextKey{}, held), held.releaseFunc(), nil
 }
 
@@ -96,6 +118,11 @@ func (s *Store) WithSnapshotCapture(ctx context.Context, fn func(context.Context
 	if held, _ := ctx.Value(mutationContextKey{}).(*mutationLease); held != nil && held.store == s && held.active() {
 		return errors.New("cannot capture inside a mutation")
 	}
+	accessRelease, err := s.BeginMaintenanceAccess(ctx)
+	if err != nil {
+		return err
+	}
+	defer accessRelease()
 	if err := s.captureBarrier().Acquire(ctx, captureWeight); err != nil {
 		return err
 	}

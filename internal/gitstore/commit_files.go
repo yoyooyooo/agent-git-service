@@ -74,9 +74,11 @@ func (s *Store) CommitFilesAt(ctx context.Context, fullName, branch, message str
 // branch. It is intended for recovery paths that must materialize an empty
 // repository state without deleting any existing branch content.
 func (s *Store) CommitRootEmptyTreeAt(ctx context.Context, fullName, branch, message string, at time.Time) (string, error) {
-	if err := ctx.Err(); err != nil {
+	ctx, release, err := s.BeginMutation(ctx, fullName)
+	if err != nil {
 		return "", err
 	}
+	defer release()
 	repo, err := s.open(ctx, fullName)
 	if err != nil {
 		return "", err
@@ -177,6 +179,11 @@ func (s *Store) buildCommitFilesAt(
 	changes []FileMutation,
 	at time.Time,
 ) (PreparedCommit, error) {
+	ctx, release, err := s.BeginMutation(ctx, fullName)
+	if err != nil {
+		return PreparedCommit{}, err
+	}
+	defer release()
 	if len(changes) == 0 {
 		return PreparedCommit{}, fmt.Errorf("no file changes supplied")
 	}
@@ -208,6 +215,9 @@ func (s *Store) buildCommitFilesAt(
 	cacheKey := fullName + "\x00" + branch
 	tree := s.takeCommitTree(cacheKey, parentHash)
 	if tree != nil {
+		// Storage may have been repacked since the cached tree was built.
+		// Reuse decoded entries, not a go-git storer with stale pack indexes.
+		tree.rebindStore(repo.Storer)
 		// The cached tree already came from this exact parent. Keep the
 		// object-presence check without reopening and decoding the commit.
 		if parentHash != plumbing.ZeroHash {
@@ -281,7 +291,7 @@ func (s *Store) buildCommitFilesAt(
 // PersistPreparedCommit durably writes the objects produced by
 // BuildCommitFilesAt without publishing the branch ref.
 func (s *Store) PersistPreparedCommit(ctx context.Context, prepared PreparedCommit) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, prepared.fullName)
 	if err != nil {
 		return err
 	}
@@ -311,7 +321,7 @@ func (s *Store) PersistPreparedCommit(ctx context.Context, prepared PreparedComm
 // PublishPreparedCommit advances branch to a previously prepared commit if the
 // branch still points at the parent observed during preparation.
 func (s *Store) PublishPreparedCommit(ctx context.Context, fullName, branch string, prepared PreparedCommit) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return err
 	}
@@ -331,6 +341,12 @@ func (s *Store) PublishPreparedCommit(ctx context.Context, fullName, branch stri
 	if trusted {
 		commitHash = prepared.commitHash
 		parentHash = prepared.parentHash
+		// A prepared commit can span maintenance. Refresh its storage handle
+		// rather than reusing pack indexes retained before repacking.
+		repo, err = s.open(ctx, fullName)
+		if err != nil {
+			return err
+		}
 		if err := repo.Storer.HasEncodedObject(commitHash); err != nil {
 			return fmt.Errorf("check prepared commit %s: %w", commitHash, err)
 		}
@@ -475,6 +491,13 @@ type mutableGitTree struct {
 	sortedEntries []object.TreeEntry
 	children      map[string]*mutableGitTree
 	dirty         bool
+}
+
+func (t *mutableGitTree) rebindStore(store storer.EncodedObjectStorer) {
+	t.store = store
+	for _, child := range t.children {
+		child.rebindStore(store)
+	}
 }
 
 func loadMutableGitTree(store storer.EncodedObjectStorer, hash plumbing.Hash) (*mutableGitTree, error) {

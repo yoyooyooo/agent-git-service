@@ -288,6 +288,9 @@ func registerPublicRepoRoutes(r chi.Router, handlers *rest.Deps, rateLimitMw fun
 		r.Use(srvmiddleware.EnforceDelegatedSessionSurface(handlers.Svc))
 		r.Use(rateLimitMw)
 		r.Use(srvmiddleware.RequireAuthForWrites(handlers.Svc))
+		if handlers.RepositoryMaintenanceAdmission != nil {
+			r.Use(handlers.RepositoryMaintenanceAdmission)
+		}
 
 		registerRepoRoutes(r, handlers)
 	})
@@ -307,6 +310,9 @@ func registerAuthenticatedRoutes(r chi.Router, handlers *rest.Deps, gqlSrv *grap
 		r.Use(srvmiddleware.TokenAuthWithEmbeddedIdentity(handlers.Svc, embeddedAuth))
 		r.Use(srvmiddleware.EnforceDelegatedSessionSurface(handlers.Svc))
 		r.Use(rateLimitMw)
+		if handlers.RepositoryMaintenanceAdmission != nil {
+			r.Use(handlers.RepositoryMaintenanceAdmission)
+		}
 
 		registerGraphQLRoutes(r, gqlSrv)
 		registerUserScopedRoutes(r, handlers)
@@ -327,6 +333,9 @@ func registerAuthenticatedRoutes(r chi.Router, handlers *rest.Deps, gqlSrv *grap
 func registerExecutionContextIntakeRoutes(r chi.Router, handlers *rest.Deps, rateLimitMw func(http.Handler) http.Handler) {
 	r.Group(func(r chi.Router) {
 		r.Use(rateLimitMw)
+		if handlers.RepositoryMaintenanceAdmission != nil {
+			r.Use(handlers.RepositoryMaintenanceAdmission)
+		}
 		r.Post("/api/v3/execution-context/intake", handlers.IntakeExecutionContext)
 	})
 }
@@ -336,6 +345,9 @@ func registerAccessGrantRoutes(r chi.Router, handlers *rest.Deps, rateLimitMw fu
 	// Source locators never select a different database.
 	r.Group(func(r chi.Router) {
 		r.Use(rateLimitMw)
+		if handlers.RepositoryMaintenanceAdmission != nil {
+			r.Use(handlers.RepositoryMaintenanceAdmission)
+		}
 		r.Post("/api/v3/access-grants", handlers.IssueAccessGrant)
 		r.Post("/api/v3/access-grants/renew", handlers.RenewAccessGrant)
 		r.Get("/api/v3/access-grants/current", handlers.GetCurrentAccessGrant)

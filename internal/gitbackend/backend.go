@@ -126,11 +126,13 @@ func Serve(w http.ResponseWriter, r *http.Request, req Request) error {
 		env = append(env,
 			"AGS_GIT_HTTP_RECEIVE_PACK=1",
 			"AGS_GIT_HTTP_PROTECTED_REFS="+strings.Join(req.ProtectedRefs, ":"),
+			"GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=gc.auto", "GIT_CONFIG_VALUE_0=0",
+			"GIT_CONFIG_KEY_1=maintenance.auto", "GIT_CONFIG_VALUE_1=false",
 		)
 	}
 	if req.AllowDeleteCurrent {
-		env = append(env, "AGS_SYNTHETIC_WIKI_WRITE=1", "GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=receive.denyDeleteCurrent", "GIT_CONFIG_VALUE_0=ignore")
+		env = append(env, "AGS_SYNTHETIC_WIKI_WRITE=1", "GIT_CONFIG_COUNT=3",
+			"GIT_CONFIG_KEY_2=receive.denyDeleteCurrent", "GIT_CONFIG_VALUE_2=ignore")
 	}
 	if req.Delegated {
 		env = append(env,

@@ -104,7 +104,7 @@ func (s *Store) withTempClone(ctx context.Context, fullName string, opts tempClo
 	mu := s.repoLock(ctx, fullName)
 	mu.Lock()
 	defer mu.Unlock()
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return "", err
 	}
@@ -158,9 +158,9 @@ func (s *Store) withTempClone(ctx context.Context, fullName string, opts tempClo
 		return sha, nil
 	}
 	if opts.pushBranch != "" {
-		if pushOut, err := exec.CommandContext(ctx, "git", "-C", tmpDir, "push", "origin", opts.pushBranch).CombinedOutput(); err != nil {
+		if pushOut, err := exec.CommandContext(ctx, "git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-C", tmpDir, "push", "origin", opts.pushBranch).CombinedOutput(); err != nil {
 			if opts.allowForcePush {
-				if pushOut2, err2 := exec.CommandContext(ctx, "git", "-C", tmpDir, "push", "--force", "origin", opts.pushBranch).CombinedOutput(); err2 != nil {
+				if pushOut2, err2 := exec.CommandContext(ctx, "git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-C", tmpDir, "push", "--force", "origin", opts.pushBranch).CombinedOutput(); err2 != nil {
 					return "", fmt.Errorf("git push failed: %v\n%s", err2, string(pushOut2))
 				}
 			} else {
@@ -312,7 +312,7 @@ func (s *Store) RevertMerge(ctx context.Context, fullName, baseBranch, mergeComm
 	mu := s.repoLock(ctx, fullName)
 	mu.Lock()
 	defer mu.Unlock()
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return "", err
 	}

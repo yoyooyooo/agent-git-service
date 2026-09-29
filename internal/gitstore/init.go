@@ -21,7 +21,7 @@ import (
 
 // Init creates a new bare git repository, optionally seeding a README commit.
 func (s *Store) Init(ctx context.Context, fullName, defaultBranch string, seed bool) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return err
 	}
@@ -63,7 +63,7 @@ func (s *Store) Init(ctx context.Context, fullName, defaultBranch string, seed b
 
 // Fork creates a copy of the repository by duplicating its directory structure.
 func (s *Store) Fork(ctx context.Context, srcFullName, targetFullName string) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, srcFullName, targetFullName)
 	if err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func (s *Store) Fork(ctx context.Context, srcFullName, targetFullName string) er
 // serving so upgraded repositories receive both delegated-session and durable
 // default-branch invariants without replacing repo-local policies.
 func (s *Store) EnsureReceivePolicy(ctx context.Context, fullName string) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return err
 	}
@@ -366,7 +366,7 @@ func writeExecutableAtomically(path string, body []byte) error {
 
 // Delete removes the on-disk git repository.
 func (s *Store) Delete(ctx context.Context, fullName string) error {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return err
 	}

@@ -110,7 +110,7 @@ func (s *Store) GetGitCommitObject(ctx context.Context, fullName, rev string) (G
 
 // CreateCommitObject writes a low-level commit object without updating any ref.
 func (s *Store) CreateCommitObject(ctx context.Context, fullName string, opts CreateCommitOptions) (GitCommitObject, error) {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return GitCommitObject{}, err
 	}
@@ -210,7 +210,7 @@ func (s *Store) GetGitTagObject(ctx context.Context, fullName, rev string) (GitT
 
 // CreateTagObject writes an annotated tag object without updating any ref.
 func (s *Store) CreateTagObject(ctx context.Context, fullName string, opts CreateTagOptions) (GitTagObject, error) {
-	ctx, release, err := s.BeginMutation(ctx)
+	ctx, release, err := s.BeginMutation(ctx, fullName)
 	if err != nil {
 		return GitTagObject{}, err
 	}

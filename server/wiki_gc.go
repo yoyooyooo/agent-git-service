@@ -21,6 +21,7 @@ func startRuntimeWorkers(deps *bootstrapDeps) {
 		return
 	}
 	startWikiCatalogGCWorker(deps.SvcDeps)
+	startGitMaintenanceWorker(deps)
 	if deps.SvcDeps != nil {
 		deps.SvcDeps.StartWikiSearchProjectionWorker()
 		deps.SvcDeps.StartWikiReferenceEffectsRecoveryWorker()
