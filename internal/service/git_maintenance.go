@@ -3,11 +3,11 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/ngaut/agent-git-service/internal/db"
+	"github.com/ngaut/agent-git-service/internal/gitstore"
 )
 
 // GitMaintenanceRoots enumerates authoritative local Git identities, not
@@ -16,7 +16,7 @@ import (
 // Query results are bounded and credential-free; there is no second database.
 func (s *Service) GitMaintenanceRoots(ctx context.Context, repo db.Repository) ([]string, error) {
 	if s == nil || s.DBForCtx(ctx) == nil {
-		return nil, fmt.Errorf("application database unavailable")
+		return nil, &gitstore.RootInventoryError{Code: "database_unavailable"}
 	}
 	database := s.DBForCtx(ctx).WithContext(ctx)
 	roots := map[string]bool{}
@@ -25,18 +25,21 @@ func (s *Service) GitMaintenanceRoots(ctx context.Context, repo db.Repository) (
 			var values []string
 			q := database.Table(table).Where(where, args...).Where(column+" IS NOT NULL AND "+column+" <> ?", "").Distinct(column).Limit(100001)
 			if err := q.Pluck(column, &values).Error; err != nil {
-				return fmt.Errorf("query application Git roots: %s.%s", table, column)
+				return &gitstore.RootInventoryError{Code: "query_failed", Source: table + "." + column}
 			}
 			if len(values) > 100000 {
-				return fmt.Errorf("application Git root inventory exceeds maintenance budget")
+				return &gitstore.RootInventoryError{Code: "inventory_budget", Source: table + "." + column}
 			}
 			for _, oid := range values {
 				if oid == strings.Repeat("0", 40) {
 					continue
 				}
+				if len(oid) != 40 || strings.Trim(oid, "0123456789abcdef") != "" {
+					return &gitstore.RootInventoryError{Code: "invalid_oid", Source: table + "." + column}
+				}
 				roots[oid] = true
 				if len(roots) > 100000 {
-					return fmt.Errorf("application Git root inventory exceeds maintenance budget")
+					return &gitstore.RootInventoryError{Code: "inventory_budget", Source: table + "." + column}
 				}
 			}
 		}
@@ -73,25 +76,25 @@ func (s *Service) GitMaintenanceRoots(ctx context.Context, repo db.Repository) (
 	for _, spec := range []struct{ table, column string }{{"access_grant_invocations", "constraints_json"}, {"delegated_agent_sessions", "operation_constraints"}} {
 		rows, err := database.Table(spec.table).Select(spec.column).Where("repository_id = ? AND "+spec.column+" IS NOT NULL AND "+spec.column+" <> ?", repo.ID, "").Rows()
 		if err != nil {
-			return nil, fmt.Errorf("query application constraint roots")
+			return nil, &gitstore.RootInventoryError{Code: "query_failed", Source: spec.table + "." + spec.column}
 		}
 		var total, count int
 		for rows.Next() {
 			var raw string
 			if err = rows.Scan(&raw); err != nil {
 				rows.Close()
-				return nil, fmt.Errorf("read application constraint roots")
+				return nil, &gitstore.RootInventoryError{Code: "scan_failed", Source: spec.table + "." + spec.column}
 			}
 			total += len(raw)
 			count++
 			if total > 16*1024*1024 || count > 100000 {
 				rows.Close()
-				return nil, fmt.Errorf("application constraints exceed maintenance budget")
+				return nil, &gitstore.RootInventoryError{Code: "inventory_budget", Source: spec.table + "." + spec.column}
 			}
 			var values map[string]json.RawMessage
 			if err = json.Unmarshal([]byte(raw), &values); err != nil {
 				rows.Close()
-				return nil, fmt.Errorf("invalid application constraint roots")
+				return nil, &gitstore.RootInventoryError{Code: "constraints_invalid", Source: spec.table + "." + spec.column}
 			}
 			for _, key := range []string{"head_sha", "base_sha", "expected_head_sha", "expected_base_sha", "exact_head", "commit_sha", "sha", "ref"} {
 				var oid string
@@ -101,23 +104,23 @@ func (s *Service) GitMaintenanceRoots(ctx context.Context, repo db.Repository) (
 			}
 			if len(roots) > 100000 {
 				rows.Close()
-				return nil, fmt.Errorf("application Git root inventory exceeds maintenance budget")
+				return nil, &gitstore.RootInventoryError{Code: "inventory_budget", Source: spec.table + "." + spec.column}
 			}
 		}
 		err = rows.Err()
 		rows.Close()
 		if err != nil {
-			return nil, fmt.Errorf("incomplete application constraint roots")
+			return nil, &gitstore.RootInventoryError{Code: "scan_failed", Source: spec.table + "." + spec.column}
 		}
 	}
 	// Deployments store a ref, not a sha column. Symbolic names are already
 	// protected by Git; an explicit OID in Ref is an additional application root.
 	var deploymentRefs []string
 	if err := database.Model(&db.Deployment{}).Where("repository_id = ?", repo.ID).Limit(100001).Pluck("ref", &deploymentRefs).Error; err != nil {
-		return nil, fmt.Errorf("query deployment refs")
+		return nil, &gitstore.RootInventoryError{Code: "query_failed", Source: "deployments.ref"}
 	}
 	if len(deploymentRefs) > 100000 {
-		return nil, fmt.Errorf("deployment inventory exceeds maintenance budget")
+		return nil, &gitstore.RootInventoryError{Code: "inventory_budget", Source: "deployments.ref"}
 	}
 	for _, ref := range deploymentRefs {
 		if len(ref) == 40 && strings.Trim(ref, "0123456789abcdef") == "" && ref != strings.Repeat("0", 40) {

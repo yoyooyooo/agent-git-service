@@ -39,6 +39,8 @@ type MaintenanceReceipt struct {
 	FinishedAt                time.Time    `json:"finished_at"`
 	Status                    string       `json:"status"`
 	ErrorCode                 string       `json:"error_code,omitempty"`
+	Phase                     string       `json:"phase,omitempty"`
+	InventorySource           string       `json:"inventory_source,omitempty"`
 	ProtectedObjects          int          `json:"protected_objects"`
 	MissingApplicationObjects int          `json:"missing_application_objects"`
 	PruningEnabled            bool         `json:"pruning_enabled"`
@@ -79,15 +81,18 @@ func maintenanceGit(ctx context.Context, dir string, input []byte, args ...strin
 }
 
 type boundedMaintenanceOutput struct {
-	bytes.Buffer
-	limit int
+	buffer bytes.Buffer
+	limit  int
 }
 
+func (b *boundedMaintenanceOutput) Bytes() []byte { return b.buffer.Bytes() }
 func (b *boundedMaintenanceOutput) Write(p []byte) (int, error) {
-	if len(p) > b.limit-b.Len() {
+	// Do not embed bytes.Buffer: its promoted ReadFrom would let io.Copy
+	// bypass this bound when exec copies child stdout.
+	if len(p) > b.limit-b.buffer.Len() {
 		return 0, errors.New("maintenance output exceeds budget")
 	}
-	return b.Buffer.Write(p)
+	return b.buffer.Write(p)
 }
 
 func (s *Store) InspectStorage(ctx context.Context, fullName string) (StorageStats, error) {
@@ -184,12 +189,13 @@ func (s *Store) WithMaintenance(ctx context.Context, fn func(context.Context) er
 // Stale protection refs intentionally remain: only an explicit history migration
 // may retire an application fact. This prevents GC from inventing retention policy.
 func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots func(context.Context) ([]string, error)) (MaintenanceReceipt, error) {
-	receipt := MaintenanceReceipt{Schema: "ags.git-maintenance.v1", StartedAt: time.Now().UTC(), Status: "running"}
+	receipt := MaintenanceReceipt{Schema: "ags.git-maintenance.v1", StartedAt: time.Now().UTC(), Status: "running", Phase: "admission"}
 	dir, err := s.repoPath(ctx, fullName)
 	if err != nil {
 		return receipt, err
 	}
 	err = s.withRepositoryMaintenance(ctx, fullName, func(runCtx context.Context) (runErr error) {
+		receipt.Phase = "storage_lock"
 		release, e := lockRepositoryMaintenance(dir)
 		if e != nil {
 			return e
@@ -207,18 +213,27 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 				}
 			}
 		}()
+		receipt.Phase = "storage_inventory"
 		before, e := inspectStorage(runCtx, dir)
 		if e != nil {
 			return e
 		}
 		receipt.Before = before
+		receipt.Phase = "application_inventory"
 		if loadRoots == nil {
 			return errors.New("application object protection is required")
 		}
 		roots, e := loadRoots(runCtx)
+		// Foreground access can cancel a database query. Do not turn a normal
+		// yield into a persisted failure/backoff by discarding that context.
+		if runCtx.Err() != nil {
+			return runCtx.Err()
+		}
 		if e != nil {
+			receipt.ErrorCode, receipt.InventorySource = rootInventoryDiagnostic(e)
 			return errors.New("application object inventory failed")
 		}
+		receipt.Phase = "root_validation"
 		set := map[string]bool{}
 		if len(roots) > 100000 {
 			return errors.New("application object inventory exceeds budget")
@@ -237,6 +252,7 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 			ordered = append(ordered, oid)
 		}
 		sort.Strings(ordered)
+		receipt.Phase = "object_inventory"
 		if len(ordered) > 0 {
 			out, e := maintenanceGit(runCtx, dir, []byte(strings.Join(ordered, "\n")+"\n"), "cat-file", "--batch-check=%(objectname) %(objecttype)")
 			if e != nil {
@@ -264,6 +280,7 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 				present = append(present, ordered[i])
 			}
 			ordered = present
+			receipt.Phase = "root_protection"
 			current, e := maintenanceGit(runCtx, dir, nil, "for-each-ref", "--format=%(refname) %(objectname)", "refs/ags/retention/")
 			if e != nil {
 				return e
@@ -298,9 +315,11 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 		if e != nil {
 			return e
 		}
+		receipt.Phase = "space_preflight"
 		if e = maintenanceSpaceAvailable(dir, before); e != nil {
 			return e
 		}
+		receipt.Phase = "connectivity_preflight"
 		if _, e = maintenanceGit(runCtx, dir, nil, "fsck", "--connectivity-only", "--no-dangling"); e != nil {
 			return e
 		}
@@ -314,12 +333,15 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 			receipt.PruningEnabled = true
 			args = append(args, "gc", "--quiet", "--prune=2.weeks.ago")
 		}
+		receipt.Phase = "native_maintenance"
 		if _, e = maintenanceGit(runCtx, dir, nil, args...); e != nil {
 			return e
 		}
+		receipt.Phase = "connectivity_readback"
 		if _, e = maintenanceGit(runCtx, dir, nil, "fsck", "--connectivity-only", "--no-dangling"); e != nil {
 			return e
 		}
+		receipt.Phase = "ref_readback"
 		afterRefs, e := maintenanceGit(runCtx, dir, nil, "for-each-ref", "--format=%(refname) %(objectname)")
 		if e != nil {
 			return e
@@ -327,7 +349,11 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 		if !bytes.Equal(pinned, afterRefs) {
 			return errors.New("repository refs changed during maintenance")
 		}
+		receipt.Phase = "storage_readback"
 		receipt.After, e = inspectStorage(runCtx, dir)
+		if e == nil {
+			receipt.Phase = "complete"
+		}
 		return e
 	})
 	if receipt.FinishedAt.IsZero() {
@@ -350,7 +376,9 @@ func finishMaintenanceReceipt(receipt *MaintenanceReceipt, err error) {
 		receipt.ErrorCode = "foreground_or_shutdown"
 	default:
 		receipt.Status = "failed"
-		receipt.ErrorCode = "maintenance_failed"
+		if receipt.ErrorCode == "" {
+			receipt.ErrorCode = "maintenance_failed"
+		}
 	}
 }
 func canonicalMaintenanceOID(oid string) bool {

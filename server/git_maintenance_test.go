@@ -19,12 +19,13 @@ func TestMaintenanceLoopStartsAutomaticallyAndStops(t *testing.T) {
 	var count atomic.Int32
 	go func() {
 		defer close(done)
-		runMaintenanceLoop(ctx, time.Millisecond, time.Millisecond, func(context.Context) {
+		runMaintenanceLoop(ctx, time.Millisecond, time.Millisecond, func(context.Context) bool {
 			count.Add(1)
 			select {
 			case ran <- struct{}{}:
 			default:
 			}
+			return false
 		})
 	}()
 	select {

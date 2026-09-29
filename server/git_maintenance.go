@@ -32,21 +32,32 @@ func startGitMaintenanceWorker(deps *bootstrapDeps) {
 	go func() {
 		defer svc.Wg.Done()
 		var cursor uint
-		runMaintenanceLoop(deps.SrvCtx, 30*time.Second, interval, func(ctx context.Context) {
+		var retryBatch []db.Repository
+		retries := 0
+		runMaintenanceLoop(deps.SrvCtx, 30*time.Second, interval, func(ctx context.Context) bool {
 			var repos []db.Repository
-			if err := deps.DB.WithContext(ctx).Select("id", "full_name", "default_branch", "delete_branch_on_merge").Where("id > ?", cursor).Order("id").Limit(16).Find(&repos).Error; err != nil {
-				slog.WarnContext(ctx, "git maintenance inventory failed")
-				return
-			}
-			if len(repos) == 0 {
-				cursor = 0
-				return
+			retrying := len(retryBatch) > 0
+			if retrying {
+				repos, retryBatch = retryBatch, nil
+				retries++
+			} else {
+				retries = 0
+				if err := deps.DB.WithContext(ctx).Select("id", "full_name", "default_branch", "delete_branch_on_merge").Where("id > ?", cursor).Order("id").Limit(16).Find(&repos).Error; err != nil {
+					slog.WarnContext(ctx, "git maintenance inventory failed")
+					return false
+				}
+				if len(repos) == 0 {
+					cursor = 0
+					return false
+				}
 			}
 			for _, repo := range repos {
 				if ctx.Err() != nil {
-					return
+					return false
 				}
-				cursor = repo.ID
+				if !retrying {
+					cursor = repo.ID
+				}
 				runCtx, cancel := context.WithTimeout(ctx, timeout)
 				stats, err := deps.Store.InspectStorage(runCtx, repo.FullName)
 				if err != nil {
@@ -75,10 +86,16 @@ func startGitMaintenanceWorker(deps *bootstrapDeps) {
 					}
 				case errors.Is(err, gitstore.ErrMaintenanceBusy), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 					slog.DebugContext(ctx, "git repository maintenance deferred", "repository_id", repo.ID)
+					// Two near-term retries are enough to catch a quiet window without
+					// indefinitely starving the next bounded inventory page.
+					if retries < 2 && ctx.Err() == nil {
+						retryBatch = append(retryBatch, repo)
+					}
 				default:
-					slog.WarnContext(ctx, "git repository maintenance failed", "repository_id", repo.ID, "code", receipt.ErrorCode)
+					slog.WarnContext(ctx, "git repository maintenance failed", "repository_id", repo.ID, "code", receipt.ErrorCode, "phase", receipt.Phase, "inventory_source", receipt.InventorySource)
 				}
 			}
+			return len(retryBatch) > 0
 		})
 	}()
 }
@@ -95,7 +112,9 @@ func storageMaintenanceDue(stats gitstore.StorageStats, previous gitstore.Mainte
 		return false
 	}
 	if previous.Status == "failed" {
-		return age >= time.Hour
+		// Older receipts masked cancelled preflights as failures. The first scan
+		// after this upgrade must re-evaluate them without manual file removal.
+		return previous.Phase == "" || age >= time.Hour
 	}
 	if previous.Status == "completed" || previous.Status == "compacted_no_prune" {
 		if age >= 7*24*time.Hour {
@@ -108,7 +127,7 @@ func storageMaintenanceDue(stats gitstore.StorageStats, previous gitstore.Mainte
 	return stats.LooseObjects >= 1024 || stats.Packs >= 8
 }
 
-func runMaintenanceLoop(ctx context.Context, initial, interval time.Duration, run func(context.Context)) {
+func runMaintenanceLoop(ctx context.Context, initial, interval time.Duration, run func(context.Context) bool) {
 	timer := time.NewTimer(initial)
 	defer timer.Stop()
 	for {
@@ -119,8 +138,11 @@ func runMaintenanceLoop(ctx context.Context, initial, interval time.Duration, ru
 			if ctx.Err() != nil {
 				return
 			}
-			run(ctx)
-			timer.Reset(interval)
+			delay := interval
+			if run(ctx) {
+				delay = min(interval, time.Minute)
+			}
+			timer.Reset(delay)
 		}
 	}
 }

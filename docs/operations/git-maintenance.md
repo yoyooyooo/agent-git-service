@@ -23,14 +23,21 @@ The interval is between bounded scan pages, not a promise that every repository
 is scanned once per interval. New non-empty stores are visited once even when
 small. Recent successful operations are rate-limited; object/pack pressure and
 an eventual weekly refresh make a repository eligible again. Failures are
-retried by later scans. No workflow receives authority from a maintenance
-receipt or a timestamp.
+retried by later scans. A yielded page gets at most two near-term retry scans
+(one minute apart, or the configured interval if shorter), then normal paging
+resumes so a busy repository cannot starve the rest. No workflow receives
+authority from a maintenance receipt or a timestamp.
 
 The worker logs a structured result and stores only the last receipt in the
 repository's owner-only `ags-maintenance.json`. Successful runs are quiet apart
 from the operational log. A changed missing-object condition emits a warning,
 not a claim that the historical data was repaired. No token, user body or
-credential is included. This version does not add external notification delivery.
+credential is included. Failed receipts include the exact bounded maintenance
+phase and, for application inventory errors, a finite reason plus a static
+schema location. They never expose SQL values or constraint contents. A
+cancelled database preflight remains `deferred`, not a persisted failure;
+upgrades recheck older unclassified failures without manual receipt removal.
+This version does not add external notification delivery.
 
 ## Protection and outcomes
 
