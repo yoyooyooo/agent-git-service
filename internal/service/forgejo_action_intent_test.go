@@ -1737,9 +1737,10 @@ func TestStatusNotificationAddLabelDenialTerminalizesBeforeComment(t *testing.T)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, pr, projection := setupIntentTestService(t)
-			client := &minimalForgejoClient{}
-			svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{Enabled: true, BaseURL: "http://forgejo.local", Token: "token"}, client, nil)
+			// Keep successful, explicit provider observations until the injected
+			// add-label denial. A DNS failure is unavailable, not proof that the
+			// intended authority seam was exercised.
+			svc, pr, projection, client := setupIntentTestServiceWithClient(t)
 			intent := seedDispatchedIntent(t, svc, pr, projection)
 			job := db.PullRequestProjectionJob{PullRequestID: pr.ID, RepositoryID: pr.RepositoryID, Provider: ProjectionProviderForgejo, Trigger: ForgejoProjectionTriggerActionRebase, RepoFullName: "example-owner/demo", AGSPRNumber: pr.Number, Phase: ForgejoProjectionPhaseVerifyingPR}
 			ctx := bindTestActionJob(t, svc, intent, &job)
@@ -1757,8 +1758,8 @@ func TestStatusNotificationAddLabelDenialTerminalizesBeforeComment(t *testing.T)
 			defer SetDelegatedProviderWriteHookForTest(svc, nil)
 			event := forgejointegration.PullRequestActionLabelEvent{RepoFullName: projection.ExternalRepo, PRNumber: projection.ExternalNumber}
 			err := tc.run(svc, ctx, event, pr)
-			if !errors.Is(err, ErrDelegatedSessionUseTimeDenied) {
-				t.Fatalf("notification error=%v", err)
+			if !errors.Is(err, ErrDelegatedSessionUseTimeDenied) || DelegatedSessionDenialReason(err) != DelegatedDenialSessionRevoked || checks != len(forgejoWorkflowStatusLabels())+1 {
+				t.Fatalf("notification missed the exact add-label authority denial: checks=%d error=%v", checks, err)
 			}
 			if err := svc.handleForgejoStatusNotificationError(ctx, intent.ID, job.ID, err, "status notification denied", pr.HeadSHA); !errors.Is(err, ErrDelegatedSessionUseTimeDenied) {
 				t.Fatalf("terminal handling error=%v", err)
@@ -1773,10 +1774,10 @@ func TestStatusNotificationAddLabelDenialTerminalizesBeforeComment(t *testing.T)
 				t.Fatalf("intent=%#v job=%#v", intent, job)
 			}
 			client.mu.Lock()
-			addCalls, commentCalls := client.addCalls, client.commentCalls
+			removeCalls, addCalls, commentCalls := client.removeCalls, client.addCalls, client.commentCalls
 			client.mu.Unlock()
-			if addCalls != 0 || commentCalls != 0 {
-				t.Fatalf("provider add=%d comment=%d", addCalls, commentCalls)
+			if removeCalls != len(forgejoWorkflowStatusLabels()) || addCalls != 0 || commentCalls != 0 {
+				t.Fatalf("provider remove=%d add=%d comment=%d", removeCalls, addCalls, commentCalls)
 			}
 		})
 	}

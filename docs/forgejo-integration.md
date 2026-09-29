@@ -619,6 +619,11 @@ or SHA mismatch. Such errors prohibit provider writes but preserve the original
 cause as observation-unavailable; observed missing identities, mismatched refs
 and revoked authority retain their existing denial behavior.
 
+An unavailable observation immediately before action-label removal also returns
+its error; it cannot acknowledge a queued action while silently discarding a
+canceled attempt. Before a job exists, recovery preserves only the admitted
+intent and does not manufacture a job or an executor.
+
 After the attempt returns, a separate five-second context may save only local
 recovery facts in the exact bound intent/job generation. A stale generation or a
 terminal denial/completion cannot be resurrected; original expiry and durable

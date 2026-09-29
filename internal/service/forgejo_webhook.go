@@ -333,6 +333,9 @@ func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event
 		return result, nil
 	}
 	if err := s.removeForgejoPullRequestLabel(ctx, event.RepoFullName, event.PRNumber, forgejointegration.AGSActionRebaseLabel); err != nil {
+		if IsForgejoActionObservationUnavailable(err) {
+			return result, err
+		}
 		if errors.Is(err, ErrDelegatedSessionUseTimeDenied) {
 			code := DelegatedSessionDenialReason(err)
 			_ = s.terminalDenyForgejoAction(ctx, intent.ID, 0, code, "delegated authority changed at provider action-label removal", "")
