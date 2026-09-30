@@ -16,6 +16,7 @@ type MaintenanceHealth struct {
 	LastFinishedAt   time.Time `json:"last_finished_at,omitempty"`
 	LastResult       string    `json:"last_result,omitempty"`
 	LastPhase        string    `json:"last_phase,omitempty"`
+	ActivePhase      string    `json:"active_phase,omitempty"`
 	Attempts         uint64    `json:"attempts"`
 	Completed        uint64    `json:"completed"`
 	Deferred         uint64    `json:"deferred"`
@@ -48,13 +49,26 @@ func (s *Store) recordMaintenanceAttempt(at time.Time) {
 	defer s.maintenanceHealth.mu.Unlock()
 	s.maintenanceHealth.value.Attempts++
 	s.maintenanceHealth.value.LastAttemptAt = at
-	s.maintenanceHealth.value.LastPhase = "admission"
+}
+
+// Bind progress only after this attempt acquired the maintenance admission.
+// A concurrent rejected attempt records its result, but cannot change the
+// phase of the admitted operation.
+func (s *Store) bindMaintenanceProgress(receipt *MaintenanceReceipt) {
+	s.maintenanceAccess.mu.Lock()
+	defer s.maintenanceAccess.mu.Unlock()
+	if run := s.maintenanceAccess.running; run != nil {
+		run.progress = receipt
+		run.phase = receipt.Phase
+	}
 }
 func (s *Store) setMaintenancePhase(receipt *MaintenanceReceipt, phase string) {
 	receipt.Phase = phase
-	s.maintenanceHealth.mu.Lock()
-	defer s.maintenanceHealth.mu.Unlock()
-	s.maintenanceHealth.value.LastPhase = phase
+	s.maintenanceAccess.mu.Lock()
+	defer s.maintenanceAccess.mu.Unlock()
+	if run := s.maintenanceAccess.running; run != nil && run.progress == receipt {
+		run.phase = phase
+	}
 }
 func (s *Store) recordMaintenanceResult(receipt MaintenanceReceipt) {
 	s.maintenanceHealth.mu.Lock()
@@ -84,7 +98,10 @@ func (s *Store) MaintenanceHealth() MaintenanceHealth {
 	}
 	s.maintenanceAccess.mu.Lock()
 	defer s.maintenanceAccess.mu.Unlock()
-	result.Running = s.maintenanceAccess.running != nil
+	if run := s.maintenanceAccess.running; run != nil {
+		result.Running = true
+		result.ActivePhase = run.phase
+	}
 	result.GlobalOperations = s.maintenanceAccess.all
 	for _, count := range s.maintenanceAccess.repos {
 		result.ScopedOperations += count

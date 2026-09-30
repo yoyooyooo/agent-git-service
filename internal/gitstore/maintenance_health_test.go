@@ -56,15 +56,28 @@ func TestMaintenanceHealthShowsActivePhaseWithoutRacing(t *testing.T) {
 	}()
 	<-entered
 	health := s.MaintenanceHealth()
-	if !health.Running || health.Attempts != 1 || health.LastPhase != "application_inventory" {
+	if !health.Running || health.Attempts != 1 || health.ActivePhase != "application_inventory" {
 		t.Fatalf("active phase unavailable: %+v", health)
+	}
+	// A second attempt is rejected while the first is still in its database
+	// preflight. Its latest-result evidence must not overwrite active progress.
+	yielded, err := s.MaintainStorage(context.Background(), "owner/repo", func(context.Context) ([]string, error) {
+		t.Fatal("concurrent attempt entered an occupied maintenance slot")
+		return nil, nil
+	})
+	if !errors.Is(err, ErrMaintenanceBusy) || yielded.Status != "deferred" {
+		t.Fatalf("concurrent yield: %+v %v", yielded, err)
+	}
+	health = s.MaintenanceHealth()
+	if !health.Running || health.Attempts != 2 || health.Deferred != 1 || health.LastResult != "deferred" || health.LastPhase != "admission" || health.ActivePhase != "application_inventory" {
+		t.Fatalf("rejected attempt corrupted active progress: %+v", health)
 	}
 	close(proceed)
 	if err := <-done; err == nil {
 		t.Fatal("inventory failure was hidden")
 	}
 	health = s.MaintenanceHealth()
-	if health.Running || health.Failed != 1 || health.LastResult != "failed" || health.LastPhase != "application_inventory" {
+	if health.Running || health.ActivePhase != "" || health.Failed != 1 || health.LastResult != "failed" || health.LastPhase != "application_inventory" {
 		t.Fatalf("failed phase: %+v", health)
 	}
 	encoded, _ := json.Marshal(health)

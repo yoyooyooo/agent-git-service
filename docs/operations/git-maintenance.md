@@ -40,9 +40,11 @@ upgrades recheck older unclassified failures without manual receipt removal.
 This version does not add external notification delivery.
 
 The existing `/readyz` response also includes a bounded `git_maintenance`
-runtime record: whether the worker started, its last scan and attempt, current
-phase, outcome counters and aggregate admission counts. It contains no repository
-names, object IDs, SQL or credentials. A deferred attempt is observable even when
+runtime record: whether the worker started, its last scan and attempt, active
+phase, outcome counters and aggregate admission counts. `active_phase` belongs
+only to the admitted running operation; `last_phase` and `last_result` describe
+the most recently finished attempt, which may be a concurrent rejected attempt.
+It contains no repository names, object IDs, SQL or credentials. A deferred attempt is observable even when
 the on-disk receipt still describes an older completed/failed operation; it does
 not overwrite that useful durable receipt or count as a success. Housekeeping
 being busy or deferred does not by itself make the primary unready. Startup and

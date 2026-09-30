@@ -19,6 +19,8 @@ type repositoryMaintenanceRun struct {
 	repository string
 	cancel     context.CancelFunc
 	done       chan struct{}
+	progress   *MaintenanceReceipt
+	phase      string
 }
 
 // BeginMaintenanceAccess spans an entire request, including database facts

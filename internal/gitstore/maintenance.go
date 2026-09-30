@@ -197,6 +197,7 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 	s.recordMaintenanceAttempt(receipt.StartedAt)
 	defer func() { s.recordMaintenanceResult(receipt) }()
 	err = s.withRepositoryMaintenance(ctx, fullName, func(runCtx context.Context) (runErr error) {
+		s.bindMaintenanceProgress(&receipt)
 		s.setMaintenancePhase(&receipt, "storage_lock")
 		release, e := lockRepositoryMaintenance(dir)
 		if e != nil {
@@ -282,7 +283,7 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 				present = append(present, ordered[i])
 			}
 			ordered = present
-			receipt.Phase = "root_protection"
+			s.setMaintenancePhase(&receipt, "root_protection")
 			current, e := maintenanceGit(runCtx, dir, nil, "for-each-ref", "--format=%(refname) %(objectname)", "refs/ags/retention/")
 			if e != nil {
 				return e
