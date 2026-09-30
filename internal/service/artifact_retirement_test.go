@@ -13,6 +13,7 @@ import (
 
 	"github.com/ngaut/agent-git-service/internal/artifactretirement"
 	"github.com/ngaut/agent-git-service/internal/db"
+	"github.com/ngaut/agent-git-service/internal/forgejointegration"
 	"github.com/ngaut/agent-git-service/internal/gitstore"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -180,5 +181,88 @@ func TestRunConfiguredArtifactRetirementRewritesHistoryAndIsIdempotent(t *testin
 	cmd.Env = append(os.Environ(), "GIT_NO_REPLACE_OBJECTS=1")
 	if err := cmd.Run(); err == nil {
 		t.Fatal("fresh complete clone still contains retired blob")
+	}
+}
+
+func TestArtifactRetirementResumeRevalidatesProviderBranch(t *testing.T) {
+	svc, repo, _ := retirementServiceFixture(t)
+	ctx := context.Background()
+	engine := []byte(strings.Repeat("legacy-engine\n", 2048))
+	engineCommit, err := svc.Git.WriteFile(ctx, repo.FullName, "main", "packages/ags-cli/libexec/ags-gh-linux-amd64", "vendor engine", engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoPath, err := svc.Git.GetRepoPath(ctx, repo.FullName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobOID := retirementServiceGit(t, repoPath, "rev-parse", engineCommit+":packages/ags-cli/libexec/ags-gh-linux-amd64")
+	if _, err := svc.Git.DeleteFileFromRepo(ctx, repo.FullName, "main", "packages/ags-cli/libexec/ags-gh-linux-amd64", "remove engine"); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(engine)
+	intent := artifactretirement.Intent{
+		Schema: artifactretirement.IntentSchema, OperationID: "resume-provider-readback", Repository: repo.FullName,
+		DefaultBranch: "main", ExpectedAncestor: engineCommit,
+		RecoveryArchive: "off-host://fixture/recovery.bundle", RecoveryArchiveSHA256: strings.Repeat("b", 64),
+		AllowSignatureRemoval: true,
+		RetiredBlobs:          []artifactretirement.BlobSpec{{OID: blobOID, Bytes: int64(len(engine)), SHA256: hex.EncodeToString(sum[:])}},
+	}
+	intentDir := filepath.Join(t.TempDir(), "config")
+	if err := os.MkdirAll(intentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	intentPath := filepath.Join(intentDir, "retirement.json")
+	data, _ := json.Marshal(intent)
+	if err := os.WriteFile(intentPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateRoot := filepath.Join(intentDir, ".artifact-retirement", intent.OperationID)
+	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := artifactretirement.Prepare(ctx, repoPath, stateRoot, intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.BeforeDiskKiB, err = artifactretirement.DiskKiB(repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := artifactretirement.SavePlan(filepath.Join(stateRoot, "plan.json"), plan); err != nil {
+		t.Fatal(err)
+	}
+
+	enabled := true
+	providerHead := plan.OriginalHead
+	svc.ForgejoIntegration = forgejointegration.NewWithGitCapabilities(forgejointegration.Config{
+		Enabled: true, BaseURL: "https://forgejo.example",
+		RepoMap: map[string]forgejointegration.RepoMapping{
+			repo.FullName: {Owner: "mirror", Repo: "repo", Enabled: &enabled},
+		},
+	}, nil, func(_ context.Context, req forgejointegration.PushRequest) error {
+		if req.ForceWithLeaseSHA != plan.OriginalHead || req.ForceWithLeaseRef != "refs/heads/main" {
+			t.Fatalf("unsafe provider rewrite: %+v", req)
+		}
+		providerHead = plan.CleanHead
+		return nil
+	}, func(context.Context, string, string, string) (string, error) {
+		return providerHead, nil
+	})
+	if _, err := svc.rewriteArtifactRetirementProviders(ctx, repo, plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := artifactretirement.Publish(ctx, repoPath, plan); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a third-party provider rewrite after local publication but
+	// before the application reconciliation/receipt was durably recorded.
+	providerHead = strings.Repeat("3", 40)
+	if _, err := svc.RunConfiguredArtifactRetirement(ctx, intentPath); err == nil {
+		t.Fatal("resume trusted stale DB provider evidence")
+	}
+	if providerHead != strings.Repeat("3", 40) {
+		t.Fatalf("resume overwrote third-party provider head: %s", providerHead)
 	}
 }

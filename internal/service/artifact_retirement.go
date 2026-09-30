@@ -128,8 +128,14 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 		if err := artifactretirement.FinalizePublished(ctx, repoPath, plan); err != nil {
 			return receipt, err
 		}
-		providerState, err = s.inferArtifactRetirementProviderCoverage(ctx, repo.ID, plan)
+		// Re-read every still-required provider branch. The lease adapters are
+		// idempotent when the provider already has the clean SHA, so a restart
+		// never has to trust stale DB projection state as proof of convergence.
+		providerState, err = s.rewriteArtifactRetirementProviders(ctx, repo, plan)
 		if err != nil {
+			return receipt, err
+		}
+		if err := s.validateArtifactRetirementProviderCoverage(ctx, repo.ID, plan, providerState); err != nil {
 			return receipt, err
 		}
 	}
@@ -342,31 +348,6 @@ func (s *Service) validateArtifactRetirementProviderCoverage(ctx context.Context
 		}
 	}
 	return nil
-}
-
-// On a resume after local publication, current projection rows are the durable
-// proof of branches that had already converged before publication.
-func (s *Service) inferArtifactRetirementProviderCoverage(ctx context.Context, repositoryID uint, plan artifactretirement.Plan) (retirementProviderState, error) {
-	state := retirementProviderState{}
-	updates := retirementBranchUpdates(plan)
-	var refs []db.ProjectionRefState
-	if err := s.DBForCtx(ctx).WithContext(ctx).Where("repository_id = ?", repositoryID).Find(&refs).Error; err != nil {
-		return nil, errors.New("artifact retirement projection-state resume failed")
-	}
-	for _, row := range refs {
-		if !strings.HasPrefix(row.Ref, "refs/heads/") {
-			continue
-		}
-		branch := strings.TrimPrefix(row.Ref, "refs/heads/")
-		update, changed := updates[branch]
-		if !changed {
-			continue
-		}
-		if row.AGSSHA == update.Old || row.AGSSHA == update.New {
-			markRetirementProvider(state, row.Provider, branch)
-		}
-	}
-	return state, nil
 }
 
 func (s *Service) reconcileArtifactRetirementActiveFacts(ctx context.Context, repositoryID uint, plan artifactretirement.Plan, state retirementProviderState) error {
