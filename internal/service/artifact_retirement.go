@@ -29,6 +29,10 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	if err != nil {
 		return receipt, err
 	}
+	intentSHA, err := artifactretirement.IntentSHA256(intent)
+	if err != nil {
+		return receipt, err
+	}
 	repo, err := s.GetRepo(ctx, intent.Repository)
 	if err != nil {
 		return receipt, err
@@ -49,7 +53,7 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	}
 	receiptPath := filepath.Join(stateRoot, "receipt.json")
 	if existing, err := artifactretirement.LoadReceipt(receiptPath); err == nil {
-		if existing.OperationID != intent.OperationID || existing.Repository != intent.Repository {
+		if existing.OperationID != intent.OperationID || existing.IntentSHA256 != intentSHA || existing.Repository != intent.Repository {
 			return receipt, errors.New("artifact retirement receipt does not match intent")
 		}
 		if err := artifactretirement.VerifyRetiredAbsent(ctx, repoPath, intent.RetiredBlobs); err != nil {
@@ -79,7 +83,7 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	} else if err != nil {
 		return receipt, err
 	}
-	if plan.OperationID != intent.OperationID || plan.Repository != intent.Repository || plan.DefaultBranch != intent.DefaultBranch {
+	if plan.OperationID != intent.OperationID || plan.IntentSHA256 != intentSHA || plan.Repository != intent.Repository || plan.DefaultBranch != intent.DefaultBranch {
 		return receipt, errors.New("artifact retirement saved plan does not match intent")
 	}
 	head, err := artifactretirement.CurrentHead(ctx, repoPath, intent.DefaultBranch)
@@ -157,7 +161,7 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 		retired = append(retired, blob.OID)
 	}
 	receipt = artifactretirement.Receipt{
-		Schema: artifactretirement.ReceiptSchema, OperationID: intent.OperationID, Repository: intent.Repository,
+		Schema: artifactretirement.ReceiptSchema, OperationID: intent.OperationID, IntentSHA256: intentSHA, Repository: intent.Repository,
 		StartedAt: started, FinishedAt: time.Now().UTC(), Status: "completed", Phase: "complete",
 		OriginalHead: plan.OriginalHead, CleanHead: plan.CleanHead, ChangedRefs: len(plan.RefUpdates),
 		ChangedCommits: changedCommits, SignatureRemovals: plan.SignatureRemovals, RetiredBlobs: retired,

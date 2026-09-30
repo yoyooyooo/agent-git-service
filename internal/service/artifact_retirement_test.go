@@ -171,6 +171,15 @@ func TestRunConfiguredArtifactRetirementRewritesHistoryAndIsIdempotent(t *testin
 	if err != nil || again.CleanHead != receipt.CleanHead || !again.FinishedAt.Equal(receipt.FinishedAt) {
 		t.Fatalf("idempotent resume: %+v %v", again, err)
 	}
+	changedIntent := intent
+	changedIntent.RecoveryArchiveSHA256 = strings.Repeat("c", 64)
+	changedData, _ := json.Marshal(changedIntent)
+	if err := os.WriteFile(intentPath, changedData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.RunConfiguredArtifactRetirement(ctx, intentPath); err == nil || !strings.Contains(err.Error(), "receipt does not match intent") {
+		t.Fatalf("changed intent reused a completion receipt: %v", err)
+	}
 	fresh := filepath.Join(t.TempDir(), "fresh")
 	cmd = exec.Command("git", "clone", "--no-local", repoPath, fresh)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
@@ -230,6 +239,18 @@ func TestArtifactRetirementResumeRevalidatesProviderBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := artifactretirement.SavePlan(filepath.Join(stateRoot, "plan.json"), plan); err != nil {
+		t.Fatal(err)
+	}
+	tamperedIntent := intent
+	tamperedIntent.RecoveryArchiveSHA256 = strings.Repeat("c", 64)
+	tamperedData, _ := json.Marshal(tamperedIntent)
+	if err := os.WriteFile(intentPath, tamperedData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.RunConfiguredArtifactRetirement(ctx, intentPath); err == nil || !strings.Contains(err.Error(), "saved plan does not match intent") {
+		t.Fatalf("changed intent reused an existing plan: %v", err)
+	}
+	if err := os.WriteFile(intentPath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 

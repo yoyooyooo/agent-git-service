@@ -107,11 +107,13 @@ receipts remain on their original SHA.
 ## Durable state and recovery
 
 A private sibling state directory stores the deterministic plan and completed
-receipt. The plan records original/clean refs, the commit map, expected current
-tree, signature removals and staging location. If staging disappears before
-publication it is rebuilt and must reproduce the same old/new default head and
-tree. If local refs are already clean after a crash, startup verifies the
-replacement map, finishes GC/readback and resumes DB reconciliation.
+receipt. Both are bound to the SHA-256 of the complete canonical intent; reusing
+an `operation_id` with different blobs, ancestor or recovery evidence is refused.
+The plan records original/clean refs, the commit map, expected current tree,
+signature removals and staging location. If staging disappears before publication
+it is rebuilt and must reproduce the same old/new default head and tree. If local
+refs are already clean after a crash, startup re-reads required provider branches,
+verifies the replacement map, finishes GC/readback and resumes DB reconciliation.
 
 The intent requires an operator-owned off-host recovery locator and digest.
 AGS records that evidence; it does not create or upload the external archive or

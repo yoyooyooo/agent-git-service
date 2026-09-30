@@ -18,6 +18,7 @@ const ReceiptSchema = "ags.artifact-retirement.receipt.v1"
 type Receipt struct {
 	Schema             string    `json:"schema"`
 	OperationID        string    `json:"operation_id"`
+	IntentSHA256       string    `json:"intent_sha256"`
 	Repository         string    `json:"repository"`
 	StartedAt          time.Time `json:"started_at"`
 	FinishedAt         time.Time `json:"finished_at"`
@@ -66,7 +67,7 @@ func LoadPlan(path string) (Plan, error) {
 	if err := readPrivateJSON(path, &plan); err != nil {
 		return plan, err
 	}
-	if !safeID(plan.OperationID) || !safeRepo(plan.Repository) || !safeBranch(plan.DefaultBranch) ||
+	if !safeID(plan.OperationID) || !fullDigest(plan.IntentSHA256) || !safeRepo(plan.Repository) || !safeBranch(plan.DefaultBranch) ||
 		!fullOID(plan.OriginalHead) || !fullOID(plan.CleanHead) || !fullOID(plan.DefaultTree) ||
 		len(plan.CommitMap) == 0 || len(plan.OriginalRefs) == 0 || len(plan.CleanRefs) == 0 ||
 		len(plan.RetiredBlobs) == 0 || strings.TrimSpace(plan.StagingGitDir) == "" {
@@ -84,7 +85,7 @@ func LoadReceipt(path string) (Receipt, error) {
 	if err := readPrivateJSON(path, &receipt); err != nil {
 		return receipt, err
 	}
-	if receipt.Schema != ReceiptSchema || !safeID(receipt.OperationID) || !safeRepo(receipt.Repository) ||
+	if receipt.Schema != ReceiptSchema || !safeID(receipt.OperationID) || !fullDigest(receipt.IntentSHA256) || !safeRepo(receipt.Repository) ||
 		receipt.StartedAt.IsZero() || receipt.FinishedAt.Before(receipt.StartedAt) || receipt.Status != "completed" {
 		return receipt, errors.New("invalid artifact retirement receipt")
 	}

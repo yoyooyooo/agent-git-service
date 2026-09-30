@@ -45,6 +45,7 @@ type RefUpdate struct {
 
 type Plan struct {
 	OperationID       string            `json:"operation_id"`
+	IntentSHA256      string            `json:"intent_sha256"`
 	Repository        string            `json:"repository"`
 	DefaultBranch     string            `json:"default_branch"`
 	OriginalHead      string            `json:"original_head"`
@@ -148,6 +149,18 @@ func LoadIntent(path string) (Intent, error) {
 	return intent, nil
 }
 
+func IntentSHA256(in Intent) (string, error) {
+	if err := validateIntent(in); err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(in)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func validateIntent(in Intent) error {
 	if in.Schema != IntentSchema || !safeID(in.OperationID) || !safeRepo(in.Repository) || !safeBranch(in.DefaultBranch) || !fullOID(in.ExpectedAncestor) {
 		return errors.New("invalid artifact retirement intent identity")
@@ -210,7 +223,8 @@ func fullDigest(value string) bool {
 
 func Prepare(ctx context.Context, sourceGitDir, workRoot string, intent Intent) (Plan, error) {
 	var plan Plan
-	if err := validateIntent(intent); err != nil {
+	intentSHA, err := IntentSHA256(intent)
+	if err != nil {
 		return plan, err
 	}
 	source, err := filepath.EvalSymlinks(sourceGitDir)
@@ -394,7 +408,7 @@ func Prepare(ctx context.Context, sourceGitDir, workRoot string, intent Intent) 
 	}
 	sort.Slice(updates, func(i, j int) bool { return updates[i].Ref < updates[j].Ref })
 	return Plan{
-		OperationID: intent.OperationID, Repository: intent.Repository, DefaultBranch: intent.DefaultBranch,
+		OperationID: intent.OperationID, IntentSHA256: intentSHA, Repository: intent.Repository, DefaultBranch: intent.DefaultBranch,
 		OriginalHead: originalHead, CleanHead: cleanHead, DefaultTree: defaultTree,
 		CommitMap: commitMap, OriginalRefs: originalRefs, CleanRefs: cleanRefs, RefUpdates: updates,
 		RetiredBlobs: append([]BlobSpec(nil), intent.RetiredBlobs...), SignatureRemovals: signatureRemovals, StagingGitDir: staging,
