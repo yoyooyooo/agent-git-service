@@ -62,6 +62,12 @@ func retirementServiceFixture(t *testing.T) (*Service, db.Repository, db.User) {
 	return &Service{DB: database, Git: store, BaseURL: "http://localhost"}, repo, owner
 }
 
+func TestRunConfiguredArtifactRetirementRequiresAbsoluteIntentPath(t *testing.T) {
+	if _, err := (&Service{}).RunConfiguredArtifactRetirement(context.Background(), "relative-retirement.json"); err == nil || !strings.Contains(err.Error(), "must be absolute") {
+		t.Fatalf("relative intent path was accepted: %v", err)
+	}
+}
+
 func TestRunConfiguredArtifactRetirementRewritesHistoryAndIsIdempotent(t *testing.T) {
 	svc, repo, owner := retirementServiceFixture(t)
 	ctx := context.Background()

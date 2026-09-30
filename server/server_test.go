@@ -544,6 +544,17 @@ func TestNew_HandlerUsesHostAwareMuxAndPerServerTransformState(t *testing.T) {
 	assertMeta(t, alpha, "http://alpha.local/api/v3/openapi.json")
 }
 
+func TestRunStartupArtifactRetirementFailsClosedBeforeWorkers(t *testing.T) {
+	deps := &bootstrapDeps{
+		Cfg:     config.Config{ArtifactRetirementIntentFile: "relative-retirement.json"},
+		SrvCtx:  context.Background(),
+		SvcDeps: &service.Service{},
+	}
+	if err := runStartupArtifactRetirement(deps); err == nil || !strings.Contains(err.Error(), "startup artifact retirement") {
+		t.Fatalf("configured retirement did not fail closed: %v", err)
+	}
+}
+
 func TestNew_HandlerUsesDefaultPrefixInResponseURLs(t *testing.T) {
 	root := t.TempDir()
 	srv, err := New(config.Config{

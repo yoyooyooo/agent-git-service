@@ -22,6 +22,9 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	if intentPath == "" {
 		return receipt, nil
 	}
+	if !filepath.IsAbs(intentPath) {
+		return receipt, errors.New("artifact retirement intent path must be absolute")
+	}
 	intent, err := artifactretirement.LoadIntent(intentPath)
 	if err != nil {
 		return receipt, err

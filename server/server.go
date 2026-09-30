@@ -1444,20 +1444,8 @@ func run(sigCh <-chan struct{}, shutdownCfg shutdownConfig) (runErr error) {
 	}
 	recoverCancel()
 	slog.Info("durable action intent recovery completed")
-	if deps.Cfg.ArtifactRetirementIntentFile != "" {
-		retireCtx, retireCancel := context.WithTimeout(deps.SrvCtx, 20*time.Minute)
-		receipt, err := deps.SvcDeps.RunConfiguredArtifactRetirement(retireCtx, deps.Cfg.ArtifactRetirementIntentFile)
-		retireCancel()
-		if err != nil {
-			slog.Error("artifact retirement startup migration failed", "error", err)
-			return fmt.Errorf("startup artifact retirement: %w", err)
-		}
-		if receipt.Status == "completed" {
-			slog.Info("artifact retirement startup migration completed",
-				"operation_id", receipt.OperationID, "repository", receipt.Repository,
-				"changed_refs", receipt.ChangedRefs, "changed_commits", receipt.ChangedCommits,
-				"before_kib", receipt.BeforeDiskKiB, "after_kib", receipt.AfterDiskKiB)
-		}
+	if err := runStartupArtifactRetirement(deps); err != nil {
+		return err
 	}
 	// Runtime workers start only after an explicit history migration has either
 	// completed or been proven already complete. They cannot race its DB/refs.
@@ -1519,6 +1507,26 @@ func RunWikiReindex(args []string) error {
 	return nil
 }
 
+func runStartupArtifactRetirement(deps *bootstrapDeps) error {
+	if deps == nil || deps.Cfg.ArtifactRetirementIntentFile == "" {
+		return nil
+	}
+	retireCtx, retireCancel := context.WithTimeout(deps.SrvCtx, 20*time.Minute)
+	receipt, err := deps.SvcDeps.RunConfiguredArtifactRetirement(retireCtx, deps.Cfg.ArtifactRetirementIntentFile)
+	retireCancel()
+	if err != nil {
+		slog.Error("artifact retirement startup migration failed", "error", err)
+		return fmt.Errorf("startup artifact retirement: %w", err)
+	}
+	if receipt.Status == "completed" {
+		slog.Info("artifact retirement startup migration completed",
+			"operation_id", receipt.OperationID, "repository", receipt.Repository,
+			"changed_refs", receipt.ChangedRefs, "changed_commits", receipt.ChangedCommits,
+			"before_kib", receipt.BeforeDiskKiB, "after_kib", receipt.AfterDiskKiB)
+	}
+	return nil
+}
+
 // Run starts the gh-server listeners and blocks until shutdown is requested.
 func Run(sigCh <-chan struct{}) error {
 	return run(sigCh, shutdownConfig{GracePeriod: 10 * time.Second})
@@ -1540,6 +1548,10 @@ func New(cfg config.Config, opts ...Option) (*Server, error) {
 	if result.Err != nil {
 		cleanupFailedBootstrap(result.Partial)
 		return nil, result.Err
+	}
+	if err := runStartupArtifactRetirement(result.Deps); err != nil {
+		cleanupFailedBootstrap(result.Deps)
+		return nil, err
 	}
 	startRuntimeWorkers(result.Deps)
 	return &Server{

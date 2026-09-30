@@ -67,6 +67,7 @@ document the relevant contract below in the same change.
 | Package | Primary responsibility |
 |---|---|
 | `apperrors` | shared sentinel error catalog and helpers |
+| `artifactretirement` | explicit exact-blob Git history rewrite planning/publication, replacement refs, recovery evidence and post-publication verification; no DB/provider authority |
 | `crypto` | NaCl-based secret encryption helpers |
 | `cibackend` | independently configured CI observation adapters, exact backend-local identities and bounded logs; no user authorization, Git hosting or merge authority |
 | `db` | relational schema, migrations, seed data, and model types |
@@ -124,9 +125,10 @@ document the relevant contract below in the same change.
 | `middleware` | auth extraction, request guards, context injection | `service` auth methods, `rest/respond`, `logging`, `metrics`, `ratelimit` | `db`, `gitstore`, REST handlers, GraphQL resolvers |
 | `rest` | HTTP request decode, REST response codes, REST JSON shapes | `service`, `rest/respond`, `rest/transform`, `ratelimit`, `db` model types, `Svc.Git` via `*service.Service` | GORM queries, GraphQL helpers |
 | `graphql` | GraphQL request parse, resolver dispatch, GraphQL response shapes, field filtering | `service`, `db` model types, `rest/respond` for HTTP JSON writeout, selected `Svc.Git` and `Svc.DB` access via `*service.Service` | `rest/transform` |
-| `service` | business rules, persistence orchestration, Git orchestration, domain side effects | `db`, `gitstore`, `cibackend`, `sessionauthority`, `operationcatalog`, `operationconstraints`, `delegationpolicy`, `workloadidentity`, `executioncontext`, `embedding`, `oidc`, `connectedlogin`, `forgejointegration`, `edgeprotocol`, `snapshotstore` | `router`, `middleware`, `rest`, `graphql`, HTTP response helpers |
+| `service` | business rules, persistence orchestration, Git orchestration, domain side effects | `db`, `gitstore`, `artifactretirement`, `cibackend`, `sessionauthority`, `operationcatalog`, `operationconstraints`, `delegationpolicy`, `workloadidentity`, `executioncontext`, `embedding`, `oidc`, `connectedlogin`, `forgejointegration`, `edgeprotocol`, `snapshotstore` | `router`, `middleware`, `rest`, `graphql`, HTTP response helpers |
 | `db` | schema, migrations, seed data, relational model types, shared state constants | GORM and standard library only | `service`, `rest`, `graphql`, `gitstore` |
 | `gitstore` | Git-native repo lifecycle, refs, merge/rebase/diff/content/archive operations | system `git`, go-git, filesystem | `db`, `rest`, `graphql` |
+| `artifactretirement` | deterministic exact-object history rewriting and atomic local ref publication for an already-authorized one-shot migration | system `git`, filesystem | `db`, providers, HTTP surfaces, automatic policy selection |
 
 ## Layer Contracts
 
