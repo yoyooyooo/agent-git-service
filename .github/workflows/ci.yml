@@ -114,7 +114,7 @@ jobs:
           - name: server-graphql
             packages: ./server ./internal/graphql
           - name: db-router-git
-            packages: ./internal/db ./internal/githttp ./internal/gitstore ./internal/gittransport ./internal/router ./internal/testharness ./internal/testharness/testdb ./internal/wikicatalog ./internal/wikiv2
+            packages: ./internal/artifactretirement ./internal/db ./internal/githttp ./internal/gitstore ./internal/gittransport ./internal/router ./internal/testharness ./internal/testharness/testdb ./internal/wikicatalog ./internal/wikiv2
           - name: edge
             packages: ./cmd/ags-edge ./cmd/ags-replication ./internal/edge ./internal/edgeprotocol ./internal/gitbackend ./internal/replication ./internal/replicationadmin ./internal/snapshotstore
           - name: fork-integrations
