@@ -46,6 +46,9 @@ func (s *Store) Compare(ctx context.Context, fullName, base, head string) (DiffR
 	if err != nil {
 		return result, err
 	}
+	if err := historicalReadRange(ctx, dir, &base, &head); err != nil {
+		return result, err
+	}
 	var wg sync.WaitGroup
 
 	wg.Add(5)
@@ -127,6 +130,9 @@ func (s *Store) DiffNumStats(ctx context.Context, fullName, base, head string) (
 	if err != nil {
 		return nil, err
 	}
+	if err := historicalReadRange(ctx, dir, &base, &head); err != nil {
+		return nil, err
+	}
 	return diffNumStat(ctx, dir, base, head)
 }
 
@@ -173,6 +179,9 @@ func (s *Store) LogBetweenTags(ctx context.Context, fullName, from, to string) (
 	if err != nil {
 		return "", err
 	}
+	if err := historicalReadRange(ctx, dir, &from, &to); err != nil {
+		return "", err
+	}
 	var args []string
 	if from != "" {
 		args = []string{"-C", dir, "log", "--format=* %s (%h)", from + ".." + to}
@@ -194,6 +203,9 @@ func (s *Store) PRCommitsLog(ctx context.Context, fullName, base, head string) (
 	}
 	dir, err := s.repoPath(ctx, fullName)
 	if err != nil {
+		return "", err
+	}
+	if err := historicalReadRange(ctx, dir, &base, &head); err != nil {
 		return "", err
 	}
 	cmd := exec.CommandContext(ctx, "git", "log", "--format=%H|%an|%ae|%aI|%s", base+".."+head)

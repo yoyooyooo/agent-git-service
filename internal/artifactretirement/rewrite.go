@@ -10,9 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -64,33 +62,7 @@ type Plan struct {
 type gitRunner struct{ dir string }
 
 func (g gitRunner) run(ctx context.Context, input []byte, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"--no-pager", "--git-dir=" + g.dir}, args...)...)
-	cmd.Stdin = bytes.NewReader(input)
-	cmd.Env = sanitizedGitEnv()
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("git %s failed: %w", firstArg(args), err)
-	}
-	return stdout.Bytes(), nil
-}
-
-func runGit(ctx context.Context, input []byte, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Stdin = bytes.NewReader(input)
-	cmd.Env = sanitizedGitEnv()
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("git %s failed: %w", firstArg(args), err)
-	}
-	return stdout.Bytes(), nil
+	return runGit(ctx, input, append([]string{"--git-dir=" + g.dir}, args...)...)
 }
 
 func firstArg(args []string) string {
@@ -117,18 +89,14 @@ func sanitizedGitEnv() []string {
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL="+os.DevNull,
-		"GIT_NO_LAZY_FETCH=1",
+		"GIT_NO_LAZY_FETCH=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_ALLOW_PROTOCOL=file",
 	)
 }
 
 func LoadIntent(path string) (Intent, error) {
 	var intent Intent
-	st, err := os.Lstat(path)
-	if err != nil {
+	if _, err := validatePrivateStateFile(path, 64*1024); err != nil {
 		return intent, err
-	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 || st.Size() > 64*1024 {
-		return intent, errors.New("artifact retirement intent must be a private regular file")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -182,7 +150,7 @@ func validateIntent(in Intent) error {
 }
 
 func safeID(value string) bool {
-	if value == "" || len(value) > 96 {
+	if value == "" || value == "." || value == ".." || len(value) > 96 {
 		return false
 	}
 	for _, c := range value {
@@ -222,6 +190,13 @@ func fullDigest(value string) bool {
 }
 
 func Prepare(ctx context.Context, sourceGitDir, workRoot string, intent Intent) (Plan, error) {
+	return PrepareWithApplicationRoots(ctx, sourceGitDir, workRoot, intent, nil)
+}
+
+// Application roots are snapshotted by the owning service before any worker
+// starts. The isolated staging copy preserves available database-only objects
+// without creating or changing refs in the live source during preparation.
+func PrepareWithApplicationRoots(ctx context.Context, sourceGitDir, workRoot string, intent Intent, applicationRoots []string) (Plan, error) {
 	var plan Plan
 	intentSHA, err := IntentSHA256(intent)
 	if err != nil {
@@ -235,7 +210,7 @@ func Prepare(ctx context.Context, sourceGitDir, workRoot string, intent Intent) 
 	if err != nil || source != sourceAbs {
 		return plan, errors.New("artifact retirement source repository must be canonical")
 	}
-	if err := os.MkdirAll(workRoot, 0o700); err != nil {
+	if err := EnsurePrivateStateDirectory(workRoot); err != nil {
 		return plan, err
 	}
 	workRootAbs, err := filepath.Abs(workRoot)
@@ -243,6 +218,12 @@ func Prepare(ctx context.Context, sourceGitDir, workRoot string, intent Intent) 
 		return plan, err
 	}
 	staging := filepath.Join(workRootAbs, "staging.git")
+	if err := rejectSymlinkComponents(staging); err != nil {
+		return plan, err
+	}
+	if source == staging || strings.HasPrefix(source+string(os.PathSeparator), staging+string(os.PathSeparator)) || strings.HasPrefix(staging, source+string(os.PathSeparator)) {
+		return plan, errors.New("retirement staging must not contain its source repository")
+	}
 	if err := os.RemoveAll(staging); err != nil {
 		return plan, err
 	}
@@ -274,11 +255,35 @@ func Prepare(ctx context.Context, sourceGitDir, workRoot string, intent Intent) 
 	if err := ensureTreeDoesNotUseRetired(ctx, src, originalHead, retired); err != nil {
 		return plan, err
 	}
-	if _, err := runGit(ctx, nil, "clone", "--mirror", "--no-local", source, staging); err != nil {
+	sourceRefs, err := refMap(ctx, src, true)
+	if err != nil {
+		return plan, err
+	}
+	for ref := range sourceRefs {
+		if strings.HasPrefix(ref, "refs/replace/") {
+			return plan, errors.New("artifact retirement refuses an existing replacement graph")
+		}
+	}
+	if err := validateLocalObjectStore(source); err != nil {
+		return plan, err
+	}
+	// Local no-hardlink copying includes currently unreachable object files;
+	// network-style cloning can omit a database-only object before it is pinned.
+	if _, err := runGit(ctx, nil, "clone", "--mirror", "--local", "--no-hardlinks", source, staging); err != nil {
 		return plan, errors.New("artifact retirement staging clone failed")
 	}
 	stage := gitRunner{dir: staging}
-	if refs, _ := stage.run(ctx, nil, "for-each-ref", "--format=%(refname)", "refs/replace/"); strings.TrimSpace(string(refs)) != "" {
+	if err := restoreStagingRefs(ctx, stage, sourceRefs); err != nil {
+		return plan, err
+	}
+	if err := protectStagingApplicationRoots(ctx, stage, src, applicationRoots); err != nil {
+		return plan, err
+	}
+	replaceRefs, err := stage.run(ctx, nil, "for-each-ref", "--format=%(refname)", "refs/replace/")
+	if err != nil {
+		return plan, err
+	}
+	if strings.TrimSpace(string(replaceRefs)) != "" {
 		return plan, errors.New("artifact retirement refuses a repository with existing replace refs")
 	}
 	commits, err := stage.run(ctx, nil, "rev-list", "--topo-order", "--reverse", "--all", "--parents")
@@ -390,10 +395,8 @@ func Prepare(ctx context.Context, sourceGitDir, workRoot string, intent Intent) 
 	if _, err := stage.run(ctx, nil, "gc", "--prune=now"); err != nil {
 		return plan, err
 	}
-	for _, spec := range intent.RetiredBlobs {
-		if objectPhysicallyExists(ctx, staging, spec.OID) {
-			return plan, fmt.Errorf("retired blob %s remains reachable in staging", spec.OID)
-		}
+	if err := VerifyRetiredAbsent(ctx, staging, intent.RetiredBlobs); err != nil {
+		return plan, err
 	}
 	if _, err := stage.run(ctx, nil, "fsck", "--full", "--no-dangling"); err != nil {
 		return plan, err
@@ -406,11 +409,11 @@ func Prepare(ctx context.Context, sourceGitDir, workRoot string, intent Intent) 
 	for _, ref := range cleanRefRows {
 		cleanRefs[ref.Name] = ref.OID
 	}
-	sort.Slice(updates, func(i, j int) bool { return updates[i].Ref < updates[j].Ref })
+	updates = refUpdatesBetween(sourceRefs, cleanRefs)
 	return Plan{
 		OperationID: intent.OperationID, IntentSHA256: intentSHA, Repository: intent.Repository, DefaultBranch: intent.DefaultBranch,
 		OriginalHead: originalHead, CleanHead: cleanHead, DefaultTree: defaultTree,
-		CommitMap: commitMap, OriginalRefs: originalRefs, CleanRefs: cleanRefs, RefUpdates: updates,
+		CommitMap: commitMap, OriginalRefs: sourceRefs, CleanRefs: cleanRefs, RefUpdates: updates,
 		RetiredBlobs: append([]BlobSpec(nil), intent.RetiredBlobs...), SignatureRemovals: signatureRemovals, StagingGitDir: staging,
 	}, nil
 }
@@ -489,10 +492,26 @@ func ensureTreeDoesNotUseRetired(ctx context.Context, g gitRunner, commit string
 	return nil
 }
 
-func objectPhysicallyExists(ctx context.Context, gitDir, oid string) bool {
-	cmd := exec.CommandContext(ctx, "git", "--git-dir="+gitDir, "cat-file", "-e", oid+"^{object}")
-	cmd.Env = append(sanitizedGitEnv(), "GIT_NO_REPLACE_OBJECTS=1")
-	return cmd.Run() == nil
+func objectPhysicallyExists(ctx context.Context, gitDir, oid string) (bool, error) {
+	if !fullOID(oid) {
+		return false, errors.New("invalid physical object identity")
+	}
+	out, err := (gitRunner{dir: gitDir}).run(ctx, []byte(oid+"\n"), "--no-replace-objects", "cat-file", "--batch-check=%(objectname) %(objecttype)")
+	if err != nil {
+		return false, err
+	}
+	parts := strings.Fields(string(out))
+	if len(parts) != 2 || parts[0] != oid {
+		return false, errors.New("invalid physical object observation")
+	}
+	switch parts[1] {
+	case "missing":
+		return false, nil
+	case "blob", "tree", "commit", "tag":
+		return true, nil
+	default:
+		return false, errors.New("unknown physical object observation")
+	}
 }
 
 func rewriteTree(ctx context.Context, g gitRunner, oid string, memo map[string]string, retired map[string]BlobSpec) (string, error) {

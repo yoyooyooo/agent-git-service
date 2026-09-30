@@ -82,7 +82,7 @@ func TestPrepareAndPublishRetiresExactBlobAndPreservesHistoricalLookup(t *testin
 	if plan.OriginalHead != originalHead || plan.CleanHead == originalHead || plan.DefaultTree == "" || plan.CommitMap[historicalCommit] == historicalCommit {
 		t.Fatalf("unexpected plan: original=%s clean=%s historical=%s", plan.OriginalHead, plan.CleanHead, plan.CommitMap[historicalCommit])
 	}
-	if objectPhysicallyExists(ctx, plan.StagingGitDir, blobOID) {
+	if exists, err := objectPhysicallyExists(ctx, plan.StagingGitDir, blobOID); err != nil || exists {
 		t.Fatal("retired blob remained in staging")
 	}
 	if got := testGit(t, plan.StagingGitDir, nil, "show", "-s", "--format=%s", historicalCommit); got != "vendor engine" {
@@ -97,7 +97,7 @@ func TestPrepareAndPublishRetiresExactBlobAndPreservesHistoricalLookup(t *testin
 	if err := Publish(ctx, bare, plan); err != nil {
 		t.Fatal(err)
 	}
-	if objectPhysicallyExists(ctx, bare, blobOID) {
+	if exists, err := objectPhysicallyExists(ctx, bare, blobOID); err != nil || exists {
 		t.Fatal("retired blob remained in active repository")
 	}
 	if got := testGit(t, bare, nil, "rev-parse", "refs/heads/main"); got != plan.CleanHead {
@@ -125,7 +125,7 @@ func TestPrepareAndPublishRetiresExactBlobAndPreservesHistoricalLookup(t *testin
 		t.Fatal("fresh clone current tree changed")
 	}
 	freshGit := filepath.Join(fresh, ".git")
-	if objectPhysicallyExists(ctx, freshGit, blobOID) {
+	if exists, err := objectPhysicallyExists(ctx, freshGit, blobOID); err != nil || exists {
 		t.Fatal("fresh full clone still contains retired blob")
 	}
 	testGit(t, bare, nil, "fsck", "--full")

@@ -20,6 +20,9 @@ func startRuntimeWorkers(deps *bootstrapDeps) {
 	if deps == nil {
 		return
 	}
+	if deps.StartBackground != nil {
+		deps.StartBackground()
+	}
 	startWikiCatalogGCWorker(deps.SvcDeps)
 	startGitMaintenanceWorker(deps)
 	if deps.SvcDeps != nil {

@@ -691,6 +691,15 @@ func (i *Integration) RewriteBranchWithLease(ctx context.Context, repoFullName, 
 	if err := i.pushAndVerify(ctx, req, ref, newSHA); err != nil {
 		return true, err
 	}
+	// A successful transport return is not an exact provider observation.
+	// Startup must never publish its local graph on an unverified provider tip.
+	observed, err := i.remoteRef(ctx, repoPath, remoteURL, ref)
+	if err != nil {
+		return true, err
+	}
+	if !exactGitSHA(observed, newSHA) {
+		return true, remoteRefDriftError(ref, newSHA, strings.TrimSpace(observed), nil)
+	}
 	return true, nil
 }
 

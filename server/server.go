@@ -89,22 +89,23 @@ func WithAuthenticator(authenticator Authenticator) Option {
 
 // bootstrapDeps holds all initialized dependencies for the application.
 type bootstrapDeps struct {
-	Cfg          config.Config
-	Options      options
-	DB           *gorm.DB
-	Embedder     embedding.Embedder
-	Store        *gitstore.Store
-	SrvCtx       context.Context
-	SrvCancel    context.CancelFunc
-	SvcDeps      *service.Service
-	GqlSrv       *graphql.Server
-	GitHandler   *githttp.Handler
-	OauthHandler *oauth.Handler
-	Handlers     *rest.Deps
-	Mux          http.Handler
-	Servers      []*http.Server
-	Labels       []string
-	Replication  *managedReplication
+	Cfg             config.Config
+	Options         options
+	DB              *gorm.DB
+	Embedder        embedding.Embedder
+	Store           *gitstore.Store
+	SrvCtx          context.Context
+	SrvCancel       context.CancelFunc
+	SvcDeps         *service.Service
+	GqlSrv          *graphql.Server
+	GitHandler      *githttp.Handler
+	OauthHandler    *oauth.Handler
+	Handlers        *rest.Deps
+	Mux             http.Handler
+	Servers         []*http.Server
+	Labels          []string
+	Replication     *managedReplication
+	StartBackground func()
 }
 
 // bootstrapResult is returned by bootstrap and contains all initialized components.
@@ -123,10 +124,11 @@ type coreDeps struct {
 }
 
 type serviceDeps struct {
-	svc          *service.Service
-	gqlSrv       *graphql.Server
-	gitHandler   *githttp.Handler
-	oauthHandler *oauth.Handler
+	svc             *service.Service
+	gqlSrv          *graphql.Server
+	gitHandler      *githttp.Handler
+	oauthHandler    *oauth.Handler
+	startBackground func()
 }
 
 type muxDeps struct {
@@ -429,13 +431,20 @@ func initServiceDeps(cfg config.Config, database *gorm.DB, store *gitstore.Store
 	if len(svcDeps.OutboundEventTargets[service.OutboundEventMulticaIncident]) > 0 && svcDeps.OutboundDispatcher != nil {
 		svcDeps.MulticaIncidentNotifier = svcDeps
 	}
-	startMulticaFailureWatcher(srvCtx, svcDeps, multicaFailureWatcherCfg)
 	if len(svcDeps.OutboundEventTargets[service.OutboundEventProjectionDrift]) > 0 && svcDeps.OutboundDispatcher != nil {
 		projectionDriftNotifier = svcDeps
 	}
-	startProjectionWatcher(srvCtx, svcDeps, projectionWatcherCfg, projectionDriftNotifier)
-	startOutboundDeliveryWorker(srvCtx, svcDeps)
-	startDelegatedSessionExpiryAuditor(srvCtx, svcDeps)
+	// Composition must not dispatch external work or mutate application facts
+	// before an authorized startup history migration has finished.
+	var startOnce sync.Once
+	deps.startBackground = func() {
+		startOnce.Do(func() {
+			startMulticaFailureWatcher(srvCtx, svcDeps, multicaFailureWatcherCfg)
+			startProjectionWatcher(srvCtx, svcDeps, projectionWatcherCfg, projectionDriftNotifier)
+			startOutboundDeliveryWorker(srvCtx, svcDeps)
+			startDelegatedSessionExpiryAuditor(srvCtx, svcDeps)
+		})
+	}
 
 	return deps, nil
 }
@@ -1294,6 +1303,7 @@ func bootstrapWithConfig(cfg config.Config, opts options) bootstrapResult {
 	deps.GqlSrv = svc.gqlSrv
 	deps.GitHandler = svc.gitHandler
 	deps.OauthHandler = svc.oauthHandler
+	deps.StartBackground = svc.startBackground
 
 	// 4. Build router and host-aware mux.
 	mux, err := buildHTTPMux(httpMuxConfig{
@@ -1504,26 +1514,6 @@ func RunWikiReindex(args []string) error {
 		return err
 	}
 	fmt.Printf("wiki-reindex indexed=%d\n", count)
-	return nil
-}
-
-func runStartupArtifactRetirement(deps *bootstrapDeps) error {
-	if deps == nil || deps.Cfg.ArtifactRetirementIntentFile == "" {
-		return nil
-	}
-	retireCtx, retireCancel := context.WithTimeout(deps.SrvCtx, 20*time.Minute)
-	receipt, err := deps.SvcDeps.RunConfiguredArtifactRetirement(retireCtx, deps.Cfg.ArtifactRetirementIntentFile)
-	retireCancel()
-	if err != nil {
-		slog.Error("artifact retirement startup migration failed", "error", err)
-		return fmt.Errorf("startup artifact retirement: %w", err)
-	}
-	if receipt.Status == "completed" {
-		slog.Info("artifact retirement startup migration completed",
-			"operation_id", receipt.OperationID, "repository", receipt.Repository,
-			"changed_refs", receipt.ChangedRefs, "changed_commits", receipt.ChangedCommits,
-			"before_kib", receipt.BeforeDiskKiB, "after_kib", receipt.AfterDiskKiB)
-	}
 	return nil
 }
 

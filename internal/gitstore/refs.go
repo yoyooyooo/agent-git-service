@@ -235,7 +235,9 @@ func (s *Store) UpdateRefSafe(ctx context.Context, fullName, ref, newSHA string,
 	return nil
 }
 
-// IsAncestor reports whether older is reachable from newer.
+// IsAncestor reports literal object ancestry, without historical replacement.
+// Authorization and live ref changes must never inherit a retired identity.
+// Historical content diagnostics use IsHistoricalAncestor explicitly.
 func (s *Store) IsAncestor(ctx context.Context, fullName, older, newer string) (bool, error) {
 	if !plumbing.IsHash(older) {
 		return false, fmt.Errorf("%w: %q", ErrInvalidSHA, older)
@@ -247,7 +249,7 @@ func (s *Store) IsAncestor(ctx context.Context, fullName, older, newer string) (
 	if err != nil {
 		return false, err
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "merge-base", "--is-ancestor", older, newer)
+	cmd := exec.CommandContext(ctx, "git", "--no-replace-objects", "-C", dir, "merge-base", "--is-ancestor", older, newer)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {

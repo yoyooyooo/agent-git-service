@@ -20,6 +20,9 @@ func (s *Store) CommitFilePatches(ctx context.Context, fullName, sha string, par
 		return nil, err
 	}
 
+	if err := historicalReadRange(ctx, dir, &sha); err != nil {
+		return nil, err
+	}
 	var cmd *exec.Cmd
 	if len(parents) == 0 {
 		cmd = exec.CommandContext(ctx, "git", "-C", dir, "diff-tree", "--root", "-p", "--no-commit-id", "-r", sha)
@@ -27,6 +30,9 @@ func (s *Store) CommitFilePatches(ctx context.Context, fullName, sha string, par
 		base := parents[0]
 		if !IsValidRev(base) {
 			return nil, fmt.Errorf("invalid base revision")
+		}
+		if err := historicalReadRange(ctx, dir, &base); err != nil {
+			return nil, err
 		}
 		cmd = exec.CommandContext(ctx, "git", "-C", dir, "diff", base+"..."+sha)
 	}
@@ -44,6 +50,9 @@ func (s *Store) CompareFilePatches(ctx context.Context, fullName, base, head str
 	}
 	dir, err := s.repoPath(ctx, fullName)
 	if err != nil {
+		return nil, err
+	}
+	if err := historicalReadRange(ctx, dir, &base, &head); err != nil {
 		return nil, err
 	}
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "diff", base+"..."+head)

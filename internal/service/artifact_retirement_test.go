@@ -137,9 +137,12 @@ func TestRunConfiguredArtifactRetirementRewritesHistoryAndIsIdempotent(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	review := db.PullRequestReview{PullRequestID: pr.ID, AuthorLogin: owner.Login, State: "APPROVED", CommitSHA: featureHead}
+	review := db.PullRequestReview{PullRequestID: pr.ID, AuthorLogin: "independent-reviewer", State: "APPROVED", CommitSHA: featureHead}
 	if err := svc.DB.Create(&review).Error; err != nil {
 		t.Fatal(err)
+	}
+	if approvals, _, err := svc.currentPRReviewState(ctx, pr); err != nil || approvals != 1 {
+		t.Fatalf("fixture review not valid for original head: %d %v", approvals, err)
 	}
 	sum := sha256.Sum256(engine)
 	intent := artifactretirement.Intent{
@@ -163,6 +166,11 @@ func TestRunConfiguredArtifactRetirementRewritesHistoryAndIsIdempotent(t *testin
 	data, _ := json.Marshal(intent)
 	if err := os.WriteFile(intentPath, data, 0o600); err != nil {
 		t.Fatal(err)
+	}
+	oldClone := filepath.Join(t.TempDir(), "old-checkout")
+	oldCloneCmd := exec.Command("git", "clone", "--no-local", repoPath, oldClone)
+	if output, err := oldCloneCmd.CombinedOutput(); err != nil {
+		t.Fatalf("old clone fixture: %v %s", err, output)
 	}
 	receipt, err := svc.RunConfiguredArtifactRetirement(ctx, intentPath)
 	if err != nil {
@@ -188,6 +196,27 @@ func TestRunConfiguredArtifactRetirementRewritesHistoryAndIsIdempotent(t *testin
 	if historicalReview.CommitSHA != featureHead {
 		t.Fatal("historical review identity was relabelled as a cleaned commit")
 	}
+	oldComparison, err := svc.Git.Compare(ctx, repo.FullName, originalHead, featureHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newComparison, err := svc.Git.Compare(ctx, repo.FullName, migratedPR.BaseSHA, migratedPR.HeadSHA)
+	if err != nil || oldComparison.AheadBy != newComparison.AheadBy || oldComparison.BehindBy != newComparison.BehindBy || oldComparison.MergeBaseSHA != newComparison.MergeBaseSHA || len(oldComparison.Files) != 1 || oldComparison.Files[0].Filename != "feature.txt" {
+		t.Fatalf("old/new PR content comparison differs: old=%+v new=%+v err=%v", oldComparison, newComparison, err)
+	}
+	if preserved, err := svc.Git.IsHistoricalAncestor(ctx, repo.FullName, originalHead, migratedPR.HeadSHA); err != nil || !preserved {
+		t.Fatalf("historical ancestry not preserved: %v %v", preserved, err)
+	}
+	if authorized, _ := svc.Git.IsAncestor(ctx, repo.FullName, originalHead, migratedPR.HeadSHA); authorized {
+		t.Fatal("historical alias silently authorized literal ancestry")
+	}
+	oldDiff, err := svc.Git.DiffRaw(ctx, repo.FullName, originalHead, featureHead)
+	if err != nil || !strings.Contains(oldDiff, "feature.txt") {
+		t.Fatalf("historical PR diff missing: %q %v", oldDiff, err)
+	}
+	if approvals, _, err := svc.currentPRReviewState(ctx, migratedPR); err != nil || approvals != 0 {
+		t.Fatalf("original approval authorized cleaned head: %d %v", approvals, err)
+	}
 	cmd := exec.Command("git", "--git-dir="+repoPath, "cat-file", "-e", blobOID+"^{object}")
 	cmd.Env = append(os.Environ(), "GIT_NO_REPLACE_OBJECTS=1")
 	if err := cmd.Run(); err == nil {
@@ -200,7 +229,7 @@ func TestRunConfiguredArtifactRetirementRewritesHistoryAndIsIdempotent(t *testin
 	maintenance, err := svc.Git.MaintainStorage(ctx, repo.FullName, func(scanCtx context.Context) ([]string, error) {
 		return svc.GitMaintenanceRoots(scanCtx, repo)
 	})
-	if err != nil || maintenance.Phase != "complete" {
+	if err != nil || maintenance.Phase != "complete" || maintenance.MissingApplicationObjects != 0 || maintenance.Status != "completed" {
 		t.Fatalf("post-retirement automatic maintenance rejected renamed retention refs: %+v %v", maintenance, err)
 	}
 	again, err := svc.RunConfiguredArtifactRetirement(ctx, intentPath)
@@ -226,6 +255,17 @@ func TestRunConfiguredArtifactRetirementRewritesHistoryAndIsIdempotent(t *testin
 	cmd.Env = append(os.Environ(), "GIT_NO_REPLACE_OBJECTS=1")
 	if err := cmd.Run(); err == nil {
 		t.Fatal("fresh complete clone still contains retired blob")
+	}
+	pushOld := exec.Command("git", "-C", oldClone, "push", "origin", "HEAD:refs/heads/stale-checkout")
+	if out, err := pushOld.CombinedOutput(); err == nil || !strings.Contains(string(out), "retired artifact") {
+		t.Fatalf("stale checkout reintroduced retired history: %v %s", err, out)
+	}
+	if err := artifactretirement.VerifyRetiredAbsent(ctx, repoPath, intent.RetiredBlobs); err != nil {
+		t.Fatal("rejected push left retired blobs in store", err)
+	}
+	pushNew := exec.Command("git", "-C", fresh, "push", "origin", "HEAD:refs/heads/clean-checkout")
+	if out, err := pushNew.CombinedOutput(); err != nil {
+		t.Fatalf("clean checkout push failed: %v %s", err, out)
 	}
 }
 
@@ -306,7 +346,11 @@ func TestArtifactRetirementResumeRevalidatesProviderBranch(t *testing.T) {
 	}, func(context.Context, string, string, string) (string, error) {
 		return providerHead, nil
 	})
-	if _, err := svc.rewriteArtifactRetirementProviders(ctx, repo, plan, stateRoot); err != nil {
+	required, err := svc.retirementProviderCheckpoint(ctx, repo, plan, stateRoot, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.rewriteArtifactRetirementProviders(ctx, repo, plan, stateRoot, required); err != nil {
 		t.Fatal(err)
 	}
 	if err := artifactretirement.Publish(ctx, repoPath, plan); err != nil {
@@ -316,8 +360,8 @@ func TestArtifactRetirementResumeRevalidatesProviderBranch(t *testing.T) {
 	// Simulate a third-party provider rewrite after local publication but
 	// before the application reconciliation/receipt was durably recorded.
 	providerHead = strings.Repeat("3", 40)
-	if _, err := svc.RunConfiguredArtifactRetirement(ctx, intentPath); err == nil {
-		t.Fatal("resume trusted stale DB provider evidence")
+	if _, err := svc.RunConfiguredArtifactRetirement(ctx, intentPath); err == nil || !strings.Contains(err.Error(), "drift") {
+		t.Fatalf("resume did not reject actual provider drift: %v", err)
 	}
 	if providerHead != strings.Repeat("3", 40) {
 		t.Fatalf("resume overwrote third-party provider head: %s", providerHead)

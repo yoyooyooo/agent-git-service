@@ -44,8 +44,10 @@ accepted. There is no wildcard or "large object" mode.
 
 ## Prepare and publish
 
-Preparation makes a no-hardlink mirror of the local bare repository and rewrites
-its commit graph itself; no Python/filter-repo runtime is required. Tree entries
+Preparation makes a local no-hardlink copy of the bare object store, restores
+all authoritative ref namespaces, and protects available application-owned roots
+in staging. This includes database-only commits that a network clone could omit.
+It rewrites the commit graph itself; no Python/filter-repo runtime is required. Tree entries
 are removed only when their exact blob OID is in the intent. Empty and merge
 commits are retained. Author, committer, timestamps, messages and unaffected
 trees are preserved. A changed signed commit/tag loses the invalid signature
@@ -62,7 +64,11 @@ refs/replace/<old-commit> -> <cleaned-commit>
 ```
 
 This keeps server-side historical API/PR reads by the original SHA possible
-without retaining the old commit or blob object bytes. It does **not** rename
+without retaining the old commit or blob object bytes. Read-only PR range and
+merged-content checks resolve these representations explicitly; live ancestry,
+exact-effect identity, CI and approval checks do not translate identities.
+Ordinary maintenance pins the cleaned representation of a historical root rather
+than treating an intentional replacement as lost data. It does **not** rename
 historical database facts: old reviews, CI facts, completed authorization facts
 and projection events keep their original identities. An old SHA therefore does
 not become a new approval. Direct external Git clients should not assume that a
@@ -118,16 +124,25 @@ receipts remain on their original SHA.
 
 ## Durable state and recovery
 
-A private sibling state directory stores the deterministic plan and completed
-receipt. Both are bound to the SHA-256 of the complete canonical intent; reusing
-an `operation_id` with different blobs, ancestor or recovery evidence is refused.
+A private, owner-checked sibling state directory stores the deterministic plan
+and completed receipt, both bound to the SHA-256 of the complete canonical intent.
+Reusing an operation ID with different blobs, ancestor or recovery evidence is
+refused. Traversal components, symlinked paths and unsafe existing permissions
+are rejected, not silently repaired.
+
+A startup interlock in the Git root is durable before the first external write:
+removing the intent configuration cannot start a half-migrated primary. All
+periodic application workers are deferred until this startup gate succeeds.
 A separate private Forgejo force-window journal exists only while a protected
 base rewrite may need restoration; it contains no credential material.
+
+Provider requirements are checkpointed before writes. Each required remote
+branch is actually read back during both normal execution and crash recovery.
 The plan records original/clean refs, the commit map, expected current tree,
-signature removals and staging location. If staging disappears before publication
-it is rebuilt and must reproduce the same old/new default head and tree. If local
-refs are already clean after a crash, startup re-reads required provider branches,
-verifies the replacement map, finishes GC/readback and resumes DB reconciliation.
+signature removals and staging location. Rebuilding lost staging must reproduce
+the complete planned ref maps, not just the default head and tree. After a crash,
+startup verifies the replacement map, finishes GC/readback and resumes database
+reconciliation without relabelling old audit evidence.
 
 The intent requires an operator-owned off-host recovery locator and digest.
 AGS records that evidence; it does not create or upload the external archive or
@@ -149,7 +164,14 @@ target repository verify separately:
 8. `git fsck --full` passes;
 9. a fresh complete clone contains no retired blob;
 10. measured active bare-repo disk use is lower;
-11. ordinary automatic maintenance still accepts the renamed retention refs.
+11. ordinary automatic maintenance still accepts the renamed retention refs;
+12. a stale checkout cannot push the retired blob history back, while a cleaned
+    checkout can still push ordinary work.
+
+The completed migration installs an exact retired-blob list consumed by the
+server-owned Git receive guard. It does not authorize new changes to that list
+based on file age, extension or size. Active cross-repository PRs require a
+coordinated migration and are rejected by this single-repository executor.
 
 The migration receipt never claims that a backup provider, snapshot filesystem
 or off-host recovery archive has physically released its own storage.

@@ -99,7 +99,7 @@ func (s *Service) scanMergedPullRequestIntegrity(ctx context.Context, repoFullNa
 			recorded++
 			continue
 		}
-		ancestor, ancestorErr := s.Git.IsAncestor(ctx, repoFullName, mergeSHA, baseSHA)
+		ancestor, ancestorErr := s.Git.IsHistoricalAncestor(ctx, repoFullName, mergeSHA, baseSHA)
 		if ancestorErr == nil && ancestor {
 			if err := s.ResolveProjectionRefState(ctx, repoFullName, ProjectionProviderForgejo, ref, baseSHA, mergeSHA, now); err != nil {
 				return recorded, err

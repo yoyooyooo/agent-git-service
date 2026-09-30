@@ -526,6 +526,9 @@ func (s *Store) DiffNameStatus(ctx context.Context, fullName, base, head string)
 	if err != nil {
 		return "", err
 	}
+	if err := historicalReadRange(ctx, dir, &base, &head); err != nil {
+		return "", err
+	}
 	cmd := exec.CommandContext(ctx, "git", "diff", "--name-status", base+"..."+head)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -544,6 +547,9 @@ func (s *Store) DiffNumStat(ctx context.Context, fullName, base, head string) (s
 	if err != nil {
 		return "", err
 	}
+	if err := historicalReadRange(ctx, dir, &base, &head); err != nil {
+		return "", err
+	}
 	cmd := exec.CommandContext(ctx, "git", "diff", "--numstat", base+"..."+head)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -560,6 +566,9 @@ func (s *Store) DiffRaw(ctx context.Context, fullName, base, head string) (strin
 	}
 	dir, err := s.repoPath(ctx, fullName)
 	if err != nil {
+		return "", err
+	}
+	if err := historicalReadRange(ctx, dir, &base, &head); err != nil {
 		return "", err
 	}
 	cmd := exec.CommandContext(ctx, "git", "diff", base+"..."+head)

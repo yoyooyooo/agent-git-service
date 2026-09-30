@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -58,6 +59,11 @@ func BranchUpdates(plan Plan) []BranchUpdate {
 	return result
 }
 
+// Checkpoints carry service-owned orchestration schemas but share the same
+// private-file, bounded JSON and durable-write rules as Git plans.
+func SaveCheckpoint(path string, value any) error  { return writePrivateJSON(path, value) }
+func LoadCheckpoint(path string, target any) error { return readPrivateJSON(path, target) }
+
 func SavePlan(path string, plan Plan) error {
 	return writePrivateJSON(path, plan)
 }
@@ -93,12 +99,8 @@ func LoadReceipt(path string) (Receipt, error) {
 }
 
 func readPrivateJSON(path string, target any) error {
-	st, err := os.Lstat(path)
-	if err != nil {
+	if _, err := validatePrivateStateFile(path, 64*1024*1024); err != nil {
 		return err
-	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 || st.Size() > 64*1024*1024 {
-		return errors.New("artifact retirement state file is unsafe")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -108,6 +110,10 @@ func readPrivateJSON(path string, target any) error {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(target); err != nil {
 		return errors.New("invalid artifact retirement state JSON")
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("invalid trailing artifact retirement state")
 	}
 	return nil
 }
@@ -121,12 +127,15 @@ func writePrivateJSON(path string, value any) error {
 		return errors.New("artifact retirement state exceeds budget")
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := EnsurePrivateStateDirectory(dir); err != nil {
 		return err
 	}
-	st, err := os.Lstat(dir)
-	if err != nil || !st.IsDir() || st.Mode().Perm()&0o077 != 0 {
-		return errors.New("artifact retirement state directory is unsafe")
+	if st, err := os.Lstat(path); err == nil {
+		if !st.Mode().IsRegular() || !ownedStateFile(st) || st.Mode().Perm()&0077 != 0 {
+			return errors.New("unsafe retirement state destination")
+		}
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	tmp, err := os.CreateTemp(dir, ".artifact-retirement-*")
 	if err != nil {
@@ -149,7 +158,19 @@ func writePrivateJSON(path string, value any) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	if err := os.Rename(name, path); err != nil {
+		return err
+	}
+	return syncStateDirectory(dir)
+}
+
+func syncStateDirectory(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }
 
 func CurrentHead(ctx context.Context, gitDir, branch string) (string, error) {
@@ -169,7 +190,11 @@ func CurrentHead(ctx context.Context, gitDir, branch string) (string, error) {
 
 func VerifyRetiredAbsent(ctx context.Context, gitDir string, blobs []BlobSpec) error {
 	for _, spec := range blobs {
-		if objectPhysicallyExists(ctx, gitDir, spec.OID) {
+		exists, err := objectPhysicallyExists(ctx, gitDir, spec.OID)
+		if err != nil {
+			return fmt.Errorf("unable to verify retired object absence: %w", err)
+		}
+		if exists {
 			return fmt.Errorf("retired blob %s remains in the active repository", spec.OID)
 		}
 	}
@@ -221,7 +246,7 @@ func FinalizePublished(ctx context.Context, activeGitDir string, plan Plan) erro
 	if _, err := active.run(ctx, nil, "fsck", "--full", "--no-dangling"); err != nil {
 		return err
 	}
-	return nil
+	return InstallRetiredBlobPolicy(activeGitDir, plan.RetiredBlobs)
 }
 
 func VerifyCurrentRefs(ctx context.Context, activeGitDir string, expected map[string]string) error {
@@ -310,6 +335,14 @@ func Publish(ctx context.Context, activeGitDir string, plan Plan) error {
 		if cleanRefs[ref] != want {
 			return errors.New("artifact retirement staging refs drifted")
 		}
+	}
+	for old, mapped := range plan.CommitMap {
+		if old != mapped && cleanRefs["refs/replace/"+old] != mapped {
+			return errors.New("artifact retirement staging replacement map drifted")
+		}
+	}
+	if err := VerifyRetiredAbsent(ctx, plan.StagingGitDir, plan.RetiredBlobs); err != nil {
+		return err
 	}
 	importPrefix := "refs/retirement-import/" + plan.OperationID + "/"
 	refspec := "+refs/*:" + importPrefix + "*"

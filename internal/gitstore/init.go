@@ -318,6 +318,9 @@ exit "$exit_code"
 	if err := writeExecutableAtomically(filepath.Join(partsDir, managedAuthorityHookName), []byte(authorityScript)); err != nil {
 		return fmt.Errorf("write managed authority hook: %w", err)
 	}
+	if err := installRetiredBlobGuard(partsDir); err != nil {
+		return fmt.Errorf("write retired artifact guard: %w", err)
+	}
 
 	dispatcher := `#!/bin/sh
 # gh-server: managed pre-receive dispatcher. Repo-local policies live in pre-receive.d.

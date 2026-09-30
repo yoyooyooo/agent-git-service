@@ -255,6 +255,10 @@ func (s *Store) MaintainStorage(ctx context.Context, fullName string, loadRoots 
 			ordered = append(ordered, oid)
 		}
 		sort.Strings(ordered)
+		ordered, e = historicalRetentionRoots(runCtx, dir, ordered)
+		if e != nil {
+			return e
+		}
 		s.setMaintenancePhase(&receipt, "object_inventory")
 		if len(ordered) > 0 {
 			out, e := maintenanceGit(runCtx, dir, []byte(strings.Join(ordered, "\n")+"\n"), "cat-file", "--batch-check=%(objectname) %(objecttype)")

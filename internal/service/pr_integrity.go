@@ -430,7 +430,7 @@ func (s *Service) scanForgejoPullRequestIntegrityScope(ctx context.Context, repo
 		ancestor := false
 		var ancestorErr error
 		if mergeSHA != "" {
-			ancestor, ancestorErr = s.Git.IsAncestor(ctx, repoFullName, mergeSHA, baseSHA)
+			ancestor, ancestorErr = s.Git.IsHistoricalAncestor(ctx, repoFullName, mergeSHA, baseSHA)
 		}
 		if ancestorErr == nil && ancestor {
 			if err := s.ResolveProjectionRefState(ctx, repoFullName, ProjectionProviderForgejo, mergeRef, baseSHA, mergeSHA, now); err != nil {

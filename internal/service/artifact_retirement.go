@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,6 +39,19 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	if !filepath.IsAbs(intentPath) {
 		return receipt, errors.New("artifact retirement intent path must be absolute")
 	}
+	if s == nil || s.Git == nil || s.DBForCtx(ctx) == nil {
+		return receipt, errors.New("artifact retirement requires an owning primary")
+	}
+	var runErr error
+	err := s.Git.WithMaintenance(ctx, func(lockedCtx context.Context) error {
+		receipt, runErr = s.runConfiguredArtifactRetirement(lockedCtx, intentPath)
+		return runErr
+	})
+	return receipt, err
+}
+
+func (s *Service) runConfiguredArtifactRetirement(ctx context.Context, intentPath string) (artifactretirement.Receipt, error) {
+	var receipt artifactretirement.Receipt
 	intent, err := artifactretirement.LoadIntent(intentPath)
 	if err != nil {
 		return receipt, err
@@ -46,8 +60,9 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	if err != nil {
 		return receipt, err
 	}
-	repo, err := s.GetRepo(ctx, intent.Repository)
-	if err != nil {
+	// Metadata only: ordinary Git admission is already exclusively owned.
+	var repo db.Repository
+	if err := s.DBForCtx(ctx).WithContext(ctx).Where("full_name = ?", intent.Repository).First(&repo).Error; err != nil {
 		return receipt, err
 	}
 	if repo.DefaultBranch != intent.DefaultBranch {
@@ -57,11 +72,13 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	if err != nil {
 		return receipt, err
 	}
-	stateRoot := filepath.Join(filepath.Dir(intentPath), ".artifact-retirement", intent.OperationID)
-	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
+	gate, err := artifactretirement.AcquireStartupGate(filepath.Dir(filepath.Dir(repoPath)), intentPath, repo.ID, intent)
+	if err != nil {
 		return receipt, err
 	}
-	if err := os.Chmod(stateRoot, 0o700); err != nil {
+	defer gate.Close()
+	stateRoot := filepath.Join(filepath.Dir(intentPath), ".artifact-retirement", intent.OperationID)
+	if err := artifactretirement.EnsurePrivateStateDirectory(stateRoot); err != nil {
 		return receipt, err
 	}
 	receiptPath := filepath.Join(stateRoot, "receipt.json")
@@ -70,6 +87,12 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 			return receipt, errors.New("artifact retirement receipt does not match intent")
 		}
 		if err := artifactretirement.VerifyRetiredAbsent(ctx, repoPath, intent.RetiredBlobs); err != nil {
+			return receipt, err
+		}
+		if err := artifactretirement.InstallRetiredBlobPolicy(repoPath, intent.RetiredBlobs); err != nil {
+			return receipt, err
+		}
+		if err := gate.Complete(); err != nil {
 			return receipt, err
 		}
 		return existing, nil
@@ -82,7 +105,11 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	planPath := filepath.Join(stateRoot, "plan.json")
 	plan, err := artifactretirement.LoadPlan(planPath)
 	if os.IsNotExist(err) {
-		plan, err = artifactretirement.Prepare(ctx, repoPath, stateRoot, intent)
+		roots, rootErr := s.GitMaintenanceRoots(ctx, repo)
+		if rootErr != nil {
+			return receipt, fmt.Errorf("artifact retirement root inventory: %w", rootErr)
+		}
+		plan, err = artifactretirement.PrepareWithApplicationRoots(ctx, repoPath, stateRoot, intent, roots)
 		if err != nil {
 			return receipt, err
 		}
@@ -96,7 +123,7 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	} else if err != nil {
 		return receipt, err
 	}
-	if plan.OperationID != intent.OperationID || plan.IntentSHA256 != intentSHA || plan.Repository != intent.Repository || plan.DefaultBranch != intent.DefaultBranch {
+	if plan.IntentSHA256 != intentSHA || plan.OperationID != intent.OperationID || plan.Repository != intent.Repository || plan.DefaultBranch != intent.DefaultBranch || plan.StagingGitDir != filepath.Join(stateRoot, "staging.git") {
 		return receipt, errors.New("artifact retirement saved plan does not match intent")
 	}
 	if err := s.recoverArtifactRetirementForgejoForce(ctx, repo, plan, stateRoot); err != nil {
@@ -112,12 +139,16 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	if head == plan.OriginalHead {
 		if _, statErr := os.Stat(plan.StagingGitDir); os.IsNotExist(statErr) {
 			before := plan.BeforeDiskKiB
-			rebuilt, rebuildErr := artifactretirement.Prepare(ctx, repoPath, stateRoot, intent)
+			roots, rootErr := s.GitMaintenanceRoots(ctx, repo)
+			if rootErr != nil {
+				return receipt, rootErr
+			}
+			rebuilt, rebuildErr := artifactretirement.PrepareWithApplicationRoots(ctx, repoPath, stateRoot, intent, roots)
 			if rebuildErr != nil {
 				return receipt, rebuildErr
 			}
 			rebuilt.BeforeDiskKiB = before
-			if rebuilt.OriginalHead != plan.OriginalHead || rebuilt.CleanHead != plan.CleanHead || rebuilt.DefaultTree != plan.DefaultTree {
+			if rebuilt.OriginalHead != plan.OriginalHead || rebuilt.CleanHead != plan.CleanHead || rebuilt.DefaultTree != plan.DefaultTree || !sameRetirementRefs(rebuilt.OriginalRefs, plan.OriginalRefs) || !sameRetirementRefs(rebuilt.CleanRefs, plan.CleanRefs) {
 				return receipt, errors.New("artifact retirement deterministic resume plan changed")
 			}
 			plan = rebuilt
@@ -130,32 +161,37 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	}
 
 	started := time.Now().UTC()
-	providerState := retirementProviderState{}
+	providerRequirements, err := s.retirementProviderCheckpoint(ctx, repo, plan, stateRoot, head == plan.OriginalHead)
+	if err != nil {
+		return receipt, err
+	}
 	if head == plan.OriginalHead {
-		providerState, err = s.rewriteArtifactRetirementProviders(ctx, repo, plan, stateRoot)
-		if err != nil {
+		if err := artifactretirement.VerifyCurrentRefs(ctx, repoPath, plan.OriginalRefs); err != nil {
 			return receipt, err
 		}
-		if err := s.validateArtifactRetirementProviderCoverage(ctx, repo.ID, plan, providerState); err != nil {
-			return receipt, err
-		}
+	}
+	// The durable interlock is recorded before the first external write. Removing
+	// the environment setting cannot start an ordinary primary halfway through.
+	if err := gate.MarkPending(); err != nil {
+		return receipt, err
+	}
+	providerPlan := plan
+	if head == plan.CleanHead {
+		providerPlan.StagingGitDir = repoPath
+	}
+	providerState, err := s.rewriteArtifactRetirementProviders(ctx, repo, providerPlan, stateRoot, providerRequirements)
+	if err != nil {
+		return receipt, err
+	}
+	if err := s.validateArtifactRetirementProviderCoverage(ctx, repo.ID, plan, providerState); err != nil {
+		return receipt, err
+	}
+	if head == plan.OriginalHead {
 		if err := artifactretirement.Publish(ctx, repoPath, plan); err != nil {
 			return receipt, err
 		}
 	} else {
-		// Publication is atomic at the ref transaction. A restart after it
-		// resumes cleanup/DB reconciliation instead of attempting a second rewrite.
 		if err := artifactretirement.FinalizePublished(ctx, repoPath, plan); err != nil {
-			return receipt, err
-		}
-		// Re-read every still-required provider branch. The lease adapters are
-		// idempotent when the provider already has the clean SHA, so a restart
-		// never has to trust stale DB projection state as proof of convergence.
-		providerState, err = s.rewriteArtifactRetirementProviders(ctx, repo, plan, stateRoot)
-		if err != nil {
-			return receipt, err
-		}
-		if err := s.validateArtifactRetirementProviderCoverage(ctx, repo.ID, plan, providerState); err != nil {
 			return receipt, err
 		}
 	}
@@ -187,12 +223,22 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	if err := artifactretirement.SaveReceipt(receiptPath, receipt); err != nil {
 		return artifactretirement.Receipt{}, err
 	}
+	if err := gate.Complete(); err != nil {
+		return artifactretirement.Receipt{}, err
+	}
 	_ = os.RemoveAll(plan.StagingGitDir)
 	return receipt, nil
 }
 
 func (s *Service) preflightArtifactRetirement(ctx context.Context, repositoryID uint) error {
 	database := s.DBForCtx(ctx).WithContext(ctx)
+	var crossRepositoryCount int64
+	if err := database.Model(&db.PullRequest{}).Where("state = ? AND merged = ? AND ((repository_id = ? AND head_repository_id IS NOT NULL AND head_repository_id <> ? AND head_repository_id <> 0) OR (head_repository_id = ? AND repository_id <> ?))", "open", false, repositoryID, repositoryID, repositoryID, repositoryID).Count(&crossRepositoryCount).Error; err != nil {
+		return errors.New("artifact retirement cross-repository preflight failed")
+	}
+	if crossRepositoryCount != 0 {
+		return errors.New("artifact retirement requires coordinated migration for open cross-repository pull requests")
+	}
 	var actionCount int64
 	if err := database.Model(&db.PullRequestActionIntent{}).
 		Where("repository_id = ? AND state IN ?", repositoryID, forgejoActionActiveStates()).
@@ -379,15 +425,22 @@ func (s *Service) rewriteArtifactRetirementForgejoBranch(
 	return handled, nil
 }
 
-func (s *Service) rewriteArtifactRetirementProviders(ctx context.Context, repo db.Repository, plan artifactretirement.Plan, stateRoot string) (retirementProviderState, error) {
+func (s *Service) rewriteArtifactRetirementProviders(ctx context.Context, repo db.Repository, plan artifactretirement.Plan, stateRoot string, requirements map[string]map[string]bool) (retirementProviderState, error) {
 	state := retirementProviderState{}
-	requirements, err := s.artifactRetirementProviderRequirements(ctx, repo, plan)
-	if err != nil {
-		return nil, err
-	}
+	var err error
 	updates := retirementBranchUpdates(plan)
-	for provider, branches := range requirements {
-		for branch := range branches {
+	providers := make([]string, 0, len(requirements))
+	for provider := range requirements {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	for _, provider := range providers {
+		branches := make([]string, 0, len(requirements[provider]))
+		for branch := range requirements[provider] {
+			branches = append(branches, branch)
+		}
+		sort.Strings(branches)
+		for _, branch := range branches {
 			update, changed := updates[branch]
 			if !changed {
 				continue
@@ -553,8 +606,12 @@ func (s *Service) reconcileArtifactRetirementActiveFacts(ctx context.Context, re
 				changes["base_sha"] = mapped
 			}
 			if len(changes) != 0 {
-				if err := tx.Model(&db.PullRequest{}).Where("id = ? AND head_sha = ? AND base_sha = ?", pr.ID, pr.HeadSHA, pr.BaseSHA).Updates(changes).Error; err != nil {
-					return err
+				result := tx.Model(&db.PullRequest{}).Where("id = ? AND head_sha = ? AND base_sha = ?", pr.ID, pr.HeadSHA, pr.BaseSHA).Updates(changes)
+				if result.Error != nil {
+					return result.Error
+				}
+				if result.RowsAffected != 1 {
+					return errors.New("artifact retirement open PR coordinates changed during reconciliation")
 				}
 			}
 			openIDs = append(openIDs, pr.ID)
@@ -569,8 +626,12 @@ func (s *Service) reconcileArtifactRetirementActiveFacts(ctx context.Context, re
 				if !changed || projection.LastSyncedSHA != update.Old || !state[projection.Provider][projection.SourceBranch] {
 					continue
 				}
-				if err := tx.Model(&db.PullRequestProjection{}).Where("id = ? AND last_synced_sha = ?", projection.ID, update.Old).Update("last_synced_sha", update.New).Error; err != nil {
-					return err
+				result := tx.Model(&db.PullRequestProjection{}).Where("id = ? AND last_synced_sha = ?", projection.ID, update.Old).Update("last_synced_sha", update.New)
+				if result.Error != nil {
+					return result.Error
+				}
+				if result.RowsAffected != 1 {
+					return errors.New("artifact retirement open projection changed during reconciliation")
 				}
 			}
 		}
@@ -595,8 +656,12 @@ func (s *Service) reconcileArtifactRetirementActiveFacts(ctx context.Context, re
 				changes["external_sha"] = update.New
 			}
 			if len(changes) != 0 {
-				if err := tx.Model(&db.ProjectionRefState{}).Where("id = ?", row.ID).Updates(changes).Error; err != nil {
-					return err
+				result := tx.Model(&db.ProjectionRefState{}).Where("id = ? AND ags_sha = ? AND external_sha = ?", row.ID, row.AGSSHA, row.ExternalSHA).Updates(changes)
+				if result.Error != nil {
+					return result.Error
+				}
+				if result.RowsAffected != 1 {
+					return errors.New("artifact retirement current projection changed during reconciliation")
 				}
 			}
 		}

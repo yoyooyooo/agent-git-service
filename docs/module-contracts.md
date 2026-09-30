@@ -67,7 +67,7 @@ document the relevant contract below in the same change.
 | Package | Primary responsibility |
 |---|---|
 | `apperrors` | shared sentinel error catalog and helpers |
-| `artifactretirement` | explicit exact-blob Git history rewrite planning/publication, replacement refs, recovery evidence and post-publication verification; no DB/provider authority |
+| `artifactretirement` | exact-blob retirement plans, atomic local publication, private resumable state and physical verification; no provider or database authority |
 | `crypto` | NaCl-based secret encryption helpers |
 | `cibackend` | independently configured CI observation adapters, exact backend-local identities and bounded logs; no user authorization, Git hosting or merge authority |
 | `db` | relational schema, migrations, seed data, and model types |
@@ -128,7 +128,7 @@ document the relevant contract below in the same change.
 | `service` | business rules, persistence orchestration, Git orchestration, domain side effects | `db`, `gitstore`, `artifactretirement`, `cibackend`, `sessionauthority`, `operationcatalog`, `operationconstraints`, `delegationpolicy`, `workloadidentity`, `executioncontext`, `embedding`, `oidc`, `connectedlogin`, `forgejointegration`, `edgeprotocol`, `snapshotstore` | `router`, `middleware`, `rest`, `graphql`, HTTP response helpers |
 | `db` | schema, migrations, seed data, relational model types, shared state constants | GORM and standard library only | `service`, `rest`, `graphql`, `gitstore` |
 | `gitstore` | Git-native repo lifecycle, refs, merge/rebase/diff/content/archive operations | system `git`, go-git, filesystem | `db`, `rest`, `graphql` |
-| `artifactretirement` | deterministic exact-object history rewriting and atomic local ref publication for an already-authorized one-shot migration | system `git`, filesystem | `db`, providers, HTTP surfaces, automatic policy selection |
+| `artifactretirement` | deterministic exact-object history retirement and durable local safety gates | system `git`, filesystem | `db`, providers, HTTP surfaces, automatic policy selection |
 
 ## Layer Contracts
 
