@@ -1,9 +1,12 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +18,16 @@ import (
 )
 
 type retirementProviderState map[string]map[string]bool
+
+const retirementForceJournalSchema = "ags.artifact-retirement.forgejo-force-window.v1"
+
+type retirementForceJournal struct {
+	Schema            string `json:"schema"`
+	OperationID       string `json:"operation_id"`
+	Repository        string `json:"repository"`
+	Branch            string `json:"branch"`
+	PolicyFingerprint string `json:"policy_fingerprint"`
+}
 
 func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPath string) (artifactretirement.Receipt, error) {
 	var receipt artifactretirement.Receipt
@@ -86,6 +99,9 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	if plan.OperationID != intent.OperationID || plan.IntentSHA256 != intentSHA || plan.Repository != intent.Repository || plan.DefaultBranch != intent.DefaultBranch {
 		return receipt, errors.New("artifact retirement saved plan does not match intent")
 	}
+	if err := s.recoverArtifactRetirementForgejoForce(ctx, repo, plan, stateRoot); err != nil {
+		return receipt, err
+	}
 	head, err := artifactretirement.CurrentHead(ctx, repoPath, intent.DefaultBranch)
 	if err != nil {
 		return receipt, err
@@ -116,7 +132,7 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 	started := time.Now().UTC()
 	providerState := retirementProviderState{}
 	if head == plan.OriginalHead {
-		providerState, err = s.rewriteArtifactRetirementProviders(ctx, repo, plan)
+		providerState, err = s.rewriteArtifactRetirementProviders(ctx, repo, plan, stateRoot)
 		if err != nil {
 			return receipt, err
 		}
@@ -135,7 +151,7 @@ func (s *Service) RunConfiguredArtifactRetirement(ctx context.Context, intentPat
 		// Re-read every still-required provider branch. The lease adapters are
 		// idempotent when the provider already has the clean SHA, so a restart
 		// never has to trust stale DB projection state as proof of convergence.
-		providerState, err = s.rewriteArtifactRetirementProviders(ctx, repo, plan)
+		providerState, err = s.rewriteArtifactRetirementProviders(ctx, repo, plan, stateRoot)
 		if err != nil {
 			return receipt, err
 		}
@@ -198,7 +214,172 @@ func (s *Service) preflightArtifactRetirement(ctx context.Context, repositoryID 
 	return nil
 }
 
-func (s *Service) rewriteArtifactRetirementProviders(ctx context.Context, repo db.Repository, plan artifactretirement.Plan) (retirementProviderState, error) {
+func retirementForceJournalPath(stateRoot string) string {
+	return filepath.Join(stateRoot, "forgejo-force-window.json")
+}
+
+func canonicalRetirementDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, c := range value {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func loadRetirementForceJournal(stateRoot string) (retirementForceJournal, bool, error) {
+	var journal retirementForceJournal
+	path := retirementForceJournalPath(stateRoot)
+	st, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return journal, false, nil
+	}
+	if err != nil {
+		return journal, false, err
+	}
+	if !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 || st.Size() > 64*1024 {
+		return journal, false, errors.New("artifact retirement force journal is unsafe")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return journal, false, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&journal); err != nil {
+		return journal, false, errors.New("artifact retirement force journal is invalid")
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return journal, false, errors.New("artifact retirement force journal has trailing data")
+	}
+	if journal.Schema != retirementForceJournalSchema || journal.OperationID == "" || journal.Repository == "" ||
+		journal.Branch == "" || !canonicalRetirementDigest(journal.PolicyFingerprint) {
+		return journal, false, errors.New("artifact retirement force journal identity is invalid")
+	}
+	return journal, true, nil
+}
+
+func saveRetirementForceJournal(stateRoot string, journal retirementForceJournal) error {
+	if journal.Schema != retirementForceJournalSchema || journal.OperationID == "" || journal.Repository == "" ||
+		journal.Branch == "" || !canonicalRetirementDigest(journal.PolicyFingerprint) {
+		return errors.New("artifact retirement force journal identity is invalid")
+	}
+	data, err := json.MarshalIndent(journal, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(stateRoot, ".forgejo-force-window-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, retirementForceJournalPath(stateRoot))
+}
+
+func removeRetirementForceJournal(stateRoot string) error {
+	err := os.Remove(retirementForceJournalPath(stateRoot))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+func (s *Service) recoverArtifactRetirementForgejoForce(ctx context.Context, repo db.Repository, plan artifactretirement.Plan, stateRoot string) error {
+	journal, exists, err := loadRetirementForceJournal(stateRoot)
+	if err != nil || !exists {
+		return err
+	}
+	if journal.OperationID != plan.OperationID || journal.Repository != repo.FullName || journal.Branch != plan.DefaultBranch {
+		return errors.New("artifact retirement force journal does not match the current plan")
+	}
+	if s.ForgejoIntegration == nil {
+		return errors.New("artifact retirement cannot restore Forgejo policy without the configured integration")
+	}
+	if err := s.ForgejoIntegration.SetArtifactRetirementForce(ctx, repo.FullName, journal.Branch, journal.PolicyFingerprint, false); err != nil {
+		return fmt.Errorf("artifact retirement restore interrupted Forgejo force policy: %w", err)
+	}
+	if err := removeRetirementForceJournal(stateRoot); err != nil {
+		return errors.New("artifact retirement restored Forgejo policy but could not retire its journal")
+	}
+	return nil
+}
+
+func (s *Service) rewriteArtifactRetirementForgejoBranch(
+	ctx context.Context,
+	repo db.Repository,
+	plan artifactretirement.Plan,
+	stateRoot, branch string,
+	update artifactretirement.BranchUpdate,
+) (bool, error) {
+	if s.ForgejoIntegration == nil {
+		return false, nil
+	}
+	actual, checked, err := s.ForgejoIntegration.RemoteBranchSHA(ctx, repo.FullName, plan.StagingGitDir, branch)
+	if err != nil {
+		return true, err
+	}
+	if !checked || strings.TrimSpace(actual) == "" {
+		return false, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(actual)) {
+	case strings.ToLower(update.New):
+		return true, nil
+	case strings.ToLower(update.Old):
+	default:
+		return true, fmt.Errorf("artifact retirement Forgejo branch %s drifted from both planned heads", branch)
+	}
+	policy, required, err := s.ForgejoIntegration.ArtifactRetirementForcePolicy(ctx, repo.FullName, branch)
+	if err != nil {
+		return true, err
+	}
+	if !required {
+		return s.ForgejoIntegration.RewriteBranchWithLease(ctx, repo.FullName, plan.StagingGitDir, branch, update.Old, update.New)
+	}
+	journal := retirementForceJournal{
+		Schema: retirementForceJournalSchema, OperationID: plan.OperationID, Repository: repo.FullName,
+		Branch: branch, PolicyFingerprint: policy.PolicyFingerprint,
+	}
+	if err := saveRetirementForceJournal(stateRoot, journal); err != nil {
+		return true, err
+	}
+	if err := s.ForgejoIntegration.SetArtifactRetirementForce(ctx, repo.FullName, branch, policy.PolicyFingerprint, true); err != nil {
+		return true, err
+	}
+	handled, pushErr := s.ForgejoIntegration.RewriteBranchWithLease(ctx, repo.FullName, plan.StagingGitDir, branch, update.Old, update.New)
+	restoreErr := s.ForgejoIntegration.SetArtifactRetirementForce(ctx, repo.FullName, branch, policy.PolicyFingerprint, false)
+	if restoreErr != nil {
+		return true, fmt.Errorf("artifact retirement Forgejo force policy restoration failed: %w", restoreErr)
+	}
+	if err := removeRetirementForceJournal(stateRoot); err != nil {
+		return true, errors.New("artifact retirement Forgejo policy restored but force journal cleanup failed")
+	}
+	if pushErr != nil {
+		return handled, pushErr
+	}
+	return handled, nil
+}
+
+func (s *Service) rewriteArtifactRetirementProviders(ctx context.Context, repo db.Repository, plan artifactretirement.Plan, stateRoot string) (retirementProviderState, error) {
 	state := retirementProviderState{}
 	requirements, err := s.artifactRetirementProviderRequirements(ctx, repo, plan)
 	if err != nil {
@@ -214,7 +395,7 @@ func (s *Service) rewriteArtifactRetirementProviders(ctx context.Context, repo d
 			var handled bool
 			switch provider {
 			case ProjectionProviderForgejo:
-				handled, err = s.ForgejoIntegration.RewriteBranchWithLease(ctx, repo.FullName, plan.StagingGitDir, branch, update.Old, update.New)
+				handled, err = s.rewriteArtifactRetirementForgejoBranch(ctx, repo, plan, stateRoot, branch, update)
 			case ProjectionProviderGitHub:
 				handled, err = s.GitHubIntegration.RewriteBranchWithLease(ctx, repo.FullName, plan.StagingGitDir, branch, update.Old, update.New)
 			default:

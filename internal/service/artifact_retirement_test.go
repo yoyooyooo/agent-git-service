@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,6 +62,41 @@ func retirementServiceFixture(t *testing.T) (*Service, db.Repository, db.User) {
 		t.Fatal(err)
 	}
 	return &Service{DB: database, Git: store, BaseURL: "http://localhost"}, repo, owner
+}
+
+type retirementProviderFixture struct {
+	force       bool
+	fingerprint string
+}
+
+func (f *retirementProviderFixture) EnsureRepository(context.Context, string, string, bool) error {
+	return nil
+}
+func (f *retirementProviderFixture) EnsurePullRequest(context.Context, forgejointegration.PullRequestRequest) (forgejointegration.PullRequestResult, error) {
+	return forgejointegration.PullRequestResult{}, nil
+}
+func (f *retirementProviderFixture) UpdatePullRequestState(context.Context, string, string, int, string) (forgejointegration.PullRequestResult, error) {
+	return forgejointegration.PullRequestResult{}, nil
+}
+func (f *retirementProviderFixture) InspectRepositoryAuthority(context.Context, string, string, string, string, string) (forgejointegration.RepositoryAuthorityState, error) {
+	return forgejointegration.RepositoryAuthorityState{
+		BaseBranchProtected: true, ForcePushBlocked: !f.force,
+		IntegrationBotCollaborator: true, IntegrationBotAuthorized: true,
+		IntegrationBotMergeAuthorized: true,
+	}, nil
+}
+func (f *retirementProviderFixture) ApplyRepositoryAuthority(context.Context, string, string, string, string, string, string, forgejointegration.RepositoryAuthorityState) error {
+	return nil
+}
+func (f *retirementProviderFixture) InspectArtifactRetirementProtection(context.Context, string, string, string) (forgejointegration.ArtifactRetirementProtectionState, error) {
+	return forgejointegration.ArtifactRetirementProtectionState{Exists: true, ForcePushEnabled: f.force, PolicyFingerprint: f.fingerprint}, nil
+}
+func (f *retirementProviderFixture) SetArtifactRetirementForce(_ context.Context, _, _, _, fingerprint string, enabled bool) error {
+	if fingerprint != f.fingerprint {
+		return errors.New("fixture policy fingerprint drift")
+	}
+	f.force = enabled
+	return nil
 }
 
 func TestRunConfiguredArtifactRetirementRequiresAbsoluteIntentPath(t *testing.T) {
@@ -259,7 +295,7 @@ func TestArtifactRetirementResumeRevalidatesProviderBranch(t *testing.T) {
 	svc.ForgejoIntegration = forgejointegration.NewWithGitCapabilities(forgejointegration.Config{
 		Enabled: true, BaseURL: "https://forgejo.example",
 		RepoMap: map[string]forgejointegration.RepoMapping{
-			repo.FullName: {Owner: "mirror", Repo: "repo", Enabled: &enabled},
+			repo.FullName: {Owner: "mirror", Repo: "repo", Enabled: &enabled, BaseBranch: "protected-other"},
 		},
 	}, nil, func(_ context.Context, req forgejointegration.PushRequest) error {
 		if req.ForceWithLeaseSHA != plan.OriginalHead || req.ForceWithLeaseRef != "refs/heads/main" {
@@ -270,7 +306,7 @@ func TestArtifactRetirementResumeRevalidatesProviderBranch(t *testing.T) {
 	}, func(context.Context, string, string, string) (string, error) {
 		return providerHead, nil
 	})
-	if _, err := svc.rewriteArtifactRetirementProviders(ctx, repo, plan); err != nil {
+	if _, err := svc.rewriteArtifactRetirementProviders(ctx, repo, plan, stateRoot); err != nil {
 		t.Fatal(err)
 	}
 	if err := artifactretirement.Publish(ctx, repoPath, plan); err != nil {
@@ -285,5 +321,104 @@ func TestArtifactRetirementResumeRevalidatesProviderBranch(t *testing.T) {
 	}
 	if providerHead != strings.Repeat("3", 40) {
 		t.Fatalf("resume overwrote third-party provider head: %s", providerHead)
+	}
+}
+
+func TestArtifactRetirementForgejoForceWindowRestoresOnSuccessAndFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		pushError bool
+	}{
+		{name: "success"},
+		{name: "push_failure", pushError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := &retirementProviderFixture{fingerprint: strings.Repeat("a", 64)}
+			oldSHA, newSHA := strings.Repeat("1", 40), strings.Repeat("2", 40)
+			providerHead := oldSHA
+			enabled := true
+			integration := forgejointegration.NewWithGitCapabilities(forgejointegration.Config{
+				Enabled: true, IntegrationBot: "ags-bot",
+				RepoMap: map[string]forgejointegration.RepoMapping{
+					"owner/repo": {Owner: "mirror", Repo: "repo", Enabled: &enabled, BaseBranch: "main"},
+				},
+			}, fixture, func(_ context.Context, req forgejointegration.PushRequest) error {
+				if !fixture.force {
+					t.Fatal("provider push ran without the durable force window")
+				}
+				if req.ForceWithLeaseRef != "refs/heads/main" || req.ForceWithLeaseSHA != oldSHA {
+					t.Fatalf("unsafe provider lease: %+v", req)
+				}
+				if tc.pushError {
+					return errors.New("fixture push failed")
+				}
+				providerHead = newSHA
+				return nil
+			}, func(context.Context, string, string, string) (string, error) {
+				return providerHead, nil
+			})
+			svc := &Service{ForgejoIntegration: integration}
+			repo := db.Repository{FullName: "owner/repo", DefaultBranch: "main"}
+			plan := artifactretirement.Plan{
+				OperationID: "force-window-fixture", Repository: repo.FullName, DefaultBranch: "main",
+				StagingGitDir: t.TempDir(),
+			}
+			stateRoot := t.TempDir()
+			handled, err := svc.rewriteArtifactRetirementForgejoBranch(context.Background(), repo, plan, stateRoot, "main",
+				artifactretirement.BranchUpdate{Branch: "main", Old: oldSHA, New: newSHA})
+			if !handled {
+				t.Fatal("mapped Forgejo branch was not handled")
+			}
+			if tc.pushError && err == nil {
+				t.Fatal("provider push failure was hidden")
+			}
+			if !tc.pushError && err != nil {
+				t.Fatal(err)
+			}
+			if fixture.force {
+				t.Fatal("temporary force policy survived the operation")
+			}
+			if _, exists, loadErr := loadRetirementForceJournal(stateRoot); loadErr != nil || exists {
+				t.Fatalf("force journal survived a restored policy: exists=%v err=%v", exists, loadErr)
+			}
+			if !tc.pushError && providerHead != newSHA {
+				t.Fatalf("provider head=%s want %s", providerHead, newSHA)
+			}
+		})
+	}
+}
+
+func TestArtifactRetirementRecoversInterruptedForgejoForceWindow(t *testing.T) {
+	fixture := &retirementProviderFixture{force: true, fingerprint: strings.Repeat("b", 64)}
+	enabled := true
+	integration := forgejointegration.NewWithGitCapabilities(forgejointegration.Config{
+		Enabled: true, IntegrationBot: "ags-bot",
+		RepoMap: map[string]forgejointegration.RepoMapping{
+			"owner/repo": {Owner: "mirror", Repo: "repo", Enabled: &enabled, BaseBranch: "main"},
+		},
+	}, fixture, func(context.Context, forgejointegration.PushRequest) error {
+		t.Fatal("recovery must restore policy before any provider push")
+		return nil
+	}, func(context.Context, string, string, string) (string, error) {
+		return strings.Repeat("1", 40), nil
+	})
+	svc := &Service{ForgejoIntegration: integration}
+	repo := db.Repository{FullName: "owner/repo", DefaultBranch: "main"}
+	plan := artifactretirement.Plan{OperationID: "interrupted-force-window", Repository: repo.FullName, DefaultBranch: "main"}
+	stateRoot := t.TempDir()
+	if err := saveRetirementForceJournal(stateRoot, retirementForceJournal{
+		Schema: retirementForceJournalSchema, OperationID: plan.OperationID, Repository: repo.FullName,
+		Branch: "main", PolicyFingerprint: fixture.fingerprint,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.recoverArtifactRetirementForgejoForce(context.Background(), repo, plan, stateRoot); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.force {
+		t.Fatal("recovery left force-push enabled")
+	}
+	if _, exists, err := loadRetirementForceJournal(stateRoot); err != nil || exists {
+		t.Fatalf("recovery journal was not retired: exists=%v err=%v", exists, err)
 	}
 }

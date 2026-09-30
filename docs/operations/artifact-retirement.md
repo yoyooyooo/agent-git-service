@@ -90,6 +90,18 @@ provider branches are not force-rewritten merely because a similarly named AGS
 branch exists. Repositories with another active provider on a changed ref fail
 closed until that provider gains an explicit migration adapter.
 
+Canonical Forgejo base protection keeps force-push disabled. For that one mapped
+base branch only, the migration first verifies normal protected-base authority,
+records a private no-secret force-window journal, fingerprints every observed
+protection field except `enable_force_push`, and uses the separate policy
+operator credential to toggle only that field. The integration-bot Git token
+then performs the exact lease rewrite. The original force setting is restored
+and normal authority is reverified before the journal is removed. Push failure
+still restores the policy. If the process dies anywhere after the journal is
+written, the next startup restores/verifies the policy before any rewrite,
+worker, projection resume or HTTP listener is allowed to continue. A different
+protection fingerprint fails closed rather than overwriting provider policy.
+
 Nonterminal Forgejo projection jobs and active provider action intents block the
 migration. Provider branches move before the local atomic ref publication so a
 restart can safely recognize provider `old|new` state.
@@ -109,6 +121,8 @@ receipts remain on their original SHA.
 A private sibling state directory stores the deterministic plan and completed
 receipt. Both are bound to the SHA-256 of the complete canonical intent; reusing
 an `operation_id` with different blobs, ancestor or recovery evidence is refused.
+A separate private Forgejo force-window journal exists only while a protected
+base rewrite may need restoration; it contains no credential material.
 The plan records original/clean refs, the commit map, expected current tree,
 signature removals and staging location. If staging disappears before publication
 it is rebuilt and must reproduce the same old/new default head and tree. If local
