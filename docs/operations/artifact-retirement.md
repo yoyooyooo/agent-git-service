@@ -30,6 +30,7 @@ The intent is an owner-private regular JSON file:
   "expected_ancestor": "<40-char accepted commit>",
   "recovery_archive": "<operator-owned off-host locator>",
   "recovery_archive_sha256": "<64-char sha256>",
+  "recovery_refs_sha256": "<64-char digest of verified archived refs>",
   "allow_signature_removal": true,
   "retired_blobs": [
     {"oid":"<40-char blob>","bytes":123,"sha256":"<64-char sha256>"}
@@ -144,9 +145,17 @@ the complete planned ref maps, not just the default head and tree. After a crash
 startup verifies the replacement map, finishes GC/readback and resumes database
 reconciliation without relabelling old audit evidence.
 
-The intent requires an operator-owned off-host recovery locator and digest.
-AGS records that evidence; it does not create or upload the external archive or
-gain authority over its retention.
+The intent requires an operator-owned off-host recovery locator, archive digest,
+and reference-snapshot digest. The deployment owner must restore and verify the
+archive, including available database-only objects, before provisioning the
+intent. `ReferenceSnapshotSHA256` computes the reference digest as SHA-256 of the
+canonical JSON reference-name/object-ID map. Startup requires the live source
+map to match this verified recovery snapshot before preparing any rewrite.
+
+AGS records the physical archive locator and checksum; it does not create or
+upload the external archive or claim to have verified its bytes remotely. A
+stale archive cannot authorize a changed source graph. Archive retention remains
+owned by deployment operations, outside ordinary active-repository cloning.
 
 ## Acceptance
 

@@ -17,7 +17,7 @@ func TestRetirementPreservesAvailableDatabaseOnlyCommit(t *testing.T) {
 	orphan := testGit(t, bare, []byte(raw), "hash-object", "-w", "-t", "commit", "--stdin")
 	initialRefs := testGit(t, bare, nil, "show-ref")
 	sum := sha256.Sum256(blob)
-	intent := Intent{Schema: IntentSchema, OperationID: "orphan-preservation", Repository: "owner/repo", DefaultBranch: "main", ExpectedAncestor: historical, RecoveryArchive: "off-host://fixture/recovery", RecoveryArchiveSHA256: strings.Repeat("a", 64), AllowSignatureRemoval: true, RetiredBlobs: []BlobSpec{{OID: blobOID, Bytes: int64(len(blob)), SHA256: hex.EncodeToString(sum[:])}}}
+	intent := Intent{Schema: IntentSchema, OperationID: "orphan-preservation", Repository: "owner/repo", DefaultBranch: "main", ExpectedAncestor: historical, RecoveryArchive: "off-host://fixture/recovery", RecoveryArchiveSHA256: strings.Repeat("a", 64), RecoveryRefsSHA256: testRecoveryDigest(t, bare), AllowSignatureRemoval: true, RetiredBlobs: []BlobSpec{{OID: blobOID, Bytes: int64(len(blob)), SHA256: hex.EncodeToString(sum[:])}}}
 	plan, err := PrepareWithApplicationRoots(ctx, bare, filepath.Join(t.TempDir(), "state"), intent, []string{orphan})
 	if err != nil {
 		t.Fatal(err)

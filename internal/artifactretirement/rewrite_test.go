@@ -63,6 +63,15 @@ func testFixture(t *testing.T) (bare, originalHead, historicalCommit, blobOID st
 	return bare, originalHead, historicalCommit, blobOID, blob
 }
 
+func testRecoveryDigest(t *testing.T, path string) string {
+	t.Helper()
+	digest, err := ReferenceSnapshotSHA256(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
 func TestPrepareAndPublishRetiresExactBlobAndPreservesHistoricalLookup(t *testing.T) {
 	ctx := context.Background()
 	bare, originalHead, historicalCommit, blobOID, blob := testFixture(t)
@@ -71,7 +80,7 @@ func TestPrepareAndPublishRetiresExactBlobAndPreservesHistoricalLookup(t *testin
 		Schema: IntentSchema, OperationID: "fixture-retirement", Repository: "owner/repo",
 		DefaultBranch: "main", ExpectedAncestor: historicalCommit,
 		RecoveryArchive:       "off-host://fixture/recovery.bundle",
-		RecoveryArchiveSHA256: strings.Repeat("a", 64), AllowSignatureRemoval: true,
+		RecoveryArchiveSHA256: strings.Repeat("a", 64), RecoveryRefsSHA256: testRecoveryDigest(t, bare), AllowSignatureRemoval: true,
 		RetiredBlobs: []BlobSpec{{OID: blobOID, Bytes: int64(len(blob)), SHA256: hex.EncodeToString(sum[:])}},
 	}
 	workRoot := filepath.Join(t.TempDir(), "state")
@@ -139,7 +148,7 @@ func TestPrepareRejectsCurrentTreeUseAndRefDrift(t *testing.T) {
 		Schema: IntentSchema, OperationID: "fixture-drift", Repository: "owner/repo",
 		DefaultBranch: "main", ExpectedAncestor: historicalCommit,
 		RecoveryArchive:       "off-host://fixture/recovery.bundle",
-		RecoveryArchiveSHA256: strings.Repeat("b", 64), AllowSignatureRemoval: true,
+		RecoveryArchiveSHA256: strings.Repeat("b", 64), RecoveryRefsSHA256: testRecoveryDigest(t, bare), AllowSignatureRemoval: true,
 		RetiredBlobs: []BlobSpec{{OID: blobOID, Bytes: int64(len(blob)), SHA256: hex.EncodeToString(sum[:])}},
 	}
 	plan, err := Prepare(ctx, bare, filepath.Join(t.TempDir(), "state"), intent)
@@ -149,5 +158,8 @@ func TestPrepareRejectsCurrentTreeUseAndRefDrift(t *testing.T) {
 	testGit(t, bare, nil, "update-ref", "refs/heads/drift", historicalCommit)
 	if err := Publish(ctx, bare, plan); err == nil || !strings.Contains(err.Error(), "refs drifted") {
 		t.Fatalf("expected fail-closed ref drift, got %v", err)
+	}
+	if _, err := Prepare(ctx, bare, filepath.Join(t.TempDir(), "state"), intent); err == nil || !strings.Contains(err.Error(), "recovery snapshot") {
+		t.Fatalf("stale recovery archive allowed new preparation: %v", err)
 	}
 }

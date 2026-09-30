@@ -31,6 +31,7 @@ type Intent struct {
 	ExpectedAncestor      string     `json:"expected_ancestor"`
 	RecoveryArchive       string     `json:"recovery_archive"`
 	RecoveryArchiveSHA256 string     `json:"recovery_archive_sha256"`
+	RecoveryRefsSHA256    string     `json:"recovery_refs_sha256"`
 	AllowSignatureRemoval bool       `json:"allow_signature_removal"`
 	RetiredBlobs          []BlobSpec `json:"retired_blobs"`
 }
@@ -133,7 +134,7 @@ func validateIntent(in Intent) error {
 	if in.Schema != IntentSchema || !safeID(in.OperationID) || !safeRepo(in.Repository) || !safeBranch(in.DefaultBranch) || !fullOID(in.ExpectedAncestor) {
 		return errors.New("invalid artifact retirement intent identity")
 	}
-	if strings.TrimSpace(in.RecoveryArchive) == "" || !fullDigest(in.RecoveryArchiveSHA256) || !in.AllowSignatureRemoval {
+	if strings.TrimSpace(in.RecoveryArchive) == "" || !fullDigest(in.RecoveryArchiveSHA256) || !fullDigest(in.RecoveryRefsSHA256) || !in.AllowSignatureRemoval {
 		return errors.New("artifact retirement recovery/signature acknowledgement is required")
 	}
 	if len(in.RetiredBlobs) == 0 || len(in.RetiredBlobs) > 32 {
@@ -258,6 +259,9 @@ func PrepareWithApplicationRoots(ctx context.Context, sourceGitDir, workRoot str
 	sourceRefs, err := refMap(ctx, src, true)
 	if err != nil {
 		return plan, err
+	}
+	if refsSHA256(sourceRefs) != intent.RecoveryRefsSHA256 {
+		return plan, errors.New("artifact retirement source refs differ from the verified recovery snapshot")
 	}
 	for ref := range sourceRefs {
 		if strings.HasPrefix(ref, "refs/replace/") {

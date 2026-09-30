@@ -10,7 +10,7 @@ import (
 )
 
 func safetyIntent() Intent {
-	return Intent{Schema: IntentSchema, OperationID: "exact-retirement", Repository: "owner/repo", DefaultBranch: "main", ExpectedAncestor: strings.Repeat("1", 40), RecoveryArchive: "off-host://fixture/recovery.bundle", RecoveryArchiveSHA256: strings.Repeat("2", 64), AllowSignatureRemoval: true, RetiredBlobs: []BlobSpec{{OID: strings.Repeat("3", 40), Bytes: 123, SHA256: strings.Repeat("4", 64)}}}
+	return Intent{Schema: IntentSchema, OperationID: "exact-retirement", Repository: "owner/repo", DefaultBranch: "main", ExpectedAncestor: strings.Repeat("1", 40), RecoveryArchive: "off-host://fixture/recovery.bundle", RecoveryArchiveSHA256: strings.Repeat("2", 64), RecoveryRefsSHA256: strings.Repeat("6", 64), AllowSignatureRemoval: true, RetiredBlobs: []BlobSpec{{OID: strings.Repeat("3", 40), Bytes: 123, SHA256: strings.Repeat("4", 64)}}}
 }
 
 func TestRetirementRejectsTraversalAndSymlinkedState(t *testing.T) {

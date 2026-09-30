@@ -105,6 +105,15 @@ func TestRunConfiguredArtifactRetirementRequiresAbsoluteIntentPath(t *testing.T)
 	}
 }
 
+func retirementRecoveryDigest(t *testing.T, path string) string {
+	t.Helper()
+	digest, err := artifactretirement.ReferenceSnapshotSHA256(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
 func TestRunConfiguredArtifactRetirementRewritesHistoryAndIsIdempotent(t *testing.T) {
 	svc, repo, owner := retirementServiceFixture(t)
 	ctx := context.Background()
@@ -153,6 +162,7 @@ func TestRunConfiguredArtifactRetirementRewritesHistoryAndIsIdempotent(t *testin
 		ExpectedAncestor:      engineCommit,
 		RecoveryArchive:       "off-host://fixture/recovery.bundle",
 		RecoveryArchiveSHA256: strings.Repeat("a", 64),
+		RecoveryRefsSHA256:    retirementRecoveryDigest(t, repoPath),
 		AllowSignatureRemoval: true,
 		RetiredBlobs: []artifactretirement.BlobSpec{{
 			OID: blobOID, Bytes: int64(len(engine)), SHA256: hex.EncodeToString(sum[:]),
@@ -289,7 +299,7 @@ func TestArtifactRetirementResumeRevalidatesProviderBranch(t *testing.T) {
 	intent := artifactretirement.Intent{
 		Schema: artifactretirement.IntentSchema, OperationID: "resume-provider-readback", Repository: repo.FullName,
 		DefaultBranch: "main", ExpectedAncestor: engineCommit,
-		RecoveryArchive: "off-host://fixture/recovery.bundle", RecoveryArchiveSHA256: strings.Repeat("b", 64),
+		RecoveryArchive: "off-host://fixture/recovery.bundle", RecoveryArchiveSHA256: strings.Repeat("b", 64), RecoveryRefsSHA256: retirementRecoveryDigest(t, repoPath),
 		AllowSignatureRemoval: true,
 		RetiredBlobs:          []artifactretirement.BlobSpec{{OID: blobOID, Bytes: int64(len(engine)), SHA256: hex.EncodeToString(sum[:])}},
 	}
