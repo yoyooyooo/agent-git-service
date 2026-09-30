@@ -637,6 +637,63 @@ func (i *Integration) RemoteBranchSHA(ctx context.Context, repoFullName, repoPat
 	return strings.TrimSpace(sha), true, nil
 }
 
+// ArtifactRetirementConfigured reports whether this repository owns a mapped
+// Forgejo target that must follow an explicit history rewrite.
+func (i *Integration) ArtifactRetirementConfigured(repoFullName string) bool {
+	if i == nil || !i.cfg.Enabled {
+		return false
+	}
+	target, ok, err := i.cfg.resolveTarget(strings.TrimSpace(repoFullName))
+	return err == nil && ok && target.Enabled
+}
+
+// RewriteBranchWithLease rewrites one already-existing provider branch during
+// an operator-approved repository history migration. It never creates a branch,
+// never performs an unconditional force, and is idempotent when the remote
+// already reached the cleaned SHA.
+func (i *Integration) RewriteBranchWithLease(ctx context.Context, repoFullName, repoPath, branch, oldSHA, newSHA string) (bool, error) {
+	if i == nil || !i.cfg.Enabled || i.remoteRef == nil {
+		return false, nil
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" || strings.HasPrefix(branch, "-") || strings.ContainsAny(branch, "\x00\r\n") || !isFullGitObjectID(oldSHA) || !isFullGitObjectID(newSHA) {
+		return false, fmt.Errorf("forgejo integration: invalid retirement branch rewrite")
+	}
+	target, err := i.cfg.requireTargetFor(repoFullName)
+	if err != nil {
+		return false, err
+	}
+	if !target.Enabled {
+		return false, nil
+	}
+	remoteURL, err := i.cfg.authenticatedRemoteURL(target)
+	if err != nil {
+		return false, err
+	}
+	ref := "refs/heads/" + branch
+	actual, err := i.remoteRef(ctx, repoPath, remoteURL, ref)
+	if err != nil {
+		return true, err
+	}
+	actual = strings.TrimSpace(actual)
+	if actual == "" {
+		return false, nil
+	}
+	if exactGitSHA(actual, newSHA) {
+		return true, nil
+	}
+	if !exactGitSHA(actual, oldSHA) {
+		return true, remoteRefDriftError(ref, oldSHA, actual, nil)
+	}
+	req := i.pushRequest(repoPath, remoteURL, ref+":"+ref, target, branch)
+	req.ForceWithLeaseRef = ref
+	req.ForceWithLeaseSHA = oldSHA
+	if err := i.pushAndVerify(ctx, req, ref, newSHA); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
 // ValidatePullRequestProjection reports whether this repository requires a
 // Forgejo PR projection and rejects heads that the configured mirror/PR policy
 // would silently skip.

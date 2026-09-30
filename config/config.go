@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,9 +22,10 @@ type Config struct {
 	GitRepoDir string
 	// Automatic maintenance is enabled by default; only explicit configuration
 	// disables it. It never authorizes a history rewrite.
-	GitMaintenanceDisabled bool
-	GitMaintenanceInterval time.Duration
-	GitMaintenanceTimeout  time.Duration
+	GitMaintenanceDisabled       bool
+	GitMaintenanceInterval       time.Duration
+	GitMaintenanceTimeout        time.Duration
+	ArtifactRetirementIntentFile string
 	// ControlPlaneDSN is retained only to reject retired deployment settings.
 	// It must never silently fall back to the single application database.
 	ControlPlaneDSN string
@@ -177,6 +179,7 @@ func New() (Config, error) {
 		DBdsn:                                   os.Getenv("DB_DSN"),
 		ControlPlaneDSN:                         os.Getenv("CONTROL_PLANE_DSN"),
 		GitRepoDir:                              os.Getenv("GIT_REPO_DIR"),
+		ArtifactRetirementIntentFile:            os.Getenv("AGS_ARTIFACT_RETIREMENT_INTENT_FILE"),
 		ReplicationConfigFile:                   os.Getenv("AGS_REPLICATION_CONFIG_FILE"),
 		ReplicationAuthorityID:                  os.Getenv("AGS_REPLICATION_AUTHORITY_ID"),
 		IntegrationsConfigFile:                  os.Getenv("AGS_INTEGRATIONS_CONFIG"),
@@ -342,6 +345,10 @@ func Normalize(cfg Config) (Config, error) {
 	cfg.ConsoleBaseURL = firstNonEmpty(cfg.ConsoleBaseURL, "http://localhost:5173")
 	cfg.OAuthDeviceVerificationURL = strings.TrimSpace(cfg.OAuthDeviceVerificationURL)
 	cfg.GitRepoDir = firstNonEmpty(cfg.GitRepoDir, "gitrepos")
+	cfg.ArtifactRetirementIntentFile = strings.TrimSpace(cfg.ArtifactRetirementIntentFile)
+	if cfg.ArtifactRetirementIntentFile != "" && !filepath.IsAbs(cfg.ArtifactRetirementIntentFile) {
+		return Config{}, fmt.Errorf("AGS_ARTIFACT_RETIREMENT_INTENT_FILE must be absolute")
+	}
 	cfg.IntegrationsConfigFile = strings.TrimSpace(cfg.IntegrationsConfigFile)
 	cfg.ListenMode = firstNonEmpty(cfg.ListenMode, "development")
 	cfg.Environment = strings.ToLower(strings.TrimSpace(firstNonEmpty(cfg.Environment, "production")))

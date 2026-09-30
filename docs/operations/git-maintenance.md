@@ -78,6 +78,10 @@ only `repack --keep-unreachable` is allowed. Normal branch/tag/PR refs are not
 deleted, reset or translated by either mode. GC cannot remove an artifact that
 is still reachable through any retained history.
 
+A separately authorized exact-blob history migration is documented in
+`docs/operations/artifact-retirement.md`. It runs before listeners/workers at
+startup and is deliberately outside this ordinary maintenance policy.
+
 Receipts report loose/packed KiB, pack/object counts, reference namespaces,
 a ref digest and protection/missing counts. These are current storage
 observations, not an estimate of a new clone's network transfer or a guaranteed

@@ -322,6 +322,87 @@ func runBeforeWrite(ctx context.Context, check func(context.Context) error) erro
 	return nil
 }
 
+// ArtifactRetirementConfigured reports whether this repository owns a mapped
+// GitHub backup/shadow target that must follow an explicit history rewrite.
+func (i *Integration) ArtifactRetirementConfigured(repoFullName string) bool {
+	if i == nil || !i.cfg.Enabled {
+		return false
+	}
+	_, ok := i.cfg.targetFor(repoFullName)
+	return ok
+}
+
+// RewriteBranchWithLease rewrites one already-existing GitHub backup/shadow
+// branch during an operator-approved history migration. It is idempotent and
+// refuses any remote head other than the exact accepted old/new identities.
+func (i *Integration) RewriteBranchWithLease(ctx context.Context, repoFullName, repoPath, branch, oldSHA, newSHA string) (bool, error) {
+	if err := i.ready(); err != nil {
+		if err == errIntegrationDisabled {
+			return false, nil
+		}
+		return false, err
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" || strings.HasPrefix(branch, "-") || strings.ContainsAny(branch, "\x00\r\n") || !fullSHA40(oldSHA) || !fullSHA40(newSHA) {
+		return false, fmt.Errorf("github integration: invalid retirement branch rewrite")
+	}
+	mapping, ok := i.cfg.targetFor(repoFullName)
+	if !ok {
+		return false, nil
+	}
+	remoteURL, err := i.cfg.authenticatedRemoteURL(mapping)
+	if err != nil {
+		return false, err
+	}
+	ref := "refs/heads/" + branch
+	out, err := gittransport.Run(ctx, remoteURL, i.cfg.Token, "-C", repoPath, "ls-remote", remoteURL, ref)
+	if err != nil {
+		return true, fmt.Errorf("github integration: read remote branch: %w", err)
+	}
+	actual := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[1] == ref {
+			actual = fields[0]
+			break
+		}
+	}
+	if actual == "" {
+		return false, nil
+	}
+	if strings.EqualFold(actual, newSHA) {
+		return true, nil
+	}
+	if !strings.EqualFold(actual, oldSHA) {
+		return true, fmt.Errorf("github integration: retirement branch %s drifted from accepted old head", branch)
+	}
+	lease := "--force-with-lease=" + ref + ":" + oldSHA
+	if _, err := gittransport.Run(ctx, remoteURL, i.cfg.Token, "-C", repoPath, "push", lease, remoteURL, ref+":"+ref); err != nil {
+		return true, fmt.Errorf("github integration: retirement push failed: %w", err)
+	}
+	out, err = gittransport.Run(ctx, remoteURL, i.cfg.Token, "-C", repoPath, "ls-remote", remoteURL, ref)
+	if err != nil {
+		return true, fmt.Errorf("github integration: retirement readback failed: %w", err)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 2 || !strings.EqualFold(fields[0], newSHA) {
+		return true, fmt.Errorf("github integration: retirement branch readback mismatch")
+	}
+	return true, nil
+}
+
+func fullSHA40(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, c := range value {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 // EnsureShadowPullRequest mirrors a PR branch and creates a GitHub shadow PR if needed.
 func (i *Integration) EnsureShadowPullRequest(ctx context.Context, req ShadowPullRequestRequest) (ShadowPullRequestResult, bool, error) {
 	if err := i.ready(); err != nil {
