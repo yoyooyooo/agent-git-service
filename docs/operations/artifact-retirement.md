@@ -133,7 +133,10 @@ application database:
 - current projection-ref state identities for a branch that converged.
 
 Historical reviews, projection events, terminal jobs, CI and authorization
-receipts remain on their original SHA.
+receipts remain on their original SHA. `ProjectionRefState` drift rows are
+observability evidence only: they do not independently authorize or require a
+provider branch rewrite during retirement. Provider writes are limited to the
+configured default branch and currently open PR projections.
 
 ## Durable state and recovery
 
