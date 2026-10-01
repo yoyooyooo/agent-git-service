@@ -439,6 +439,9 @@ func (s *Service) ResumePendingForgejoProjectionJobs(ctx context.Context) error 
 	if s == nil || s.DisableForgejoProjectionWorker {
 		return nil
 	}
+	if _, err := s.terminalizeClosedForgejoProjectionJobs(ctx, 0); err != nil {
+		return err
+	}
 	if err := s.requeueGenericForgejoSessionAdmissionJobs(ctx); err != nil {
 		return err
 	}
@@ -489,6 +492,35 @@ func (s *Service) ResumePendingForgejoProjectionJobs(ctx context.Context) error 
 		s.scheduleForgejoProjectionJob(ctx, job.ID)
 	}
 	return nil
+}
+
+// terminalizeClosedForgejoProjectionJobs retires generic projection work whose
+// authoritative AGS PR is already terminal. Such a job has no legal provider
+// effect left to perform. The terminal row also invalidates any stale worker's
+// generation CAS, so a late attempt cannot revive or publish it.
+func (s *Service) terminalizeClosedForgejoProjectionJobs(ctx context.Context, repositoryID uint) (int64, error) {
+	if s == nil {
+		return 0, nil
+	}
+	now := time.Now().UTC()
+	query := s.DBForCtx(ctx).Model(&db.PullRequestProjectionJob{}).
+		Where("provider = ? AND `trigger` = ? AND phase NOT IN ?", ProjectionProviderForgejo, ForgejoProjectionTriggerPullRequest, forgejoProjectionTerminalPhases).
+		Where("pull_request_id IN (SELECT id FROM pull_requests WHERE state = ? OR merged = ?)", db.StateClosed, true)
+	if repositoryID != 0 {
+		query = query.Where("repository_id = ?", repositoryID)
+	}
+	result := query.Updates(map[string]any{
+		"phase":           ForgejoProjectionPhaseFailedTerminal,
+		"last_error_type": forgejointegration.ProjectionFailurePullRequestStateDrift,
+		"last_error":      "projection job retired because the authoritative AGS pull request is closed",
+		"next_run_at":     nil,
+		"finished_at":     &now,
+		"updated_at":      now,
+	})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
 }
 
 func (s *Service) projectionBackgroundContext(ctx context.Context) context.Context {

@@ -138,6 +138,39 @@ func TestResumePendingForgejoProjectionJobsHealsSessionAdmissionTerminal(t *test
 	}
 }
 
+func TestResumePendingForgejoProjectionJobsTerminalizesClosedPullRequestWork(t *testing.T) {
+	svc, cleanup := setupTestService(t)
+	defer cleanup()
+	pr, _ := seedStandingExecutorProjectionPR(t, svc, "closed-resume", "agent/closed-resume")
+	now := time.Now().UTC()
+	if err := svc.DB.Model(&db.PullRequest{}).Where("id = ?", pr.ID).Updates(map[string]any{
+		"state": db.StateClosed, "closed_at": &now,
+	}).Error; err != nil {
+		t.Fatalf("close PR fixture: %v", err)
+	}
+	job := db.PullRequestProjectionJob{
+		PullRequestID: pr.ID, RepositoryID: pr.RepositoryID,
+		Provider: service.ProjectionProviderForgejo, Trigger: service.ForgejoProjectionTriggerPullRequest,
+		RepoFullName: "closed-resume/repo", AGSPRNumber: pr.Number, HeadRef: pr.HeadRef, BaseRef: pr.BaseRef,
+		HeadSHA: pr.HeadSHA, Phase: service.ForgejoProjectionPhaseFailedRetryable, Attempt: 17,
+		LastErrorType: forgejointegration.ProjectionFailureNonFastForward, LastError: "historical retry fixture",
+	}
+	if err := svc.DB.Create(&job).Error; err != nil {
+		t.Fatalf("seed closed projection job: %v", err)
+	}
+	if err := svc.ResumePendingForgejoProjectionJobs(context.Background()); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	svc.Wg.Wait()
+	var got db.PullRequestProjectionJob
+	if err := svc.DB.First(&got, job.ID).Error; err != nil {
+		t.Fatalf("reload job: %v", err)
+	}
+	if got.Phase != service.ForgejoProjectionPhaseFailedTerminal || got.LastErrorType != forgejointegration.ProjectionFailurePullRequestStateDrift || got.FinishedAt == nil || got.NextRunAt != nil {
+		t.Fatalf("closed PR projection was not terminalized: %+v", got)
+	}
+}
+
 func TestSyncPRHeadAfterPushRequeuesWhenOriginatingSessionExpired(t *testing.T) {
 	svc, cleanup := setupTestService(t)
 	defer cleanup()

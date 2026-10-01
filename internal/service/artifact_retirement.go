@@ -248,6 +248,9 @@ func (s *Service) preflightArtifactRetirement(ctx context.Context, repositoryID 
 	if actionCount != 0 {
 		return errors.New("artifact retirement refuses active provider action intents")
 	}
+	if _, err := s.terminalizeClosedForgejoProjectionJobs(ctx, repositoryID); err != nil {
+		return errors.New("artifact retirement closed projection-job reconciliation failed")
+	}
 	var projectionCount int64
 	if err := database.Model(&db.PullRequestProjectionJob{}).
 		Where("repository_id = ? AND phase NOT IN ?", repositoryID, forgejoProjectionTerminalPhases).

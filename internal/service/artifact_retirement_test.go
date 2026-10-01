@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ngaut/agent-git-service/internal/artifactretirement"
 	"github.com/ngaut/agent-git-service/internal/db"
@@ -99,6 +100,40 @@ func (f *retirementProviderFixture) SetArtifactRetirementForce(_ context.Context
 	}
 	f.force = enabled
 	return nil
+}
+
+func TestArtifactRetirementPreflightRetiresClosedPullRequestProjectionJobs(t *testing.T) {
+	svc, repo, owner := retirementServiceFixture(t)
+	ctx := context.Background()
+	if err := svc.Git.CreateBranch(ctx, repo.FullName, "closed-work", "main"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := svc.Git.WriteFile(ctx, repo.FullName, "closed-work", "closed.txt", "closed work", []byte("closed\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err := svc.CreatePR(ContextWithUser(ctx, owner), CreatePRInput{RepoFullName: repo.FullName, Title: "closed work", HeadRef: "closed-work", BaseRef: "main", AuthorLogin: owner.Login})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := svc.DB.Model(&db.PullRequest{}).Where("id = ?", pr.ID).Updates(map[string]any{"state": db.StateClosed, "closed_at": &now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	job := db.PullRequestProjectionJob{PullRequestID: pr.ID, RepositoryID: repo.ID, Provider: ProjectionProviderForgejo, Trigger: ForgejoProjectionTriggerPullRequest, RepoFullName: repo.FullName, AGSPRNumber: pr.Number, HeadRef: pr.HeadRef, BaseRef: pr.BaseRef, HeadSHA: head, Phase: ForgejoProjectionPhasePreflight, Attempt: 9}
+	if err := svc.DB.Create(&job).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.preflightArtifactRetirement(ctx, repo.ID); err != nil {
+		t.Fatalf("closed historical projection blocked retirement: %v", err)
+	}
+	var got db.PullRequestProjectionJob
+	if err := svc.DB.First(&got, job.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != ForgejoProjectionPhaseFailedTerminal || got.LastErrorType != forgejointegration.ProjectionFailurePullRequestStateDrift || got.FinishedAt == nil {
+		t.Fatalf("closed projection job not terminalized by retirement preflight: %+v", got)
+	}
 }
 
 func TestRunConfiguredArtifactRetirementRequiresAbsoluteIntentPath(t *testing.T) {
