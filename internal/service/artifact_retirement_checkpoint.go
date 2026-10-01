@@ -10,6 +10,8 @@ import (
 	"github.com/ngaut/agent-git-service/internal/db"
 )
 
+const retirementProviderCheckpointSchema = "ags.artifact-retirement.providers.v2"
+
 type retirementProvidersCheckpoint struct {
 	Schema       string                     `json:"schema"`
 	IntentSHA256 string                     `json:"intent_sha256"`
@@ -23,19 +25,27 @@ func (s *Service) retirementProviderCheckpoint(ctx context.Context, repo db.Repo
 	path := filepath.Join(stateRoot, "providers.json")
 	var saved retirementProvidersCheckpoint
 	err := artifactretirement.LoadCheckpoint(path, &saved)
-	if os.IsNotExist(err) && mayCreate {
-		required, err := s.artifactRetirementProviderRequirements(ctx, repo, plan)
-		if err != nil {
-			return nil, err
+	legacy := err == nil && saved.Schema == "ags.artifact-retirement.providers.v1"
+	if (os.IsNotExist(err) || legacy) && mayCreate {
+		// v1 included ProjectionRefState drift rows as provider-write authority.
+		// Before any publication, recompute under the current policy and replace
+		// that legacy journal. Once publication can have started, never shrink a
+		// saved write set: doing so could hide a partially moved provider branch.
+		required, queryErr := s.artifactRetirementProviderRequirements(ctx, repo, plan)
+		if queryErr != nil {
+			return nil, queryErr
 		}
-		saved = retirementProvidersCheckpoint{Schema: "ags.artifact-retirement.providers.v1", IntentSHA256: plan.IntentSHA256, RepositoryID: repo.ID, Required: required}
-		if err := artifactretirement.SaveCheckpoint(path, saved); err != nil {
-			return nil, err
+		saved = retirementProvidersCheckpoint{Schema: retirementProviderCheckpointSchema, IntentSHA256: plan.IntentSHA256, RepositoryID: repo.ID, Required: required}
+		if saveErr := artifactretirement.SaveCheckpoint(path, saved); saveErr != nil {
+			return nil, saveErr
 		}
+		err = nil
 	} else if err != nil {
 		return nil, err
+	} else if legacy {
+		return nil, errors.New("artifact retirement legacy provider journal cannot resume after publication")
 	}
-	if saved.Schema != "ags.artifact-retirement.providers.v1" || saved.IntentSHA256 != plan.IntentSHA256 || saved.RepositoryID != repo.ID || saved.Required == nil {
+	if saved.Schema != retirementProviderCheckpointSchema || saved.IntentSHA256 != plan.IntentSHA256 || saved.RepositoryID != repo.ID || saved.Required == nil {
 		return nil, errors.New("artifact retirement provider journal does not match this operation")
 	}
 	return saved.Required, nil

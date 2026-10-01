@@ -221,6 +221,51 @@ func TestArtifactRetirementProviderRequirementsIgnoreDriftEvidenceButKeepOpenPro
 	}
 }
 
+func TestArtifactRetirementResumeRevalidatesLegacyProviderCheckpoint(t *testing.T) {
+	svc, repo, _ := retirementServiceFixture(t)
+	ctx := context.Background()
+	enabled := true
+	svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{
+		Enabled: true,
+		RepoMap: map[string]forgejointegration.RepoMapping{
+			repo.FullName: {Owner: "mirror", Repo: "repo", Enabled: &enabled, BaseBranch: "main"},
+		},
+	}, nil, nil)
+	plan := artifactretirement.Plan{
+		IntentSHA256: strings.Repeat("a", 64), Repository: repo.FullName, DefaultBranch: "main",
+		RefUpdates: []artifactretirement.RefUpdate{
+			{Ref: "refs/heads/main", Old: strings.Repeat("1", 40), New: strings.Repeat("2", 40)},
+			{Ref: "refs/heads/stale-drift", Old: strings.Repeat("3", 40), New: strings.Repeat("4", 40)},
+		},
+	}
+	stateRoot := t.TempDir()
+	if err := os.Chmod(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := retirementProvidersCheckpoint{
+		Schema: "ags.artifact-retirement.providers.v1", IntentSHA256: plan.IntentSHA256, RepositoryID: repo.ID,
+		Required: map[string]map[string]bool{ProjectionProviderForgejo: {"main": true, "stale-drift": true}},
+	}
+	path := filepath.Join(stateRoot, "providers.json")
+	if err := artifactretirement.SaveCheckpoint(path, legacy); err != nil {
+		t.Fatal(err)
+	}
+	required, err := svc.retirementProviderCheckpoint(ctx, repo, plan, stateRoot, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !required[ProjectionProviderForgejo]["main"] || required[ProjectionProviderForgejo]["stale-drift"] {
+		t.Fatalf("legacy drift authority survived recomputation: %#v", required)
+	}
+	var saved retirementProvidersCheckpoint
+	if err := artifactretirement.LoadCheckpoint(path, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Schema != retirementProviderCheckpointSchema || saved.Required[ProjectionProviderForgejo]["stale-drift"] {
+		t.Fatalf("legacy checkpoint not upgraded safely: %#v", saved)
+	}
+}
+
 func TestArtifactRetirementProtectedBaseFailurePrecedesAllExternalWrites(t *testing.T) {
 	calls, pushes := 0, 0
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

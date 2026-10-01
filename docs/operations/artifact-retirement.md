@@ -90,8 +90,8 @@ transaction resumes finalization instead of attempting a second rewrite.
 ## Provider projections and active work
 
 Only provider branches that are operationally required are rewritten: the
-configured default branch, current projection-ref states and open PR
-projections. Forgejo and GitHub use exact `force-with-lease=<ref>:<old-sha>`;
+configured default branch and open PR projections. Forgejo and GitHub use
+exact `force-with-lease=<ref>:<old-sha>`;
 an absent or third-party-drifted required branch blocks startup. Unrelated old
 provider branches are not force-rewritten merely because a similarly named AGS
 branch exists. Repositories with another active provider on a changed ref fail
