@@ -502,28 +502,12 @@ func (s *Service) artifactRetirementProviderRequirements(ctx context.Context, re
 	if s.GitHubIntegration != nil && s.GitHubIntegration.ArtifactRetirementConfigured(repo.FullName) {
 		add(ProjectionProviderGitHub, plan.DefaultBranch)
 	}
+	// ProjectionRefState is drift/observability evidence, not write
+	// authority. Retirement must not repair unrelated historical drift merely
+	// because a ref-state row is active. Required provider writes come only
+	// from the configured default branch and currently open PR projections.
 	updates := retirementBranchUpdates(plan)
-	var refs []db.ProjectionRefState
 	database := s.DBForCtx(ctx).WithContext(ctx)
-	if err := database.Where("repository_id = ?", repo.ID).Find(&refs).Error; err != nil {
-		return nil, errors.New("artifact retirement provider requirement query failed")
-	}
-	for _, row := range refs {
-		if !strings.HasPrefix(row.Ref, "refs/heads/") {
-			continue
-		}
-		branch := strings.TrimPrefix(row.Ref, "refs/heads/")
-		update, changed := updates[branch]
-		if !changed || row.AGSSHA != update.Old {
-			continue
-		}
-		switch row.Provider {
-		case ProjectionProviderForgejo, ProjectionProviderGitHub:
-			add(row.Provider, branch)
-		default:
-			return nil, fmt.Errorf("artifact retirement does not support active provider %s", row.Provider)
-		}
-	}
 	var projections []db.PullRequestProjection
 	if err := database.Table("pull_request_projections").
 		Joins("JOIN pull_requests ON pull_requests.id = pull_request_projections.pull_request_id").
@@ -564,28 +548,9 @@ func retirementBranchUpdates(plan artifactretirement.Plan) map[string]artifactre
 func (s *Service) validateArtifactRetirementProviderCoverage(ctx context.Context, repositoryID uint, plan artifactretirement.Plan, state retirementProviderState) error {
 	updates := retirementBranchUpdates(plan)
 	database := s.DBForCtx(ctx).WithContext(ctx)
-	var refs []db.ProjectionRefState
-	if err := database.Where("repository_id = ?", repositoryID).Find(&refs).Error; err != nil {
-		return errors.New("artifact retirement projection-state preflight failed")
-	}
-	for _, row := range refs {
-		if !strings.HasPrefix(row.Ref, "refs/heads/") {
-			continue
-		}
-		branch := strings.TrimPrefix(row.Ref, "refs/heads/")
-		update, changed := updates[branch]
-		if !changed || row.AGSSHA != update.Old {
-			continue
-		}
-		switch row.Provider {
-		case ProjectionProviderForgejo, ProjectionProviderGitHub:
-			if !state[row.Provider][branch] {
-				return fmt.Errorf("artifact retirement provider branch %s/%s was not rewritten", row.Provider, branch)
-			}
-		default:
-			return fmt.Errorf("artifact retirement does not support active provider %s", row.Provider)
-		}
-	}
+	// Drift-state rows are observations and remain untouched unless their branch
+	// was actually rewritten for an open projection/default branch. They do not
+	// independently require provider publication or block migration completion.
 	var projections []db.PullRequestProjection
 	if err := database.Table("pull_request_projections").
 		Joins("JOIN pull_requests ON pull_requests.id = pull_request_projections.pull_request_id").

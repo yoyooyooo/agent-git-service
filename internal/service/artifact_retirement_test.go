@@ -151,6 +151,76 @@ func retirementRecoveryDigest(t *testing.T, path string) string {
 	return digest
 }
 
+func TestArtifactRetirementProviderRequirementsIgnoreDriftEvidenceButKeepOpenProjection(t *testing.T) {
+	svc, repo, owner := retirementServiceFixture(t)
+	ctx := context.Background()
+	enabled := true
+	svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{
+		Enabled: true,
+		RepoMap: map[string]forgejointegration.RepoMapping{
+			repo.FullName: {Owner: "mirror", Repo: "repo", Enabled: &enabled, BaseBranch: "main"},
+		},
+	}, nil, nil)
+
+	oldMain, newMain := strings.Repeat("1", 40), strings.Repeat("2", 40)
+	oldDrift, newDrift := strings.Repeat("3", 40), strings.Repeat("4", 40)
+	oldOpen, newOpen := strings.Repeat("5", 40), strings.Repeat("6", 40)
+	plan := artifactretirement.Plan{
+		Repository: repo.FullName, DefaultBranch: "main",
+		RefUpdates: []artifactretirement.RefUpdate{
+			{Ref: "refs/heads/main", Old: oldMain, New: newMain},
+			{Ref: "refs/heads/stale-drift", Old: oldDrift, New: newDrift},
+			{Ref: "refs/heads/open-work", Old: oldOpen, New: newOpen},
+		},
+	}
+	now := time.Now().UTC()
+	if err := svc.DB.Create(&db.ProjectionRefState{
+		Provider: ProjectionProviderForgejo, RepositoryID: repo.ID, RepoFullName: repo.FullName,
+		Ref: "refs/heads/stale-drift", Branch: "stale-drift", Type: forgejointegration.ProjectionFailureSHADrift,
+		Status: ProjectionStatusActive, Authority: ProjectionAuthorityAGS, AGSSHA: oldDrift,
+		ExternalSHA: strings.Repeat("7", 40), FirstSeenAt: now, LastSeenAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	pr := db.PullRequest{
+		Number: 901, RepositoryID: repo.ID, Title: "open retirement projection", State: db.StateOpen,
+		AuthorID: owner.ID, HeadRef: "open-work", HeadSHA: oldOpen, BaseRef: "main", BaseSHA: oldMain,
+	}
+	if err := svc.DB.Create(&pr).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DB.Create(&db.PullRequestProjection{
+		PullRequestID: pr.ID, RepositoryID: repo.ID, Provider: ProjectionProviderForgejo,
+		ExternalRepo: "mirror/repo", ExternalNumber: 42, SourceBranch: "open-work", TargetBranch: "main",
+		State: ProjectionStateOpen, LastSyncedSHA: oldOpen,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	required, err := svc.artifactRetirementProviderRequirements(ctx, repo, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !required[ProjectionProviderForgejo]["main"] || !required[ProjectionProviderForgejo]["open-work"] {
+		t.Fatalf("current authority missing from requirements: %#v", required)
+	}
+	if required[ProjectionProviderForgejo]["stale-drift"] {
+		t.Fatalf("drift evidence gained provider write authority: %#v", required)
+	}
+	if err := svc.validateArtifactRetirementProviderCoverage(ctx, repo.ID, plan, retirementProviderState{
+		ProjectionProviderForgejo: {"main": true, "open-work": true},
+	}); err != nil {
+		t.Fatalf("drift evidence blocked retirement coverage: %v", err)
+	}
+	var preserved db.ProjectionRefState
+	if err := svc.DB.Where("repository_id = ? AND ref = ?", repo.ID, "refs/heads/stale-drift").First(&preserved).Error; err != nil {
+		t.Fatal(err)
+	}
+	if preserved.Status != ProjectionStatusActive || preserved.AGSSHA != oldDrift {
+		t.Fatalf("drift evidence was mutated by requirement evaluation: %+v", preserved)
+	}
+}
+
 func TestArtifactRetirementProtectedBaseFailurePrecedesAllExternalWrites(t *testing.T) {
 	calls, pushes := 0, 0
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
