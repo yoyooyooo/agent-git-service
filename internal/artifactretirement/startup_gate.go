@@ -31,10 +31,17 @@ func CheckStartupGate(root, intentPath string) error {
 		return err
 	}
 	path := filepath.Join(startupGateDirectory(absoluteRoot), "pending.json")
-	var marker StartupMarker
-	if err := readPrivateJSON(path, &marker); os.IsNotExist(err) {
+	// The retirement safety policy is opt-in until a durable marker actually
+	// exists. Ordinary deployments may legitimately place the Git root behind an
+	// OS-managed symlink; strict component/private-file checks begin only after
+	// an interrupted retirement has something durable to protect.
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
+		return err
+	}
+	var marker StartupMarker
+	if err := readPrivateJSON(path, &marker); err != nil {
 		return err
 	}
 	if marker.Schema != "ags.artifact-retirement.pending.v1" || !fullDigest(marker.IntentSHA256) || marker.RepositoryID == 0 {

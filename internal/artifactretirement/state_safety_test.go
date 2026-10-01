@@ -50,6 +50,21 @@ func TestRetirementRejectsTraversalAndSymlinkedState(t *testing.T) {
 	}
 }
 
+func TestStartupGateAbsentDoesNotRejectSymlinkedGitRoot(t *testing.T) {
+	parent := t.TempDir()
+	realRoot := filepath.Join(parent, "real-git-root")
+	if err := os.Mkdir(realRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(parent, "git-root-alias")
+	if err := os.Symlink(realRoot, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckStartupGate(alias, ""); err != nil {
+		t.Fatalf("absent retirement marker affected ordinary startup: %v", err)
+	}
+}
+
 func TestRetirementAbsenceVerificationDoesNotHideCancellationOrFailure(t *testing.T) {
 	bare, _, _, oid, _ := testFixture(t)
 	if exists, err := objectPhysicallyExists(context.Background(), bare, oid); err != nil || !exists {
