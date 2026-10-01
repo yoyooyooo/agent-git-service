@@ -97,8 +97,20 @@ provider branches are not force-rewritten merely because a similarly named AGS
 branch exists. Repositories with another active provider on a changed ref fail
 closed until that provider gains an explicit migration adapter.
 
-Canonical Forgejo base protection keeps force-push disabled. For that one mapped
-base branch only, the migration first verifies normal protected-base authority,
+Protected-base capability is checked before any work branch is rewritten, so an
+unsupported provider does not receive a partially published graph.
+
+**Forgejo 12 protected branches are not supported by this force-window adapter.**
+That version does not expose `enable_force_push` and rejects force pushes before
+its administrator PR-merge exceptions. An administrator token or changing
+`apply_to_admins` does not make that operation valid. No fallback removes branch
+protection, enables disabled custom hooks, or writes around the provider. A
+separately authorized provider-owned maintenance procedure is necessary for
+such a deployment before production retirement can proceed.
+
+On an endpoint that actually exposes and enforces the exact force-push field,
+canonical base protection keeps force-push disabled. For the mapped base branch
+only, the migration first verifies normal protected-base authority,
 records a private no-secret force-window journal, fingerprints every observed
 protection field except `enable_force_push`, and uses the separate policy
 operator credential to toggle only that field. The integration-bot Git token

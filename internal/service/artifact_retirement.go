@@ -429,6 +429,25 @@ func (s *Service) rewriteArtifactRetirementProviders(ctx context.Context, repo d
 	state := retirementProviderState{}
 	var err error
 	updates := retirementBranchUpdates(plan)
+	// Check the protected base before changing any easier work branch. A
+	// provider without a supported maintenance capability must fail before
+	// partial external graph publication, not halfway through a sorted loop.
+	if requirements[ProjectionProviderForgejo][plan.DefaultBranch] {
+		if update, changed := updates[plan.DefaultBranch]; changed {
+			actual, handled, err := s.ForgejoIntegration.RemoteBranchSHA(ctx, repo.FullName, plan.StagingGitDir, plan.DefaultBranch)
+			if err != nil || !handled {
+				return nil, errors.New("artifact retirement protected-base observation unavailable")
+			}
+			if actual != update.Old && actual != update.New {
+				return nil, errors.New("artifact retirement protected-base provider drift")
+			}
+			if actual == update.Old {
+				if _, _, err := s.ForgejoIntegration.ArtifactRetirementForcePolicy(ctx, repo.FullName, plan.DefaultBranch); err != nil {
+					return nil, fmt.Errorf("artifact retirement protected-base preflight: %w", err)
+				}
+			}
+		}
+	}
 	providers := make([]string, 0, len(requirements))
 	for provider := range requirements {
 		providers = append(providers, provider)

@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -112,6 +114,28 @@ func retirementRecoveryDigest(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return digest
+}
+
+func TestArtifactRetirementProtectedBaseFailurePrecedesAllExternalWrites(t *testing.T) {
+	calls, pushes := 0, 0
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodGet {
+			t.Error("capability preflight attempted provider mutation")
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer api.Close()
+	old, newSHA := strings.Repeat("1", 40), strings.Repeat("2", 40)
+	integration := forgejointegration.NewWithGitCapabilities(forgejointegration.Config{Enabled: true, BaseURL: api.URL, AuthorityPolicyEnabled: true, IntegrationBot: "fixture-bot", RepoMap: map[string]forgejointegration.RepoMapping{"owner/repo": {Owner: "owner", Repo: "repo", BaseBranch: "main"}}}, nil,
+		func(context.Context, forgejointegration.PushRequest) error { pushes++; return nil },
+		func(context.Context, string, string, string) (string, error) { return old, nil })
+	svc := &Service{ForgejoIntegration: integration}
+	plan := artifactretirement.Plan{Repository: "owner/repo", DefaultBranch: "main", StagingGitDir: "/isolated/fixture.git", RefUpdates: []artifactretirement.RefUpdate{{Ref: "refs/heads/a-feature", Old: old, New: newSHA}, {Ref: "refs/heads/main", Old: old, New: newSHA}}}
+	_, err := svc.rewriteArtifactRetirementProviders(context.Background(), db.Repository{FullName: "owner/repo"}, plan, t.TempDir(), map[string]map[string]bool{ProjectionProviderForgejo: {"a-feature": true, "main": true}})
+	if err == nil || !strings.Contains(err.Error(), "protected-base preflight") || pushes != 0 || calls == 0 {
+		t.Fatalf("capability failure allowed partial publication: %v pushes=%d calls=%d", err, pushes, calls)
+	}
 }
 
 func TestRunConfiguredArtifactRetirementRewritesHistoryAndIsIdempotent(t *testing.T) {
