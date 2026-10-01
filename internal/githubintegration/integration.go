@@ -325,7 +325,7 @@ func runBeforeWrite(ctx context.Context, check func(context.Context) error) erro
 // ArtifactRetirementConfigured reports whether this repository owns a mapped
 // GitHub backup/shadow target that must follow an explicit history rewrite.
 func (i *Integration) ArtifactRetirementConfigured(repoFullName string) bool {
-	if i == nil || !i.cfg.Enabled {
+	if err := i.ready(); err != nil {
 		return false
 	}
 	_, ok := i.cfg.targetFor(repoFullName)

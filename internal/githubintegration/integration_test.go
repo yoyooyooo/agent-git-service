@@ -186,6 +186,16 @@ func TestDisabledIntegrationIsNoop(t *testing.T) {
 	}
 }
 
+func TestArtifactRetirementConfiguredRequiresReadyForgejoAuthority(t *testing.T) {
+	mapped := map[string]RepoMapping{"operator/project-kit": {Owner: "example-org", Repo: "project-kit"}}
+	if New(Config{Enabled: true, MergeAuthority: "github", Repos: mapped}, nil).ArtifactRetirementConfigured("operator/project-kit") {
+		t.Fatal("non-Forgejo authority was treated as an active retirement projection")
+	}
+	if !New(Config{Enabled: true, MergeAuthority: "forgejo", Repos: mapped}, nil).ArtifactRetirementConfigured("operator/project-kit") {
+		t.Fatal("ready Forgejo-authority shadow was not included in retirement")
+	}
+}
+
 func TestPushBackupSkipsNonForgejoAuthority(t *testing.T) {
 	called := false
 	integration := New(Config{
