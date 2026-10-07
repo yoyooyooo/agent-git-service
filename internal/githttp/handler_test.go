@@ -311,9 +311,12 @@ func TestReceivePackDispatchesPushWebhook(t *testing.T) {
 	if payload.HeadCommit.ID == "" {
 		t.Fatalf("expected head commit id to be populated")
 	}
-	expectedURL := fmt.Sprintf("https://%s/pushhook/repo/commit/%s", strings.TrimPrefix(env.Server.URL, "http://"), payload.HeadCommit.ID)
+	expectedURL := fmt.Sprintf("%s/pushhook/repo/commit/%s", env.Server.URL, payload.HeadCommit.ID)
 	if payload.HeadCommit.URL != expectedURL {
 		t.Fatalf("expected head commit URL %q, got %q", expectedURL, payload.HeadCommit.URL)
+	}
+	if payload.Commits[0].URL != expectedURL {
+		t.Fatalf("expected commit URL %q, got %q", expectedURL, payload.Commits[0].URL)
 	}
 	if len(payload.HeadCommit.Added) != 1 || payload.HeadCommit.Added[0] != "hook.txt" {
 		t.Fatalf("expected added files [hook.txt], got %#v", payload.HeadCommit.Added)
