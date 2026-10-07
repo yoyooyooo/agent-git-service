@@ -397,10 +397,9 @@ func (s *Service) ServerCtx() context.Context {
 	return context.Background()
 }
 
-// HTMLBaseURL returns the base URL with https:// scheme for user-facing URLs.
-// GitHub always uses https:// for browser URLs; the CLI tests assert this.
+// HTMLBaseURL returns the configured base URL for user-facing links.
 func (s *Service) HTMLBaseURL() string {
-	return strings.Replace(s.BaseURL, "http://", "https://", 1)
+	return s.BaseURL
 }
 
 // APIBaseURL is the configured absolute origin for machine-followed API links.

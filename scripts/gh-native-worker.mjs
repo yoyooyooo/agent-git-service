@@ -117,7 +117,8 @@ try {
   await start("native");
   let response = await api("/api/v3/user/repos", "POST", { name: "gh-native", private: true, auto_init: true, default_branch: "main" }); assertions(response.status === 201, "native repository creation failed");
   await git(["clone", "https://127.0.0.1/" + repo + ".git", checkout], work); await git(["switch", "-c", "feature"]); writeFileSync(join(checkout, "feature.txt"), "fixture\n"); await git(["add", "feature.txt"]); await git(["commit", "-m", "feature"]); await git(["push", "-u", "origin", "feature"]); head = await git(["rev-parse", "HEAD"]);
-  await ghCheck("origin-only repository", ["repo", "view", "--json", "nameWithOwner,url"]);
+  const viewedRepository = await ghCheck("origin-only repository", ["repo", "view", "--json", "nameWithOwner,url"]);
+  assertions(JSON.parse(viewedRepository.stdout).url === "http://127.0.0.2:6666/" + repo, "official gh repository URL changed the configured browser origin");
   await ghCheck("HEAD discovery", ["browse", "--no-browser"]);
   await ghCheck("draft create", ["pr", "create", "--base", "main", "--title", "Official gh fixture", "--body", "isolated", "--draft"]);
   response = await api("/api/v3/repos/" + repo + "/pulls/1"); assertions(response.status === 200 && response.data.draft === true, "draft flag silently ignored");

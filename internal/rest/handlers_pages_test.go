@@ -43,7 +43,7 @@ func TestPages_ConfigAndBuildHistory_Issue1296(t *testing.T) {
 	if body["status"] != service.PagesBuildStatusQueued {
 		t.Errorf("status after enable: got %v, want %q", body["status"], service.PagesBuildStatusQueued)
 	}
-	if body["html_url"] != "https://localhost:8080/pages/testuser/pages-1296" {
+	if body["html_url"] != "http://localhost:8080/pages/testuser/pages-1296" {
 		t.Errorf("html_url after enable: got %v", body["html_url"])
 	}
 	w = h.DoREST(t, "GET", "/api/v3/repos/"+full, nil)

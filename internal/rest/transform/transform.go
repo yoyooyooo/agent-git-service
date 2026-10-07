@@ -136,16 +136,15 @@ func host() string {
 	return "localhost"
 }
 
-// htmlBase returns the base URL with https:// scheme, used for html_url fields.
-// GitHub always uses https:// for user-facing URLs; the CLI tests assert this.
+// htmlBase returns the configured base URL for html_url fields.
 func htmlBase() string {
-	return strings.Replace(base(), "http://", "https://", 1)
+	return base()
 }
 
-// HTMLBase returns the HTTPS base URL for constructing html_url fields.
+// HTMLBase returns the configured base URL for constructing html_url fields.
 // Exported for use by handler files that build URLs outside the transform package.
 func HTMLBase() string {
-	return strings.Replace(base(), "http://", "https://", 1)
+	return htmlBase()
 }
 
 func APIPrefix() string { return "/api/v3" }

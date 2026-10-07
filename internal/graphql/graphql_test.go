@@ -57,8 +57,8 @@ func TestGraphQL_RepositoryQuery(t *testing.T) {
 	if repo["isPrivate"] != false {
 		t.Errorf("isPrivate: got %v, want false", repo["isPrivate"])
 	}
-	if repo["url"] == nil || repo["url"] == "" {
-		t.Error("url should be non-empty")
+	if got, want := repo["url"], svc.BaseURL+"/tester/repo-q"; got != want {
+		t.Errorf("url: got %v, want configured browser URL %s", got, want)
 	}
 	id, ok := repo["id"].(string)
 	if !ok || id == "" {
@@ -1172,8 +1172,8 @@ func TestGraphQL_RepositoryProjectsV2ReturnsOnlyLinkedProjects(t *testing.T) {
 	if project["resourcePath"] != "/tester/repo-projects/projects/1" {
 		t.Fatalf("resourcePath = %v, want /tester/repo-projects/projects/1", project["resourcePath"])
 	}
-	if project["url"] != "https://localhost:8080/tester/repo-projects/projects/1" {
-		t.Fatalf("url = %v, want https://localhost:8080/tester/repo-projects/projects/1", project["url"])
+	if project["url"] != "http://localhost:8080/tester/repo-projects/projects/1" {
+		t.Fatalf("url = %v, want http://localhost:8080/tester/repo-projects/projects/1", project["url"])
 	}
 	if project["shortDescription"] != linked.ShortDescription {
 		t.Fatalf("shortDescription = %v, want %q", project["shortDescription"], linked.ShortDescription)

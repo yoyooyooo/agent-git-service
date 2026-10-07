@@ -14,9 +14,9 @@ host authentication. A configured HTML URL is not an authentication router.
 When Git/callbacks retain a legacy origin but gh uses a separate API gateway, set
 `AGS_API_BASE_URL=https://api.example.test` on the server. It controls generated
 REST/CI API links, including jobs/logs and pagination. It does not change `BASE_URL`
-for clone URLs, callback defaults or browser URLs. Without it, API links use
-`BASE_URL` as configured; they never force an HTTP Git port to HTTPS just because
-HTML URLs prefer HTTPS. The origin is explicit, credential-free configuration,
+for clone URLs, callback defaults or browser URLs. Browser links retain the
+configured scheme, hostname and port. Without it, API links use `BASE_URL` as
+configured. The origin is explicit, credential-free configuration,
 not a value inferred from untrusted Host or forwarded headers. Both native and
 external CI responses use the same API URL owner.
 

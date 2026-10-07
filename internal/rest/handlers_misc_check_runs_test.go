@@ -105,7 +105,7 @@ func assertCheckRunShape(t *testing.T, checkRun map[string]any, repoFullName str
 	if got, _ := checkRun["external_id"].(string); got != fmt.Sprintf("workflow-run/%d/job/%d", run.ID, job.ID) {
 		t.Fatalf("external_id: got %q", got)
 	}
-	if got, _ := checkRun["details_url"].(string); got != fmt.Sprintf("https://localhost:8080/%s/actions/runs/%d/job/%d", repoFullName, run.ID, job.ID) {
+	if got, _ := checkRun["details_url"].(string); got != fmt.Sprintf("http://localhost:8080/%s/actions/runs/%d/job/%d", repoFullName, run.ID, job.ID) {
 		t.Fatalf("details_url: got %q", got)
 	}
 
