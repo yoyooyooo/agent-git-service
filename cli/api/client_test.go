@@ -2,16 +2,22 @@ package api
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/cli/cli/v2/pkg/httpmock"
 	"github.com/cli/cli/v2/pkg/iostreams"
+	ghauth "github.com/cli/go-gh/v2/pkg/auth"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -327,3 +333,150 @@ func TestGraphQLHTTPProxyKeepsNonDefaultPortOnHost(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// recordingStoredTokenConfig resolves tokens through the production
+// config lookup and records the host key it was given.
+type recordingStoredTokenConfig struct{ seen *string }
+
+func (c recordingStoredTokenConfig) ActiveToken(host string) (string, string) {
+	*c.seen = host
+	return ghauth.TokenFromEnvOrConfig(host)
+}
+
+// TestGraphQLHTTPSProxyAuthenticatesStoredBareHost is the auth regression
+// for a non-default AGS port behind an HTTP proxy: credentials saved for
+// the bare hostname must still be found, and the proxy must still be
+// aimed at host:port.
+//
+// The lookup uses go-gh's process-wide config cache, so the body runs in
+// a child process whose GH_CONFIG_DIR is set before that cache is filled.
+func TestGraphQLHTTPSProxyAuthenticatesStoredBareHost(t *testing.T) {
+	if os.Getenv("AGS_STORED_AUTH_CHILD") != "1" {
+		cfgDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cfgDir, "hosts.yml"), []byte("review.example:\n    oauth_token: SYNTHETIC_REVIEW_ONLY\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(exe, "-test.run=^TestGraphQLHTTPSProxyAuthenticatesStoredBareHost$", "-test.v", "-test.count=1")
+		cmd.Env = storedCredentialProxyEnv(cfgDir)
+		out, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "stored bare-host credential authenticated") {
+			t.Fatalf("stored-credential child failed: %v\n%s", err, out)
+		}
+		return
+	}
+
+	for _, key := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
+		os.Unsetenv(key)
+	}
+	token, source := ghauth.TokenFromEnvOrConfig("review.example")
+	if token != "SYNTHETIC_REVIEW_ONLY" || source != "oauth_token" {
+		t.Fatal("synthetic hosts.yml was not the credential source")
+	}
+
+	originHost := make(chan string, 1)
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originHost <- r.Host
+		if r.Header.Get("Authorization") != "token SYNTHETIC_REVIEW_ONLY" {
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, `{"message":"Bad credentials"}`)
+			return
+		}
+		io.WriteString(w, `{"data":{"viewer":{"login":"review"}}}`)
+	}))
+	t.Cleanup(origin.Close)
+	originURL, err := url.Parse(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seenConnect := make(chan string, 1)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "expected CONNECT", http.StatusBadRequest)
+			return
+		}
+		seenConnect <- r.RequestURI
+		dst, dialErr := net.Dial("tcp", originURL.Host)
+		if dialErr != nil {
+			http.Error(w, dialErr.Error(), http.StatusBadGateway)
+			return
+		}
+		src, _, hijackErr := w.(http.Hijacker).Hijack()
+		if hijackErr != nil {
+			dst.Close()
+			return
+		}
+		io.WriteString(src, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		go func() {
+			io.Copy(dst, src)
+			dst.Close()
+		}()
+		io.Copy(src, dst)
+		src.Close()
+	}))
+	t.Cleanup(proxy.Close)
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalProxy := proxyForRequest
+	proxyForRequest = http.ProxyURL(proxyURL)
+	t.Cleanup(func() { proxyForRequest = originalProxy })
+
+	// Loopback test server only; the process does not use a real credential.
+	transport := &http.Transport{
+		Proxy:           http.ProxyURL(proxyURL),
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	t.Cleanup(transport.CloseIdleConnections)
+
+	var lookup string
+	client := NewClientFromHTTP(&http.Client{Transport: AddAuthTokenHeader(transport, recordingStoredTokenConfig{seen: &lookup})})
+	t.Setenv("AGS_URL", "https://review.example:8443")
+	var data struct {
+		Viewer struct {
+			Login string
+		}
+	}
+	err = client.GraphQL("review.example", "query { viewer { login } }", nil, &data)
+	connect := ""
+	select {
+	case connect = <-seenConnect:
+	default:
+	}
+	wireHost := ""
+	select {
+	case wireHost = <-originHost:
+	default:
+	}
+	if connect != "review.example:8443" {
+		t.Fatalf("CONNECT=%q, want review.example:8443", connect)
+	}
+	if wireHost != "review.example:8443" {
+		t.Fatalf("origin Host=%q, want review.example:8443", wireHost)
+	}
+	if err != nil {
+		t.Fatalf("stored credential lookup=%q; GraphQL failed: %v", lookup, err)
+	}
+	if lookup != "review.example" || data.Viewer.Login != "review" {
+		t.Fatalf("lookup=%q login=%q, want bare host review.example", lookup, data.Viewer.Login)
+	}
+	t.Log("stored bare-host credential authenticated")
+}
+
+func storedCredentialProxyEnv(cfgDir string) []string {
+	env := []string{
+		"AGS_STORED_AUTH_CHILD=1",
+		"GH_CONFIG_DIR=" + cfgDir,
+	}
+	for _, key := range []string{"PATH", "TMPDIR", "TMP", "TEMP", "HOME", "LANG", "LC_ALL", "TZ", "SYSTEMROOT", "WINDIR"} {
+		if value, ok := os.LookupEnv(key); ok {
+			env = append(env, key+"="+value)
+		}
+	}
+	return env
+}

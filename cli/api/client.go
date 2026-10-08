@@ -281,6 +281,10 @@ func clientOptions(hostname string, transport http.RoundTripper) ghAPI.ClientOpt
 	return opts
 }
 
+// agsCredentialHostKey stores the host that must be used for credential
+// lookup. The on-wire Request.Host may later include a non-default port.
+type agsCredentialHostKey struct{}
+
 type agsRewriteTransport struct {
 	baseURL *url.URL
 	host    string
@@ -295,7 +299,12 @@ func (t agsRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error
 		// Go's Request.WriteProxy prefers Request.Host over URL.Host when it
 		// builds the absolute URI. A hostname-only Host ("mini") drops :6666,
 		// and an HTTP proxy then dials port 80.
+		//
+		// Credential lookup also prefers Request.Host and does not strip
+		// ports. Snapshot the pre-rewrite host so a token stored for the bare
+		// hostname still matches, then put the port on the wire Host.
 		if httpProxyUsesNonDefaultPort(clone) {
+			clone = clone.WithContext(context.WithValue(clone.Context(), agsCredentialHostKey{}, getHost(clone)))
 			clone.Host = clone.URL.Host
 		}
 		req = clone
