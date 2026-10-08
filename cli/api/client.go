@@ -292,6 +292,12 @@ func (t agsRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error
 		clone := req.Clone(req.Context())
 		clone.URL.Scheme = t.baseURL.Scheme
 		clone.URL.Host = t.baseURL.Host
+		// Go's Request.WriteProxy prefers Request.Host over URL.Host when it
+		// builds the absolute URI. A hostname-only Host ("mini") drops :6666,
+		// and an HTTP proxy then dials port 80.
+		if httpProxyUsesNonDefaultPort(clone) {
+			clone.Host = clone.URL.Host
+		}
 		req = clone
 	}
 	rt := t.rt
@@ -299,6 +305,42 @@ func (t agsRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error
 		rt = http.DefaultTransport
 	}
 	return rt.RoundTrip(req)
+}
+
+// proxyForRequest decides whether an HTTP proxy will carry the request.
+// Tests replace it because net/http caches ProxyFromEnvironment for the process.
+var proxyForRequest = http.ProxyFromEnvironment
+
+func httpProxyUsesNonDefaultPort(req *http.Request) bool {
+	if req == nil || req.URL == nil {
+		return false
+	}
+	port := req.URL.Port()
+	if port == "" {
+		return false
+	}
+	switch req.URL.Scheme {
+	case "http":
+		if port == "80" {
+			return false
+		}
+	case "https":
+		if port == "443" {
+			return false
+		}
+	default:
+		return false
+	}
+	proxyURL, err := proxyForRequest(req)
+	if err != nil || proxyURL == nil {
+		return false
+	}
+	switch proxyURL.Scheme {
+	case "http", "https":
+		return true
+	default:
+		return false
+	}
 }
 
 func agsBaseURLForHost(hostname string) *url.URL {
