@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/cli/cli/v2/pkg/httpmock"
@@ -283,6 +285,42 @@ func TestGraphQLRewritesExplicitAGSURL(t *testing.T) {
 				t.Fatalf("GraphQL URL = %q, want AGS URL", gotURL)
 			}
 		})
+	}
+}
+
+func TestGraphQLHTTPProxyKeepsNonDefaultPortOnHost(t *testing.T) {
+	original := proxyForRequest
+	proxyForRequest = func(req *http.Request) (*url.URL, error) {
+		return url.Parse("http://127.0.0.1:7890")
+	}
+	t.Cleanup(func() { proxyForRequest = original })
+
+	t.Setenv("AGS_URL", "http://mini:6666")
+	var gotHost string
+	var gotURL string
+	client := NewClientFromHTTP(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotHost = req.Host
+		gotURL = req.URL.String()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"data":{"viewer":{"login":"ags"}}}`)),
+			Request:    req,
+		}, nil
+	})})
+	var response struct {
+		Viewer struct {
+			Login string
+		}
+	}
+	if err := client.GraphQL("mini", "query { viewer { login } }", nil, &response); err != nil {
+		t.Fatalf("GraphQL: %v", err)
+	}
+	if gotHost != "mini:6666" {
+		t.Fatalf("Host = %q, want mini:6666 so an HTTP proxy does not dial port 80 (url %s)", gotHost, gotURL)
+	}
+	if !strings.Contains(gotURL, "http://mini:6666/api/graphql") {
+		t.Fatalf("URL = %q, want http://mini:6666/api/graphql", gotURL)
 	}
 }
 
