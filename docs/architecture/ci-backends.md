@@ -89,6 +89,13 @@ provider-log bridge. The bridge must match repository, task ID, run number, job
 name, commit, ref, event and provider PR (when applicable). It never receives an
 ordinary AGS token. Push and workflow_dispatch are distinguished from actual
 provider-PR runs, including when AGS PR numbers differ from provider numbers.
+Forgejo stores a synchronized PR event as `pull_request_sync` while its public
+Actions API reports `pull_request`. After matching the exact provider PR ref and
+run/job/task commit SHAs, the bridge normalizes this known event alias in its
+response. Stored provenance is not rewritten; unknown `pull_request_*` events,
+`pull_request_target`, wrong refs and wrong commits remain rejected. Upgrade the
+host actually serving the log bridge as well as any affected CI adapter; updating
+only the AGS client-facing primary cannot repair an older remote bridge.
 
 Run ZIPs contain actual whole-job logs where step metadata is unavailable; no
 successful steps are fabricated. Signed download redirects require an exact
@@ -96,6 +103,31 @@ configured HTTPS hostname and receive no provider authorization, cookies or AGS
 credentials. Only one explicit GET is allowed. Archives are checked for path
 traversal, file type, entry count and total expanded bytes (8 MiB), not merely
 compressed size. HTTP work is time-bounded and mutation requests are never retried.
+
+## Reading provider logs with official gh
+
+Use the AGS checkout's ordinary GitHub CLI configuration. For PR runs, selecting
+by the exact reviewed head avoids confusing a provider's `#PR` display branch
+with the source branch:
+
+```bash
+HEAD_SHA="$(gh pr view "$PR" --json headRefOid --jq .headRefOid)"
+gh run list --commit "$HEAD_SHA" --limit 20 \
+  --json databaseId,number,headSha,status,conclusion
+# RUN_ID is databaseId from the preceding AGS response, not the provider's
+# display run number or global database ID. Select the intended attempt.
+gh run view "$RUN_ID" --json databaseId,number,headSha,jobs
+gh run view "$RUN_ID" --log-failed
+gh run view "$RUN_ID" --log
+# JOB_ID is a job databaseId from the same AGS run response.
+gh run view --job "$JOB_ID" --log
+```
+
+No Forgejo login, provider token, alternate origin or `ags-cli` PR command is
+required. The server-side backend and log bridge must already be configured.
+A successful API read is not a successful CI result; keep the run head and
+conclusion in the receipt. Missing provider step metadata may display as
+`UNKNOWN STEP`; whole-job output remains the original log, not fabricated steps.
 
 ## Identity, completeness and switching
 

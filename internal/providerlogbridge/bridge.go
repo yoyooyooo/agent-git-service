@@ -224,8 +224,12 @@ func verifyBinding(binding logBinding, expected expectedBinding) (verifiedBindin
 	providerRef := strings.TrimSpace(binding.ProviderRef)
 	event := strings.TrimSpace(binding.Event)
 	pullRef := "refs/pull/" + strconv.FormatInt(expected.ProviderPR, 10) + "/head"
-	if expected.ProviderPR > 0 && providerRef == pullRef && event == "pull_request" {
-		return verifiedBinding{ProviderPR: expected.ProviderPR, ProviderRef: providerRef, Event: event}, nil
+	// Forgejo persists synchronized pull requests as pull_request_sync, but its
+	// public Actions API exposes the event family pull_request. Normalize only
+	// this known alias after the exact PR ref and all three commit bindings have
+	// matched; never accept arbitrary pull_request_* or rewrite stored events.
+	if expected.ProviderPR > 0 && providerRef == pullRef && (event == "pull_request" || event == "pull_request_sync") {
+		return verifiedBinding{ProviderPR: expected.ProviderPR, ProviderRef: providerRef, Event: "pull_request"}, nil
 	}
 	branchRef := "refs/heads/" + expected.HeadRef
 	if expected.HeadRef != "" && providerRef == branchRef && (event == "workflow_dispatch" || event == "push") {
