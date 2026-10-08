@@ -96,12 +96,12 @@ func AddAuthTokenHeader(rt http.RoundTripper, cfg tokenGetter) http.RoundTripper
 		if req.Header.Get(authorization) == "" {
 			var redirectHostnameChange bool
 			if req.Response != nil && req.Response.Request != nil {
-				redirectHostnameChange = getHost(req) != getHost(req.Response.Request)
+				redirectHostnameChange = credentialHost(req) != credentialHost(req.Response.Request)
 			}
 			// Only set header if an initial request or redirect request to the same host as the initial request.
 			// If the host has changed during a redirect do not add the authentication token header.
 			if !redirectHostnameChange {
-				hostname := ghauth.NormalizeHostname(getHost(req))
+				hostname := ghauth.NormalizeHostname(credentialHost(req))
 				if token, _ := cfg.ActiveToken(hostname); token != "" {
 					req.Header.Set(authorization, fmt.Sprintf("token %s", token))
 				}
@@ -140,4 +140,16 @@ func getHost(r *http.Request) string {
 		return r.Host
 	}
 	return r.URL.Host
+}
+
+// credentialHost is the host key for stored credentials. Proxied AGS
+// requests stash the pre-rewrite host so a non-default wire port is not
+// part of the lookup key.
+func credentialHost(r *http.Request) string {
+	if r != nil {
+		if host, ok := r.Context().Value(agsCredentialHostKey{}).(string); ok && host != "" {
+			return host
+		}
+	}
+	return getHost(r)
 }
