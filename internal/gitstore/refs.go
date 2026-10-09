@@ -171,6 +171,34 @@ func (s *Store) UpdateRefCAS(ctx context.Context, fullName, ref, newSHA, expecte
 	return fmt.Errorf("git update-ref %s %s %s: %v\n%s", ref, newSHA, expectedOldSHA, err, out)
 }
 
+// UpdateRefCASWithHead verifies the source and updates the target in one Git
+// transaction. A verification-only target preserves an already advanced base.
+func (s *Store) UpdateRefCASWithHead(ctx context.Context, fullName, headRef, expectedHead, baseRef, newBase, expectedBase string) error {
+	ctx, release, err := s.BeginMutation(ctx, fullName)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if !IsValidRefName(headRef) || !IsValidRefName(baseRef) || headRef == baseRef ||
+		!mergeSHA.MatchString(expectedHead) || !mergeSHA.MatchString(newBase) || !mergeSHA.MatchString(expectedBase) {
+		return ErrMergePrecondition
+	}
+	dir, err := s.repoPath(ctx, fullName)
+	if err != nil {
+		return err
+	}
+	target := fmt.Sprintf("update %s %s %s\n", baseRef, newBase, expectedBase)
+	if newBase == expectedBase {
+		target = fmt.Sprintf("verify %s %s\n", baseRef, expectedBase)
+	}
+	command := exec.CommandContext(ctx, "git", "-C", dir, "update-ref", "--stdin")
+	command.Stdin = strings.NewReader(fmt.Sprintf("start\nverify %s %s\n%sprepare\ncommit\n", headRef, expectedHead, target))
+	if _, err := command.CombinedOutput(); err != nil {
+		return ErrMergePrecondition
+	}
+	return nil
+}
+
 // ErrNonFastForward is returned by UpdateRefSafe when the proposed SHA
 // is not a fast-forward of the existing ref's SHA and the caller has
 // not opted into the force path. Callers (REST PATCH /git/refs/...)

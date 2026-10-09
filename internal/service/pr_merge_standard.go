@@ -103,7 +103,13 @@ func (s *Service) MergeStandardPR(ctx context.Context, repository string, number
 			if e != nil {
 				return pr, e
 			}
+			if current.HeadSHA != expected || (current.State != db.StateOpen && !current.Merged) {
+				return pr, fmt.Errorf("%w: pull request changed while merge was being confirmed", ErrConflict)
+			}
 			if current.Merged {
+				if providerMethod == "fast-forward-only" && current.MergeCommitSHA != expected {
+					return pr, fmt.Errorf("%w: fast-forward merge differs from expected head", ErrConflict)
+				}
 				return current, nil
 			}
 			select {

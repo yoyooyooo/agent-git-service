@@ -28,24 +28,31 @@ func (s *Service) acknowledgeFastForwardMerge(ctx context.Context, receipt Human
 	if !exactGitSHA(sides.ProviderBase, sides.Head) {
 		return HumanProviderMergeReceipt{}, fmt.Errorf("%w: Forgejo target ref is not the expected head", ErrConflict)
 	}
-	containsHead, err := s.Git.IsAncestor(ctx, receipt.Repository, sides.Head, sides.AGSBase)
-	if err != nil {
-		return HumanProviderMergeReceipt{}, err
+	// Hold the PR row lock while checking both Git refs and writing the terminal
+	// fact. Source pushes are fenced by Git's source-ref verification; projection
+	// updates and PR closure are fenced by the open/head database condition.
+	if pr.HeadRepositoryID != 0 && pr.HeadRepositoryID != pr.RepositoryID {
+		return HumanProviderMergeReceipt{}, fmt.Errorf("%w: atomic cross-repository acknowledgement is unavailable", ErrConflict)
 	}
-	if exactGitSHA(sides.AGSBase, sides.Head) {
-		// already at H
-	} else if ok, ancErr := s.Git.IsAncestor(ctx, receipt.Repository, sides.AGSBase, sides.Head); ancErr != nil {
-		return HumanProviderMergeReceipt{}, ancErr
-	} else if ok {
-		if err := s.Git.UpdateRefCAS(ctx, receipt.Repository, "refs/heads/"+sides.BaseRef, sides.Head, sides.AGSBase); err != nil {
-			return HumanProviderMergeReceipt{}, fmt.Errorf("%w: AGS base CAS failed: %v", ErrConflict, err)
+	err := s.markAGSPRMergedKeepProviderOpen(ctx, pr.ID, sides.Head, providerMergeAckMergedBy, func() error {
+		newBase := sides.AGSBase
+		if !exactGitSHA(sides.AGSBase, sides.Head) {
+			if ok, err := s.Git.IsAncestor(ctx, receipt.Repository, sides.AGSBase, sides.Head); err != nil {
+				return err
+			} else if ok {
+				newBase = sides.Head
+			} else if containsHead, err := s.Git.IsAncestor(ctx, receipt.Repository, sides.Head, sides.AGSBase); err != nil {
+				return err
+			} else if !containsHead {
+				return fmt.Errorf("%w: AGS and Forgejo target refs have diverged", ErrConflict)
+			}
 		}
-	} else if containsHead {
-		// H ≤ A: keep advanced main, do not rewind.
-	} else {
-		return HumanProviderMergeReceipt{}, fmt.Errorf("%w: AGS and Forgejo target refs have diverged", ErrConflict)
-	}
-	if err := s.markAGSPRMergedKeepProviderOpen(ctx, pr.ID, sides.Head, providerMergeAckMergedBy); err != nil {
+		if err := s.Git.UpdateRefCASWithHead(ctx, receipt.Repository, "refs/heads/"+pr.HeadRef, sides.Head, "refs/heads/"+sides.BaseRef, newBase, sides.AGSBase); err != nil {
+			return fmt.Errorf("%w: AGS head/base transaction failed: %v", ErrConflict, err)
+		}
+		return nil
+	})
+	if err != nil {
 		return HumanProviderMergeReceipt{}, err
 	}
 	receipt.ProviderMerged = false
@@ -58,7 +65,7 @@ func (s *Service) acknowledgeFastForwardMerge(ctx context.Context, receipt Human
 	return receipt, nil
 }
 
-func (s *Service) markAGSPRMergedKeepProviderOpen(ctx context.Context, pullRequestID uint, mergeSHA, mergedBy string) error {
+func (s *Service) markAGSPRMergedKeepProviderOpen(ctx context.Context, pullRequestID uint, mergeSHA, mergedBy string, publish func() error) error {
 	mergeSHA = strings.ToLower(strings.TrimSpace(mergeSHA))
 	if pullRequestID == 0 || !canonicalActionSHA(mergeSHA) {
 		return fmt.Errorf("%w: merged AGS PR requires a canonical SHA", ErrValidation)
@@ -70,13 +77,19 @@ func (s *Service) markAGSPRMergedKeepProviderOpen(ctx context.Context, pullReque
 			return err
 		}
 		if locked.Merged {
-			if !strings.EqualFold(locked.MergeCommitSHA, mergeSHA) {
+			if !exactGitSHA(locked.HeadSHA, mergeSHA) || !exactGitSHA(locked.MergeCommitSHA, mergeSHA) {
 				return fmt.Errorf("%w: terminal AGS merge SHA conflicts with expected head", ErrConflict)
 			}
 			return nil
 		}
+		if locked.State != db.StateOpen || !exactGitSHA(locked.HeadSHA, mergeSHA) {
+			return fmt.Errorf("%w: AGS pull request is no longer open at expected head", ErrConflict)
+		}
+		if err := publish(); err != nil {
+			return err
+		}
 		result := tx.Model(&db.PullRequest{}).
-			Where("id = ? AND merged = ?", pullRequestID, false).
+			Where("id = ? AND merged = ? AND state = ? AND head_sha = ?", pullRequestID, false, db.StateOpen, mergeSHA).
 			Updates(map[string]any{
 				"state":            db.StateClosed,
 				"merged":           true,
