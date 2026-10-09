@@ -92,7 +92,9 @@ provider-PR runs, including when AGS PR numbers differ from provider numbers.
 Forgejo stores a synchronized PR event as `pull_request_sync` while its public
 Actions API reports `pull_request`. After matching the exact provider PR ref and
 run/job/task commit SHAs, the bridge normalizes this known event alias in its
-response. Stored provenance is not rewritten; unknown `pull_request_*` events,
+response. The CI adapter also normalizes `pull_request_sync` to `pull_request`
+when the run has an exact provider PR identity, so standard Actions responses
+and strict log receipt validation use the same event. Stored provenance is not rewritten; unknown `pull_request_*` events,
 `pull_request_target`, wrong refs and wrong commits remain rejected. Upgrade the
 host actually serving the log bridge as well as any affected CI adapter; updating
 only the AGS client-facing primary cannot repair an older remote bridge.

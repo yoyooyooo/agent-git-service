@@ -197,3 +197,43 @@ func TestCICancelUsesCurrentNativeWritePermissionNotBackendSecrets(t *testing.T)
 		t.Fatal("reader used server token for mutation", e)
 	}
 }
+
+func TestCIChecksForgejoPRProjectionBindsCurrentHead(t *testing.T) {
+	s, ctx, repo, pr, backend, config := ciFixture(t)
+	selected := config.Backends["builder"]
+	selected.Kind = "forgejo"
+	config.Backends["builder"] = selected
+	backend.runs[0].Branch = "#42"
+	backend.runs[0].PullRequests = []int{42}
+	backend.jobs[0].Name = "check-linux"
+	required := []string{"check-linux"}
+	binding := config.Repositories[repo.FullName]
+	binding.RequiredChecks = &required
+	config.Repositories[repo.FullName] = binding
+	registry, err := cibackend.WithBackends(config, map[string]cibackend.Backend{"builder": backend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.CI = registry
+	projection := db.PullRequestProjection{PullRequestID: pr.ID, RepositoryID: repo.ID, Provider: "forgejo", ExternalRepo: "ci/project", ExternalNumber: 42, ExternalURL: "https://api.example.test/ci/project/pulls/42", LastSyncedSHA: pr.HeadSHA}
+	if err = s.DB.Create(&projection).Error; err != nil {
+		t.Fatal(err)
+	}
+	observed, err := s.ReadCIChecks(ctx, pr)
+	if err != nil || len(observed.Checks) != 1 || observed.Checks[0].Name != "check-linux" || observed.Checks[0].Conclusion != "success" || !observed.Checks[0].Required {
+		t.Fatalf("lost projected check-linux: %#v %v", observed, err)
+	}
+	for _, updates := range []map[string]any{
+		{"external_number": 43},
+		{"external_number": 42, "last_synced_sha": strings.Repeat("b", 40)},
+		{"last_synced_sha": pr.HeadSHA, "external_url": "https://wrong.example.test/ci/project/pulls/42"},
+	} {
+		if err = s.DB.Model(&projection).Updates(updates).Error; err != nil {
+			t.Fatal(err)
+		}
+		observed, err = s.ReadCIChecks(ctx, pr)
+		if err != nil || len(observed.Checks) != 1 || observed.Checks[0].Status != "queued" || observed.Checks[0].Conclusion != "" {
+			t.Fatalf("unbound CI evidence passed: %#v %v", observed, err)
+		}
+	}
+}
