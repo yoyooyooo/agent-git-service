@@ -76,9 +76,10 @@ func (s *Service) MergeStandardPR(ctx context.Context, repository string, number
 	// including selected CI. Repeating that remote observation here adds latency
 	// but cannot strengthen the eventual atomic head/base check.
 	if providerOwned {
-		// A configured fast-forward-only authority is a stricter rebase path: it
-		// accepts only already-linear input, without manufacturing a merge commit.
-		if method == "rebase" && providerMethod == "fast-forward-only" {
+		// Standard gh has no fast-forward strategy. Both ordinary merge and
+		// rebase requests use the configured stricter authority, which checks
+		// ancestry and advances the base without rewriting commits.
+		if (method == "rebase" || method == "merge") && providerMethod == "fast-forward-only" {
 			method = providerMethod
 		}
 		if method != providerMethod {

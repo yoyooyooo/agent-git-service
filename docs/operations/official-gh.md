@@ -41,7 +41,18 @@ See [CI backends](../architecture/ci-backends.md).
 
 ## Standard merge
 
-Standard REST `sha` and GraphQL `expectedHeadOid` are enforced. For native same-repo
+Standard REST `sha` and GraphQL `expectedHeadOid` are enforced, including
+`gh pr merge --match-head-commit`. When the configured provider authority permits
+only fast-forward merges, standard `--merge` and `--rebase` both select that
+stricter authority. The head must already contain the current base; no merge
+commit or rewritten commit is manufactured. `--squash` remains incompatible with
+that authority. A confirmed merged PR exposes the resulting SHA through
+`gh pr view --json mergeCommit` and GraphQL field discovery.
+
+PR list state arguments follow the client's declared variable (official gh uses
+`$state`). GraphQL `CLOSED` excludes `MERGED`, while selecting both includes both.
+
+For native same-repo
 merge, the source and destination refs are frozen, normal AGS policy is checked,
 objects are prepared, then one Git ref transaction verifies the source head and
 CAS-updates the base. Repository receive hooks remain honored. Another Git process
