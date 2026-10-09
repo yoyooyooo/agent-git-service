@@ -125,6 +125,14 @@ try {
   const openTimes = await ghCheck("open PR nullable timestamps", ["pr", "view", "1", "--json", "number,closedAt,mergedAt,statusCheckRollup"]);
   assertions(JSON.parse(openTimes.stdout).closedAt === null && JSON.parse(openTimes.stdout).mergedAt === null, "open PR invented closing or merge times");
   await ghCheck("ready for review", ["pr", "ready", "1"]);
+  await ghCheck("edit title and body", ["pr", "edit", "1", "--title", "Official gh edited", "--body", "edited body"]);
+  await ghCheck("inline comment", ["pr", "comment", "1", "--body", "inline fixture"]);
+  writeFileSync(join(work, "comment.md"), "body-file fixture\n\nsecond paragraph\n");
+  await ghCheck("body-file comment", ["pr", "comment", "1", "--body-file", join(work, "comment.md")]);
+  await ghCheck("convert to draft", ["pr", "ready", "1", "--undo"]);
+  const edited = JSON.parse((await ghCheck("edited fields and comments", ["pr", "view", "1", "--json", "title,body,isDraft,comments,mergeCommit,headRefOid"])).stdout);
+  assertions(edited.title === "Official gh edited" && edited.body === "edited body" && edited.isDraft && edited.comments.length === 2 && edited.comments[1].body === "body-file fixture\n\nsecond paragraph\n" && edited.mergeCommit === null && edited.headRefOid === head, "PR edit/comment/draft readback drift");
+  await ghCheck("restore ready", ["pr", "ready", "1"]);
   const noCI = await ghCheck("no CI still has commit", ["pr", "checks", "1"], [1]); assertions(!noCI.stderr.includes("no commit found"), "missing CI removed commit shape");
   await start("github");
   await ghCheck("GitHub Actions failure", ["pr", "checks", "1", "--required"], [1]);
@@ -163,6 +171,11 @@ try {
   response = await api(`/api/v3/repos/${repo}/branches/main`); assertions(response.data.commit.sha === before, "rejected merge changed destination");
   await ghCheck("standard merge after external checks", ["pr", "merge", "1", "--merge", "--match-head-commit", head]);
   response = await api(`/api/v3/repos/${repo}/pulls/1`); assertions(response.status === 200 && response.data.merged, "merge exit success without native merged fact");
+  const mergeSHA = response.data.merge_commit_sha;
+  const merged = JSON.parse((await ghCheck("merged SHA through official gh", ["pr", "view", "1", "--json", "state,mergeCommit"])).stdout);
+  assertions(merged.state === "MERGED" && merged.mergeCommit?.oid === mergeSHA, "merged SHA missing from gh readback");
+  const mergedList = JSON.parse((await ghCheck("list merged state", ["pr", "list", "--state", "merged", "--json", "number,state,mergeCommit"])).stdout);
+  assertions(mergedList.length === 1 && mergedList[0].number === 1 && mergedList[0].state === "MERGED" && mergedList[0].mergeCommit?.oid === mergeSHA, "merged list ignored state or merge SHA");
   // Separate task run credentials use the same native actor. Source metadata is
   // explicitly provisional here; it grants no identity or repository permission.
   const one = await api("/api/ext/v1/client-runs", "POST", { context: { source: "fixture", agent: "fixture-actor", task: "task-one", run: "run-one" } });
@@ -235,6 +248,9 @@ try {
     await companionCall("session.end",{directory:aliasDir,caFile:join(work,"cert.pem"),apply:true});
     report.companionIntegrated={source:JSON.parse(readFileSync(join(companion,"build-manifest.json"),"utf8")).source,officialGitPush:true,officialGhCreate:true,perCommandRoutingOverrides:false,unrelatedHostPreserved:true,distinctApiHost:true};
   }
+  await ghCheck("close throwaway PR", ["pr", "close", "2"]);
+  const closedList = JSON.parse((await ghCheck("closed list excludes merged", ["pr", "list", "--state", "closed", "--json", "number,state,mergeCommit"])).stdout);
+  assertions(closedList.length === 1 && closedList[0].number === 2 && closedList[0].state === "CLOSED" && closedList[0].mergeCommit === null, "closed list included merged PR");
   report.passed = true; report.gh = (await cmd(gh, ["--version"])).stdout; report.runCredentialsSeparated = true; report.externalBackendSwitch = { githubRun, forgejoRun }; report.expectedHeadEnforced = true;
 } catch (e) { report.passed = false; report.failure = { stage, message: clean(e.message), server: clean(serverLog).slice(-2000) }; }
 finally {
