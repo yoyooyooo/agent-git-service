@@ -2,7 +2,6 @@ package graphql
 
 import (
 	"context"
-	"fmt"
 	"regexp"
 	"strings"
 
@@ -13,6 +12,7 @@ import (
 // Regex patterns for extracting query-level PR filters and search aliases.
 var (
 	reHeadRefVar  = regexp.MustCompile(`headRefName\s*:\s*\$(\w+)`)
+	rePRStatesArg = regexp.MustCompile(`states\s*:\s*(\$\w+|\[[A-Z_,\s]+\]|[A-Z_]+)`)
 	reSearchAlias = regexp.MustCompile(`(\w+)\s*:\s*search\s*\(\s*query\s*:\s*\$(\w+)`)
 )
 
@@ -77,18 +77,12 @@ func (s *Server) doPRSingle(ctx context.Context, req gqlRequest) map[string]any 
 func (s *Server) doPRs(ctx context.Context, req gqlRequest) map[string]any {
 	owner, name, _ := resolveRepo(req.Variables)
 
-	// Parse states from GraphQL variables (e.g. ["OPEN"], ["CLOSED"], ["MERGED"])
-	state := db.StateOpen
-	if raw, ok := req.Variables["states"]; ok {
-		if arr, ok := raw.([]any); ok && len(arr) > 0 {
-			first := strings.ToLower(fmt.Sprintf("%v", arr[0]))
-			switch {
-			case len(arr) > 1:
-				state = "all"
-			case first == db.StateClosed || first == "merged":
-				state = db.StateClosed
-			}
-		}
+	states := requestedPRStates(req)
+	state := "all"
+	if len(states) == 1 && states["OPEN"] {
+		state = db.StateOpen
+	} else if len(states) > 0 && !states["OPEN"] {
+		state = db.StateClosed
 	}
 
 	prs, err := s.Svc.ListPRs(ctx, owner+"/"+name, state)
@@ -105,6 +99,13 @@ func (s *Server) doPRs(ctx context.Context, req gqlRequest) map[string]any {
 
 	var nodes []any
 	for _, p := range prs {
+		prState := strings.ToUpper(p.State)
+		if p.Merged {
+			prState = "MERGED"
+		}
+		if len(states) > 0 && !states[prState] {
+			continue
+		}
 		if headRefFilter != "" && p.HeadRef != headRefFilter {
 			continue
 		}
@@ -115,6 +116,39 @@ func (s *Server) doPRs(ctx context.Context, req gqlRequest) map[string]any {
 		nodes = []any{}
 	}
 	return wrap("repository", map[string]any{"pullRequests": gqlConn(nodes)})
+}
+
+// Resolve the argument's variable name, rather than assuming the client calls
+// it "states". Official gh uses $state. CLOSED excludes merged PRs in GraphQL.
+func requestedPRStates(req gqlRequest) map[string]bool {
+	var raw any
+	if match := rePRStatesArg.FindStringSubmatch(req.Query); len(match) > 1 {
+		arg := match[1]
+		if strings.HasPrefix(arg, "$") {
+			raw = req.Variables[strings.TrimPrefix(arg, "$")]
+		} else {
+			raw = strings.FieldsFunc(arg, func(r rune) bool {
+				return r == '[' || r == ']' || r == ',' || r == ' ' || r == '\n' || r == '\t' || r == '\r'
+			})
+		}
+	}
+	states := map[string]bool{}
+	add := func(value string) { states[strings.ToUpper(value)] = true }
+	switch values := raw.(type) {
+	case []any:
+		for _, value := range values {
+			if state, ok := value.(string); ok {
+				add(state)
+			}
+		}
+	case []string:
+		for _, state := range values {
+			add(state)
+		}
+	case string:
+		add(values)
+	}
+	return states
 }
 
 func (s *Server) doSearch(ctx context.Context, req gqlRequest) map[string]any {

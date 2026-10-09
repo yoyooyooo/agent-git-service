@@ -49,6 +49,11 @@ func (r forgejoRun) run() (Run, error) {
 			prs = append(prs, n)
 		}
 	}
+	// Synchronized PR runs have a provider-specific trigger name. The log
+	// bridge and GitHub Actions API expose the standard pull_request event.
+	if len(prs) == 1 && r.Event == "pull_request_sync" {
+		r.Event = "pull_request"
+	}
 	// Forgejo creates another run/task identity for retries; it does not expose
 	// GitHub's run_attempt counter. One concrete run is represented as attempt 1.
 	return Run{Key: strconv.FormatInt(r.ID, 10), Number: r.Number, Workflow: r.Workflow, Name: r.Workflow, Branch: branch, HeadSHA: r.Head, Event: r.Event, Status: status, Conclusion: conclusion, URL: r.URL, CreatedAt: r.Created, UpdatedAt: r.Updated, StartedAt: r.Started, Attempt: 1, PullRequests: prs}, nil

@@ -140,7 +140,7 @@ func TypeFields(typeName string) map[string]any {
 	case "PullRequest":
 		return FieldResp("id", "title", "body", "state", "number",
 			"author", "labels", "assignees", "comments", "createdAt", "updatedAt",
-			"closedAt", "mergedAt", "url", "headRefName", "baseRefName",
+			"closedAt", "mergedAt", "mergeCommit", "url", "headRefName", "baseRefName",
 			"isDraft", "merged", "mergeable", "isInMergeQueue",
 			"reviewRequests", "reviews", "commits", "files",
 			"headRefOid", "headRepository", "headRepositoryOwner",
