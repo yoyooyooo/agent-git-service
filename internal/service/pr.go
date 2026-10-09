@@ -377,11 +377,13 @@ func (s *Service) GetPR(ctx context.Context, repoFullName string, number int) (d
 type PRListFilter struct {
 	RepoFullName string
 	State        string
-	Head         string
-	Base         string
-	Sort         string
-	Direction    string
-	Mentioned    string
+	// States uses exact GraphQL states: CLOSED excludes merged PRs.
+	States    []string
+	Head      string
+	Base      string
+	Sort      string
+	Direction string
+	Mentioned string
 }
 
 // ListPRs returns pull requests filtered by state.
@@ -400,13 +402,31 @@ func (s *Service) ListPRsFiltered(ctx context.Context, filter PRListFilter) ([]d
 		return nil, err
 	}
 	q := preloadPRFull(s.DBForCtx(ctx)).Where("repository_id = ?", rep.ID)
-	switch state {
-	case db.StateClosed:
-		q = q.Where("state = 'closed' OR merged = true")
-	case "all":
-		// no filter
-	default: // open
-		q = q.Where("state = 'open' AND merged = false")
+	if len(filter.States) > 0 {
+		var predicates []string
+		for _, exact := range filter.States {
+			switch exact {
+			case "OPEN":
+				predicates = append(predicates, "(state = 'open' AND merged = false)")
+			case "CLOSED":
+				predicates = append(predicates, "(state = 'closed' AND merged = false)")
+			case "MERGED":
+				predicates = append(predicates, "merged = true")
+			}
+		}
+		if len(predicates) == 0 {
+			return []db.PullRequest{}, nil
+		}
+		q = q.Where("(" + strings.Join(predicates, " OR ") + ")")
+	} else {
+		switch state {
+		case db.StateClosed:
+			q = q.Where("state = 'closed' OR merged = true")
+		case "all":
+			// no filter
+		default: // open
+			q = q.Where("state = 'open' AND merged = false")
+		}
 	}
 	if base := strings.TrimSpace(filter.Base); base != "" {
 		q = q.Where("base_ref = ?", base)

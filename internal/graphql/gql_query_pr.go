@@ -5,7 +5,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/service"
 )
 
@@ -78,15 +77,10 @@ func (s *Server) doPRs(ctx context.Context, req gqlRequest) map[string]any {
 	owner, name, _ := resolveRepo(req.Variables)
 
 	states := requestedPRStates(req)
-	state := "all"
-	if len(states) == 1 && states["OPEN"] {
-		state = db.StateOpen
-	} else if len(states) > 0 && !states["OPEN"] {
-		state = db.StateClosed
+	exactStates := make([]string, 0, len(states))
+	for state := range states {
+		exactStates = append(exactStates, state)
 	}
-
-	prs, err := s.Svc.ListPRs(ctx, owner+"/"+name, state)
-	logErr(ctx, "gql.ListPRs", err)
 
 	// Filter by headRefName if provided (used by gh pr status)
 	headRefFilter := strFrom(req.Variables, "headRefName")
@@ -97,18 +91,14 @@ func (s *Server) doPRs(ctx context.Context, req gqlRequest) map[string]any {
 		}
 	}
 
+	// Apply exact state and head filters before the service's bounded list.
+	prs, err := s.Svc.ListPRsFiltered(ctx, service.PRListFilter{
+		RepoFullName: owner + "/" + name, State: "all", States: exactStates, Head: headRefFilter,
+	})
+	logErr(ctx, "gql.ListPRs", err)
+
 	var nodes []any
 	for _, p := range prs {
-		prState := strings.ToUpper(p.State)
-		if p.Merged {
-			prState = "MERGED"
-		}
-		if len(states) > 0 && !states[prState] {
-			continue
-		}
-		if headRefFilter != "" && p.HeadRef != headRefFilter {
-			continue
-		}
 		pr := s.prGQL(ctx, p, req.Query)
 		nodes = append(nodes, pr)
 	}

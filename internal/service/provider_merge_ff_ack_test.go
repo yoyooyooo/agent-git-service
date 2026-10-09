@@ -239,6 +239,11 @@ func TestHumanProviderMergeDoesNotAckWhenFlagDisabled(t *testing.T) {
 
 func TestAccessGrantPRMergeFastForwardAckWhenProviderRefEqualsHead(t *testing.T) {
 	svc, grantToken, input, provider := setupAccessGrantMerge(t, "success")
+	// An acknowledgement must verify a real source ref, even when main is
+	// already at the expected head.
+	if err := svc.Git.CreateBranch(context.Background(), "example-owner/demo", "feature/access-grant", "main"); err != nil {
+		t.Fatal(err)
+	}
 	var repository db.Repository
 	if err := svc.DB.First(&repository, "full_name = ?", "example-owner/demo").Error; err != nil {
 		t.Fatal(err)

@@ -46,11 +46,18 @@ Standard REST `sha` and GraphQL `expectedHeadOid` are enforced, including
 only fast-forward merges, standard `--merge` and `--rebase` both select that
 stricter authority. The head must already contain the current base; no merge
 commit or rewritten commit is manufactured. `--squash` remains incompatible with
-that authority. A confirmed merged PR exposes the resulting SHA through
-`gh pr view --json mergeCommit` and GraphQL field discovery.
+that authority. Fast-forward acknowledgement verifies the source head and base
+in one Git ref transaction, including when the base is already at or beyond the
+expected head. The PR terminal update requires the PR to remain open at that
+head. A source or PR head change during acknowledgement returns a conflict
+without advancing the base or marking the changed PR merged. A confirmed merged
+PR exposes the resulting SHA through `gh pr view --json mergeCommit` and GraphQL
+field discovery.
 
 PR list state arguments follow the client's declared variable (official gh uses
 `$state`). GraphQL `CLOSED` excludes `MERGED`, while selecting both includes both.
+Exact state and head-ref filters are applied in the database before the bounded
+1000-row list, so newer nonmatching terminal PRs cannot hide an older merged PR.
 
 For native same-repo
 merge, the source and destination refs are frozen, normal AGS policy is checked,
