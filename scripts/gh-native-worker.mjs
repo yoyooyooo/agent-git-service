@@ -249,8 +249,10 @@ try {
     report.companionIntegrated={source:JSON.parse(readFileSync(join(companion,"build-manifest.json"),"utf8")).source,officialGitPush:true,officialGhCreate:true,perCommandRoutingOverrides:false,unrelatedHostPreserved:true,distinctApiHost:true};
   }
   await ghCheck("close throwaway PR", ["pr", "close", "2"]);
-  const closedList = JSON.parse((await ghCheck("closed list excludes merged", ["pr", "list", "--state", "closed", "--json", "number,state,mergeCommit"])).stdout);
-  assertions(closedList.length === 1 && closedList[0].number === 2 && closedList[0].state === "CLOSED" && closedList[0].mergeCommit === null, "closed list included merged PR");
+  const closedList = JSON.parse((await ghCheck("closed list includes closed and merged", ["pr", "list", "--state", "closed", "--json", "number,state,mergeCommit"])).stdout);
+  // gh's --state closed explicitly requests [CLOSED, MERGED]. A GraphQL
+  // CLOSED-only selection is covered separately by the HTTP regression.
+  assertions(closedList.length === 2 && closedList.some(pr => pr.number === 2 && pr.state === "CLOSED" && pr.mergeCommit === null) && closedList.some(pr => pr.number === 1 && pr.state === "MERGED" && pr.mergeCommit?.oid === mergeSHA), "closed list lost the requested terminal states");
   report.passed = true; report.gh = (await cmd(gh, ["--version"])).stdout; report.runCredentialsSeparated = true; report.externalBackendSwitch = { githubRun, forgejoRun }; report.expectedHeadEnforced = true;
 } catch (e) { report.passed = false; report.failure = { stage, message: clean(e.message), server: clean(serverLog).slice(-2000) }; }
 finally {
