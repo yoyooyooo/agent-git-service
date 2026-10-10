@@ -336,6 +336,8 @@ Start with the parts that every PR, release, and workflow flow depends on:
 
 - `internal/gitstore`: `Merge`, `Rebase`, `Compare`, `DiffNameStatus`, `DiffNumStat`, `ReadFile`, `ListTags`, `LogBetweenTags`, `PRCommitsLog`
 - `internal/service/repo_test.go`: duplicate repo names, transfer, fork behavior, delete cascade, repo emptiness, disk usage
+- `internal/service/repo_delete_dependents_test.go`: migrated-schema enumeration of every repository/PR foreign key, populated SQLite (FK enabled) and TiDB fixtures, base/head cross-repository PR dependents, unchanged unrelated rows, shared Wiki blob references, and final-delete rollback
+- `internal/rest/handlers_repo_delete_dependents_test.go`: authenticated HTTP DELETE with cross-repository PR reviews, projections, projection jobs/attempts and Multica links returns 204 and preserves the other repository's Git storage and unrelated PR rows
 
 #### Pull Request Lifecycle
 

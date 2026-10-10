@@ -1106,8 +1106,7 @@ func (s *Service) deleteRepoCascade(tx *gorm.DB, repoID uint, fullName string) e
 	}
 	// Redeliveries have a self-FK. Detach it inside the transaction before
 	// deleting the delivery set so row-by-row MySQL/TiDB checks also succeed.
-	deliveryIDs := tx.Model(&db.HookDelivery{}).Select("id").Where("repository_id = ?", repoID)
-	if err := del(tx.Model(&db.HookDelivery{}).Where("parent_delivery_id IN (?)", deliveryIDs).Update("parent_delivery_id", nil)); err != nil {
+	if err := del(tx.Model(&db.HookDelivery{}).Where("repository_id = ?", repoID).Update("parent_delivery_id", nil)); err != nil {
 		return err
 	}
 	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.HookDelivery{})); err != nil {
