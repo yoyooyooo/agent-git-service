@@ -171,6 +171,11 @@ are disposable in a loopback-only user/network namespace. Backend fixtures use t
 published API shapes; they are not evidence of running real hosted CI jobs.
 
 This is a standard-client slice, not complete GitHub Actions API equivalence.
-Unsupported external artifacts/caches/settings and commit check-list resources fail
-explicitly rather than using unrelated native state. Provider provisioning and a
-production TLS/credential/log-bridge rollout are separate explicit operations.
+External adapters do not publish Actions artifacts. `GET` of the repository and
+run artifact collections returns `{total_count:0, artifacts:[]}` so stock `gh run
+view` can finish after jobs load. Artifact download stays unsupported. Commit
+check-runs list the selected backend's jobs for that SHA, including a provider
+branch label that is not the AGS head ref. Caches, settings and other unsupported
+Actions operations still fail explicitly rather than using unrelated native state.
+Provider provisioning and a production TLS/credential/log-bridge rollout are
+separate explicit operations.

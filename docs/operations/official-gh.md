@@ -34,10 +34,15 @@ entry and diagnose origin/overrides. It does not change GitHub accounts, remote
 URLs, global PATH, or how ordinary gh commands are parsed.
 
 The authenticated API supports HEAD repository discovery, draft creation, commit
-connections with no CI, and current configured CI evidence. Not every GitHub
-endpoint is fully replicated; unsupported external Actions management/check-run
-REST capabilities are explicit rather than silently using unrelated native state.
-See [CI backends](../architecture/ci-backends.md).
+connections with no CI, and current configured CI evidence. External check-runs
+and empty artifact collections are projected for stock `gh run view` and
+`gh api`. Not every GitHub endpoint is fully replicated; unsupported external
+Actions management still fails explicitly rather than silently using unrelated
+native state. See [CI backends](../architecture/ci-backends.md).
+
+GraphQL `mergeStateStatus` is `BEHIND` when an open, non-draft head does not
+contain the current base. A requested standard merge method that the repository
+disables returns the same conflict from REST and GraphQL before any ref moves.
 
 ## Standard merge
 

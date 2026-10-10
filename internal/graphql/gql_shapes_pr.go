@@ -83,7 +83,7 @@ func (s *Server) prGQL(ctx context.Context, p db.PullRequest, queries ...string)
 		"additions":               additions,
 		"deletions":               deletions,
 		"changedFiles":            changedFiles,
-		"mergeStateStatus":        mergeStateStatus(p),
+		"mergeStateStatus":        s.mergeStateStatus(ctx, p, queryHasAny(q, "mergeStateStatus")),
 		"mergedBy":                mergedByGQL(p),
 		"mergeCommit":             mergeCommitGQL(p),
 		"maintainerCanModify":     p.MaintainerCanModify,

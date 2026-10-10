@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/ngaut/agent-git-service/internal/cibackend"
+	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/rest/respond"
 	"github.com/ngaut/agent-git-service/internal/service"
 )
@@ -224,6 +226,20 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write(data)
 			return
+		case "checks-for-ref":
+			d.listExternalCheckRunsForRef(w, r, *repo, base)
+			return
+		case "run-artifacts", "repo-artifacts":
+			if operation == "run-artifacts" {
+				if _, ok := readID("run_id"); !ok {
+					return
+				}
+			}
+			// External adapters do not publish Actions artifacts. An empty
+			// collection is the truthful observation; 501 makes stock gh abort
+			// run view before it can show jobs that were already loaded.
+			respond.JSON(w, 200, map[string]any{"total_count": 0, "artifacts": []any{}})
+			return
 		default:
 			respond.Error(w, 501, "Selected CI backend does not expose this Actions operation")
 			return
@@ -264,6 +280,54 @@ func ciJobJSON(v service.CIJob, base string) map[string]any {
 func ciCheckRunJSON(value service.CIJob, base string) map[string]any {
 	j := value.Job
 	return map[string]any{"id": value.ID, "name": j.Name, "head_sha": j.HeadSHA, "status": j.Status, "conclusion": nilIfEmpty(j.Conclusion), "started_at": j.StartedAt, "completed_at": j.CompletedAt, "html_url": j.URL, "url": fmt.Sprintf("%s/check-runs/%d", base, value.ID), "check_suite": map[string]any{"id": value.RunID}, "output": map[string]any{"title": j.Name, "summary": "CI job status; structured annotations are not projected. See job logs."}, "ags_ci_backend": value.Backend, "ags_annotations_status": "not-projected"}
+}
+
+func ciCheckFromObservation(check service.CICheck, base string) map[string]any {
+	var id any
+	if n, err := strconv.ParseUint(check.ID, 10, 64); err == nil {
+		id = n
+	}
+	return map[string]any{
+		"id": id, "name": check.Name, "head_sha": "", "status": check.Status, "conclusion": nilIfEmpty(check.Conclusion),
+		"started_at": check.StartedAt, "completed_at": check.CompletedAt, "html_url": check.URL,
+		"details_url": check.URL, "url": fmt.Sprintf("%s/check-runs/%s", base, check.ID),
+		"check_suite": map[string]any{"id": check.ID},
+		"output":      map[string]any{"title": check.Name, "summary": "CI job status; structured annotations are not projected. See job logs."},
+	}
+}
+
+// listExternalCheckRunsForRef projects the selected backend's jobs for one commit.
+// gh pr checks uses GraphQL; this is the REST surface used by gh api and other clients.
+func (d *Deps) listExternalCheckRunsForRef(w http.ResponseWriter, r *http.Request, repo db.Repository, base string) {
+	ref := chi.URLParam(r, "ref")
+	sha := ref
+	if len(sha) != 40 {
+		if d.Svc.Git == nil {
+			respond.Error(w, http.StatusNotImplemented, "Checks API compatibility for unresolved refs requires the Git backend")
+			return
+		}
+		resolved, err := d.Svc.Git.HeadSHA(r.Context(), repo.FullName, ref)
+		if err != nil {
+			respond.Error(w, http.StatusNotFound, fmt.Sprintf("Ref %q not found", ref))
+			return
+		}
+		sha = resolved
+	}
+	observed, err := d.Svc.ReadCIChecksForSHA(r.Context(), repo, sha)
+	if err != nil {
+		ciHTTPError(w, err)
+		return
+	}
+	rows := make([]any, 0, len(observed.Checks))
+	for _, check := range observed.Checks {
+		if strings.HasPrefix(check.ID, "required:") {
+			continue
+		}
+		row := ciCheckFromObservation(check, base)
+		row["head_sha"] = sha
+		rows = append(rows, row)
+	}
+	respond.JSON(w, 200, map[string]any{"total_count": len(rows), "check_runs": rows})
 }
 
 func ciWorkflowJSON(value service.CIWorkflow, base string) map[string]any {

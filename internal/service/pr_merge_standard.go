@@ -40,6 +40,9 @@ func (s *Service) MergeStandardPR(ctx context.Context, repository string, number
 	default:
 		return pr, fmt.Errorf("%w: unsupported standard merge method", ErrValidation)
 	}
+	if err := s.rejectDisallowedStandardMerge(ctx, repository, method); err != nil {
+		return pr, err
+	}
 	expected = strings.ToLower(strings.TrimSpace(expected))
 	if expected != "" && !canonicalActionSHA(expected) {
 		return pr, fmt.Errorf("%w: invalid expected head SHA", ErrValidation)
@@ -130,6 +133,29 @@ func (s *Service) MergeStandardPR(ctx context.Context, repository string, number
 		return pr, e
 	}
 	return pr, nil
+}
+
+// rejectDisallowedStandardMerge applies the repository allow_* flags to both
+// REST and GraphQL. Provider-owned fast-forward acceptance happens later and
+// is not a second policy.
+func (s *Service) rejectDisallowedStandardMerge(ctx context.Context, repository, method string) error {
+	repo, err := s.GetRepo(ctx, repository)
+	if err != nil {
+		return err
+	}
+	allowed := true
+	switch method {
+	case "merge":
+		allowed = repo.AllowMergeCommit
+	case "squash":
+		allowed = repo.AllowSquashMerge
+	case "rebase":
+		allowed = repo.AllowRebaseMerge
+	}
+	if allowed {
+		return nil
+	}
+	return fmt.Errorf("%w: %s merges are disabled for this repository", ErrConflict, method)
 }
 
 // MergeStandardPRByID resolves the GraphQL node without leaking private state.

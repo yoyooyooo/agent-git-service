@@ -290,7 +290,18 @@ func ciError(err error) error {
 	return err
 }
 
+// ReadCIChecksForSHA returns checks whose run commit is the requested SHA.
+// Callers that only have a commit, such as REST check-runs, must not also
+// require the provider display branch to equal that SHA or ref.
+func (s *Service) ReadCIChecksForSHA(ctx context.Context, repo db.Repository, sha string) (CIChecks, error) {
+	return s.readCIChecks(ctx, db.PullRequest{RepositoryID: repo.ID, Repository: repo, HeadSHA: sha, State: db.StateOpen}, false)
+}
+
 func (s *Service) ReadCIChecks(ctx context.Context, pr db.PullRequest) (CIChecks, error) {
+	return s.readCIChecks(ctx, pr, true)
+}
+
+func (s *Service) readCIChecks(ctx context.Context, pr db.PullRequest, matchBranch bool) (CIChecks, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	repo, sel, e := s.ciScope(ctx, pr.Repository.FullName)
@@ -324,7 +335,7 @@ func (s *Service) ReadCIChecks(ctx context.Context, pr db.PullRequest) (CIChecks
 			if run.HeadSHA != pr.HeadSHA {
 				continue
 			}
-			if run.Branch != pr.HeadRef {
+			if matchBranch && run.Branch != pr.HeadRef {
 				// Forgejo may label PR runs #<provider-number>; use a durable projection,
 				// never the AGS PR number or a guessed branch name.
 				var projection db.PullRequestProjection
