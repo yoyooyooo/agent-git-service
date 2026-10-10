@@ -106,18 +106,31 @@ func autoMergeRequestGQL(p db.PullRequest) any {
 	}
 }
 
-// mergeStateStatus returns the mergeStateStatus for a PR.
-func mergeStateStatus(p db.PullRequest) string {
-	if p.Merged {
-		return "UNKNOWN"
-	}
-	if p.State == db.StateClosed {
+// mergeStateStatus reports GitHub's coarse merge state. A fast-forward
+// candidate whose head does not contain the current base is BEHIND even when
+// the trees would otherwise merge cleanly. Conflict detection stays on mergeable.
+func (s *Server) mergeStateStatus(ctx context.Context, p db.PullRequest, requested bool) string {
+	if p.Merged || p.State == db.StateClosed {
 		return "UNKNOWN"
 	}
 	if p.Draft {
 		return "DRAFT"
 	}
-	return "CLEAN"
+	if !requested || s == nil || s.Svc == nil || s.Svc.Git == nil || p.Repository.FullName == "" || p.HeadSHA == "" || p.BaseRef == "" {
+		return "CLEAN"
+	}
+	base, err := s.Svc.Git.HeadSHA(ctx, p.Repository.FullName, p.BaseRef)
+	if err != nil || base == "" {
+		return "CLEAN"
+	}
+	if base == p.HeadSHA {
+		return "CLEAN"
+	}
+	contains, err := s.Svc.Git.IsAncestor(ctx, p.Repository.FullName, base, p.HeadSHA)
+	if err != nil || contains {
+		return "CLEAN"
+	}
+	return "BEHIND"
 }
 
 // mergedByGQL returns the mergedBy field for a PR.
