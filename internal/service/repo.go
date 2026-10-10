@@ -962,7 +962,10 @@ func (s *Service) deleteRepoCascade(tx *gorm.DB, repoID uint, fullName string) e
 	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.CIResource{})); err != nil {
 		return err
 	}
-	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.ClientRunLink{})); err != nil {
+	// Use one set for base- and head-repository PRs throughout the cascade.
+	// Keep these subqueries live until all PR dependents have been removed.
+	prIDs := tx.Model(&db.PullRequest{}).Select("id").Where("repository_id = ? OR head_repository_id = ?", repoID, repoID)
+	if err := del(tx.Where("repository_id = ? OR pull_request_id IN (?)", repoID, prIDs).Delete(&db.ClientRunLink{})); err != nil {
 		return err
 	}
 
@@ -989,56 +992,66 @@ func (s *Service) deleteRepoCascade(tx *gorm.DB, repoID uint, fullName string) e
 		return err
 	}
 
-	// Phase 3: PR child records (review comments, reviews, review requests).
-	prIDs := tx.Model(&db.PullRequest{}).Select("id").Where("repository_id = ?", repoID)
-	crossPRIDs := tx.Model(&db.PullRequest{}).Select("id").Where("head_repository_id = ?", repoID)
-	// PRReviewComment must be deleted before PullRequestReview (FK dependency)
-	if err := del(tx.Where("pull_request_id IN (?)", prIDs).Delete(&db.PRReviewComment{})); err != nil {
+	// Phase 3: PR dependents, including rows owned by another base repository
+	// whose PR uses this repository as its head. Attempts precede their jobs;
+	// review comments precede their reviews.
+	jobIDs := tx.Model(&db.PullRequestProjectionJob{}).Select("id").
+		Where("repository_id = ? OR pull_request_id IN (?)", repoID, prIDs)
+	if err := del(tx.Where("job_id IN (?)", jobIDs).Delete(&db.PullRequestProjectionJobAttempt{})); err != nil {
 		return err
 	}
-	if err := del(tx.Where("pull_request_id IN (?)", crossPRIDs).Delete(&db.PRReviewComment{})); err != nil {
+	for _, model := range []any{&db.PullRequestProjectionJob{}, &db.PullRequestProjection{}, &db.PullRequestMulticaLink{}, &db.PullRequestActionIntent{}} {
+		if err := del(tx.Where("repository_id = ? OR pull_request_id IN (?)", repoID, prIDs).Delete(model)); err != nil {
+			return err
+		}
+	}
+	for _, model := range []any{&db.PRReviewComment{}, &db.PullRequestReview{}, &db.ReviewRequest{}} {
+		if err := del(tx.Where("pull_request_id IN (?)", prIDs).Delete(model)); err != nil {
+			return err
+		}
+	}
+	if err := del(tx.Where("repository_id = ? OR (subject_type = ? AND subject_id IN (?))", repoID, NotificationSubjectPullRequest, prIDs).Delete(&db.Notification{})); err != nil {
 		return err
 	}
-	if err := del(tx.Where("pull_request_id IN (?)", prIDs).Delete(&db.PullRequestReview{})); err != nil {
-		return err
-	}
-	if err := del(tx.Where("pull_request_id IN (?)", prIDs).Delete(&db.ReviewRequest{})); err != nil {
-		return err
-	}
-	if err := del(tx.Where("pull_request_id IN (?)", crossPRIDs).Delete(&db.PullRequestReview{})); err != nil {
-		return err
-	}
-	if err := del(tx.Where("pull_request_id IN (?)", crossPRIDs).Delete(&db.ReviewRequest{})); err != nil {
+	// References can point into the deleted repository or originate from a
+	// cross-repository PR. Remove them before their source comments/PRs.
+	prNumbers := tx.Model(&db.PullRequest{}).Select("number").Where("head_repository_id = ?", repoID).
+		Where("pull_requests.repository_id = issue_references.source_repository_id")
+	if err := del(tx.Where("source_repository_id = ? OR target_repository_id = ? OR (source_type = ? AND source_pr_number IN (?))",
+		repoID, repoID, issueReferenceSourcePullRequestBody, prNumbers).Delete(&db.IssueReference{})); err != nil {
 		return err
 	}
 
 	// Phase 4: Many2many join tables.
-	if err := tx.Exec("DELETE FROM pr_labels WHERE pull_request_id IN (SELECT id FROM pull_requests WHERE head_repository_id = ?)", repoID).Error; err != nil {
+	if err := tx.Exec("DELETE FROM pr_labels WHERE pull_request_id IN (SELECT id FROM pull_requests WHERE repository_id = ? OR head_repository_id = ?)", repoID, repoID).Error; err != nil {
 		return err
 	}
 	if err := tx.Exec("DELETE FROM issue_labels WHERE issue_id IN (SELECT id FROM issues WHERE repository_id = ?)", repoID).Error; err != nil {
-		return err
-	}
-	if err := tx.Exec("DELETE FROM pr_labels WHERE pull_request_id IN (SELECT id FROM pull_requests WHERE repository_id = ?)", repoID).Error; err != nil {
 		return err
 	}
 	if err := tx.Exec("DELETE FROM wiki_page_labels WHERE repository_id = ?", repoID).Error; err != nil {
 		return err
 	}
 
-	// Phase 5: PRs and linked records.
-	if err := del(tx.Where("head_repository_id = ?", repoID).Delete(&db.PullRequest{})); err != nil {
+	// Phase 5: PRs, then their repository-scoped historical sessions.
+	if err := del(tx.Where("repository_id = ? OR head_repository_id = ?", repoID, repoID).Delete(&db.PullRequest{})); err != nil {
+		return err
+	}
+	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.DelegatedAgentSession{})); err != nil {
 		return err
 	}
 	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.LinkedBranch{})); err != nil {
 		return err
 	}
-	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.PullRequest{})); err != nil {
-		return err
-	}
 
 	// Phase 6: Issue-related records.
-	// Keep milestones last in this phase: issues.milestone_id has an FK to milestones.id.
+	// Incidents reference issues; milestones must outlive both issues and PRs.
+	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.RepoIncident{})); err != nil {
+		return err
+	}
+	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.ExternalEvent{})); err != nil {
+		return err
+	}
 	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.IssueComment{})); err != nil {
 		return err
 	}
@@ -1055,9 +1068,6 @@ func (s *Service) deleteRepoCascade(tx *gorm.DB, repoID uint, fullName string) e
 
 	// Phase 7: Other records (labels, keys, releases, variables, secrets, rulesets, autolinks, stars).
 	// Deployment statuses before deployments (FK dependency).
-	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.Notification{})); err != nil {
-		return err
-	}
 	if err := del(tx.Where("deployment_id IN (?)", tx.Model(&db.Deployment{}).Select("id").Where("repository_id = ?", repoID)).Delete(&db.DeploymentStatus{})); err != nil {
 		return err
 	}
@@ -1092,6 +1102,15 @@ func (s *Service) deleteRepoCascade(tx *gorm.DB, repoID uint, fullName string) e
 		return err
 	}
 	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.RepositoryInvitation{})); err != nil {
+		return err
+	}
+	// Redeliveries have a self-FK. Detach it inside the transaction before
+	// deleting the delivery set so row-by-row MySQL/TiDB checks also succeed.
+	deliveryIDs := tx.Model(&db.HookDelivery{}).Select("id").Where("repository_id = ?", repoID)
+	if err := del(tx.Model(&db.HookDelivery{}).Where("parent_delivery_id IN (?)", deliveryIDs).Update("parent_delivery_id", nil)); err != nil {
+		return err
+	}
+	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.HookDelivery{})); err != nil {
 		return err
 	}
 	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.Webhook{})); err != nil {
@@ -1141,6 +1160,42 @@ func (s *Service) deleteRepoCascade(tx *gorm.DB, repoID uint, fullName string) e
 	}
 	if err := del(tx.Where("repository_id = ?", repoID).Delete(&db.ProjectionEvent{})); err != nil {
 		return err
+	}
+
+	// Remaining repository FKs and catalog children without declared FKs.
+	// Large wiki blobs may be shared by other repositories: decrement only
+	// this repository's live references and leave reclamation to catalog GC.
+	type blobRefCount struct {
+		BlobSHA  string
+		Refcount int64
+	}
+	var liveRefs []blobRefCount
+	if err := tx.Model(&db.WikiPage{}).Select("head_blob_sha AS blob_sha, COUNT(*) AS refcount").
+		Where("repository_id = ? AND deleted_at IS NULL AND body_size > ?", repoID, wikicatalog.MaxBodyInlineBytes).
+		Group("head_blob_sha").Scan(&liveRefs).Error; err != nil {
+		return err
+	}
+	for _, ref := range liveRefs {
+		if ref.BlobSHA == "" {
+			continue
+		}
+		if err := del(tx.Model(&db.WikiBlobRef{}).Where("blob_sha = ?", ref.BlobSHA).
+			UpdateColumn("refcount", gorm.Expr("refcount - ?", ref.Refcount))); err != nil {
+			return err
+		}
+	}
+	pageIDs := tx.Model(&db.WikiPage{}).Select("page_id").Where("repository_id = ?", repoID)
+	if err := del(tx.Where("page_id IN (?)", pageIDs).Delete(&db.WikiPageRevision{})); err != nil {
+		return err
+	}
+	for _, model := range []any{
+		&db.RepoFlowEnvProjection{}, &db.WikiPageLink{}, &db.WikiPage{}, &db.WikiRepoHead{}, &db.WikiChangeset{},
+		&db.WikiPageIndex{}, &db.WikiIndexState{}, &db.WikiBacklink{}, &db.WikiPageHistory{},
+		&db.Environment{}, &db.PagesConfig{}, &db.PagesBuild{}, &db.ProjectRepoLink{},
+	} {
+		if err := del(tx.Where("repository_id = ?", repoID).Delete(model)); err != nil {
+			return err
+		}
 	}
 
 	// Phase 8: Delete repo itself.
