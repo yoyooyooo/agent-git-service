@@ -749,17 +749,19 @@ func (i *Integration) EnsurePullRequest(ctx context.Context, in PullRequestSyncR
 		return PullRequestResult{}, fmt.Errorf("forgejo integration: token is required")
 	}
 	head := strings.TrimSpace(in.Head)
-	target, err := i.cfg.requireTargetFor(in.RepoFullName)
-	if err != nil {
-		return PullRequestResult{}, err
-	}
-	base := strings.TrimSpace(in.Base)
-	if base == "" {
-		base = target.BaseBranch
-	}
-	// An existing mapped pull request must follow an AGS base edit even when
-	// the repository does not auto-open pull requests for new heads.
+	// A base retarget addresses one already mapped provider pull request, so it
+	// needs the explicit target even when new heads are not auto-projected.
+	// Every other request keeps the historical order: skip optional projection
+	// before requireTargetFor, so an unmapped non-PR branch stays a no-op.
 	if in.MappedNumber > 0 {
+		target, err := i.cfg.requireTargetFor(in.RepoFullName)
+		if err != nil {
+			return PullRequestResult{}, err
+		}
+		base := strings.TrimSpace(in.Base)
+		if base == "" {
+			base = target.BaseBranch
+		}
 		if strings.TrimSpace(in.RepoPath) == "" {
 			return PullRequestResult{}, fmt.Errorf("forgejo integration: repo path is required to retarget PR branch %s", head)
 		}
@@ -771,6 +773,14 @@ func (i *Integration) EnsurePullRequest(ctx context.Context, in PullRequestSyncR
 	}
 	if !required {
 		return PullRequestResult{}, nil
+	}
+	target, err := i.cfg.requireTargetFor(in.RepoFullName)
+	if err != nil {
+		return PullRequestResult{}, err
+	}
+	base := strings.TrimSpace(in.Base)
+	if base == "" {
+		base = target.BaseBranch
 	}
 	if strings.TrimSpace(in.RepoPath) == "" {
 		return PullRequestResult{}, fmt.Errorf("forgejo integration: repo path is required to mirror PR branch %s", head)
