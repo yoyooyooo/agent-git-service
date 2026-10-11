@@ -237,3 +237,40 @@ func TestCIChecksForgejoPRProjectionBindsCurrentHead(t *testing.T) {
 		}
 	}
 }
+
+func TestCIChecksPullRequestRunOutranksLaterWorkflowDispatch(t *testing.T) {
+	s, ctx, repo, pr, backend, config := ciFixture(t)
+	selected := config.Backends["builder"]
+	selected.Kind = "forgejo"
+	config.Backends["builder"] = selected
+	required := []string{"check-linux"}
+	binding := config.Repositories[repo.FullName]
+	binding.RequiredChecks = &required
+	config.Repositories[repo.FullName] = binding
+	registry, err := cibackend.WithBackends(config, map[string]cibackend.Backend{"builder": backend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.CI = registry
+	projection := db.PullRequestProjection{PullRequestID: pr.ID, RepositoryID: repo.ID, Provider: "forgejo", ExternalRepo: "ci/project", ExternalNumber: 42, ExternalURL: "https://api.example.test/ci/project/pulls/42", LastSyncedSHA: pr.HeadSHA}
+	if err = s.DB.Create(&projection).Error; err != nil {
+		t.Fatal(err)
+	}
+	failedAt := time.Now().UTC().Add(-time.Hour)
+	dispatchAt := failedAt.Add(30 * time.Minute)
+	backend.runs = []cibackend.Run{
+		{Key: "289", Workflow: "check.yml", Name: "check.yml", Branch: "#42", HeadSHA: pr.HeadSHA, Event: "pull_request_sync", Status: "completed", Conclusion: "failure", CreatedAt: failedAt, UpdatedAt: failedAt, Number: 289, Attempt: 1, PullRequests: []int{42}},
+		{Key: "290", Workflow: "check.yml", Name: "check.yml", Branch: pr.HeadRef, HeadSHA: pr.HeadSHA, Event: "workflow_dispatch", Status: "completed", Conclusion: "success", CreatedAt: dispatchAt, UpdatedAt: dispatchAt, Number: 290, Attempt: 1},
+	}
+	backend.jobs = []cibackend.Job{
+		{Key: "289:1", Run: "289", Name: "check-linux", HeadSHA: pr.HeadSHA, Status: "completed", Conclusion: "failure"},
+		{Key: "290:1", Run: "290", Name: "check-linux", HeadSHA: pr.HeadSHA, Status: "completed", Conclusion: "success"},
+	}
+	observed, err := s.ReadCIChecks(ctx, pr)
+	if err != nil || len(observed.Checks) != 1 || observed.Checks[0].Name != "check-linux" || observed.Checks[0].Conclusion != "failure" || observed.Checks[0].Event != "pull_request_sync" {
+		t.Fatalf("workflow_dispatch replaced the failed pull_request check: %#v %v", observed, err)
+	}
+	if err = s.enforceConfiguredCIForMerge(ctx, pr); err == nil {
+		t.Fatal("failed pull_request check-linux allowed merge after a later workflow_dispatch success")
+	}
+}
