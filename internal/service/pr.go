@@ -628,8 +628,27 @@ func (s *Service) UpdatePR(ctx context.Context, repoFullName string, number int,
 			pr.ClosedAt = nil
 		}
 	}
+	var baseRetarget string
 	if in.BaseRef != nil {
-		pr.BaseRef = *in.BaseRef
+		nextBase := strings.TrimSpace(*in.BaseRef)
+		if nextBase == "" {
+			return db.PullRequest{}, fmt.Errorf("%w: pull request base is required", ErrValidation)
+		}
+		if nextBase != pr.BaseRef {
+			if pr.State != db.StateOpen || pr.Merged {
+				return db.PullRequest{}, fmt.Errorf("%w: only an open pull request can change base", ErrInvalidState)
+			}
+			if nextBase == pr.HeadRef {
+				return db.PullRequest{}, fmt.Errorf("%w: pull request base cannot equal its head", ErrValidation)
+			}
+			baseSHA, err := s.Git.HeadSHA(ctx, rep.FullName, nextBase)
+			if err != nil || !canonicalActionSHA(baseSHA) {
+				return db.PullRequest{}, fmt.Errorf("%w: pull request base %s is unavailable", ErrValidation, nextBase)
+			}
+			pr.BaseRef = nextBase
+			pr.BaseSHA = strings.ToLower(strings.TrimSpace(baseSHA))
+			baseRetarget = nextBase
+		}
 	}
 	if in.Draft != nil {
 		pr.Draft = *in.Draft
@@ -664,7 +683,7 @@ func (s *Service) UpdatePR(ctx context.Context, repoFullName string, number int,
 		if err := s.DispatchPullRequestClosedIntegrations(ctx, pr); err != nil {
 			slog.WarnContext(ctx, "close PR projections failed", "repo", repoFullName, "pr_number", number, "error", err)
 		}
-	} else if pr.State == db.StateOpen && (pr.Title != origTitle || pr.Body != origBody || in.BaseRef != nil || (in.State != nil && *in.State == db.StateOpen && origState == db.StateClosed)) {
+	} else if pr.State == db.StateOpen && (pr.Title != origTitle || pr.Body != origBody || baseRetarget != "" || (in.State != nil && *in.State == db.StateOpen && origState == db.StateClosed)) {
 		if _, err := s.DispatchPullRequestIntegrations(ctx, pr); err != nil {
 			slog.WarnContext(ctx, "refresh PR projections failed", "repo", repoFullName, "pr_number", number, "error", err)
 		}
@@ -733,6 +752,26 @@ func (s *Service) UpdatePRByID(ctx context.Context, id uint, state *string, draf
 	return nil
 }
 
+// retargetPullRequestBase records a new open-PR base and its current tip,
+// then asks provider projection to follow that base. Callers that also change
+// other fields must apply those fields separately.
+func (s *Service) retargetPullRequestBase(ctx context.Context, pr db.PullRequest, baseRef string) (db.PullRequest, error) {
+	repoName := strings.TrimSpace(pr.Repository.FullName)
+	if repoName == "" {
+		repo, err := s.GetRepoByID(ctx, fmt.Sprint(pr.RepositoryID))
+		if err != nil {
+			return db.PullRequest{}, err
+		}
+		repoName = repo.FullName
+		pr.Repository = repo
+	}
+	updated, err := s.UpdatePR(ctx, repoName, pr.Number, UpdatePRInput{BaseRef: &baseRef})
+	if err != nil {
+		return db.PullRequest{}, err
+	}
+	return updated, nil
+}
+
 // UpdatePRFields updates arbitrary fields on a pull request by its DB ID.
 func (s *Service) UpdatePRFields(ctx context.Context, id uint, updates map[string]any) error {
 	if len(updates) > 0 {
@@ -746,8 +785,18 @@ func (s *Service) UpdatePRFields(ctx context.Context, id uint, updates map[strin
 			newAssigneeLogins = v
 		}
 		newBody, bodyChanged := issueReferenceBodyUpdate(updates["body"], pr.Body)
-		if err := s.DBForCtx(ctx).Model(&db.PullRequest{}).Where("id = ?", id).Updates(updates).Error; err != nil {
-			return err
+		if nextBase, ok := updates["base_ref"].(string); ok {
+			retargeted, err := s.retargetPullRequestBase(ctx, pr, nextBase)
+			if err != nil {
+				return err
+			}
+			delete(updates, "base_ref")
+			pr = retargeted
+		}
+		if len(updates) > 0 {
+			if err := s.DBForCtx(ctx).Model(&db.PullRequest{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+				return err
+			}
 		}
 		if bodyChanged {
 			pr.Body = db.LargeText(newBody)

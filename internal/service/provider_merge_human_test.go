@@ -179,3 +179,76 @@ func TestHumanProviderMergeRejectsAgentIdentityBeforeProviderMutation(t *testing
 		t.Fatalf("provider merge calls=%d", calls)
 	}
 }
+
+func TestHumanProviderMergeAfterBaseRetargetRefreshesStaleProjection(t *testing.T) {
+	svc, _, mergeInput, provider := setupAccessGrantMerge(t, "success")
+	human := db.User{
+		Login: "human-provider-merge-retarget", Name: "Human Retarget", Type: db.TypeUser,
+		Status: "active", UserKind: db.UserKindHuman, DefaultRepositoryPermission: "none",
+	}
+	if err := svc.DB.Create(&human).Error; err != nil {
+		t.Fatal(err)
+	}
+	var repository db.Repository
+	if err := svc.DB.First(&repository, "full_name = ?", "example-owner/demo").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DB.Create(&db.Collaborator{RepositoryID: repository.ID, UserID: human.ID, Permission: "admin"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	const nextBase = "release"
+	if err := svc.Git.CreateBranch(context.Background(), repository.FullName, nextBase, "main"); err != nil {
+		t.Fatal(err)
+	}
+	baseSHA, err := svc.Git.HeadSHA(context.Background(), repository.FullName, nextBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pr db.PullRequest
+	if err := svc.DB.First(&pr, "repository_id = ? AND number = ?", repository.ID, mergeInput.AGSPRNumber).Error; err != nil {
+		t.Fatal(err)
+	}
+	// The provider projection still names the pre-retarget stack base. A
+	// supported base edit must move that mapping and the live provider base
+	// before merge preflight compares them.
+	provider.mu.Lock()
+	provider.remoteSHA = baseSHA
+	provider.mu.Unlock()
+	ctx := service.ContextWithUser(context.Background(), human)
+	if _, err := svc.UpdatePR(ctx, repository.FullName, pr.Number, service.UpdatePRInput{BaseRef: strPtr(nextBase)}); err != nil {
+		t.Fatal(err)
+	}
+	var projection db.PullRequestProjection
+	if err := svc.DB.Where("pull_request_id = ?", pr.ID).First(&projection).Error; err != nil {
+		t.Fatal(err)
+	}
+	if projection.TargetBranch != nextBase {
+		t.Fatalf("projection target=%q, want %s", projection.TargetBranch, nextBase)
+	}
+	provider.mu.Lock()
+	observedBase := provider.snapshot.BaseRef
+	provider.mu.Unlock()
+	if observedBase != nextBase {
+		t.Fatalf("provider base=%q, want %s", observedBase, nextBase)
+	}
+
+	receipt, err := svc.ExecuteHumanProviderMerge(ctx, repository.FullName, mergeInput.AGSPRNumber, service.HumanProviderMergeInput{
+		ExpectedHeadSHA: mergeInput.ExpectedHeadSHA,
+		MergeMethod:     mergeInput.MergeMethod,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !receipt.ProviderMerged || receipt.ProviderMergeSHA != mergeInput.ExpectedHeadSHA {
+		t.Fatalf("receipt=%#v", receipt)
+	}
+	var stored db.PullRequest
+	if err := svc.DB.First(&stored, pr.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.BaseRef != nextBase || stored.BaseSHA != baseSHA {
+		t.Fatalf("stored base=%s %s, want %s %s", stored.BaseRef, stored.BaseSHA, nextBase, baseSHA)
+	}
+}
+
+func strPtr(value string) *string { return &value }

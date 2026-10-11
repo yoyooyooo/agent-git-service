@@ -167,6 +167,9 @@ type PullRequestSyncRequest struct {
 	Title        string
 	Body         string
 	HeadSHA      string
+	// MappedNumber retargets one already-projected Forgejo pull request.
+	// Zero keeps the historical ensure-by-head-and-base behavior.
+	MappedNumber int
 	RewriteLease *PullRequestRewriteLease
 	// BeforeWrite is a service-owned final authority check. The integration
 	// invokes it immediately before every provider mutation and never caches a
@@ -746,13 +749,6 @@ func (i *Integration) EnsurePullRequest(ctx context.Context, in PullRequestSyncR
 		return PullRequestResult{}, fmt.Errorf("forgejo integration: token is required")
 	}
 	head := strings.TrimSpace(in.Head)
-	required, err := i.ValidatePullRequestProjection(in.RepoFullName, head, in.Base)
-	if err != nil {
-		return PullRequestResult{}, err
-	}
-	if !required {
-		return PullRequestResult{}, nil
-	}
 	target, err := i.cfg.requireTargetFor(in.RepoFullName)
 	if err != nil {
 		return PullRequestResult{}, err
@@ -760,6 +756,21 @@ func (i *Integration) EnsurePullRequest(ctx context.Context, in PullRequestSyncR
 	base := strings.TrimSpace(in.Base)
 	if base == "" {
 		base = target.BaseBranch
+	}
+	// An existing mapped pull request must follow an AGS base edit even when
+	// the repository does not auto-open pull requests for new heads.
+	if in.MappedNumber > 0 {
+		if strings.TrimSpace(in.RepoPath) == "" {
+			return PullRequestResult{}, fmt.Errorf("forgejo integration: repo path is required to retarget PR branch %s", head)
+		}
+		return i.retargetMappedPullRequest(ctx, in, target, head, base)
+	}
+	required, err := i.ValidatePullRequestProjection(in.RepoFullName, head, in.Base)
+	if err != nil {
+		return PullRequestResult{}, err
+	}
+	if !required {
+		return PullRequestResult{}, nil
 	}
 	if strings.TrimSpace(in.RepoPath) == "" {
 		return PullRequestResult{}, fmt.Errorf("forgejo integration: repo path is required to mirror PR branch %s", head)
@@ -810,6 +821,54 @@ func (i *Integration) EnsurePullRequest(ctx context.Context, in PullRequestSyncR
 	if err := verifyProjectedHeadSHA(in.HeadSHA, result.HeadSHA, head); err != nil {
 		return result, err
 	}
+	return result, nil
+}
+
+// pullRequestBaseEditor changes the base of one exact Forgejo pull request
+// without opening a second pull request for the new head/base pair.
+type pullRequestBaseEditor interface {
+	EditPullRequestBase(ctx context.Context, owner, repo string, number int, base string) (PullRequestResult, error)
+}
+
+// retargetMappedPullRequest moves one already-projected Forgejo pull request
+// onto the AGS base. A missing editor fails closed: creating a second pull
+// request would split the durable external number.
+func (i *Integration) retargetMappedPullRequest(ctx context.Context, in PullRequestSyncRequest, target TargetRepo, head, base string) (PullRequestResult, error) {
+	editor, ok := i.client.(pullRequestBaseEditor)
+	if !ok {
+		return PullRequestResult{}, fmt.Errorf("forgejo integration: client cannot retarget mapped pull request #%d", in.MappedNumber)
+	}
+	before, found, err := i.ExactPullRequestSnapshot(ctx, in.RepoFullName, target.Owner+"/"+target.Repo, in.MappedNumber)
+	if err != nil {
+		return PullRequestResult{}, fmt.Errorf("forgejo integration: inspect mapped pull request #%d before base retarget: %w", in.MappedNumber, err)
+	}
+	if !found || before.State != "open" || before.Merged || before.HeadRef != head || !exactGitSHA(before.HeadSHA, in.HeadSHA) {
+		return PullRequestResult{}, fmt.Errorf("forgejo integration: mapped pull request #%d is not the open head accepted for base retarget", in.MappedNumber)
+	}
+	if before.BaseRef == base {
+		return PullRequestResult{Number: before.Number, URL: before.URL, ExternalRepo: target.Owner + "/" + target.Repo, HeadSHA: before.HeadSHA}, nil
+	}
+	if err := runBeforeProviderWrite(ctx, in.BeforeWrite); err != nil {
+		return PullRequestResult{}, err
+	}
+	result, err := editor.EditPullRequestBase(ctx, target.Owner, target.Repo, in.MappedNumber, base)
+	if err != nil {
+		return result, fmt.Errorf("forgejo integration: retarget mapped pull request #%d to %s: %w", in.MappedNumber, base, err)
+	}
+	after, found, readErr := i.ExactPullRequestSnapshot(ctx, in.RepoFullName, target.Owner+"/"+target.Repo, in.MappedNumber)
+	if readErr != nil || !found || after.BaseRef != base || after.HeadRef != head || !exactGitSHA(after.HeadSHA, in.HeadSHA) {
+		return result, fmt.Errorf("forgejo integration: mapped pull request #%d did not converge to base %s", in.MappedNumber, base)
+	}
+	if result.Number == 0 {
+		result.Number = after.Number
+	}
+	if result.URL == "" {
+		result.URL = after.URL
+	}
+	if result.HeadSHA == "" {
+		result.HeadSHA = after.HeadSHA
+	}
+	result.ExternalRepo = target.Owner + "/" + target.Repo
 	return result, nil
 }
 

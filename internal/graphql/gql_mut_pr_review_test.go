@@ -1039,6 +1039,13 @@ func TestGraphQL_UpdatePR_BaseRef_Success(t *testing.T) {
 	if updatedPR.BaseRef != "develop" {
 		t.Errorf("DB base_ref: got %v, want 'develop'", updatedPR.BaseRef)
 	}
+	developSHA, err := svc.Git.HeadSHA(ctx, repo.FullName, "develop")
+	if err != nil {
+		t.Fatalf("HeadSHA(develop): %v", err)
+	}
+	if updatedPR.BaseSHA != developSHA {
+		t.Errorf("DB base_sha: got %v, want %s", updatedPR.BaseSHA, developSHA)
+	}
 }
 
 // TestGraphQL_UpdatePR_InvalidPRID tests update fails gracefully with invalid PR ID.
