@@ -365,7 +365,7 @@ func (s *Service) readCIChecks(ctx context.Context, pr db.PullRequest, matchBran
 				}
 			}
 			previous, ok := newest[run.Workflow]
-			if !ok || run.CreatedAt.After(previous.CreatedAt) || run.CreatedAt.Equal(previous.CreatedAt) && run.Attempt > previous.Attempt {
+			if !ok || preferObservedCIRun(run, previous) {
 				newest[run.Workflow] = run
 			}
 		}
@@ -416,6 +416,30 @@ func (s *Service) readCIChecks(ctx context.Context, pr db.PullRequest, matchBran
 		out.Checks = append(out.Checks, CICheck{ID: "required:" + name, Name: name, Status: "queued", Required: true})
 	}
 	return out, nil
+}
+
+// preferObservedCIRun keeps one run per workflow. A pull_request run is the
+// evidence a protected pull request check uses. A later workflow_dispatch of the
+// same workflow and job name must not replace that evidence.
+func preferObservedCIRun(candidate, current cibackend.Run) bool {
+	candidatePR := ciRunIsPullRequestEvent(candidate.Event)
+	currentPR := ciRunIsPullRequestEvent(current.Event)
+	if candidatePR != currentPR {
+		return candidatePR
+	}
+	if candidate.CreatedAt.After(current.CreatedAt) {
+		return true
+	}
+	return candidate.CreatedAt.Equal(current.CreatedAt) && candidate.Attempt > current.Attempt
+}
+
+func ciRunIsPullRequestEvent(event string) bool {
+	switch strings.TrimSpace(event) {
+	case "pull_request", "pull_request_sync", "pull_request_target":
+		return true
+	default:
+		return false
+	}
 }
 
 // Safe status errors deliberately omit provider response bodies and credentials.
