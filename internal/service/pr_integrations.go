@@ -238,6 +238,11 @@ func (s *Service) ensureForgejoPullRequestWithPolicyAndAdmission(ctx context.Con
 			}
 		}
 	}
+	if rewrite == nil {
+		if err := s.retargetForgejoProjectionBase(ctx, repoFullName, repoPath, headSHA, pr, beforeWrite); err != nil {
+			return forgejointegration.PullRequestResult{}, false, err
+		}
+	}
 	res, handled, err := s.ensureForgejoPullRequestExternalWithPolicyAndAuthority(ctx, repoFullName, repoPath, headSHA, pr, rewrite, beforeWrite)
 	if err != nil || !handled {
 		return res, handled, err
@@ -291,6 +296,51 @@ func (s *Service) ensureForgejoPullRequestExternalWithPolicyAndAuthority(ctx con
 		return forgejointegration.PullRequestResult{}, false, nil
 	}
 	return res, true, nil
+}
+
+// retargetForgejoProjectionBase moves one open mapped Forgejo pull request
+// onto the AGS base before a generic ensure. Ensure matches head and base, so
+// leaving the provider on the previous base would open a second pull request.
+func (s *Service) retargetForgejoProjectionBase(ctx context.Context, repoFullName, repoPath, headSHA string, pr db.PullRequest, beforeWrite func(context.Context) error) error {
+	if s == nil || s.ForgejoIntegration == nil || pr.State != db.StateOpen || pr.Merged {
+		return nil
+	}
+	projection, ok := s.forgejoProjectionForPullRequest(ctx, pr.ID)
+	if !ok || projection.ExternalNumber <= 0 || projection.State != ProjectionStateOpen || projection.TargetBranch == pr.BaseRef {
+		return nil
+	}
+	res, err := s.ForgejoIntegration.EnsurePullRequest(ctx, forgejointegration.PullRequestSyncRequest{
+		RepoFullName: repoFullName,
+		RepoPath:     repoPath,
+		Head:         pr.HeadRef,
+		Base:         pr.BaseRef,
+		Title:        pr.Title,
+		Body:         s.forgejoPullRequestBody(ctx, repoFullName, pr),
+		HeadSHA:      headSHA,
+		MappedNumber: projection.ExternalNumber,
+		BeforeWrite:  beforeWrite,
+	})
+	if err != nil {
+		return fmt.Errorf("retarget Forgejo pull request base: %w", err)
+	}
+	if res.Number != 0 && res.Number != projection.ExternalNumber {
+		return fmt.Errorf("retarget Forgejo pull request base: provider returned #%d for mapped #%d", res.Number, projection.ExternalNumber)
+	}
+	projection.TargetBranch = pr.BaseRef
+	projection.SourceBranch = pr.HeadRef
+	if strings.TrimSpace(res.ExternalRepo) != "" {
+		projection.ExternalRepo = res.ExternalRepo
+	}
+	if strings.TrimSpace(res.URL) != "" {
+		projection.ExternalURL = res.URL
+	}
+	if strings.TrimSpace(headSHA) != "" {
+		projection.LastSyncedSHA = headSHA
+	}
+	if err := s.UpsertPullRequestProjection(ctx, projection); err != nil {
+		return fmt.Errorf("record retargeted Forgejo projection: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) recordForgejoPullRequestProjection(ctx context.Context, repoFullName, headSHA string, pr db.PullRequest, res forgejointegration.PullRequestResult) error {

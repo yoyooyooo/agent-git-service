@@ -42,6 +42,17 @@ func (*accessGrantMergeProvider) UpdatePullRequestState(context.Context, string,
 	return forgejointegration.PullRequestResult{}, nil
 }
 
+func (p *accessGrantMergeProvider) EditPullRequestBase(_ context.Context, owner, repo string, number int, base string) (forgejointegration.PullRequestResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.snapshot.Number != number || p.snapshot.State != "open" || p.snapshot.Merged {
+		return forgejointegration.PullRequestResult{}, errors.New("mapped pull request is not open")
+	}
+	p.snapshot.BaseRef = base
+	p.snapshot.BaseSHA = p.remoteSHA
+	return forgejointegration.PullRequestResult{Number: number, URL: p.snapshot.URL, ExternalRepo: owner + "/" + repo, HeadSHA: p.snapshot.HeadSHA}, nil
+}
+
 func (p *accessGrantMergeProvider) GetPullRequest(context.Context, string, string, int) (forgejointegration.PullRequestSnapshot, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

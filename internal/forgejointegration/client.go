@@ -357,6 +357,26 @@ func (c *HTTPClient) reconcilePullRequestMetadata(ctx context.Context, in PullRe
 	return existing.result(), nil
 }
 
+// EditPullRequestBase changes one open Forgejo pull request's base branch.
+// Forgejo accepts the GitHub-compatible "base" field on the pull edit endpoint.
+func (c *HTTPClient) EditPullRequestBase(ctx context.Context, owner, repo string, number int, base string) (PullRequestResult, error) {
+	base = strings.TrimSpace(base)
+	if number <= 0 || base == "" {
+		return PullRequestResult{}, fmt.Errorf("pull request number and base are required")
+	}
+	status, response, err := c.request(ctx, http.MethodPatch, apiPath("/api/v1/repos/%s/%s/pulls/%s", owner, repo, fmt.Sprint(number)), map[string]any{"base": base})
+	if err != nil {
+		return PullRequestResult{}, err
+	}
+	if status < 200 || status >= 300 {
+		return PullRequestResult{}, fmt.Errorf("edit pull request base returned status %d: %s", status, strings.TrimSpace(string(response)))
+	}
+	if pr, ok := decodePullRequestResult(response); ok {
+		return pr, nil
+	}
+	return PullRequestResult{Number: number}, nil
+}
+
 func (c *HTTPClient) UpdatePullRequestState(ctx context.Context, owner, repo string, number int, state string) (PullRequestResult, error) {
 	body := map[string]any{"state": strings.TrimSpace(state)}
 	status, response, err := c.request(ctx, http.MethodPatch, apiPath("/api/v1/repos/%s/%s/pulls/%s", owner, repo, fmt.Sprint(number)), body)
