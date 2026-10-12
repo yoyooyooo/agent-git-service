@@ -1339,3 +1339,116 @@ func TestResolveAbsentForgejoProjectionStatesMarksGoneRefsResolved(t *testing.T)
 		t.Fatalf("absent/absent state not resolved: %#v", status.Refs)
 	}
 }
+
+// Live samples, 2026-10-12 runtime.log:
+// 03:43:28 projection watch poll failed: jackie/agent-kit refs/heads/docs/t023-runtime-checkpoint
+// 03:58:28 projection watch poll failed: jackie/agent-kit refs/pull/293/projection-integrity
+// Both stayed generation 1 while the rendered external SHA changed, so the old
+// generation-only key collided with the delivered row and dropped the notice.
+func TestSameGenerationDriftFactChangeDoesNotConflictWithDeliveredNotice(t *testing.T) {
+	svc := setupProjectionStateService(t)
+	if err := svc.DB.AutoMigrate(&db.OutboundDelivery{}); err != nil {
+		t.Fatalf("migrate outbound: %v", err)
+	}
+	ctx := context.Background()
+	repo := db.Repository{OwnerID: 1, Name: "agent-kit", FullName: "jackie/agent-kit", DefaultBranch: "main"}
+	if err := svc.DB.Create(&repo).Error; err != nil {
+		t.Fatalf("create repo: %v", err)
+	}
+	svc.OutboundEventTargets = map[string][]OutboundTarget{
+		OutboundEventProjectionDrift: {{Name: "projection_drift_ops", Type: OutboundTargetTypeFeishuWebhook}},
+	}
+
+	samples := []struct {
+		ref, branch, firstExternal, nextExternal, summary string
+	}{
+		{
+			ref: "refs/heads/docs/t023-runtime-checkpoint", branch: "docs/t023-runtime-checkpoint",
+			firstExternal: "1111111111111111111111111111111111111111",
+			nextExternal:  "0e08adf36e7e0e08adf36e7e0e08adf36e7e0e08",
+			summary:       "Forgejo ref SHA differs from AGS authoritative ref",
+		},
+		{
+			ref: "refs/pull/293/projection-integrity", branch: "main",
+			firstExternal: "1c09f4091fc91c09f4091fc91c09f4091fc91c09",
+			nextExternal:  "7a9bc863d6a17a9bc863d6a17a9bc863d6a17a9b",
+			summary:       "AGS PR #293 state=closed merged=true differs from Forgejo PR #280 state=closed merged=false",
+		},
+	}
+	for _, sample := range samples {
+		first := &forgejointegration.ProjectionError{
+			Type: forgejointegration.ProjectionFailureSHADrift, Repo: repo.FullName, TargetRepo: "mirror/agent-kit",
+			Ref: sample.ref, Branch: sample.branch,
+			ExpectedSHA: "1200fdc61a571200fdc61a571200fdc61a571200", ActualSHA: sample.firstExternal,
+			ErrorSummary: sample.summary,
+		}
+		if err := svc.RecordForgejoProjectionFailure(ctx, repo.FullName, nil, first); err != nil {
+			t.Fatalf("record %s: %v", sample.ref, err)
+		}
+		rows, err := svc.ListProjectionDriftNotifications(ctx, time.Hour, 0, 10)
+		if err != nil {
+			t.Fatalf("list %s: %v", sample.ref, err)
+		}
+		var note ProjectionDriftNotification
+		for _, row := range rows {
+			if row.Ref == sample.ref {
+				note = row
+			}
+		}
+		if note.StateID == 0 || note.Generation != 1 {
+			t.Fatalf("missing generation-1 notice for %s: %#v", sample.ref, rows)
+		}
+		if _, err := svc.enqueueProjectionDriftOutboundIntents(ctx, note, false); err != nil {
+			t.Fatalf("enqueue first %s: %v", sample.ref, err)
+		}
+		if _, err := svc.enqueueProjectionDriftOutboundIntents(ctx, note, false); err != nil {
+			t.Fatalf("repeat identical %s: %v", sample.ref, err)
+		}
+
+		next := &forgejointegration.ProjectionError{
+			Type: forgejointegration.ProjectionFailureSHADrift, Repo: repo.FullName, TargetRepo: "mirror/agent-kit",
+			Ref: sample.ref, Branch: sample.branch,
+			ExpectedSHA: first.ExpectedSHA, ActualSHA: sample.nextExternal, ErrorSummary: sample.summary,
+		}
+		if err := svc.RecordForgejoProjectionFailure(ctx, repo.FullName, nil, next); err != nil {
+			t.Fatalf("refresh %s: %v", sample.ref, err)
+		}
+		rows, err = svc.ListProjectionDriftNotifications(ctx, 0, 0, 10)
+		if err != nil {
+			t.Fatalf("relist %s: %v", sample.ref, err)
+		}
+		note = ProjectionDriftNotification{}
+		for _, row := range rows {
+			if row.Ref == sample.ref {
+				note = row
+			}
+		}
+		if note.Generation != 1 || note.ForgejoSHA != sample.nextExternal {
+			t.Fatalf("same-generation fact did not refresh for %s: %#v", sample.ref, note)
+		}
+		if _, err := svc.enqueueProjectionDriftOutboundIntents(ctx, note, false); err != nil {
+			t.Fatalf("enqueue changed fact %s: %v", sample.ref, err)
+		}
+	}
+
+	var deliveries []db.OutboundDelivery
+	if err := svc.DB.Where("event_type = ?", OutboundEventProjectionDrift).Order("id asc").Find(&deliveries).Error; err != nil {
+		t.Fatalf("list deliveries: %v", err)
+	}
+	if len(deliveries) != 4 {
+		t.Fatalf("expected two facts for each sample; rows=%d", len(deliveries))
+	}
+	seen := map[string]int{}
+	for _, delivery := range deliveries {
+		if delivery.Status != OutboundDeliveryStatusPending {
+			t.Fatalf("notice was not queued: %#v", delivery)
+		}
+		if !strings.Contains(delivery.IdempotencyKey, ":g1:") || !strings.Contains(delivery.IdempotencyKey, ":projection_drift_ops") {
+			t.Fatalf("fact key missing generation or target: %s", delivery.IdempotencyKey)
+		}
+		seen[delivery.IdempotencyKey]++
+	}
+	if len(seen) != 4 {
+		t.Fatalf("changed same-generation facts reused a key: %#v", seen)
+	}
+}
