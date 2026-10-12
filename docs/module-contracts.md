@@ -660,8 +660,8 @@ Ownership:
 
 - create one owner-only mode `0600` state file for a GitHub App manifest registration and refuse it after one hour
 - exchange `POST /app-manifests/{code}/conversions` without a personal token; tests use a fixture and do not dial GitHub
-- write only the App ID, PEM private key, and webhook secret; stage every file with `O_NOFOLLOW`, `fchmod 0600`, and a random temp name, then rename the whole set; a staging failure removes the temp files and leaves the previous set byte-for-byte unchanged
-- claim the state before the exchange, so a second callback with the same state fails while the first is in progress; a failed exchange releases the claim, and a conversion that could not be committed is retained for a retry of the same code without a second exchange
+- write only the App ID, PEM private key, and webhook secret; stage every file with `O_NOFOLLOW`, `fchmod 0600`, and a random temp name, copy the previous set aside, then publish; any staging or publication failure removes the temp files, restores the copy, and leaves the previous set byte-for-byte unchanged
+- claim the state before the exchange and before every retry of a retained conversion, so a second callback with the same state fails while the first is in progress; a failed exchange releases the claim; a conversion that could not be committed is retained for a retry of the same code without a second exchange, and that retry still checks the current state and the one-hour window
 - drop `client_id` and `client_secret` instead of saving them
 - delete the state file after success and reject a repeated code
 

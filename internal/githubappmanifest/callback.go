@@ -95,9 +95,16 @@ type Flow struct {
 	// one fails. Zero means no injected failure. Tests use it to prove a partial
 	// set is not committed.
 	StageFailAfter int
+	// rename publishes one staged credential file. Tests set it to fail or stall
+	// one commit; nil uses os.Rename. Restoring a failed commit does not use it.
+	rename func(staged, dest string) error
 
 	mu        sync.Mutex
 	usedCodes map[string]struct{}
+	// pendingCodes is the set of codes whose exchange or credential write is
+	// still in progress. A second callback with one of those codes waits out
+	// this process instead of starting another one.
+	pendingCodes map[string]struct{}
 	// retained keeps a conversion whose files were not committed, keyed by
 	// code, so the one-time exchange can be written again without calling
 	// GitHub a second time.
@@ -133,12 +140,14 @@ func (f *Flow) Begin(redirectURL string) (State, error) {
 // Complete checks state and the one-hour window, exchanges the code once, and
 // writes the three credential files. The code is not logged.
 //
-// The state is claimed before the exchange, so two callbacks cannot both pass
-// the same state. A failed exchange releases the claim. A successful exchange
-// is kept in memory when the credential set cannot be committed, and the same
-// code retries the write without a second conversion. The three files are
-// staged and renamed only after every stage exists, so a failure leaves the
-// previous set unchanged.
+// The state is claimed before the exchange and again before every retry of a
+// retained conversion, so two callbacks cannot both pass the same state. A
+// failed exchange releases the claim. A successful exchange is kept in memory
+// when the credential set cannot be committed, and the same code retries the
+// write without a second conversion. A retry still has to present the current
+// state and pass the one-hour check. Every previous credential is backed up
+// before the new set is published, and a failed publication restores that
+// backup, so the previous set stays byte-for-byte unchanged.
 func (f *Flow) Complete(code, state string) (Registration, error) {
 	code = strings.TrimSpace(code)
 	state = strings.TrimSpace(state)
@@ -166,28 +175,30 @@ func (f *Flow) Complete(code, state string) (Registration, error) {
 	return registration, nil
 }
 
-// claim reserves the state before any exchange. release is non-nil only when
-// the caller must undo that reservation because nothing was committed.
-// The lock is not held across Convert.
+// claim reserves the state before any exchange and before every retry of a
+// retained conversion. release is non-nil only when the caller must undo that
+// reservation because nothing was committed. The lock is not held across
+// Convert.
 func (f *Flow) claim(code, state string) (Conversion, func(), error) {
 	retained, err := f.reserve(code, state)
-	if err != nil || retained != nil {
-		if retained == nil {
-			return Conversion{}, nil, err
-		}
-		return *retained, nil, nil
+	if err != nil {
+		return Conversion{}, nil, err
+	}
+	if retained != nil {
+		return *retained, func() { f.release(code, state) }, nil
 	}
 	conversion, err := f.Exchanger.Convert(code)
 	if err != nil {
-		f.release(state)
+		f.release(code, state)
 		return Conversion{}, nil, err
 	}
 	f.remember(code, conversion)
-	return conversion, func() { f.release(state) }, nil
+	return conversion, func() { f.release(code, state) }, nil
 }
 
 // reserve returns a retained conversion for a retry, or nil when this call
-// owns a fresh state reservation and must exchange.
+// owns a fresh state reservation and must exchange. Both paths validate the
+// current state file and hold its claim until the credential set is committed.
 func (f *Flow) reserve(code, state string) (*Conversion, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -197,8 +208,8 @@ func (f *Flow) reserve(code, state string) (*Conversion, error) {
 	if _, used := f.usedCodes[code]; used {
 		return nil, fmt.Errorf("manifest code was already used")
 	}
-	if retained, ok := f.retained[code]; ok {
-		return &retained, nil
+	if _, pending := f.pendingCodes[code]; pending {
+		return nil, fmt.Errorf("manifest code is already in use")
 	}
 	loaded, err := f.loadState()
 	if err != nil {
@@ -214,6 +225,14 @@ func (f *Flow) reserve(code, state string) (*Conversion, error) {
 		return nil, fmt.Errorf("manifest state is already in use")
 	}
 	f.usedCodes[state] = struct{}{}
+	if f.pendingCodes == nil {
+		f.pendingCodes = map[string]struct{}{}
+	}
+	f.pendingCodes[code] = struct{}{}
+	if retained, ok := f.retained[code]; ok {
+		copyOfRetained := retained
+		return &copyOfRetained, nil
+	}
 	return nil, nil
 }
 
@@ -226,10 +245,11 @@ func (f *Flow) remember(code string, conversion Conversion) {
 	f.retained[code] = conversion
 }
 
-func (f *Flow) release(state string) {
+func (f *Flow) release(code, state string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.usedCodes, state)
+	delete(f.pendingCodes, code)
 }
 
 func (f *Flow) finish(code string) {
@@ -239,6 +259,7 @@ func (f *Flow) finish(code string) {
 		f.usedCodes = map[string]struct{}{}
 	}
 	f.usedCodes[code] = struct{}{}
+	delete(f.pendingCodes, code)
 	delete(f.retained, code)
 }
 
@@ -256,9 +277,9 @@ func (f *Flow) persist(conversion Conversion) (Registration, error) {
 		{f.Paths.WebhookSecret, []byte(conversion.WebhookSecret + "\n")},
 	}
 	staged := make([]string, 0, len(files))
-	cleanup := true
+	cleanupStaged := true
 	defer func() {
-		if cleanup {
+		if cleanupStaged {
 			for _, path := range staged {
 				_ = os.Remove(path)
 			}
@@ -274,15 +295,14 @@ func (f *Flow) persist(conversion Conversion) (Registration, error) {
 		}
 		staged = append(staged, tmp)
 	}
-	for i, file := range files {
-		if err := os.Rename(staged[i], file.path); err != nil {
-			return Registration{}, fmt.Errorf("commit credential file %s: %w", filepath.Base(file.path), err)
-		}
-		if err := confirmFile(file.path, f.ownerUID()); err != nil {
-			return Registration{}, err
-		}
+	renameFile := f.rename
+	if renameFile == nil {
+		renameFile = os.Rename
 	}
-	cleanup = false
+	if err := publishCredentialSet(files, staged, f.ownerUID(), renameFile); err != nil {
+		return Registration{}, err
+	}
+	cleanupStaged = false
 	return Registration{
 		AppID:       appID,
 		Slug:        conversion.Slug,
@@ -390,6 +410,95 @@ func (e HTTPExchanger) Convert(code string) (Conversion, error) {
 		body[i] = 0
 	}
 	return conversion, nil
+}
+
+// publishCredentialSet copies every existing credential aside before any
+// live path changes. Publication then replaces the live files one by one.
+// Any failure restores the copies and removes files this attempt created, so
+// the caller still sees the previous set.
+func publishCredentialSet(files []struct {
+	path string
+	body []byte
+}, staged []string, uid int, renameFile func(string, string) error) error {
+	backups := make([]string, len(files))
+	existed := make([]bool, len(files))
+	for i, file := range files {
+		if _, err := os.Lstat(file.path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("read previous credential %s: %w", filepath.Base(file.path), err)
+		}
+		existed[i] = true
+		tmp, err := copyCredential(file.path, uid)
+		if err != nil {
+			removeCredentialTemps(backups)
+			return err
+		}
+		backups[i] = tmp
+	}
+	replaced := 0
+	err := publishStaged(files, staged, uid, renameFile, &replaced)
+	if err != nil {
+		restoreErr := restoreCredentialSet(files, backups, existed, replaced)
+		removeCredentialTemps(backups)
+		if restoreErr != nil {
+			return fmt.Errorf("%w; restore credential set: %v", err, restoreErr)
+		}
+		return err
+	}
+	removeCredentialTemps(backups)
+	return nil
+}
+
+func publishStaged(files []struct {
+	path string
+	body []byte
+}, staged []string, uid int, renameFile func(string, string) error, replaced *int) error {
+	for i, file := range files {
+		if err := renameFile(staged[i], file.path); err != nil {
+			return fmt.Errorf("commit credential file %s: %w", filepath.Base(file.path), err)
+		}
+		*replaced = i + 1
+		if err := confirmFile(file.path, uid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func restoreCredentialSet(files []struct {
+	path string
+	body []byte
+}, backups []string, existed []bool, replaced int) error {
+	for i := replaced - 1; i >= 0; i-- {
+		if existed[i] {
+			if err := os.Rename(backups[i], files[i].path); err != nil {
+				return err
+			}
+			backups[i] = ""
+			continue
+		}
+		if err := os.Remove(files[i].path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyCredential(path string, uid int) (string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("copy previous credential %s: %w", filepath.Base(path), err)
+	}
+	return stageCredential(path, body, uid)
+}
+
+func removeCredentialTemps(paths []string) {
+	for _, path := range paths {
+		if path != "" {
+			_ = os.Remove(path)
+		}
+	}
 }
 
 func writeNewFile(path string, body []byte, uid int) error {
