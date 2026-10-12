@@ -78,6 +78,7 @@ document the relevant contract below in the same change.
 | `executioncontext` | operator-registered fixed-egress execution-context resolution, closed source adaptation, and credential-free normalization |
 | `forgejointegration` | AGS -> Forgejo branch/PR projection, including exact lease-protected mapped PR-head rewrites |
 | `gitlabintegration` | optional AGS -> GitLab post-push mirror plus Forgejo-authoritative shadow MR and backup sync |
+| `githubappmanifest` | one-hour GitHub App manifest state, fixture conversion, and atomic mode 0600 credential writes; no App registration |
 | `githubappreceiver` | signature-checked GitHub App webhook intake with a 10 MiB limit, delivery idempotency, and spool-failure 503; no GitHub connection |
 | `githubintegration` | optional AGS -> GitHub post-push mirror plus Forgejo-authoritative shadow PR and backup sync |
 | `buildinfo` | dependency-free release identity and version output; no configuration, business state or network access |
