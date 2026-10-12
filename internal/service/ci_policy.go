@@ -70,13 +70,22 @@ func (s *Service) enforceConfiguredCIForMerge(ctx context.Context, pr db.PullReq
 	if e != nil {
 		return e
 	}
+	// A required name can match jobs in different workflow files. One success
+	// must not clear that name while another match is failed or still running.
+	satisfied := map[string]bool{}
 	for _, check := range checks.Checks {
-		if required[check.Name] && check.Status == "completed" && (check.Conclusion == "success" || check.Conclusion == "neutral" || check.Conclusion == "skipped") {
-			delete(required, check.Name)
+		if !required[check.Name] {
+			continue
 		}
+		if !ciCheckSatisfiesRequired(check) {
+			return fmt.Errorf("%w: current head has pending or failed required CI checks", ErrInvalidState)
+		}
+		satisfied[check.Name] = true
 	}
-	if len(required) > 0 {
-		return fmt.Errorf("%w: current head has pending or failed required CI checks", ErrInvalidState)
+	for name := range required {
+		if !satisfied[name] {
+			return fmt.Errorf("%w: current head has pending or failed required CI checks", ErrInvalidState)
+		}
 	}
 	return nil
 }

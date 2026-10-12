@@ -428,6 +428,13 @@ func ciCheckIdentity(workflow, name string) string {
 	return workflow + "\x00" + name
 }
 
+// ciCheckSatisfiesRequired is true only for a completed passing conclusion.
+// Callers that match several workflow files to one required name must apply
+// this to every match; one success does not cover a failed or pending sibling.
+func ciCheckSatisfiesRequired(check CICheck) bool {
+	return check.Status == "completed" && (check.Conclusion == "success" || check.Conclusion == "neutral" || check.Conclusion == "skipped")
+}
+
 // preferObservedCIRun keeps one run per workflow. A pull_request run is the
 // evidence a protected pull request check uses. A later workflow_dispatch of the
 // same workflow and job name must not replace that evidence.
