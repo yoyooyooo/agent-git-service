@@ -289,8 +289,13 @@ func (s *Service) latestStatusChecksForPR(ctx context.Context, pr db.PullRequest
 		if err != nil {
 			return nil, err
 		}
+		// Required names are not workflow-qualified. Fold matches by job name, but
+		// keep a failure or pending result: a later success must not overwrite it.
 		for _, check := range observed.Checks {
-			states[check.Name] = mergeStatusState{Completed: check.Status == "completed", Passed: check.Status == "completed" && (check.Conclusion == "success" || check.Conclusion == "neutral" || check.Conclusion == "skipped")}
+			recordStrictestStatus(states, check.Name, mergeStatusState{
+				Completed: check.Status == "completed",
+				Passed:    ciCheckSatisfiesRequired(check),
+			})
 		}
 		return states, nil
 	}
@@ -336,6 +341,21 @@ func recordLatestStatus(states map[string]mergeStatusState, name string, candida
 		return
 	}
 	states[name] = candidate
+}
+
+// recordStrictestStatus folds observations that share one required name.
+// Passing requires every match to be completed and passing; any failure or
+// pending observation keeps the name unsatisfied regardless of traversal order.
+func recordStrictestStatus(states map[string]mergeStatusState, name string, candidate mergeStatusState) {
+	existing, ok := states[name]
+	if !ok {
+		states[name] = candidate
+		return
+	}
+	states[name] = mergeStatusState{
+		Completed: existing.Completed && candidate.Completed,
+		Passed:    existing.Passed && candidate.Passed,
+	}
 }
 
 func (s *Service) ReevaluateAutoMergeForSHA(ctx context.Context, repoID uint, sha string) {
