@@ -149,6 +149,14 @@ func (f *Forgejo) Jobs(ctx context.Context, repo, id string) (Jobs, error) {
 	if e != nil {
 		return Jobs{}, e
 	}
+	// Forgejo 12 filters runs by head_sha in SQL. Its public task list accepts only
+	// page and limit, and returns tasks id DESC. Repository run numbers increase
+	// with those IDs, including retries of the same run. After this run's tasks are
+	// collected, one full newer-than-this page whose maximum run number is smaller
+	// proves the rest of the table cannot contain another task of this run.
+	if e = f.confirmRunIndex(ctx, repo, run); e != nil {
+		return Jobs{}, e
+	}
 	prefix, e := f.prefix(repo)
 	if e != nil {
 		return Jobs{}, e
@@ -160,9 +168,7 @@ func (f *Forgejo) Jobs(ctx context.Context, repo, id string) (Jobs, error) {
 	}
 	seen := map[int64]bool{}
 	expectedTotal := -1
-	// The native task listing has no run filter. Exhaust its bounded pages before
-	// claiming job completeness; a truncated or moving inventory is never empty
-	// success. The explicit work budget can be tuned without changing CI identity.
+	var previousMax int64
 	for page := 1; page <= limit; page++ {
 		data, e := f.request(ctx, "GET", fmt.Sprintf("%stasks?page=%d&limit=50", prefix, page), false)
 		if e != nil {
@@ -183,15 +189,19 @@ func (f *Forgejo) Jobs(ctx context.Context, repo, id string) (Jobs, error) {
 		} else if expectedTotal != body.Total {
 			return Jobs{}, fmt.Errorf("%w: CI task inventory changed during observation", ErrUnavailable)
 		}
+		var pageMaxRun int64
 		for _, task := range body.Items {
-			if task.ID <= 0 || seen[task.ID] {
+			if task.ID <= 0 || task.RunNumber <= 0 || seen[task.ID] {
 				return Jobs{}, fmt.Errorf("%w: repeated task in paged CI inventory", ErrUnavailable)
 			}
 			seen[task.ID] = true
+			if task.RunNumber > pageMaxRun {
+				pageMaxRun = task.RunNumber
+			}
 			if task.RunNumber != run.Number {
 				continue
 			}
-			if task.ID <= 0 || task.Head != run.HeadSHA || task.Workflow != run.Workflow || task.Name == "" || task.Created.IsZero() || !safeURL(task.URL) {
+			if task.Head != run.HeadSHA || task.Workflow != run.Workflow || task.Name == "" || task.Created.IsZero() || !safeURL(task.URL) {
 				return Jobs{}, ErrInvalid
 			}
 			status, conclusion, e := normalized(task.Status, "")
@@ -205,7 +215,8 @@ func (f *Forgejo) Jobs(ctx context.Context, repo, id string) (Jobs, error) {
 			}
 			result.Items = append(result.Items, Job{Key: id + ":" + strconv.FormatInt(task.ID, 10), Run: id, Name: task.Name, HeadSHA: run.HeadSHA, Status: status, Conclusion: conclusion, URL: task.URL, StartedAt: task.Started, CompletedAt: stopped, Steps: []Step{}})
 		}
-		if len(body.Items) < 50 || body.Total > 0 && page*50 >= body.Total {
+		completePage := len(body.Items) < 50 || body.Total > 0 && page*50 >= body.Total
+		if completePage {
 			if len(seen) != expectedTotal {
 				return Jobs{}, fmt.Errorf("%w: incomplete CI task inventory", ErrUnavailable)
 			}
@@ -213,8 +224,48 @@ func (f *Forgejo) Jobs(ctx context.Context, repo, id string) (Jobs, error) {
 			result.Total = len(result.Items)
 			return result, nil
 		}
+		// id DESC makes each full page older than the previous one. Once the
+		// previous page already held this run, a smaller maximum cannot hide another
+		// task of it, including a retry. Do not require a page after that.
+		if len(result.Items) > 0 && previousMax > 0 && pageMaxRun < run.Number {
+			result.Complete = true
+			result.Total = len(result.Items)
+			return result, nil
+		}
+		previousMax = pageMaxRun
 	}
 	return Jobs{}, fmt.Errorf("%w: Forgejo task inventory exceeds bounded observation", ErrUnavailable)
+}
+
+// confirmRunIndex checks the repository run index before any task page is read.
+// Forgejo filters head_sha and index_in_repo in SQL. The task list does not.
+func (f *Forgejo) confirmRunIndex(ctx context.Context, repo string, run Run) error {
+	if run.Number <= 0 || len(run.HeadSHA) != 40 {
+		return ErrInvalid
+	}
+	prefix, e := f.prefix(repo)
+	if e != nil {
+		return e
+	}
+	data, e := f.request(ctx, "GET", fmt.Sprintf("%sruns?page=1&limit=50&head_sha=%s&run_number=%d", prefix, url.QueryEscape(run.HeadSHA), run.Number), false)
+	if e != nil {
+		return e
+	}
+	var body struct {
+		Total int          `json:"total_count"`
+		Items []forgejoRun `json:"workflow_runs"`
+	}
+	if e = decode(data, &body); e != nil {
+		return e
+	}
+	if body.Total != 1 || len(body.Items) != 1 {
+		return ErrInvalid
+	}
+	indexed, e := body.Items[0].run()
+	if e != nil || indexed.Key != run.Key || indexed.Number != run.Number || indexed.Workflow != run.Workflow || indexed.HeadSHA != run.HeadSHA {
+		return ErrInvalid
+	}
+	return nil
 }
 func forgejoJobParts(id string) (string, string, error) {
 	parts := strings.Split(id, ":")
