@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -164,4 +165,106 @@ func TestManifestConversionFixtureKeepsClientSecretOutOfRegistration(t *testing.
 	if _, err := os.Stat(filepath.Join(dir, "client_secret")); !os.IsNotExist(err) {
 		t.Fatal("client secret was written")
 	}
+}
+
+func TestManifestFailedWriteKeepsExistingSetAndCanRetry(t *testing.T) {
+	flow, exchanger, _ := newFlow(t, time.Date(2026, 10, 12, 5, 0, 0, 0, time.UTC))
+	for _, path := range []string{flow.Paths.AppID, flow.Paths.PrivateKey, flow.Paths.WebhookSecret} {
+		if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := flow.Begin(CallbackPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(flow.Paths.PrivateKey), "."+filepath.Base(flow.Paths.PrivateKey)+".tmp"), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	flow.StageFailAfter = 1
+	if _, err := flow.Complete("one-time-code", state.Value); err == nil || !strings.Contains(err.Error(), "staging") {
+		t.Fatalf("expected staging failure, got %v", err)
+	}
+	for _, path := range []string{flow.Paths.AppID, flow.Paths.PrivateKey, flow.Paths.WebhookSecret} {
+		body, err := os.ReadFile(path)
+		if err != nil || string(body) != "original" {
+			t.Fatalf("%s changed to %q (%v)", path, body, err)
+		}
+	}
+	calls := len(exchanger.Calls)
+	flow.StageFailAfter = 0
+	if _, err := flow.Complete("one-time-code", state.Value); err != nil {
+		t.Fatal(err)
+	}
+	if len(exchanger.Calls) != calls {
+		t.Fatalf("retry exchanged again: %#v", exchanger.Calls)
+	}
+	id, err := os.ReadFile(flow.Paths.AppID)
+	if err != nil || string(id) != "4242\n" {
+		t.Fatalf("app id = %q %v", id, err)
+	}
+	key, err := os.ReadFile(flow.Paths.PrivateKey)
+	if err != nil || string(key) != "fixture-private-key-material" {
+		t.Fatal("private key was not committed on retry")
+	}
+	hook, err := os.ReadFile(flow.Paths.WebhookSecret)
+	if err != nil || string(hook) != "webhook-secret-value\n" {
+		t.Fatal("webhook secret was not committed on retry")
+	}
+}
+
+func TestManifestStateIsConsumedOnceConcurrently(t *testing.T) {
+	flow, _, _ := newFlow(t, time.Date(2026, 10, 12, 5, 0, 0, 0, time.UTC))
+	state, err := flow.Begin(CallbackPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &gatedExchanger{entered: make(chan struct{}, 2)}
+	flow.Exchanger = gate
+	errs := make(chan error, 2)
+	go func() {
+		_, err := flow.Complete("code-a", state.Value)
+		errs <- err
+	}()
+	select {
+	case <-gate.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first exchange did not start")
+	}
+	go func() {
+		_, err := flow.Complete("code-b", state.Value)
+		errs <- err
+	}()
+	second := <-errs
+	if second == nil || !strings.Contains(second.Error(), "already in use") {
+		t.Fatalf("second completion while state is claimed: %v", second)
+	}
+	close(gate.release)
+	first := <-errs
+	if first != nil {
+		t.Fatal(first)
+	}
+	id, err := os.ReadFile(flow.Paths.AppID)
+	if err != nil || strings.TrimSpace(string(id)) != "4242" {
+		t.Fatalf("app id = %q %v", id, err)
+	}
+}
+
+// gatedExchanger blocks inside Convert until release is closed. entered is
+// signaled once the call has passed state reservation.
+type gatedExchanger struct {
+	release chan struct{}
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (e *gatedExchanger) Convert(code string) (Conversion, error) {
+	e.once.Do(func() {
+		if e.release == nil {
+			e.release = make(chan struct{})
+		}
+	})
+	e.entered <- struct{}{}
+	<-e.release
+	return testConversion(), nil
 }
