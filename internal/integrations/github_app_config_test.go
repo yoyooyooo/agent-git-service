@@ -1,13 +1,25 @@
 package integrations
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-const githubAppPEM = "fixture-private-key-material"
+func githubAppPEM(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}
+	return string(pem.EncodeToMemory(block))
+}
 
 func writeGitHubAppFile(t *testing.T, path, contents string, mode os.FileMode) {
 	t.Helper()
@@ -31,7 +43,7 @@ func githubAppYAML(dir string, enabled bool) string {
 func writeGitHubAppFiles(t *testing.T, dir string) {
 	t.Helper()
 	writeGitHubAppFile(t, filepath.Join(dir, "github-app-id"), "123456\n", 0o600)
-	writeGitHubAppFile(t, filepath.Join(dir, "github-app.pem"), githubAppPEM, 0o600)
+	writeGitHubAppFile(t, filepath.Join(dir, "github-app.pem"), githubAppPEM(t), 0o600)
 	writeGitHubAppFile(t, filepath.Join(dir, "github-app-webhook.secret"), "webhook-secret-value\n", 0o600)
 }
 
@@ -135,6 +147,26 @@ func TestLoadFileGitHubAppEnabledMissingFileIsNotReady(t *testing.T) {
 
 func TestLoadFileGitHubAppDisabledIgnoresMissingFiles(t *testing.T) {
 	if _, err := loadGitHubApp(t, "github_app:\n  enabled: false\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadFileGitHubAppRejectsUnusablePrivateKey(t *testing.T) {
+	dir := t.TempDir()
+	writeGitHubAppFiles(t, dir)
+	writeGitHubAppFile(t, filepath.Join(dir, "github-app.pem"), "fixture-private-key-material", 0o600)
+	if _, err := loadGitHubApp(t, githubAppYAML(dir, true)); err == nil || !strings.Contains(err.Error(), "private key") {
+		t.Fatalf("expected unusable private key rejection, got %v", err)
+	}
+
+	block := &pem.Block{Type: "RSA PRIVATE KEY", Bytes: []byte("not-a-key")}
+	writeGitHubAppFile(t, filepath.Join(dir, "github-app.pem"), string(pem.EncodeToMemory(block)), 0o600)
+	if _, err := loadGitHubApp(t, githubAppYAML(dir, true)); err == nil || !strings.Contains(err.Error(), "private key") {
+		t.Fatalf("expected unparsable PEM rejection, got %v", err)
+	}
+
+	writeGitHubAppFile(t, filepath.Join(dir, "github-app.pem"), githubAppPEM(t), 0o600)
+	if _, err := loadGitHubApp(t, githubAppYAML(dir, true)); err != nil {
 		t.Fatal(err)
 	}
 }

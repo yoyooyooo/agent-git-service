@@ -1,6 +1,8 @@
 package integrations
 
 import (
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"os"
@@ -740,8 +742,8 @@ func validateGitHubApp(cfg *GitHubAppConfig, document []byte) error {
 	if err != nil {
 		return fmt.Errorf("read github_app.private_key_file: %w", err)
 	}
-	if privateKey == "" {
-		return fmt.Errorf("github_app.private_key_file is empty")
+	if err := validateGitHubAppPrivateKey(privateKey); err != nil {
+		return fmt.Errorf("github_app.private_key_file: %w", err)
 	}
 	webhookSecret, err := readGitHubAppSecretFile(cfg.WebhookSecretFile)
 	if err != nil {
@@ -752,6 +754,36 @@ func validateGitHubApp(cfg *GitHubAppConfig, document []byte) error {
 	}
 	cfg.AppID = appID
 	cfg.WebhookSecret = webhookSecret
+	return nil
+}
+
+// validateGitHubAppPrivateKey accepts only a PEM block that parses as a
+// PKCS#1, PKCS#8, or EC private key. An enabled app that cannot sign an
+// App JWT is not ready.
+func validateGitHubAppPrivateKey(material string) error {
+	if strings.TrimSpace(material) == "" {
+		return fmt.Errorf("private key is empty")
+	}
+	block, rest := pem.Decode([]byte(material))
+	if block == nil {
+		return fmt.Errorf("private key is not a PEM block")
+	}
+	if strings.TrimSpace(string(rest)) != "" {
+		return fmt.Errorf("private key PEM has trailing data")
+	}
+	if !strings.Contains(block.Type, "PRIVATE KEY") {
+		return fmt.Errorf("private key PEM type %q is not a private key", block.Type)
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		parsed, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+	}
+	if err != nil {
+		parsed, err = x509.ParseECPrivateKey(block.Bytes)
+	}
+	if err != nil || parsed == nil {
+		return fmt.Errorf("private key PEM cannot be parsed")
+	}
 	return nil
 }
 
