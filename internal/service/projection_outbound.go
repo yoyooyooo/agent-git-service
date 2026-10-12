@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -87,13 +89,17 @@ func (s *Service) enqueueProjectionDriftOutboundIntents(ctx context.Context, not
 	for _, target := range targets {
 		text := renderProjectionDriftOutboundText(note, resolved)
 		refKey := firstNonEmptyOutboundString(note.Ref, note.Branch, fmt.Sprint(note.StateID))
+		// Generation stays stable while a scan refreshes the same active drift.
+		// The notice key must follow the rendered fact, or a changed SHA/type/summary
+		// collides with the delivered row and aborts the whole reconciliation.
+		fact := projectionDriftNoticeFact(text)
 		intent := OutboundDeliveryIntent{
 			EventType:      OutboundEventProjectionDrift,
 			TargetName:     strings.TrimSpace(target.Name),
 			TargetType:     strings.TrimSpace(strings.ToLower(target.Type)),
 			SubjectType:    "projection_ref",
 			SubjectKey:     fmt.Sprintf("%s:%s:%s:g%d:%s", provider, strings.TrimSpace(note.RepoFullName), state, generation, refKey),
-			IdempotencyKey: fmt.Sprintf("%s:%s:%s:%s:%s:g%d:%s", OutboundEventProjectionDrift, provider, state, strings.TrimSpace(note.RepoFullName), refKey, generation, strings.TrimSpace(target.Name)),
+			IdempotencyKey: fmt.Sprintf("%s:%s:%s:%s:%s:g%d:%s:%s", OutboundEventProjectionDrift, provider, state, strings.TrimSpace(note.RepoFullName), refKey, generation, fact, strings.TrimSpace(target.Name)),
 			PayloadVersion: "projection_drift_text_v2",
 			PayloadJSON:    outboundTextPayloadJSON(text, false),
 			RepoFullName:   strings.TrimSpace(note.RepoFullName),
@@ -200,6 +206,11 @@ func renderProjectionDriftOutboundText(note ProjectionDriftNotification, resolve
 		lines = append(lines, "Resolved at: "+note.ResolvedAt.UTC().Format("2006-01-02T15:04:05Z07:00"))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func projectionDriftNoticeFact(text string) string {
+	digest := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(digest[:8])
 }
 
 func projectionDriftOutboundTitle(provider string, resolved bool) string {
