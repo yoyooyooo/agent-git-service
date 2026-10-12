@@ -78,6 +78,7 @@ document the relevant contract below in the same change.
 | `executioncontext` | operator-registered fixed-egress execution-context resolution, closed source adaptation, and credential-free normalization |
 | `forgejointegration` | AGS -> Forgejo branch/PR projection, including exact lease-protected mapped PR-head rewrites |
 | `gitlabintegration` | optional AGS -> GitLab post-push mirror plus Forgejo-authoritative shadow MR and backup sync |
+| `githubappreceiver` | signature-checked GitHub App webhook intake with a 10 MiB limit, delivery idempotency, and spool-failure 503; no GitHub connection |
 | `githubintegration` | optional AGS -> GitHub post-push mirror plus Forgejo-authoritative shadow PR and backup sync |
 | `buildinfo` | dependency-free release identity and version output; no configuration, business state or network access |
 | `gitbackend` | already-authorized native Git CGI execution, isolated snapshot reads, bounded spooling and explicit receive opt-in |
@@ -651,6 +652,38 @@ Assessment:
 
 - boundary is projection-only and replaceable
 - shadow-MR close/comment behavior should stay here or in a sibling GitLab shadow package, not in Forgejo or Git HTTP code
+
+### `githubappmanifest`
+
+Ownership:
+
+- create one owner-only mode `0600` state file for a GitHub App manifest registration and refuse it after one hour
+- exchange `POST /app-manifests/{code}/conversions` without a personal token; tests use a fixture and do not dial GitHub
+- write only the App ID, PEM private key, and webhook secret, each through an `O_NOFOLLOW` temp file, `fchmod 0600`, and an atomic rename, then `lstat` the result
+- drop `client_id` and `client_secret` instead of saving them
+- delete the state file after success and reject a repeated code
+
+Rules:
+
+- the code, PEM, webhook secret, client id, and client secret must not enter the structured log; the log keeps App ID, slug, and owner login
+- this segment does not register an App, mount the tailnet callback, or change runtime config
+
+### `githubappreceiver`
+
+Ownership:
+
+- verify `X-Hub-Signature-256` over the raw body with HMAC-SHA256 and `hmac.Equal`; SHA-1 signatures are rejected
+- accept only `POST /api/ext/v1/integrations/github/events` and reject bodies larger than 10 MiB before storage
+- persist a delivery under `(github.com, app_id, X-GitHub-Delivery)` and return the original receipt for the same digest; a repeated GUID with a different digest is a conflict and does not replace the body
+- return 503 when the spool cannot commit, without a prior 2xx
+- a 200 status is only `received`, `duplicate`, or `quarantined`
+
+Rules:
+
+- this package has no Git client, no AGS database, and no GitHub write credential
+- fixtures stay in memory; the receiver does not dial GitHub
+- logs carry the delivery GUID, installation ID, repository ID, and status only
+- nothing in this segment mounts the handler on the running AGS server or opens Funnel
 
 ### `githubintegration`
 
