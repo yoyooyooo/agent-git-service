@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -1451,4 +1452,85 @@ func TestSameGenerationDriftFactChangeDoesNotConflictWithDeliveredNotice(t *test
 	if len(seen) != 4 {
 		t.Fatalf("changed same-generation facts reused a key: %#v", seen)
 	}
+}
+
+// Review reproduction: a notice already delivered under the pre-fact key must
+// not be dispatched again when the same rendered text is enqueued under the
+// fact key. A later change of that text still creates one new row, and
+// repeating the changed text does not dispatch again.
+func TestLegacyDeliveredDriftNoticeDoesNotResendUntilFactChanges(t *testing.T) {
+	svc := setupProjectionStateService(t)
+	if err := svc.DB.AutoMigrate(&db.OutboundDelivery{}); err != nil {
+		t.Fatalf("migrate outbound: %v", err)
+	}
+	ctx := context.Background()
+	dispatcher := &legacyDriftNoticeDispatcher{}
+	svc.OutboundDispatcher = dispatcher
+	svc.OutboundEventTargets = map[string][]OutboundTarget{
+		OutboundEventProjectionDrift: {{Name: "review_ops", Type: OutboundTargetTypeFeishuWebhook}},
+	}
+	note := ProjectionDriftNotification{
+		Generation: 1, Provider: ProjectionProviderForgejo, RepoFullName: "example-owner/demo",
+		Ref: "refs/heads/main", Branch: "main", Type: "sha_drift",
+		AGSSHA: "1111111111111111111111111111111111111111", ForgejoSHA: "2222222222222222222222222222222222222222",
+		FirstSeenAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
+	}
+	oldKey := fmt.Sprintf("%s:%s:active:%s:%s:g1:review_ops", OutboundEventProjectionDrift, note.Provider, note.RepoFullName, note.Ref)
+	old, _, err := svc.EnqueueOutboundDelivery(ctx, OutboundDeliveryIntent{
+		EventType: OutboundEventProjectionDrift, TargetName: "review_ops", TargetType: OutboundTargetTypeFeishuWebhook,
+		SubjectType: "projection_ref", SubjectKey: fmt.Sprintf("%s:%s:active:g1:%s", note.Provider, note.RepoFullName, note.Ref),
+		IdempotencyKey: oldKey, PayloadVersion: "projection_drift_text_v2",
+		PayloadJSON: outboundTextPayloadJSON(renderProjectionDriftOutboundText(note, false), false), RepoFullName: note.RepoFullName,
+	})
+	if err != nil {
+		t.Fatalf("enqueue legacy: %v", err)
+	}
+	if err := svc.DeliverOutboundDeliveryNow(ctx, old.ID); err != nil {
+		t.Fatalf("deliver legacy: %v", err)
+	}
+	if dispatcher.calls != 1 {
+		t.Fatalf("legacy delivery calls=%d", dispatcher.calls)
+	}
+
+	dispatcher.calls = 0
+	for i := 0; i < 3; i++ {
+		if err := svc.NotifyProjectionDrift(ctx, note); err != nil {
+			t.Fatalf("repeat identical notice: %v", err)
+		}
+	}
+	var rows []db.OutboundDelivery
+	if err := svc.DB.Order("id").Find(&rows).Error; err != nil {
+		t.Fatalf("list identical rows: %v", err)
+	}
+	if dispatcher.calls != 0 || len(rows) != 1 || rows[0].ID != old.ID || rows[0].Status != OutboundDeliveryStatusDelivered {
+		t.Fatalf("identical payload reused the delivered legacy row: dispatches=%d rows=%d", dispatcher.calls, len(rows))
+	}
+
+	changed := note
+	changed.ForgejoSHA = "3333333333333333333333333333333333333333"
+	for i := 0; i < 3; i++ {
+		if err := svc.NotifyProjectionDrift(ctx, changed); err != nil {
+			t.Fatalf("notify changed fact: %v", err)
+		}
+	}
+	rows = nil
+	if err := svc.DB.Order("id").Find(&rows).Error; err != nil {
+		t.Fatalf("list changed rows: %v", err)
+	}
+	if dispatcher.calls != 1 || len(rows) != 2 {
+		t.Fatalf("changed fact: dispatches=%d rows=%d; want 1 dispatch and 2 rows", dispatcher.calls, len(rows))
+	}
+	if rows[1].Status != OutboundDeliveryStatusDelivered || rows[1].IdempotencyKey == oldKey || !strings.Contains(rows[1].IdempotencyKey, ":g1:") {
+		t.Fatalf("changed fact did not take a new delivered key: %#v", rows[1])
+	}
+	if rows[0].PayloadJSON == rows[1].PayloadJSON {
+		t.Fatal("changed fact stored the original payload")
+	}
+}
+
+type legacyDriftNoticeDispatcher struct{ calls int }
+
+func (d *legacyDriftNoticeDispatcher) DispatchOutbound(context.Context, OutboundDispatchCall) OutboundDeliveryResult {
+	d.calls++
+	return OutboundDeliveryResult{Delivered: true, HTTPStatus: 200}
 }
