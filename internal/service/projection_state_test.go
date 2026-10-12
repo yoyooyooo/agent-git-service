@@ -1534,3 +1534,127 @@ func (d *legacyDriftNoticeDispatcher) DispatchOutbound(context.Context, Outbound
 	d.calls++
 	return OutboundDeliveryResult{Delivered: true, HTTPStatus: 200}
 }
+
+type terminalDriftLabelClient struct {
+	labels []string
+}
+
+func (c *terminalDriftLabelClient) EnsureRepository(context.Context, string, string, bool) error {
+	return nil
+}
+func (c *terminalDriftLabelClient) EnsurePullRequest(context.Context, forgejointegration.PullRequestRequest) (forgejointegration.PullRequestResult, error) {
+	return forgejointegration.PullRequestResult{}, nil
+}
+func (c *terminalDriftLabelClient) UpdatePullRequestState(context.Context, string, string, int, string) (forgejointegration.PullRequestResult, error) {
+	return forgejointegration.PullRequestResult{}, nil
+}
+func (c *terminalDriftLabelClient) AddIssueLabels(_ context.Context, _, _ string, _ int, labels []string) error {
+	c.labels = append(c.labels, labels...)
+	return nil
+}
+func (c *terminalDriftLabelClient) RemoveIssueLabel(context.Context, string, string, int, string) error {
+	return nil
+}
+func (c *terminalDriftLabelClient) CreateIssueComment(context.Context, string, string, int, string) error {
+	return nil
+}
+
+func TestTerminalForgejoProjectionFailureRecordsDriftAndLabel(t *testing.T) {
+	svc := setupProjectionStateService(t)
+	client := &terminalDriftLabelClient{}
+	svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{Enabled: true, BaseURL: "http://forgejo.local", Token: "secret-token"}, client, nil)
+	ctx := context.Background()
+	var repo db.Repository
+	if err := svc.DB.First(&repo, "full_name = ?", "example-owner/demo").Error; err != nil {
+		t.Fatalf("load repo: %v", err)
+	}
+	pr := db.PullRequest{Number: 67, RepositoryID: repo.ID, Repository: repo, Title: "terminal drift", State: db.StateOpen, HeadRef: "fix/drift", HeadSHA: "1111111111111111111111111111111111111111", BaseRef: "main"}
+	if err := svc.DB.Create(&pr).Error; err != nil {
+		t.Fatalf("create pr: %v", err)
+	}
+	job := db.PullRequestProjectionJob{
+		PullRequestID: pr.ID, RepositoryID: repo.ID, Provider: ProjectionProviderForgejo,
+		Trigger: ForgejoProjectionTriggerPullRequest, RepoFullName: repo.FullName, AGSPRNumber: pr.Number,
+		HeadRef: pr.HeadRef, BaseRef: pr.BaseRef, HeadSHA: pr.HeadSHA, Phase: ForgejoProjectionPhasePushingRef,
+		Attempt: 4, RemoteRef: "refs/heads/fix/drift", RemoteSHA: pr.HeadSHA,
+		ExternalRepo: "forgejo/demo", ExternalNumber: 68, ExternalURL: "http://forgejo.local/forgejo/demo/pulls/68",
+	}
+	if err := svc.DB.Create(&job).Error; err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	failure := &projectionJobFailure{
+		failureType: forgejointegration.ProjectionFailureNonFastForward,
+		summary:     "remote ref differs",
+		remoteSHA:   "2222222222222222222222222222222222222222",
+	}
+	svc.markForgejoProjectionJobFailed(contextWithGenericProjectionClaim(ctx, job), job.ID, ForgejoProjectionPhaseFailedTerminal, nil, failure)
+	status, err := svc.GetProjectionStatus(ctx, repo.FullName)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if len(status.Refs) != 1 || status.Refs[0].Status != "active" || status.Refs[0].Type != forgejointegration.ProjectionFailureNonFastForward {
+		t.Fatalf("drift not recorded: %#v", status.Refs)
+	}
+	if len(client.labels) != 1 || client.labels[0] != forgejointegration.AGSStatusProjectionDriftLabel {
+		t.Fatalf("labels=%v", client.labels)
+	}
+}
+
+func TestRepairForgejoProjectionAuthorityRequiresConfirmedCurrentHead(t *testing.T) {
+	svc := setupProjectionStateService(t)
+	svc.DisableForgejoProjectionWorker = true
+	svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{Enabled: true, BaseURL: "http://forgejo.local", Token: "secret-token"}, &fakeProjectionClient{}, nil)
+	ctx := context.Background()
+	var repo db.Repository
+	if err := svc.DB.First(&repo, "full_name = ?", "example-owner/demo").Error; err != nil {
+		t.Fatalf("load repo: %v", err)
+	}
+	const head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	pr := db.PullRequest{Number: 67, RepositoryID: repo.ID, Title: "repair", State: db.StateOpen, HeadRef: "fix/drift", HeadSHA: head, BaseRef: "main"}
+	if err := svc.DB.Create(&pr).Error; err != nil {
+		t.Fatalf("create pr: %v", err)
+	}
+	job := db.PullRequestProjectionJob{
+		PullRequestID: pr.ID, RepositoryID: repo.ID, Provider: ProjectionProviderForgejo,
+		Trigger: ForgejoProjectionTriggerPullRequest, RepoFullName: repo.FullName, AGSPRNumber: pr.Number,
+		HeadRef: pr.HeadRef, BaseRef: pr.BaseRef, HeadSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Phase: ForgejoProjectionPhaseFailedTerminal, Attempt: 4,
+		LastErrorType: forgejointegration.ProjectionFailureNonFastForward, LastError: "blocked",
+		RemoteRef: "refs/heads/fix/drift", RemoteSHA: "cccccccccccccccccccccccccccccccccccccccc",
+	}
+	if err := svc.DB.Create(&job).Error; err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := svc.RepairForgejoPullRequestProjectionAuthority(ctx, repo.FullName, pr.Number, "dddddddddddddddddddddddddddddddddddddddd"); err == nil {
+		t.Fatal("mismatched confirm was accepted")
+	}
+	var unchanged db.PullRequestProjectionJob
+	if err := svc.DB.First(&unchanged, job.ID).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if unchanged.Phase != ForgejoProjectionPhaseFailedTerminal || unchanged.Attempt != 4 {
+		t.Fatalf("mismatched confirm mutated job: %#v", unchanged)
+	}
+	result, err := svc.RepairForgejoPullRequestProjectionAuthority(ctx, repo.FullName, pr.Number, head)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if result.Phase != ForgejoProjectionPhaseQueued || result.Status != "queued" {
+		t.Fatalf("result=%#v", result)
+	}
+	var repaired db.PullRequestProjectionJob
+	if err := svc.DB.First(&repaired, job.ID).Error; err != nil {
+		t.Fatalf("reload repaired: %v", err)
+	}
+	if repaired.Phase != ForgejoProjectionPhaseQueued || repaired.Attempt != 5 || repaired.HeadSHA != head || repaired.LastErrorType != "" {
+		t.Fatalf("job not repaired onto current head: %#v", repaired)
+	}
+	repaired.Phase = ForgejoProjectionPhaseFailedTerminal
+	repaired.LastErrorType = forgejointegration.ProjectionFailureAuthFailed
+	if err := svc.DB.Save(&repaired).Error; err != nil {
+		t.Fatalf("save unrelated terminal: %v", err)
+	}
+	if _, err := svc.RepairForgejoPullRequestProjectionAuthority(ctx, repo.FullName, pr.Number, head); err == nil {
+		t.Fatal("unrelated terminal failure was repaired")
+	}
+}

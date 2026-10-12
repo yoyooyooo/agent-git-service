@@ -367,7 +367,7 @@ func (s *Service) RetryForgejoPullRequestProjection(ctx context.Context, repoFul
 	case ForgejoProjectionPhaseProjected:
 		return projectionJobStatus(job), nil
 	case ForgejoProjectionPhaseFailedTerminal:
-		return ProjectionJobStatus{}, fmt.Errorf("forgejo projection job is terminal failed; inspect drift before retry: %w", ErrInvalidState)
+		return ProjectionJobStatus{}, fmt.Errorf("forgejo projection job is terminal failed; inspect drift, then POST projection authority repair: %w", ErrInvalidState)
 	}
 	now := time.Now().UTC()
 	if job.Trigger == ForgejoProjectionTriggerActionRebase {
@@ -401,6 +401,82 @@ func (s *Service) RetryForgejoPullRequestProjection(ctx context.Context, repoFul
 	}
 	if err := s.retryGenericForgejoProjectionJob(ctx, job, updates); err != nil {
 		return ProjectionJobStatus{}, err
+	}
+	if err := s.DBForCtx(ctx).Where("id = ?", job.ID).First(&job).Error; err != nil {
+		return ProjectionJobStatus{}, err
+	}
+	s.scheduleForgejoProjectionJob(ctx, job.ID)
+	return projectionJobStatus(job), nil
+}
+
+// RepairForgejoPullRequestProjectionAuthority requeues a terminal generic
+// Forgejo projection after the operator confirms the current AGS head.
+// The confirm value must be that full head SHA. The worker then projects it.
+// This does not create a Forgejo pull request directly and does not rewrite
+// an AGS base branch. A mismatched confirm leaves the terminal row unchanged.
+func (s *Service) RepairForgejoPullRequestProjectionAuthority(ctx context.Context, repoFullName string, prNumber int, confirmSHA string) (ProjectionJobStatus, error) {
+	if s == nil {
+		return ProjectionJobStatus{}, fmt.Errorf("service is nil")
+	}
+	if s.ForgejoIntegration == nil {
+		return ProjectionJobStatus{}, fmt.Errorf("forgejo projection repair unavailable: %w", ErrInvalidState)
+	}
+	confirmSHA = strings.TrimSpace(confirmSHA)
+	if !projectionConfirmSHA(confirmSHA) {
+		return ProjectionJobStatus{}, fmt.Errorf("authority repair requires the full current AGS head as confirm: %w", ErrInvalidState)
+	}
+	repo, err := s.projectionRepository(ctx, repoFullName)
+	if err != nil {
+		return ProjectionJobStatus{}, err
+	}
+	if err := s.requireRepoPermission(ctx, repo.ID, RepoPermissionWrite); err != nil {
+		return ProjectionJobStatus{}, err
+	}
+	var pr db.PullRequest
+	if err := s.DBForCtx(ctx).Preload("Repository").Where("repository_id = ? AND number = ?", repo.ID, prNumber).First(&pr).Error; err != nil {
+		return ProjectionJobStatus{}, err
+	}
+	if pr.State != db.StateOpen {
+		return ProjectionJobStatus{}, fmt.Errorf("authority repair requires an open AGS pull request: %w", ErrInvalidState)
+	}
+	headSHA := strings.TrimSpace(pr.HeadSHA)
+	if !strings.EqualFold(headSHA, confirmSHA) {
+		return ProjectionJobStatus{}, fmt.Errorf("authority repair confirm %s does not match current AGS head %s: %w", confirmSHA, headSHA, ErrInvalidState)
+	}
+	var job db.PullRequestProjectionJob
+	if err := s.DBForCtx(ctx).Where("pull_request_id = ? AND provider = ?", pr.ID, ProjectionProviderForgejo).First(&job).Error; err != nil {
+		return ProjectionJobStatus{}, err
+	}
+	if job.Trigger != ForgejoProjectionTriggerPullRequest || job.Phase != ForgejoProjectionPhaseFailedTerminal {
+		return ProjectionJobStatus{}, fmt.Errorf("authority repair only accepts a terminal generic Forgejo projection: %w", ErrInvalidState)
+	}
+	switch job.LastErrorType {
+	case forgejointegration.ProjectionFailureNonFastForward, forgejointegration.ProjectionFailureSHADrift:
+	default:
+		return ProjectionJobStatus{}, fmt.Errorf("authority repair refuses terminal failure %s: %w", job.LastErrorType, ErrInvalidState)
+	}
+	now := time.Now().UTC()
+	result := s.DBForCtx(ctx).Model(&db.PullRequestProjectionJob{}).
+		Where("id = ? AND `trigger` = ? AND phase = ? AND updated_at = ?", job.ID, ForgejoProjectionTriggerPullRequest, ForgejoProjectionPhaseFailedTerminal, job.UpdatedAt).
+		Updates(map[string]any{
+			"attempt":         gorm.Expr("attempt + 1"),
+			"phase":           ForgejoProjectionPhaseQueued,
+			"head_ref":        pr.HeadRef,
+			"base_ref":        pr.BaseRef,
+			"head_sha":        headSHA,
+			"remote_ref":      "refs/heads/" + strings.TrimSpace(pr.HeadRef),
+			"remote_sha":      headSHA,
+			"last_error_type": "",
+			"last_error":      "",
+			"next_run_at":     &now,
+			"finished_at":     nil,
+			"updated_at":      now,
+		})
+	if result.Error != nil {
+		return ProjectionJobStatus{}, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ProjectionJobStatus{}, fmt.Errorf("forgejo projection job changed before authority repair: %w", ErrInvalidState)
 	}
 	if err := s.DBForCtx(ctx).Where("id = ?", job.ID).First(&job).Error; err != nil {
 		return ProjectionJobStatus{}, err
@@ -1035,6 +1111,76 @@ func (s *Service) markForgejoProjectionJobFailed(ctx context.Context, jobID uint
 		"payload_changed_files", failure.payload.ChangedFiles,
 		"payload_head_bytes", failure.payload.HeadBlobBytes,
 	)
+	if phase == ForgejoProjectionPhaseFailedTerminal && failure.failureType != ProjectionFailureProviderAdmissionDenied {
+		s.signalTerminalForgejoProjectionFailure(ctx, jobID, failure)
+	}
+
+}
+
+func (s *Service) signalTerminalForgejoProjectionFailure(ctx context.Context, jobID uint, failure *projectionJobFailure) {
+	if s == nil || failure == nil || jobID == 0 {
+		return
+	}
+	var job db.PullRequestProjectionJob
+	if err := s.DBForCtx(ctx).Preload("PullRequest").Preload("PullRequest.Repository").First(&job, jobID).Error; err != nil {
+		slog.WarnContext(ctx, "load terminal Forgejo projection job for drift signal failed", "job_id", jobID, "error", err)
+		return
+	}
+	repoFullName := strings.TrimSpace(job.RepoFullName)
+	if repoFullName == "" {
+		repoFullName = strings.TrimSpace(job.PullRequest.Repository.FullName)
+	}
+	ref := strings.TrimSpace(job.RemoteRef)
+	if ref == "" {
+		ref = "refs/heads/" + strings.TrimSpace(firstNonEmpty(job.HeadRef, job.PullRequest.HeadRef))
+	}
+	expectedSHA := strings.TrimSpace(firstNonEmpty(job.HeadSHA, job.PullRequest.HeadSHA))
+	projectionErr := &forgejointegration.ProjectionError{
+		Type:         firstNonEmpty(failure.failureType, forgejointegration.ProjectionFailureUnknown),
+		Repo:         repoFullName,
+		TargetRepo:   strings.TrimSpace(job.ExternalRepo),
+		Ref:          ref,
+		Branch:       branchNameFromRef(ref),
+		ExpectedSHA:  expectedSHA,
+		ActualSHA:    strings.TrimSpace(firstNonEmpty(failure.remoteSHA, job.RemoteSHA)),
+		ErrorSummary: strings.TrimSpace(failure.summary),
+	}
+	metadata := ProjectionFailureAlertMetadata{
+		AGSPRNumber:        job.PullRequest.Number,
+		AGSPRURL:           s.absAGSURL(fmt.Sprintf("/%s/pull/%d", repoFullName, job.PullRequest.Number)),
+		ForgejoPRNumber:    job.ExternalNumber,
+		ForgejoPRURL:       strings.TrimSpace(job.ExternalURL),
+		ActionPhase:        "projection_job_terminal",
+		AGSNewSHA:          expectedSHA,
+		ExpectedForgejoSHA: expectedSHA,
+		ActualForgejoSHA:   projectionErr.ActualSHA,
+		CorrelationID:      fmt.Sprintf("projection-job:%d:attempt:%d", job.ID, job.Attempt),
+		RecoveryHint:       "terminal Forgejo projection failed; inspect drift, then call projection authority repair. Do not force-push Forgejo by hand",
+	}
+	if err := s.RecordForgejoProjectionFailureWithAlert(ctx, repoFullName, []ForgejoRefChange{{Ref: ref, After: expectedSHA}}, projectionErr, metadata); err != nil && !IsProjectionAlertingError(err) {
+		slog.WarnContext(ctx, "record terminal Forgejo projection drift failed", "job_id", jobID, "error", err)
+	}
+	if job.ExternalNumber <= 0 || strings.TrimSpace(job.ExternalRepo) == "" || s.ForgejoIntegration == nil {
+		return
+	}
+	if err := s.ForgejoIntegration.AddPullRequestLabels(ctx, job.ExternalRepo, job.ExternalNumber, []string{forgejointegration.AGSStatusProjectionDriftLabel}); err != nil {
+		slog.WarnContext(ctx, "label terminal Forgejo projection drift failed", "job_id", jobID, "forgejo_repo", job.ExternalRepo, "forgejo_pr", job.ExternalNumber, "error", err)
+	}
+}
+
+func projectionConfirmSHA(sha string) bool {
+	sha = strings.TrimSpace(sha)
+	if len(sha) != 40 {
+		return false
+	}
+	for _, r := range sha {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) persistProjectionJobAttempt(ctx context.Context, job db.PullRequestProjectionJob, status, errorType, errSummary string, finishedAt *time.Time) error {

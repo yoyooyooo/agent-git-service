@@ -721,7 +721,7 @@ func projectionJobNextRepairAction(job db.PullRequestProjectionJob) string {
 		}
 		return "call_projection_retry"
 	case ForgejoProjectionPhaseFailedTerminal:
-		return "inspect_terminal_error_and_drift_before_manual_ags_authority_repair"
+		return "call_projection_authority_repair_after_drift_inspection"
 	default:
 		return "inspect_projection_status"
 	}

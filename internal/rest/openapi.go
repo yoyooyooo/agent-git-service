@@ -386,6 +386,11 @@ func buildRESTOpenAPIPaths() map[string]any {
 		"/api/v3/repos/{owner}/{repo}/projection/forgejo/pulls/{number}/retry": map[string]any{
 			"post": operation("retryForgejoPullRequestProjection", "Safely requeue/resume a retryable failed Forgejo PR projection job without manually creating a Forgejo PR.", auth(), nil, pathParams(param("owner", "string"), param("repo", "string"), param("number", "integer")), response(202, "Projection retry queued")),
 		},
+		"/api/v3/repos/{owner}/{repo}/projection/forgejo/pulls/{number}/repair": map[string]any{
+			"post": operation("repairForgejoPullRequestProjectionAuthority", "Requeue a terminal generic Forgejo projection after the caller confirms the current full AGS head SHA. Refuses every other terminal failure.", auth(), jsonBody(true, map[string]any{
+				"confirm": map[string]any{"type": "string", "pattern": "^[A-Fa-f0-9]{40}$"},
+			}, []string{"confirm"}), pathParams(param("owner", "string"), param("repo", "string"), param("number", "integer")), response(202, "Projection authority repair queued")),
+		},
 		"/api/ext/v1/user/agents": map[string]any{
 			"get": operation("listBoundAgents", "List agents bound to the authenticated user.", auth(), nil, nil, response(200, "Bound agents returned")),
 		},

@@ -558,6 +558,23 @@ ags-api GET  /api/v3/repos/example-team/project-one/projection/status | jq '.job
 ags-api POST /api/v3/repos/example-team/project-one/projection/forgejo/pulls/2/retry
 ```
 
+A terminal generic Forgejo projection (`phase=failed_terminal`) is not silent. The failure is recorded as active projection drift and, when the job already has a Forgejo pull request number, AGS adds `ags/status-projection-drift` on that pull request. `next_repair_action` is `call_projection_authority_repair_after_drift_inspection`.
+
+The repair entry for that terminal state is explicit. It does not accept a normal retry. The caller confirms the current full AGS head SHA, and only a terminal generic job whose error is `non_fast_forward_blocked` or `sha_drift` is requeued:
+
+```text
+POST /api/v3/repos/{owner}/{repo}/projection/forgejo/pulls/{ags_pr_number}/repair
+{"confirm":"<current full AGS head SHA>"}
+```
+
+```bash
+ags-api POST /api/v3/repos/example-team/project-one/projection/forgejo/pulls/2/repair --input - <<'JSON'
+{"confirm":"<current full AGS head SHA>"}
+JSON
+```
+
+A missing or mismatched `confirm` leaves the terminal job unchanged. The repair does not create a Forgejo pull request by hand and does not rewrite an AGS base branch.
+
 Never repair this state by manually creating a Forgejo PR. AGS PR state, branch, head SHA, title/body, and projection jobs remain authoritative; Forgejo is the merge/CI projection surface.
 
 The regression harness for large or slow PR projection uses deterministic fake pushers rather than credentials or real remotes. The pusher records a simulated remote branch update and then returns evidence such as `git push: signal: killed`, `unknown_projection_error refs/heads/...`, or `cannot lock ref ... reference already exists`. This captures the old partial state where Forgejo has the branch but AGS has not completed PR ensure/projection-row recording, and verifies the async worker no longer inherits request cancellation.
