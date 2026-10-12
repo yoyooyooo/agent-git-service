@@ -268,3 +268,56 @@ func TestProjectionRetryEndpointRequeuesFailedRetryableJob(t *testing.T) {
 		t.Fatalf("retry endpoint did not requeue cleanly: %#v", job)
 	}
 }
+
+func TestProjectionRepairEndpointRequeuesConfirmedTerminalDrift(t *testing.T) {
+	h := testharness.New(t)
+	ctx := context.Background()
+	compatSeedRepo(t, h, "projection-repair")
+	full := "testuser/projection-repair"
+	branch := "agent/rest-repair"
+	if err := h.Svc.Git.CreateBranch(ctx, full, branch, "main"); err != nil {
+		t.Fatalf("create branch: %v", err)
+	}
+	headSHA, err := h.Svc.Git.WriteFile(ctx, full, branch, "repair.txt", "repair fixture", []byte("repair fixture\n"))
+	if err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	h.Svc.DisableForgejoProjectionWorker = true
+	h.Svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{
+		Enabled: true, BaseURL: "http://forgejo.local", Token: "secret-token", AutoPullRequest: true,
+		MirrorBranchIncludes: []string{"agent/*"}, PRBranchIncludes: []string{"agent/*"},
+		RepoMap: map[string]forgejointegration.RepoMapping{full: {Owner: "forgejo", Repo: "projection-repair"}},
+	}, &restPRProjectionClient{headSHA: headSHA}, nil)
+	w := h.DoRESTJSON(t, "POST", fmt.Sprintf("/api/v3/repos/%s/pulls", full), map[string]any{"title": "REST projection repair", "head": branch, "base": "main"})
+	assertStatusCode(t, w, 201)
+	var pr db.PullRequest
+	if err := h.DB.Where("repository_id = (SELECT id FROM repositories WHERE full_name = ?) AND number = ?", full, 1).First(&pr).Error; err != nil {
+		t.Fatalf("load pr: %v", err)
+	}
+	if err := h.DB.Model(&db.PullRequestProjectionJob{}).Where("pull_request_id = ? AND provider = ?", pr.ID, service.ProjectionProviderForgejo).Updates(map[string]any{
+		"phase": service.ForgejoProjectionPhaseFailedTerminal, "attempt": 4,
+		"last_error_type": forgejointegration.ProjectionFailureNonFastForward, "last_error": "non-fast-forward",
+		"external_repo": "forgejo/projection-repair", "external_number": 68,
+	}).Error; err != nil {
+		t.Fatalf("mark terminal: %v", err)
+	}
+	retry := h.DoRESTJSON(t, "POST", fmt.Sprintf("/api/v3/repos/%s/projection/forgejo/pulls/%d/retry", full, pr.Number), nil)
+	assertStatusCode(t, retry, 422)
+	bad := h.DoRESTJSON(t, "POST", fmt.Sprintf("/api/v3/repos/%s/projection/forgejo/pulls/%d/repair", full, pr.Number), map[string]any{"confirm": "dddddddddddddddddddddddddddddddddddddddd"})
+	assertStatusCode(t, bad, 422)
+	var job db.PullRequestProjectionJob
+	if err := h.DB.Where("pull_request_id = ? AND provider = ?", pr.ID, service.ProjectionProviderForgejo).First(&job).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if job.Phase != service.ForgejoProjectionPhaseFailedTerminal || job.Attempt != 4 {
+		t.Fatalf("rejected repair mutated job: %#v", job)
+	}
+	ok := h.DoRESTJSON(t, "POST", fmt.Sprintf("/api/v3/repos/%s/projection/forgejo/pulls/%d/repair", full, pr.Number), map[string]any{"confirm": headSHA})
+	assertStatusCode(t, ok, 202)
+	if err := h.DB.Where("pull_request_id = ? AND provider = ?", pr.ID, service.ProjectionProviderForgejo).First(&job).Error; err != nil {
+		t.Fatalf("reload repaired: %v", err)
+	}
+	if job.Phase != service.ForgejoProjectionPhaseQueued || job.Attempt != 5 || job.HeadSHA != headSHA || job.LastErrorType != "" {
+		t.Fatalf("repair endpoint did not requeue onto current head: %#v", job)
+	}
+}

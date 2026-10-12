@@ -519,6 +519,7 @@ func registerRepoRoutes(r chi.Router, handlers *rest.Deps) {
 func registerProjectionRoutes(r chi.Router, handlers *rest.Deps) {
 	r.Get("/api/v3/repos/{owner}/{repo}/projection/status", handlers.GetProjectionStatus)
 	r.Post("/api/v3/repos/{owner}/{repo}/projection/forgejo/pulls/{number}/retry", handlers.RetryProjection)
+	r.Post("/api/v3/repos/{owner}/{repo}/projection/forgejo/pulls/{number}/repair", handlers.RepairProjectionAuthority)
 	r.Post("/api/v3/repos/{owner}/{repo}/pulls/{pull_number}/outbound/replay-merge", handlers.ReplayPullRequestMergeOutbound)
 }
 
