@@ -152,10 +152,13 @@ type PullRequestRequest struct {
 // PullRequestRewriteLease authorizes one historical rewrite of an existing,
 // mapped Forgejo PR work branch. ExpectedOldHeadSHA is the durable, full object
 // ID accepted during preflight; it must never be inferred from a later read.
+// BackupDivergedObservedRef is the authority-repair exception: the integration
+// tags the ref it just observed, then leases against that same observed ID.
 type PullRequestRewriteLease struct {
-	ExternalRepo       string
-	ExternalNumber     int
-	ExpectedOldHeadSHA string
+	ExternalRepo              string
+	ExternalNumber            int
+	ExpectedOldHeadSHA        string
+	BackupDivergedObservedRef bool
 }
 
 // PullRequestSyncRequest asks the integration to mirror an AGS PR head branch and ensure its Forgejo PR projection.
@@ -319,6 +322,7 @@ type Integration struct {
 	authorityClient repositoryAuthorityClient
 	push            GitPusher
 	remoteRef       GitRemoteRefReader
+	backupTag       func(ctx context.Context, repoPath, remoteURL, tag, sha string) error
 }
 
 // New constructs a Forgejo integration. A nil client or pusher is replaced by the default implementation.
@@ -346,7 +350,9 @@ func NewWithGitCapabilities(cfg Config, client Client, pusher GitPusher, remoteR
 	if remoteRef == nil {
 		remoteRef = GitRemoteRefSHA
 	}
-	return &Integration{cfg: cfg, client: client, authorityClient: authorityClient, push: pusher, remoteRef: remoteRef}
+	integration := &Integration{cfg: cfg, client: client, authorityClient: authorityClient, push: pusher, remoteRef: remoteRef}
+	integration.backupTag = integration.createRemoteBackupTag
+	return integration
 }
 
 // WorkflowActionsEnabled reports whether signed Forgejo webhook actions can
@@ -901,8 +907,29 @@ func (i *Integration) rewritePullRequestHeadWithLease(ctx context.Context, in Pu
 	}
 	oldSHA := strings.ToLower(strings.TrimSpace(lease.ExpectedOldHeadSHA))
 	newSHA := strings.ToLower(strings.TrimSpace(in.HeadSHA))
-	if !isFullGitObjectID(oldSHA) || !isFullGitObjectID(newSHA) {
+	if !isFullGitObjectID(newSHA) || (!lease.BackupDivergedObservedRef && !isFullGitObjectID(oldSHA)) {
 		return PullRequestResult{}, fmt.Errorf("forgejo integration: lease rewrite requires full old and new object IDs")
+	}
+	if lease.BackupDivergedObservedRef {
+		observed, err := i.remoteRef(ctx, in.RepoPath, remoteURL, ref)
+		if err != nil {
+			return PullRequestResult{}, fmt.Errorf("forgejo integration: inspect remote ref before authority repair: %w", err)
+		}
+		observed = strings.ToLower(strings.TrimSpace(observed))
+		if !isFullGitObjectID(observed) {
+			return PullRequestResult{}, fmt.Errorf("forgejo integration: authority repair requires an existing remote ref %s", ref)
+		}
+		tag := projectionBackupTag(in.Head, observed)
+		if !exactGitSHA(observed, newSHA) {
+			if err := i.backupTag(ctx, in.RepoPath, remoteURL, tag, observed); err != nil {
+				return PullRequestResult{}, fmt.Errorf("forgejo integration: backup tag %s before authority repair: %w", tag, err)
+			}
+			confirmed, err := i.remoteRef(ctx, in.RepoPath, remoteURL, "refs/tags/"+tag)
+			if err != nil || !exactGitSHA(confirmed, observed) {
+				return PullRequestResult{}, fmt.Errorf("forgejo integration: backup tag %s did not read back as %s", tag, observed)
+			}
+		}
+		oldSHA = observed
 	}
 	before, ok, err := i.pullRequestSnapshot(ctx, target, lease.ExternalNumber)
 	if err != nil {
@@ -940,6 +967,24 @@ func (i *Integration) rewritePullRequestHeadWithLease(ctx context.Context, in Pu
 		return result, err
 	}
 	return result, nil
+}
+
+func (i *Integration) createRemoteBackupTag(ctx context.Context, repoPath, remoteURL, tag, sha string) error {
+	if i == nil {
+		return fmt.Errorf("forgejo integration is nil")
+	}
+	local := "refs/ags-projection-backup-staging/" + sha
+	if _, err := gittransport.Run(ctx, remoteURL, "", "-C", repoPath, "fetch", "--no-tags", remoteURL, sha+":"+local); err != nil {
+		return err
+	}
+	_, err := gittransport.Run(ctx, remoteURL, "", "-C", repoPath, "push", remoteURL, local+":refs/tags/"+tag)
+	return err
+}
+
+func projectionBackupTag(branch, observedSHA string) string {
+	branch = strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/")
+	observedSHA = strings.ToLower(strings.TrimSpace(observedSHA))
+	return "ags-projection-backup/" + branch + "/" + observedSHA
 }
 
 func (i *Integration) pullRequestSnapshot(ctx context.Context, target TargetRepo, number int) (PullRequestSnapshot, bool, error) {

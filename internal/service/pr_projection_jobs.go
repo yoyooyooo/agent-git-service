@@ -409,6 +409,8 @@ func (s *Service) RetryForgejoPullRequestProjection(ctx context.Context, repoFul
 	return projectionJobStatus(job), nil
 }
 
+const authorityRepairCorrelationID = "authority-repair"
+
 // RepairForgejoPullRequestProjectionAuthority requeues a terminal generic
 // Forgejo projection after the operator confirms the current AGS head.
 // The confirm value must be that full head SHA. The worker then projects it.
@@ -466,6 +468,7 @@ func (s *Service) RepairForgejoPullRequestProjectionAuthority(ctx context.Contex
 			"head_sha":        headSHA,
 			"remote_ref":      "refs/heads/" + strings.TrimSpace(pr.HeadRef),
 			"remote_sha":      headSHA,
+			"correlation_id":  authorityRepairCorrelationID,
 			"last_error_type": "",
 			"last_error":      "",
 			"next_run_at":     &now,
@@ -854,17 +857,36 @@ func (s *Service) processForgejoProjectionJobAttempt(ctx context.Context, job db
 	if pr.Repository.FullName == "" {
 		pr.Repository.FullName = repoFullName
 	}
+	authorityRepair := strings.TrimSpace(job.CorrelationID) == authorityRepairCorrelationID
 	return s.withForgejoProjectionLock(forgejoProjectionLockKey(repoFullName, pr.ID, pr.HeadRef), func() *projectionJobFailure {
-		if err := s.updateForgejoProjectionJobPhase(ctx, job.ID, ForgejoProjectionPhasePushingRef, map[string]any{
+		phaseUpdates := map[string]any{
 			"finished_at": nil,
 			"remote_ref":  "refs/heads/" + strings.TrimSpace(pr.HeadRef),
 			"remote_sha":  headSHA,
-		}); err != nil {
+		}
+		if authorityRepair {
+			// One attempt only. A later ordinary projection must not reuse it.
+			phaseUpdates["correlation_id"] = ""
+		}
+		if err := s.updateForgejoProjectionJobPhase(ctx, job.ID, ForgejoProjectionPhasePushingRef, phaseUpdates); err != nil {
 			return newFailure(job.RemoteRef, headSHA, fmt.Errorf("persist Forgejo projection job phase: %w", err), true)
 		}
-		result, handled, err := s.ensureForgejoPullRequestExternalWithAuthority(ctx, repoFullName, repoPath, headSHA, pr, func(checkCtx context.Context) error {
-			return s.revalidateGenericProjectionProviderWrite(checkCtx, job, pr)
-		})
+		var result forgejointegration.PullRequestResult
+		var handled bool
+		var err error
+		if authorityRepair {
+			result, handled, err = s.ensureForgejoPullRequestExternalWithPolicyAndAuthority(ctx, repoFullName, repoPath, headSHA, pr, &ForgejoPullRequestRewritePolicy{
+				ExternalRepo:              strings.TrimSpace(firstNonEmpty(job.ExternalRepo, "")),
+				ExternalNumber:            job.ExternalNumber,
+				BackupDivergedObservedRef: true,
+			}, func(checkCtx context.Context) error {
+				return s.revalidateGenericProjectionProviderWrite(checkCtx, job, pr)
+			})
+		} else {
+			result, handled, err = s.ensureForgejoPullRequestExternalWithAuthority(ctx, repoFullName, repoPath, headSHA, pr, func(checkCtx context.Context) error {
+				return s.revalidateGenericProjectionProviderWrite(checkCtx, job, pr)
+			})
+		}
 		if err != nil {
 			return newFailure("refs/heads/"+strings.TrimSpace(pr.HeadRef), headSHA, err, true)
 		}
