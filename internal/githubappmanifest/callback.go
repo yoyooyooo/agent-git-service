@@ -414,8 +414,9 @@ func (e HTTPExchanger) Convert(code string) (Conversion, error) {
 
 // publishCredentialSet copies every existing credential aside before any
 // live path changes. Publication then replaces the live files one by one.
-// Any failure restores the copies and removes files this attempt created, so
-// the caller still sees the previous set.
+// Any failure restores the copies. Recovery copies are removed only after
+// every one has been restored; a failed rollback keeps the remaining copies
+// and names them in the error.
 func publishCredentialSet(files []struct {
 	path string
 	body []byte
@@ -440,10 +441,10 @@ func publishCredentialSet(files []struct {
 	err := publishStaged(files, staged, uid, renameFile, &replaced)
 	if err != nil {
 		restoreErr := restoreCredentialSet(files, backups, existed, replaced)
-		removeCredentialTemps(backups)
 		if restoreErr != nil {
-			return fmt.Errorf("%w; restore credential set: %v", err, restoreErr)
+			return fmt.Errorf("%w; %w", err, restoreErr)
 		}
+		removeCredentialTemps(backups)
 		return err
 	}
 	removeCredentialTemps(backups)
@@ -470,19 +471,24 @@ func restoreCredentialSet(files []struct {
 	path string
 	body []byte
 }, backups []string, existed []bool, replaced int) error {
+	var failures []string
 	for i := replaced - 1; i >= 0; i-- {
 		if existed[i] {
 			if err := os.Rename(backups[i], files[i].path); err != nil {
-				return err
+				failures = append(failures, fmt.Sprintf("%s recovery copy remains at %s: %v", filepath.Base(files[i].path), backups[i], err))
+				continue
 			}
 			backups[i] = ""
 			continue
 		}
 		if err := os.Remove(files[i].path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+			failures = append(failures, fmt.Sprintf("remove new %s: %v", filepath.Base(files[i].path), err))
 		}
 	}
-	return nil
+	if len(failures) == 0 {
+		return nil
+	}
+	return fmt.Errorf("restore credential set: %s", strings.Join(failures, "; "))
 }
 
 func copyCredential(path string, uid int) (string, error) {

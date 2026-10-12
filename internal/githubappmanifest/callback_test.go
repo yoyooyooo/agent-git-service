@@ -3,6 +3,7 @@ package githubappmanifest
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -450,5 +451,81 @@ func TestManifestSameCodeIsSingleUseDuringExchange(t *testing.T) {
 	id, err := os.ReadFile(flow.Paths.AppID)
 	if err != nil || string(id) != "4242\n" {
 		t.Fatalf("app id = %q %v", id, err)
+	}
+}
+
+// TestManifestRollbackFailureKeepsUnrecoveredBackups publishes the first two
+// credential files, then fails the third while the private-key directory is
+// no longer writable. Rollback of that key fails, but every previous
+// credential must remain either at its live path or in a named recovery copy.
+func TestManifestRollbackFailureKeepsUnrecoveredBackups(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("requires unprivileged permission enforcement")
+	}
+	flow, _, _ := newFlow(t, time.Date(2026, 10, 12, 6, 0, 0, 0, time.UTC))
+	root := filepath.Dir(flow.StatePath)
+	paths := []*string{&flow.Paths.AppID, &flow.Paths.PrivateKey, &flow.Paths.WebhookSecret}
+	for i, path := range paths {
+		dir := filepath.Join(root, fmt.Sprintf("credential-%d", i))
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		*path = filepath.Join(dir, filepath.Base(*path))
+	}
+	writeOriginalCredentials(t, flow)
+	state, err := flow.Begin(CallbackPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedDir := filepath.Dir(flow.Paths.PrivateKey)
+	t.Cleanup(func() {
+		if err := os.Chmod(blockedDir, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+	flow.rename = func(src, dst string) error {
+		if dst == flow.Paths.WebhookSecret {
+			if err := os.Chmod(blockedDir, 0o500); err != nil {
+				return err
+			}
+			return syscall.EIO
+		}
+		return os.Rename(src, dst)
+	}
+	_, err = flow.Complete("rollback-code", state.Value)
+	if err == nil || !strings.Contains(err.Error(), "restore credential set") {
+		t.Fatalf("expected rollback failure, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "github-app.pem recovery copy remains at") {
+		t.Fatalf("rollback error does not name the unrecovered copy: %v", err)
+	}
+	recoveryCopy := ""
+	for _, field := range strings.Fields(err.Error()) {
+		if strings.Contains(field, "github-app.pem.") && strings.HasSuffix(field, ".tmp") {
+			recoveryCopy = strings.TrimRight(field, ":;,")
+		}
+	}
+	body, readErr := os.ReadFile(recoveryCopy)
+	if readErr != nil || string(body) != "original" {
+		t.Fatalf("named recovery copy %q = %q (%v)", recoveryCopy, body, readErr)
+	}
+	if err := os.Chmod(blockedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{flow.Paths.AppID, flow.Paths.PrivateKey, flow.Paths.WebhookSecret} {
+		entries, err := os.ReadDir(filepath.Dir(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		foundOriginal := false
+		for _, entry := range entries {
+			body, readErr := os.ReadFile(filepath.Join(filepath.Dir(path), entry.Name()))
+			if readErr == nil && string(body) == "original" {
+				foundOriginal = true
+			}
+		}
+		if !foundOriginal {
+			t.Errorf("old %s was lost from both the live path and every recovery copy", filepath.Base(path))
+		}
 	}
 }
