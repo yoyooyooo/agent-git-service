@@ -274,3 +274,81 @@ func TestCIChecksPullRequestRunOutranksLaterWorkflowDispatch(t *testing.T) {
 		t.Fatal("failed pull_request check-linux allowed merge after a later workflow_dispatch success")
 	}
 }
+
+func TestCIChecksSameJobNameInDifferentWorkflowsStaysDistinct(t *testing.T) {
+	s, ctx, repo, pr, backend, config := ciFixture(t)
+	selected := config.Backends["builder"]
+	selected.Kind = "forgejo"
+	config.Backends["builder"] = selected
+	required := []string{"notify-feishu-on-failure"}
+	binding := config.Repositories[repo.FullName]
+	binding.RequiredChecks = &required
+	config.Repositories[repo.FullName] = binding
+	registry, err := cibackend.WithBackends(config, map[string]cibackend.Backend{"builder": backend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.CI = registry
+	projection := db.PullRequestProjection{PullRequestID: pr.ID, RepositoryID: repo.ID, Provider: "forgejo", ExternalRepo: "ci/project", ExternalNumber: 615, ExternalURL: "https://api.example.test/ci/project/pulls/615", LastSyncedSHA: pr.HeadSHA}
+	if err = s.DB.Create(&projection).Error; err != nil {
+		t.Fatal(err)
+	}
+	// ux/merdi-express-shipping PR 615: ci.yml and app-ci.yml both define
+	// notify-feishu-on-failure. Those are different workflow files, so gh pr checks
+	// must see both instead of rejecting the rollup as inconsistent evidence.
+	created := time.Now().UTC().Add(-time.Hour)
+	backend.runs = []cibackend.Run{
+		{Key: "2991", Workflow: "ci.yml", Name: "ci.yml", Branch: "#615", HeadSHA: pr.HeadSHA, Event: "pull_request", Status: "completed", Conclusion: "success", CreatedAt: created, UpdatedAt: created, Number: 2991, Attempt: 1, PullRequests: []int{615}},
+		{Key: "2992", Workflow: "app-ci.yml", Name: "app-ci.yml", Branch: "#615", HeadSHA: pr.HeadSHA, Event: "pull_request", Status: "completed", Conclusion: "failure", CreatedAt: created.Add(time.Minute), UpdatedAt: created.Add(time.Minute), Number: 2992, Attempt: 1, PullRequests: []int{615}},
+	}
+	backend.jobs = []cibackend.Job{
+		{Key: "2991:1", Run: "2991", Name: "build", HeadSHA: pr.HeadSHA, Status: "completed", Conclusion: "success"},
+		{Key: "2991:2", Run: "2991", Name: "notify-feishu-on-failure", HeadSHA: pr.HeadSHA, Status: "completed", Conclusion: "skipped"},
+		{Key: "2992:1", Run: "2992", Name: "app", HeadSHA: pr.HeadSHA, Status: "completed", Conclusion: "failure"},
+		{Key: "2992:2", Run: "2992", Name: "notify-feishu-on-failure", HeadSHA: pr.HeadSHA, Status: "completed", Conclusion: "success"},
+	}
+	observed, err := s.ReadCIChecks(ctx, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type observedCheck struct {
+		workflow, conclusion string
+		required             bool
+	}
+	got := map[string]observedCheck{}
+	for _, check := range observed.Checks {
+		key := check.Workflow + "/" + check.Name
+		if _, exists := got[key]; exists {
+			t.Fatalf("check reported twice: %s %#v", key, observed)
+		}
+		got[key] = observedCheck{check.Workflow, check.Conclusion, check.Required}
+	}
+	want := map[string]observedCheck{
+		"ci.yml/build":                        {"ci.yml", "success", false},
+		"ci.yml/notify-feishu-on-failure":     {"ci.yml", "skipped", true},
+		"app-ci.yml/app":                      {"app-ci.yml", "failure", false},
+		"app-ci.yml/notify-feishu-on-failure": {"app-ci.yml", "success", true},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("checks = %#v", observed.Checks)
+	}
+	for key, check := range want {
+		if got[key] != check {
+			t.Fatalf("%s = %#v, want %#v", key, got[key], check)
+		}
+	}
+	if err = s.enforceConfiguredCIForMerge(ctx, pr); err != nil {
+		t.Fatal(err)
+	}
+	// Commit check-runs omit the branch match that PR rollup uses. The same two
+	// workflow files must still be distinct there; gh pr checks is the PR path.
+	bySHA, err := s.ReadCIChecksForSHA(ctx, repo, pr.HeadSHA)
+	if err != nil || len(bySHA.Checks) != 4 {
+		t.Fatalf("SHA check list collapsed duplicate job names: %#v %v", bySHA, err)
+	}
+
+	backend.jobs = append(backend.jobs, cibackend.Job{Key: "2991:3", Run: "2991", Name: "notify-feishu-on-failure", HeadSHA: pr.HeadSHA, Status: "completed", Conclusion: "failure"})
+	if _, err = s.ReadCIChecks(ctx, pr); !errors.Is(err, cibackend.ErrInvalid) {
+		t.Fatal("same workflow and job name accepted", err)
+	}
+}
