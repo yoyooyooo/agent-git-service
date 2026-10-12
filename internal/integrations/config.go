@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ngaut/agent-git-service/internal/cibackend"
@@ -20,6 +21,7 @@ import (
 )
 
 var targetInstancePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,63}$`)
+var gitHubAppIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
 
 const maxTypedOutboundDispatchTimeout = 2 * time.Minute
 
@@ -38,16 +40,19 @@ type Config struct {
 	PrincipalSessions sessionauthority.Config `yaml:"-"`
 	// PrincipalSessionsLegacy is parsed only so LoadFile can fail closed when a
 	// residual principal_sessions permission projection is still present.
-	PrincipalSessionsLegacy sessionauthority.Config     `yaml:"principal_sessions"`
-	Forgejo                 ForgejoConfig               `yaml:"forgejo"`
-	GitLab                  GitLabConfig                `yaml:"gitlab"`
-	GitHub                  GitHubConfig                `yaml:"github"`
-	Multica                 MulticaConfig               `yaml:"multica"`
-	ExecutionContext        executioncontext.Config     `yaml:"execution_context"`
-	Outbound                OutboundConfig              `yaml:"outbound"`
-	Notifications           NotificationsConfig         `yaml:"notifications"`
-	ProjectionWatch         ProjectionWatchConfig       `yaml:"projection_watch"`
-	Repositories            map[string]RepositoryConfig `yaml:"repositories"`
+	PrincipalSessionsLegacy sessionauthority.Config `yaml:"principal_sessions"`
+	Forgejo                 ForgejoConfig           `yaml:"forgejo"`
+	GitLab                  GitLabConfig            `yaml:"gitlab"`
+	GitHub                  GitHubConfig            `yaml:"github"`
+	// GitHubApp is the disabled-by-default GitHub App credential surface.
+	// It is separate from GitHub, which remains the PAT-backed projection.
+	GitHubApp        GitHubAppConfig             `yaml:"github_app"`
+	Multica          MulticaConfig               `yaml:"multica"`
+	ExecutionContext executioncontext.Config     `yaml:"execution_context"`
+	Outbound         OutboundConfig              `yaml:"outbound"`
+	Notifications    NotificationsConfig         `yaml:"notifications"`
+	ProjectionWatch  ProjectionWatchConfig       `yaml:"projection_watch"`
+	Repositories     map[string]RepositoryConfig `yaml:"repositories"`
 }
 
 // RepositoryConfig is per-repo host policy that is not Forgejo/GitLab mapping.
@@ -176,6 +181,27 @@ type GitHubRepoConfig struct {
 	RemoteURL    string `yaml:"remote_url"`
 	TargetBranch string `yaml:"target_branch"`
 	Enabled      *bool  `yaml:"enabled"`
+}
+
+// DefaultGitHubAppWebhookPath is the only webhook path the dedicated receiver registers.
+const DefaultGitHubAppWebhookPath = "/api/ext/v1/integrations/github/events"
+
+// DefaultGitHubAppAPIBaseURL is the GitHub API used when github_app.api_base_url is empty.
+const DefaultGitHubAppAPIBaseURL = "https://api.github.com"
+
+// GitHubAppConfig is the file-backed GitHub App surface. Secrets stay in
+// owner-only files; inline material is rejected and never loaded.
+type GitHubAppConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	AppIDFile         string `yaml:"app_id_file"`
+	PrivateKeyFile    string `yaml:"private_key_file"`
+	WebhookSecretFile string `yaml:"webhook_secret_file"`
+	APIBaseURL        string `yaml:"api_base_url"`
+	WebhookPath       string `yaml:"webhook_path"`
+	// AppID and WebhookSecret are filled only from the owner-only files when
+	// Enabled is true. Private key bytes are not retained by this config.
+	AppID         string `yaml:"-"`
+	WebhookSecret string `yaml:"-"`
 }
 
 type MulticaConfig struct {
@@ -663,7 +689,70 @@ func LoadFile(path string) (Config, error) {
 	cfg.TeamAuthority = principalSessions.Config()
 	cfg.PrincipalSessions = cfg.TeamAuthority
 	cfg.PrincipalSessionsLegacy = sessionauthority.Config{}
+	if err := validateGitHubApp(&cfg.GitHubApp, data); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+// validateGitHubApp rejects inline secret material always. File mode, owner,
+// and symlink checks run only when the app is enabled, so a disabled block
+// does not touch secret files or change running readiness.
+func validateGitHubApp(cfg *GitHubAppConfig, document []byte) error {
+	var surface struct {
+		GitHubApp map[string]yaml.Node `yaml:"github_app"`
+	}
+	if err := yaml.Unmarshal(document, &surface); err != nil {
+		return fmt.Errorf("decode github_app config: %w", err)
+	}
+	for _, key := range []string{
+		"app_id", "private_key", "webhook_secret", "client_secret", "client_id", "pem",
+	} {
+		if _, present := surface.GitHubApp[key]; present {
+			return fmt.Errorf("github_app.%s inline material is rejected; use the owner-only file", key)
+		}
+	}
+	cfg.AppIDFile = strings.TrimSpace(cfg.AppIDFile)
+	cfg.PrivateKeyFile = strings.TrimSpace(cfg.PrivateKeyFile)
+	cfg.WebhookSecretFile = strings.TrimSpace(cfg.WebhookSecretFile)
+	cfg.APIBaseURL = strings.TrimSpace(cfg.APIBaseURL)
+	cfg.WebhookPath = strings.TrimSpace(cfg.WebhookPath)
+	if cfg.APIBaseURL == "" {
+		cfg.APIBaseURL = DefaultGitHubAppAPIBaseURL
+	}
+	if cfg.WebhookPath == "" {
+		cfg.WebhookPath = DefaultGitHubAppWebhookPath
+	}
+	if !cfg.Enabled {
+		return nil
+	}
+	if cfg.AppIDFile == "" || cfg.PrivateKeyFile == "" || cfg.WebhookSecretFile == "" {
+		return fmt.Errorf("github_app.enabled requires app_id_file, private_key_file, and webhook_secret_file")
+	}
+	appID, err := readGitHubAppSecretFile(cfg.AppIDFile)
+	if err != nil {
+		return fmt.Errorf("read github_app.app_id_file: %w", err)
+	}
+	if !gitHubAppIDPattern.MatchString(appID) {
+		return fmt.Errorf("github_app.app_id_file must contain a numeric GitHub App ID")
+	}
+	privateKey, err := readGitHubAppSecretFile(cfg.PrivateKeyFile)
+	if err != nil {
+		return fmt.Errorf("read github_app.private_key_file: %w", err)
+	}
+	if privateKey == "" {
+		return fmt.Errorf("github_app.private_key_file is empty")
+	}
+	webhookSecret, err := readGitHubAppSecretFile(cfg.WebhookSecretFile)
+	if err != nil {
+		return fmt.Errorf("read github_app.webhook_secret_file: %w", err)
+	}
+	if webhookSecret == "" {
+		return fmt.Errorf("github_app.webhook_secret_file is empty")
+	}
+	cfg.AppID = appID
+	cfg.WebhookSecret = webhookSecret
+	return nil
 }
 
 func sessionAuthorityConfigEmpty(input sessionauthority.Config) bool {
@@ -694,6 +783,49 @@ func parseOptionalDuration(field, raw string) (time.Duration, error) {
 
 func readTrimmedSecretFile(path string) (string, error) {
 	data, err := os.ReadFile(strings.TrimSpace(path))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// readGitHubAppSecretFile requires a local regular file owned by the
+// process user with mode 0600. Symlinks are rejected before open.
+func readGitHubAppSecretFile(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("secret file path is empty")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("secret file must be a regular file and symlinks are not allowed")
+	}
+	if info.Mode().Perm() != 0o600 {
+		return "", fmt.Errorf("secret file must have mode 0600")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("secret file owner is unavailable")
+	}
+	if int(stat.Uid) != os.Getuid() {
+		return "", fmt.Errorf("secret file must be owned by the process user")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm() != 0o600 {
+		return "", fmt.Errorf("secret file changed or is not a mode 0600 regular file")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, 1<<20))
 	if err != nil {
 		return "", err
 	}
