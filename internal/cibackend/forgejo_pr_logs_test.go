@@ -21,6 +21,11 @@ func TestForgejoPRLogsCarryTheExactProviderSourceBranch(t *testing.T) {
 					run["prettyref"] = "#42"
 					run["event"] = event
 					_ = json.NewEncoder(w).Encode(run)
+				case "/api/v1/repos/ci/project/actions/runs":
+					run := forgejoFixtureRun()
+					run["prettyref"] = "#42"
+					run["event"] = event
+					_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "workflow_runs": []any{run}})
 				case "/api/v1/repos/ci/project/actions/tasks":
 					_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "workflow_runs": []any{map[string]any{"id": 41, "run_number": 9, "workflow_id": "ci.yml", "name": "test", "head_sha": head, "status": "success", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:01:00Z"}}})
 				case "/api/v1/repos/ci/project/pulls/42":

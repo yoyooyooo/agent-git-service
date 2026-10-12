@@ -72,15 +72,26 @@ For `gh run list` name lookup, an explicitly labelled catalogue of already
 observed workflow identities is available, with state `unknown`; this is not a
 list of enabled workflows.
 
-Forgejo jobs are selected by exact run number, workflow and head from its bounded
-ActionTask inventory. The default work budget is 100 pages of 50 tasks, with an
-explicit `task_page_limit` (1–1000) and an independent request deadline. The total
-count must stay stable, page IDs must not overlap, and the unique observed count
-must match the reported total. If completeness cannot be established within the
-budget, the response is unavailable, never an empty/successful job set. An operator
-can tune observation work without changing resource identity; very large/high-churn
-repositories still benefit from a future run-specific API or typed indexed bridge.
-Older jobs are not silently dropped to meet the budget.
+Forgejo runs are selected with the public `head_sha` filter. Forgejo jobs are then
+selected by exact repository run number, workflow and head. The public task list
+ignores `head_sha` and `run_number`, so the adapter reads that list from the newest
+task. Forgejo 12 returns it `id DESC`, and repository run numbers increase with
+those IDs, including retries of one run. After this run's tasks have been seen, the
+scan stops at the first full page whose maximum run number is smaller. It does not
+stop merely because the first page contained a match: a retry can place another
+task of the same run on the next page.
+
+The default work budget is 100 pages of 50 tasks, with an explicit
+`task_page_limit` (1–1000) and an independent request deadline. While pages are
+read, the total count must stay stable and page IDs must not overlap. Reaching the
+end of the list still requires the unique observed count to match the reported
+total. Stopping early because a lower run number was passed does not require
+reading the older remainder, and does not report those older tasks as this run's
+jobs. If neither the lower run number nor the end of the list is reached within
+the budget, the response is unavailable, never an empty/successful job set. An
+operator can tune observation work without changing resource identity. A repository
+whose newest runs have more than the budget of newer tasks still needs a
+run-specific task API or typed indexed bridge.
 
 ## Logs
 

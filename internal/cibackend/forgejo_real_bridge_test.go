@@ -63,6 +63,10 @@ func TestForgejoSyncJobAndRunLogsThroughRealBridge(t *testing.T) {
 			run := forgejoFixtureRun()
 			run["prettyref"], run["event"], run["status"] = "#42", "pull_request", "failure"
 			_ = json.NewEncoder(w).Encode(run)
+		case "/api/v1/repos/ci/project/actions/runs":
+			run := forgejoFixtureRun()
+			run["prettyref"], run["event"], run["status"] = "#42", "pull_request", "failure"
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "workflow_runs": []any{run}})
 		case "/api/v1/repos/ci/project/actions/tasks":
 			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "workflow_runs": []any{map[string]any{
 				"id": 41, "run_number": 9, "workflow_id": "ci.yml", "name": "test", "head_sha": head, "status": "failure",
