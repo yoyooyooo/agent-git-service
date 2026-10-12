@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/ngaut/agent-git-service/internal/db"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 const (
@@ -93,19 +95,27 @@ func (s *Service) enqueueProjectionDriftOutboundIntents(ctx context.Context, not
 		// The notice key must follow the rendered fact, or a changed SHA/type/summary
 		// collides with the delivered row and aborts the whole reconciliation.
 		fact := projectionDriftNoticeFact(text)
+		targetName := strings.TrimSpace(target.Name)
 		intent := OutboundDeliveryIntent{
 			EventType:      OutboundEventProjectionDrift,
-			TargetName:     strings.TrimSpace(target.Name),
+			TargetName:     targetName,
 			TargetType:     strings.TrimSpace(strings.ToLower(target.Type)),
 			SubjectType:    "projection_ref",
 			SubjectKey:     fmt.Sprintf("%s:%s:%s:g%d:%s", provider, strings.TrimSpace(note.RepoFullName), state, generation, refKey),
-			IdempotencyKey: fmt.Sprintf("%s:%s:%s:%s:%s:g%d:%s:%s", OutboundEventProjectionDrift, provider, state, strings.TrimSpace(note.RepoFullName), refKey, generation, fact, strings.TrimSpace(target.Name)),
+			IdempotencyKey: fmt.Sprintf("%s:%s:%s:%s:%s:g%d:%s:%s", OutboundEventProjectionDrift, provider, state, strings.TrimSpace(note.RepoFullName), refKey, generation, fact, targetName),
 			PayloadVersion: "projection_drift_text_v2",
 			PayloadJSON:    outboundTextPayloadJSON(text, false),
 			RepoFullName:   strings.TrimSpace(note.RepoFullName),
 		}
 		if intent.TargetName == "" || intent.TargetType == "" {
 			return nil, &ProjectionAlertingError{Outcome: ProjectionAlertingOutcomeTargetMissing, Cause: fmt.Errorf("projection_drift outbound target name/type is empty")}
+		}
+		// Rows written before the fact hash used generation+target as the key.
+		// An unchanged payload must keep that delivered row; a changed payload
+		// still gets the fact key so it cannot collide with the old one.
+		if legacy, ok := s.deliveredProjectionDriftNotice(ctx, projectionDriftLegacyIdempotencyKey(provider, state, note.RepoFullName, refKey, generation, targetName), intent); ok {
+			deliveries = append(deliveries, legacy)
+			continue
 		}
 		delivery, _, err := s.EnqueueOutboundDelivery(ctx, intent)
 		if err != nil {
@@ -211,6 +221,31 @@ func renderProjectionDriftOutboundText(note ProjectionDriftNotification, resolve
 func projectionDriftNoticeFact(text string) string {
 	digest := sha256.Sum256([]byte(text))
 	return hex.EncodeToString(digest[:8])
+}
+
+func projectionDriftLegacyIdempotencyKey(provider, state, repo, refKey string, generation uint, targetName string) string {
+	return fmt.Sprintf("%s:%s:%s:%s:%s:g%d:%s", OutboundEventProjectionDrift, provider, state, strings.TrimSpace(repo), refKey, generation, targetName)
+}
+
+// deliveredProjectionDriftNotice reuses a pre-fact-key row only when that row
+// already completed delivery of this exact payload. A different payload, or a
+// row that never finished, falls through so the fact key can be enqueued.
+func (s *Service) deliveredProjectionDriftNotice(ctx context.Context, legacyKey string, intent OutboundDeliveryIntent) (db.OutboundDelivery, bool) {
+	if s == nil || s.DB == nil {
+		return db.OutboundDelivery{}, false
+	}
+	var existing db.OutboundDelivery
+	lookup := s.DBForCtx(ctx).Session(&gorm.Session{Logger: gormlogger.Discard})
+	if err := lookup.Where("idempotency_key = ?", legacyKey).First(&existing).Error; err != nil {
+		return db.OutboundDelivery{}, false
+	}
+	if existing.Status != OutboundDeliveryStatusDelivered {
+		return db.OutboundDelivery{}, false
+	}
+	if existing.EventType != intent.EventType || existing.TargetName != intent.TargetName || existing.TargetType != intent.TargetType || existing.PayloadVersion != intent.PayloadVersion || string(existing.PayloadJSON) != intent.PayloadJSON {
+		return db.OutboundDelivery{}, false
+	}
+	return existing, true
 }
 
 func projectionDriftOutboundTitle(provider string, resolved bool) string {
