@@ -154,7 +154,7 @@ The mapping is small metadata, not a log cache, and is deleted with its reposito
 GraphQL checks select current PR head only and do not reuse a previous successful
 attempt to hide a newer failure. Provider PR branches require a durable exact
 projection with matching origin/repository/head; AGS PR numbers are never guessed
-as provider PR numbers. Duplicate check names, malformed statuses, cross-run jobs,
+as provider PR numbers. The same job name in two workflow files is two checks, identified by workflow file plus job name. A repeated name inside one workflow, malformed statuses, cross-run jobs,
 outages and incomplete pagination are errors, not empty success.
 
 `HEAD /repos/...` preserves GET visibility for stock gh discovery. No-CI PRs still

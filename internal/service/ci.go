@@ -389,10 +389,11 @@ func (s *Service) readCIChecks(ctx context.Context, pr db.PullRequest, matchBran
 			return out, cibackend.ErrUnavailable
 		}
 		if len(jobs.Items) == 0 {
-			if seenChecks[run.Name] {
+			identity := ciCheckIdentity(run.Workflow, run.Name)
+			if seenChecks[identity] {
 				return out, fmt.Errorf("%w: ambiguous CI check names", cibackend.ErrInvalid)
 			}
-			seenChecks[run.Name] = true
+			seenChecks[identity] = true
 			out.Checks = append(out.Checks, CICheck{ID: fmt.Sprint(view.ID), Name: run.Name, Status: run.Status, Conclusion: run.Conclusion, URL: run.URL, Workflow: run.Name, Event: run.Event, Required: required[run.Name], StartedAt: run.StartedAt})
 			delete(pending, run.Name)
 		}
@@ -400,10 +401,11 @@ func (s *Service) readCIChecks(ctx context.Context, pr db.PullRequest, matchBran
 			if j.Run != run.Key || j.HeadSHA != "" && j.HeadSHA != pr.HeadSHA {
 				return out, cibackend.ErrInvalid
 			}
-			if seenChecks[j.Name] {
+			identity := ciCheckIdentity(run.Workflow, j.Name)
+			if seenChecks[identity] {
 				return out, fmt.Errorf("%w: ambiguous CI check names", cibackend.ErrInvalid)
 			}
-			seenChecks[j.Name] = true
+			seenChecks[identity] = true
 			id, e := s.mapCI(ctx, repo, sel, "job", j.Key, j.Run)
 			if e != nil {
 				return out, e
@@ -416,6 +418,14 @@ func (s *Service) readCIChecks(ctx context.Context, pr db.PullRequest, matchBran
 		out.Checks = append(out.Checks, CICheck{ID: "required:" + name, Name: name, Status: "queued", Required: true})
 	}
 	return out, nil
+}
+
+// ciCheckIdentity distinguishes checks that share a job name across workflow
+// files. The same name inside one workflow is still one check and stays ambiguous
+// when two observations disagree. Workflow is the file identity (ci.yml), not the
+// display title, so two files that both define notify-feishu-on-failure are distinct.
+func ciCheckIdentity(workflow, name string) string {
+	return workflow + "\x00" + name
 }
 
 // preferObservedCIRun keeps one run per workflow. A pull_request run is the
