@@ -2,11 +2,14 @@ package githubappmanifest
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -267,4 +270,185 @@ func (e *gatedExchanger) Convert(code string) (Conversion, error) {
 	e.entered <- struct{}{}
 	<-e.release
 	return testConversion(), nil
+}
+
+func writeOriginalCredentials(t *testing.T, flow *Flow) {
+	t.Helper()
+	for _, path := range []string{flow.Paths.AppID, flow.Paths.PrivateKey, flow.Paths.WebhookSecret} {
+		if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func assertOriginalCredentials(t *testing.T, flow *Flow) {
+	t.Helper()
+	for _, path := range []string{flow.Paths.AppID, flow.Paths.PrivateKey, flow.Paths.WebhookSecret} {
+		body, err := os.ReadFile(path)
+		if err != nil || string(body) != "original" {
+			t.Errorf("%s = %q (%v), want the previous credential set", filepath.Base(path), body, err)
+		}
+	}
+}
+
+// TestManifestCommitFailureLeavesPreviousSetIntact reproduces a failure after
+// the first credential file has already been replaced. The previous set must
+// stay readable as a whole, and the retry of the same code must still pass
+// the original state check.
+func TestManifestCommitFailureLeavesPreviousSetIntact(t *testing.T) {
+	flow, exchanger, _ := newFlow(t, time.Date(2026, 10, 12, 6, 0, 0, 0, time.UTC))
+	writeOriginalCredentials(t, flow)
+	state, err := flow.Begin(CallbackPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var renames atomic.Int32
+	flow.rename = func(staged, dest string) error {
+		if renames.Add(1) == 2 {
+			return &os.LinkError{Op: "rename", Old: staged, New: dest, Err: syscall.EIO}
+		}
+		return os.Rename(staged, dest)
+	}
+	_, err = flow.Complete("code-a", state.Value)
+	if !errors.Is(err, syscall.EIO) {
+		t.Fatalf("expected commit EIO, got %v", err)
+	}
+	assertOriginalCredentials(t, flow)
+	for _, path := range []string{flow.Paths.AppID, flow.Paths.PrivateKey, flow.Paths.WebhookSecret} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 || !info.Mode().IsRegular() {
+			t.Fatalf("%s mode %o after failed commit", filepath.Base(path), info.Mode())
+		}
+	}
+	flow.rename = nil
+	if _, err := flow.Complete("code-a", state.Value); err != nil {
+		t.Fatal(err)
+	}
+	if len(exchanger.Calls) != 1 {
+		t.Fatalf("retry exchanged again: %#v", exchanger.Calls)
+	}
+	id, err := os.ReadFile(flow.Paths.AppID)
+	if err != nil || string(id) != "4242\n" {
+		t.Fatalf("app id = %q %v", id, err)
+	}
+}
+
+// TestManifestCachedRetryValidatesState reproduces a retry of a retained
+// conversion. The cached code still has to pass the current state check.
+func TestManifestCachedRetryValidatesState(t *testing.T) {
+	for _, scenario := range []string{"wrong", "expired", "missing-file"} {
+		t.Run(scenario, func(t *testing.T) {
+			now := time.Date(2026, 10, 12, 6, 0, 0, 0, time.UTC)
+			flow, exchanger, _ := newFlow(t, now)
+			writeOriginalCredentials(t, flow)
+			state, err := flow.Begin(CallbackPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			flow.StageFailAfter = 1
+			if _, err := flow.Complete("code-a", state.Value); err == nil {
+				t.Fatal("expected the first write to fail")
+			}
+			flow.StageFailAfter = 0
+			supplied := state.Value
+			switch scenario {
+			case "wrong":
+				supplied = "wrong-nonempty-state"
+			case "expired":
+				flow.Now = func() time.Time { return now.Add(Window + time.Second) }
+			case "missing-file":
+				if err := os.Rename(flow.StatePath, flow.StatePath+".saved"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			registration, err := flow.Complete("code-a", supplied)
+			if err == nil {
+				t.Errorf("cached retry accepted scenario %s (appID=%s exchanges=%d)", scenario, registration.AppID, len(exchanger.Calls))
+			}
+			assertOriginalCredentials(t, flow)
+			if len(exchanger.Calls) != 1 {
+				t.Errorf("unauthorized retry exchanged again: %#v", exchanger.Calls)
+			}
+		})
+	}
+}
+
+// TestManifestSameCodeStateIsSingleUseUnderConcurrency reproduces two
+// completions that share a code and state after the exchange has succeeded.
+// Only one of them may commit the credential set.
+func TestManifestSameCodeStateIsSingleUseUnderConcurrency(t *testing.T) {
+	flow, exchanger, _ := newFlow(t, time.Date(2026, 10, 12, 6, 0, 0, 0, time.UTC))
+	state, err := flow.Begin(CallbackPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var publishes atomic.Int32
+	flow.rename = func(staged, dest string) error {
+		if dest == flow.Paths.AppID && publishes.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return os.Rename(staged, dest)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := flow.Complete("same-code", state.Value)
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		close(release)
+		<-done
+		t.Fatal("first completion did not reach the credential commit")
+	}
+	_, secondErr := flow.Complete("same-code", state.Value)
+	close(release)
+	firstErr := <-done
+	t.Logf("first=%v second=%v publishes=%d exchanges=%d", firstErr, secondErr, publishes.Load(), len(exchanger.Calls))
+	if firstErr == nil && secondErr == nil {
+		t.Fatal("the same code and state both completed")
+	}
+	if len(exchanger.Calls) != 1 {
+		t.Fatalf("exchanges = %#v", exchanger.Calls)
+	}
+}
+
+// TestManifestSameCodeIsSingleUseDuringExchange stalls the first conversion
+// before it returns. The overlapping callback must not exchange or commit.
+func TestManifestSameCodeIsSingleUseDuringExchange(t *testing.T) {
+	flow, _, _ := newFlow(t, time.Date(2026, 10, 12, 6, 0, 0, 0, time.UTC))
+	state, err := flow.Begin(CallbackPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &gatedExchanger{entered: make(chan struct{}, 2)}
+	flow.Exchanger = gate
+	done := make(chan error, 1)
+	go func() {
+		_, err := flow.Complete("same-code", state.Value)
+		done <- err
+	}()
+	select {
+	case <-gate.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first exchange did not start")
+	}
+	_, secondErr := flow.Complete("same-code", state.Value)
+	if secondErr == nil || !strings.Contains(secondErr.Error(), "already in use") {
+		t.Fatalf("overlapping exchange was accepted: %v", secondErr)
+	}
+	close(gate.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	id, err := os.ReadFile(flow.Paths.AppID)
+	if err != nil || string(id) != "4242\n" {
+		t.Fatalf("app id = %q %v", id, err)
+	}
 }
