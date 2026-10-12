@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -90,7 +91,17 @@ type Flow struct {
 	Now       func() time.Time
 	OwnerUID  int
 	Log       *slog.Logger
+	// StageFailAfter is how many credential files may be staged before the next
+	// one fails. Zero means no injected failure. Tests use it to prove a partial
+	// set is not committed.
+	StageFailAfter int
+
+	mu        sync.Mutex
 	usedCodes map[string]struct{}
+	// retained keeps a conversion whose files were not committed, keyed by
+	// code, so the one-time exchange can be written again without calling
+	// GitHub a second time.
+	retained map[string]Conversion
 }
 
 // Begin writes a new 0600 state file. An existing state is not reused.
@@ -121,33 +132,26 @@ func (f *Flow) Begin(redirectURL string) (State, error) {
 
 // Complete checks state and the one-hour window, exchanges the code once, and
 // writes the three credential files. The code is not logged.
+//
+// The state is claimed before the exchange, so two callbacks cannot both pass
+// the same state. A failed exchange releases the claim. A successful exchange
+// is kept in memory when the credential set cannot be committed, and the same
+// code retries the write without a second conversion. The three files are
+// staged and renamed only after every stage exists, so a failure leaves the
+// previous set unchanged.
 func (f *Flow) Complete(code, state string) (Registration, error) {
 	code = strings.TrimSpace(code)
 	state = strings.TrimSpace(state)
 	if code == "" || state == "" {
 		return Registration{}, fmt.Errorf("manifest code and state are required")
 	}
-	if f.usedCodes == nil {
-		f.usedCodes = map[string]struct{}{}
-	}
-	if _, used := f.usedCodes[code]; used {
-		return Registration{}, fmt.Errorf("manifest code was already used")
-	}
-	loaded, err := f.loadState()
+	conversion, release, err := f.claim(code, state)
 	if err != nil {
 		return Registration{}, err
 	}
-	if loaded.Value != state {
-		return Registration{}, fmt.Errorf("manifest state does not match")
+	if release != nil {
+		defer release()
 	}
-	if f.now().After(loaded.ExpiresAt) {
-		return Registration{}, fmt.Errorf("manifest registration window expired")
-	}
-	conversion, err := f.Exchanger.Convert(code)
-	if err != nil {
-		return Registration{}, err
-	}
-	f.usedCodes[code] = struct{}{}
 	registration, err := f.persist(conversion)
 	f.wipe(&conversion)
 	if err != nil {
@@ -156,8 +160,86 @@ func (f *Flow) Complete(code, state string) (Registration, error) {
 	if err := os.Remove(f.StatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return Registration{}, fmt.Errorf("remove manifest state: %w", err)
 	}
+	f.finish(code)
+	release = nil
 	f.logCompleted(registration)
 	return registration, nil
+}
+
+// claim reserves the state before any exchange. release is non-nil only when
+// the caller must undo that reservation because nothing was committed.
+// The lock is not held across Convert.
+func (f *Flow) claim(code, state string) (Conversion, func(), error) {
+	retained, err := f.reserve(code, state)
+	if err != nil || retained != nil {
+		if retained == nil {
+			return Conversion{}, nil, err
+		}
+		return *retained, nil, nil
+	}
+	conversion, err := f.Exchanger.Convert(code)
+	if err != nil {
+		f.release(state)
+		return Conversion{}, nil, err
+	}
+	f.remember(code, conversion)
+	return conversion, func() { f.release(state) }, nil
+}
+
+// reserve returns a retained conversion for a retry, or nil when this call
+// owns a fresh state reservation and must exchange.
+func (f *Flow) reserve(code, state string) (*Conversion, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.usedCodes == nil {
+		f.usedCodes = map[string]struct{}{}
+	}
+	if _, used := f.usedCodes[code]; used {
+		return nil, fmt.Errorf("manifest code was already used")
+	}
+	if retained, ok := f.retained[code]; ok {
+		return &retained, nil
+	}
+	loaded, err := f.loadState()
+	if err != nil {
+		return nil, err
+	}
+	if loaded.Value != state {
+		return nil, fmt.Errorf("manifest state does not match")
+	}
+	if f.now().After(loaded.ExpiresAt) {
+		return nil, fmt.Errorf("manifest registration window expired")
+	}
+	if _, claimed := f.usedCodes[state]; claimed {
+		return nil, fmt.Errorf("manifest state is already in use")
+	}
+	f.usedCodes[state] = struct{}{}
+	return nil, nil
+}
+
+func (f *Flow) remember(code string, conversion Conversion) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.retained == nil {
+		f.retained = map[string]Conversion{}
+	}
+	f.retained[code] = conversion
+}
+
+func (f *Flow) release(state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.usedCodes, state)
+}
+
+func (f *Flow) finish(code string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.usedCodes == nil {
+		f.usedCodes = map[string]struct{}{}
+	}
+	f.usedCodes[code] = struct{}{}
+	delete(f.retained, code)
 }
 
 func (f *Flow) persist(conversion Conversion) (Registration, error) {
@@ -173,14 +255,34 @@ func (f *Flow) persist(conversion Conversion) (Registration, error) {
 		{f.Paths.PrivateKey, []byte(conversion.PEM)},
 		{f.Paths.WebhookSecret, []byte(conversion.WebhookSecret + "\n")},
 	}
-	for _, file := range files {
-		if err := writeNewFile(file.path, file.body, f.ownerUID()); err != nil {
+	staged := make([]string, 0, len(files))
+	cleanup := true
+	defer func() {
+		if cleanup {
+			for _, path := range staged {
+				_ = os.Remove(path)
+			}
+		}
+	}()
+	for i, file := range files {
+		if f.StageFailAfter > 0 && i >= f.StageFailAfter {
+			return Registration{}, fmt.Errorf("injected credential staging failure")
+		}
+		tmp, err := stageCredential(file.path, file.body, f.ownerUID())
+		if err != nil {
 			return Registration{}, err
+		}
+		staged = append(staged, tmp)
+	}
+	for i, file := range files {
+		if err := os.Rename(staged[i], file.path); err != nil {
+			return Registration{}, fmt.Errorf("commit credential file %s: %w", filepath.Base(file.path), err)
 		}
 		if err := confirmFile(file.path, f.ownerUID()); err != nil {
 			return Registration{}, err
 		}
 	}
+	cleanup = false
 	return Registration{
 		AppID:       appID,
 		Slug:        conversion.Slug,
@@ -291,47 +393,65 @@ func (e HTTPExchanger) Convert(code string) (Conversion, error) {
 }
 
 func writeNewFile(path string, body []byte, uid int) error {
+	tmpName, err := stageCredential(path, body, uid)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
+// stageCredential writes one new 0600 file next to path and returns its name.
+// The name is random, so a leftover temp file cannot block the next attempt.
+// The caller renames it onto the destination or removes it.
+func stageCredential(path string, body []byte, uid int) (string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return fmt.Errorf("credential path is empty")
+		return "", fmt.Errorf("credential path is empty")
 	}
 	dir := filepath.Dir(path)
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
-		return fmt.Errorf("credential directory is not ready")
+		return "", fmt.Errorf("credential directory is not ready")
 	}
-	tmp, err := os.OpenFile(filepath.Join(dir, "."+filepath.Base(path)+".tmp"), os.O_RDWR|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, stateFileMode)
+	var nonce [8]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	tmpName := filepath.Join(dir, "."+filepath.Base(path)+"."+hex.EncodeToString(nonce[:])+".tmp")
+	tmp, err := os.OpenFile(tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, stateFileMode)
 	if err != nil {
-		return fmt.Errorf("create credential temp file: %w", err)
+		return "", fmt.Errorf("create credential temp file: %w", err)
 	}
-	tmpName := tmp.Name()
-	committed := false
+	closed := false
+	ok := false
 	defer func() {
-		if !committed {
+		if !closed {
+			_ = tmp.Close()
+		}
+		if !ok {
 			_ = os.Remove(tmpName)
 		}
 	}()
 	if _, err := tmp.Write(body); err != nil {
-		_ = tmp.Close()
-		return err
+		return "", err
 	}
 	if err := tmp.Chmod(stateFileMode); err != nil {
-		_ = tmp.Close()
-		return err
+		return "", err
 	}
 	if uid > 0 {
 		if err := tmp.Chown(uid, -1); err != nil && !errors.Is(err, syscall.EPERM) {
-			_ = tmp.Close()
-			return err
+			return "", err
 		}
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return "", err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+	closed = true
+	ok = true
+	return tmpName, nil
 }
 
 func confirmFile(path string, uid int) error {
