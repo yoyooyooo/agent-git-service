@@ -560,7 +560,7 @@ ags-api POST /api/v3/repos/example-team/project-one/projection/forgejo/pulls/2/r
 
 A terminal generic Forgejo projection (`phase=failed_terminal`) is not silent. The failure is recorded as active projection drift and, when the job already has a Forgejo pull request number, AGS adds `ags/status-projection-drift` on that pull request. `next_repair_action` is `call_projection_authority_repair_after_drift_inspection`.
 
-The repair entry for that terminal state is explicit. It does not accept a normal retry. The caller confirms the current full AGS head SHA, and only a terminal generic job whose error is `non_fast_forward_blocked` or `sha_drift` is requeued:
+The repair entry for that terminal state is explicit. It does not accept a normal retry. The caller confirms the current full AGS head SHA, and only a terminal generic job whose error is `non_fast_forward_blocked` or `sha_drift` is requeued. That one attempt tags the Forgejo ref it observes as `ags-projection-backup/<branch>/<observed-sha>`, then lease-pushes the confirmed AGS head over that observed value. The marker is cleared before the push, so a later ordinary projection does not overwrite a diverged ref:
 
 ```text
 POST /api/v3/repos/{owner}/{repo}/projection/forgejo/pulls/{ags_pr_number}/repair

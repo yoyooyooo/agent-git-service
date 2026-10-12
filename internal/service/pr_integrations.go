@@ -28,9 +28,10 @@ type PullRequestIntegrationPolicy struct {
 // Forgejo PR identity and old head used for one lease-protected rebase
 // projection. Callers must obtain these values before mutating the AGS head.
 type ForgejoPullRequestRewritePolicy struct {
-	ExternalRepo       string
-	ExternalNumber     int
-	ExpectedOldHeadSHA string
+	ExternalRepo              string
+	ExternalNumber            int
+	ExpectedOldHeadSHA        string
+	BackupDivergedObservedRef bool
 }
 
 // PullRequestProviderResult is one provider's structured dispatch outcome.
@@ -285,7 +286,8 @@ func (s *Service) ensureForgejoPullRequestExternalWithPolicyAndAuthority(ctx con
 	if rewrite != nil {
 		request.RewriteLease = &forgejointegration.PullRequestRewriteLease{
 			ExternalRepo: rewrite.ExternalRepo, ExternalNumber: rewrite.ExternalNumber,
-			ExpectedOldHeadSHA: rewrite.ExpectedOldHeadSHA,
+			ExpectedOldHeadSHA:        rewrite.ExpectedOldHeadSHA,
+			BackupDivergedObservedRef: rewrite.BackupDivergedObservedRef,
 		}
 	}
 	res, err := s.ForgejoIntegration.EnsurePullRequest(ctx, request)
