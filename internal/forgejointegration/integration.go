@@ -921,6 +921,9 @@ func (i *Integration) rewritePullRequestHeadWithLease(ctx context.Context, in Pu
 		}
 		tag := projectionBackupTag(in.Head, observed)
 		if !exactGitSHA(observed, newSHA) {
+			if err := runBeforeProviderWrite(ctx, in.BeforeWrite); err != nil {
+				return PullRequestResult{}, err
+			}
 			if err := i.backupTag(ctx, in.RepoPath, remoteURL, tag, observed); err != nil {
 				return PullRequestResult{}, fmt.Errorf("forgejo integration: backup tag %s before authority repair: %w", tag, err)
 			}
