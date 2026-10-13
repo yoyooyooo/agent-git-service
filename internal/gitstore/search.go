@@ -300,6 +300,7 @@ func (s *Store) GetCommit(ctx context.Context, fullName, sha string) (*SearchCom
 	}
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "show", "-s",
 		"--format=%H|%an|%ae|%aI|%s|%P|%T", sha)
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if commitLookupNotFound(string(out)) {

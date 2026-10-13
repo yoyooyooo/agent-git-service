@@ -161,6 +161,10 @@ func (d *Deps) GetCommit(w http.ResponseWriter, r *http.Request) {
 		// Get commit details to find parent SHA
 		commit, err := d.Svc.Git.GetCommit(r.Context(), full, sha)
 		if err != nil {
+			if errors.Is(err, gitstore.ErrCommitNotFound) {
+				respond.NotFound(w)
+				return
+			}
 			respond.ServiceErrorRequest(r, w, err)
 			return
 		}
@@ -185,13 +189,15 @@ func (d *Deps) GetCommit(w http.ResponseWriter, r *http.Request) {
 	// Normal JSON response with CommitDetails
 	details, err := d.Svc.Git.CommitDetails(r.Context(), full, sha)
 	if err != nil {
-		commit := transform.Commit(full, sha)
-		commit["files"] = []any{}
-		respond.JSON(w, 200, commit)
+		if errors.Is(err, gitstore.ErrCommitNotFound) {
+			respond.NotFound(w)
+			return
+		}
+		respond.ServiceErrorRequest(r, w, err)
 		return
 	}
 
-	commit := transform.Commit(full, sha, transform.CommitMeta{
+	commit := transform.Commit(full, details.Commit.SHA, transform.CommitMeta{
 		Message:    details.Commit.Message,
 		AuthorName: details.Commit.Author,
 		Email:      details.Commit.Email,
