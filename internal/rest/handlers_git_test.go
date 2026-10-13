@@ -18,6 +18,7 @@ import (
 	"golang.org/x/crypto/openpgp/armor"
 
 	"github.com/ngaut/agent-git-service/internal/db"
+	"github.com/ngaut/agent-git-service/internal/gitstore"
 	"github.com/ngaut/agent-git-service/internal/service"
 	"github.com/ngaut/agent-git-service/internal/testharness"
 )
@@ -1873,6 +1874,90 @@ func TestGitHandlers(t *testing.T) {
 		body := testharness.DecodeJSON(t, w)
 		if body["sha"] != commitSHA {
 			t.Errorf("sha: got %v, want %q", body["sha"], commitSHA)
+		}
+	})
+
+	t.Run("GetCommitMissingSHAReturnsNotFound", func(t *testing.T) {
+		h := testharness.New(t)
+		_ = createGitRepo(t, h, "git-commit-missing", "main", true)
+
+		for _, accept := range []string{"application/vnd.github+json", "application/vnd.github.diff", "application/vnd.github.v3.diff"} {
+			t.Run(accept, func(t *testing.T) {
+				for _, ref := range []string{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "does-not-exist"} {
+					req := httptest.NewRequest("GET", "/api/v3/repos/testuser/git-commit-missing/commits/"+ref, nil)
+					req.Header.Set("Authorization", "token "+h.Token)
+					req.Header.Set("Accept", accept)
+					w := httptest.NewRecorder()
+					h.Mux.ServeHTTP(w, req)
+					assertStatusCode(t, w, 404)
+
+					body := testharness.DecodeJSON(t, w)
+					if body["message"] != "Not Found" || body["sha"] != nil {
+						t.Errorf("missing commit %s: got %+v, want Not Found without a synthetic SHA", ref, body)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("GetCommitBackendFailureReturnsServerError", func(t *testing.T) {
+		h := testharness.New(t)
+		fullName := createGitRepo(t, h, "git-commit-backend-failure", "main", true)
+		unavailable, err := gitstore.New(t.TempDir())
+		if err != nil {
+			t.Fatalf("create unavailable git store: %v", err)
+		}
+		h.Svc.Git = unavailable
+		for _, accept := range []string{"application/vnd.github+json", "application/vnd.github.diff"} {
+			req := httptest.NewRequest("GET", "/api/v3/repos/"+fullName+"/commits/main", nil)
+			req.Header.Set("Authorization", "token "+h.Token)
+			req.Header.Set("Accept", accept)
+			w := httptest.NewRecorder()
+			h.Mux.ServeHTTP(w, req)
+			assertStatusCode(t, w, 500)
+		}
+	})
+
+	t.Run("GetCommitBranchRefReturnsResolvedCommit", func(t *testing.T) {
+		h := testharness.New(t)
+		ctx := context.Background()
+		fullName := createGitRepo(t, h, "git-commit-branch", "main", true)
+
+		commits, err := h.Svc.Git.ListCommits(ctx, fullName, 1, nil)
+		if err != nil {
+			t.Fatalf("list commits: %v", err)
+		}
+		if len(commits) == 0 {
+			t.Fatal("no commits found")
+		}
+
+		w := h.DoREST(t, "GET", "/api/v3/repos/testuser/git-commit-branch/commits/main", nil)
+		assertStatusCode(t, w, 200)
+		body := testharness.DecodeJSON(t, w)
+		if body["sha"] != commits[0].SHA {
+			t.Errorf("sha: got %v, want %q", body["sha"], commits[0].SHA)
+		}
+	})
+
+	t.Run("GetCommitShortSHAReturnsResolvedCommit", func(t *testing.T) {
+		h := testharness.New(t)
+		ctx := context.Background()
+		fullName := createGitRepo(t, h, "git-commit-short", "main", true)
+
+		commits, err := h.Svc.Git.ListCommits(ctx, fullName, 1, nil)
+		if err != nil {
+			t.Fatalf("list commits: %v", err)
+		}
+		if len(commits) == 0 || len(commits[0].SHA) < 7 {
+			t.Fatalf("commit SHA unavailable: %+v", commits)
+		}
+		shortSHA := commits[0].SHA[:7]
+
+		w := h.DoREST(t, "GET", "/api/v3/repos/testuser/git-commit-short/commits/"+shortSHA, nil)
+		assertStatusCode(t, w, 200)
+		body := testharness.DecodeJSON(t, w)
+		if body["sha"] != commits[0].SHA {
+			t.Errorf("sha: got %v, want %q", body["sha"], commits[0].SHA)
 		}
 	})
 

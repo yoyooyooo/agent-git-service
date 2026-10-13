@@ -2,6 +2,7 @@ package gitstore_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -112,6 +113,26 @@ func TestStore_SearchCommits(t *testing.T) {
 		}
 		// Should not error, may return 0 or more results depending on git behavior
 		t.Logf("Special char query returned %d results", len(results))
+	})
+
+	t.Run("missing commit is distinct from backend failure", func(t *testing.T) {
+		t.Setenv("LC_ALL", "zh_CN.UTF-8")
+		for _, ref := range []string{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "does-not-exist"} {
+			_, err := store.CommitDetails(ctx, repoName, ref)
+			if !errors.Is(err, gitstore.ErrCommitNotFound) {
+				t.Fatalf("CommitDetails(%s) error = %v, want ErrCommitNotFound", ref, err)
+			}
+
+			_, err = store.GetCommit(ctx, repoName, ref)
+			if !errors.Is(err, gitstore.ErrCommitNotFound) {
+				t.Fatalf("GetCommit(%s) error = %v, want ErrCommitNotFound", ref, err)
+			}
+		}
+
+		_, err := store.CommitDetails(ctx, "nonexistent/repo", "main")
+		if err == nil || errors.Is(err, gitstore.ErrCommitNotFound) {
+			t.Fatalf("missing backend error = %v, want a distinct backend failure", err)
+		}
 	})
 
 	t.Run("nonexistent repo returns error", func(t *testing.T) {

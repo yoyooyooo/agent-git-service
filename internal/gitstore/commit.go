@@ -3,6 +3,7 @@ package gitstore
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -62,13 +63,17 @@ func (s *Store) CommitForPathAtRef(ctx context.Context, fullName, ref, path stri
 
 func commitInfo(ctx context.Context, dir, sha string) (SearchCommitInfo, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "log", "-1", "--format=%H|%an|%ae|%aI|%s|%P", sha)
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return SearchCommitInfo{}, fmt.Errorf("git log failed: %v\n%s", err, out)
+		if ctx.Err() == nil && commitLookupNotFound(string(out)) {
+			return SearchCommitInfo{}, fmt.Errorf("%w: %s", ErrCommitNotFound, sha)
+		}
+		return SearchCommitInfo{}, fmt.Errorf("git log failed: %w\n%s", err, out)
 	}
 	line := strings.TrimSpace(string(out))
 	if line == "" {
-		return SearchCommitInfo{}, fmt.Errorf("git log returned empty output")
+		return SearchCommitInfo{}, fmt.Errorf("%w: %s", ErrCommitNotFound, sha)
 	}
 	commit, ok := parseCommitLogLine(line)
 	if !ok {
