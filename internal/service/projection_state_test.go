@@ -1646,7 +1646,7 @@ func TestRepairForgejoProjectionAuthorityRequiresConfirmedCurrentHead(t *testing
 	if err := svc.DB.First(&repaired, job.ID).Error; err != nil {
 		t.Fatalf("reload repaired: %v", err)
 	}
-	if repaired.Phase != ForgejoProjectionPhaseQueued || repaired.Attempt != 5 || repaired.HeadSHA != head || repaired.LastErrorType != "" || repaired.CorrelationID != authorityRepairCorrelationID {
+	if repaired.Phase != ForgejoProjectionPhaseQueued || repaired.Attempt != 5 || repaired.HeadSHA != head || repaired.LastErrorType != "" || repaired.CorrelationID != authorityRepairConfirmation(head) {
 		t.Fatalf("job not repaired onto current head: %#v", repaired)
 	}
 	repaired.Phase = ForgejoProjectionPhaseFailedTerminal

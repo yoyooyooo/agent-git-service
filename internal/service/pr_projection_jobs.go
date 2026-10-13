@@ -294,6 +294,8 @@ func (s *Service) EnqueueForgejoPullRequestProjection(ctx context.Context, pr db
 	if (headAdvanced && job.Phase != ForgejoProjectionPhaseFailedTerminal) || admissionHeal {
 		now = time.Now().UTC()
 		updates := map[string]any{
+			"attempt":         gorm.Expr("attempt + 1"),
+			"correlation_id":  "",
 			"phase":           ForgejoProjectionPhaseQueued,
 			"head_sha":        headSHA,
 			"remote_sha":      headSHA,
@@ -411,6 +413,15 @@ func (s *Service) RetryForgejoPullRequestProjection(ctx context.Context, repoFul
 
 const authorityRepairCorrelationID = "authority-repair"
 
+func authorityRepairConfirmation(headSHA string) string {
+	return authorityRepairCorrelationID + ":" + strings.ToLower(strings.TrimSpace(headSHA))
+}
+
+func hasAuthorityRepairConfirmation(job db.PullRequestProjectionJob) bool {
+	headSHA := strings.TrimSpace(job.HeadSHA)
+	return projectionConfirmSHA(headSHA) && job.CorrelationID == authorityRepairConfirmation(headSHA)
+}
+
 // RepairForgejoPullRequestProjectionAuthority requeues a terminal generic
 // Forgejo projection after the operator confirms the current AGS head.
 // The confirm value must be that full head SHA. The worker then projects it.
@@ -468,7 +479,7 @@ func (s *Service) RepairForgejoPullRequestProjectionAuthority(ctx context.Contex
 			"head_sha":        headSHA,
 			"remote_ref":      "refs/heads/" + strings.TrimSpace(pr.HeadRef),
 			"remote_sha":      headSHA,
-			"correlation_id":  authorityRepairCorrelationID,
+			"correlation_id":  authorityRepairConfirmation(headSHA),
 			"last_error_type": "",
 			"last_error":      "",
 			"next_run_at":     &now,
@@ -498,6 +509,7 @@ func (s *Service) retryGenericForgejoProjectionJob(ctx context.Context, job db.P
 	updates["attempt"] = gorm.Expr("attempt + 1")
 	updates["phase"] = ForgejoProjectionPhaseQueued
 	updates["started_at"] = nil
+	updates["correlation_id"] = ""
 	result := s.DBForCtx(ctx).Model(&db.PullRequestProjectionJob{}).
 		Where("id = ? AND `trigger` = ? AND phase = ? AND updated_at = ? AND phase NOT IN ?",
 			job.ID, job.Trigger, job.Phase, job.UpdatedAt, forgejoProjectionTerminalPhases).
@@ -857,7 +869,10 @@ func (s *Service) processForgejoProjectionJobAttempt(ctx context.Context, job db
 	if pr.Repository.FullName == "" {
 		pr.Repository.FullName = repoFullName
 	}
-	authorityRepair := strings.TrimSpace(job.CorrelationID) == authorityRepairCorrelationID
+	authorityRepair := hasAuthorityRepairConfirmation(job)
+	if strings.HasPrefix(job.CorrelationID, authorityRepairCorrelationID) && !authorityRepair {
+		return newFailure(job.RemoteRef, headSHA, fmt.Errorf("authority repair confirmation does not match the job head: %w", ErrInvalidState), false)
+	}
 	return s.withForgejoProjectionLock(forgejoProjectionLockKey(repoFullName, pr.ID, pr.HeadRef), func() *projectionJobFailure {
 		phaseUpdates := map[string]any{
 			"finished_at": nil,
@@ -875,6 +890,9 @@ func (s *Service) processForgejoProjectionJobAttempt(ctx context.Context, job db
 		var handled bool
 		var err error
 		if authorityRepair {
+			if err := s.revalidateGenericProjectionProviderWrite(ctx, job, pr); err != nil {
+				return newFailure(job.RemoteRef, headSHA, err, false)
+			}
 			result, handled, err = s.ensureForgejoPullRequestExternalWithPolicyAndAuthority(ctx, repoFullName, repoPath, headSHA, pr, &ForgejoPullRequestRewritePolicy{
 				ExternalRepo:              strings.TrimSpace(firstNonEmpty(job.ExternalRepo, "")),
 				ExternalNumber:            job.ExternalNumber,
@@ -960,7 +978,22 @@ func (s *Service) revalidateGenericProjectionGeneration(ctx context.Context, job
 }
 
 func (s *Service) revalidateGenericProjectionProviderWrite(ctx context.Context, job db.PullRequestProjectionJob, pr db.PullRequest) error {
-	return s.revalidateGenericProjectionGeneration(ctx, job.ID, ForgejoProjectionPhasePushingRef)
+	if err := s.revalidateGenericProjectionGeneration(ctx, job.ID, ForgejoProjectionPhasePushingRef); err != nil {
+		return err
+	}
+	if hasAuthorityRepairConfirmation(job) {
+		// The durable marker is consumed when this attempt enters pushing_ref.
+		// Its claimed snapshot still binds every repair write to the confirmed
+		// head; advancing the PR without enqueue must also revoke that authority.
+		var current db.PullRequest
+		if err := s.DBForCtx(ctx).Select("id", "head_sha", "state").First(&current, job.PullRequestID).Error; err != nil {
+			return err
+		}
+		if current.State != db.StateOpen || !strings.EqualFold(strings.TrimSpace(current.HeadSHA), strings.TrimSpace(job.HeadSHA)) {
+			return fmt.Errorf("authority repair confirmed head is no longer current: %w", ErrInvalidState)
+		}
+	}
+	return nil
 }
 
 func genericForgejoSessionAdmissionHeal(job db.PullRequestProjectionJob) bool {
@@ -977,6 +1010,7 @@ func (s *Service) requeueGenericForgejoSessionAdmissionJobs(ctx context.Context)
 			ProjectionProviderForgejo, ForgejoProjectionTriggerPullRequest,
 			ForgejoProjectionPhaseFailedTerminal, ProjectionFailureProviderAdmissionDenied).
 		Updates(map[string]any{
+			"correlation_id":  "",
 			"phase":           ForgejoProjectionPhaseQueued,
 			"last_error_type": "",
 			"last_error":      "",
