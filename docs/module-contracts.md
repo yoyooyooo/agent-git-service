@@ -668,7 +668,7 @@ Ownership:
 Rules:
 
 - the code, PEM, webhook secret, client id, and client secret must not enter the structured log; the log keeps App ID, slug, and owner login
-- this segment does not register an App, mount the tailnet callback, or change runtime config
+- opt-in `Registrar` composes a site-admin start/status API, one-time browser callback, and App JWT identity probe; disabled registration mounts no routes. It does not activate projections or installation/webhook delivery. See [owner registration actions](operations/github-app-registration.md).
 
 ### `githubappreceiver`
 

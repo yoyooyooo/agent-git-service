@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/ngaut/agent-git-service/internal/githttp"
+	"github.com/ngaut/agent-git-service/internal/githubappmanifest"
 	"github.com/ngaut/agent-git-service/internal/graphql"
 	srvmiddleware "github.com/ngaut/agent-git-service/internal/middleware"
 	"github.com/ngaut/agent-git-service/internal/oauth"
@@ -59,6 +60,9 @@ func RegisterRoutes(r chi.Router, handlers *rest.Deps, gitHandler *githttp.Handl
 
 	registerOAuthRoutes(r, oauthHandler, authCfg, handlers.LegacyExtensionAliases)
 	registerPublicAuthRoutes(r, handlers, rateLimitMw)
+	if handlers.GitHubAppRegistrar != nil {
+		r.Get(githubappmanifest.CallbackPath, handlers.GitHubAppRegistrar.Callback)
+	}
 	registerAgentPublicRoutes(r, handlers, rateLimitMw)
 	registerExecutionContextIntakeRoutes(r, handlers, rateLimitMw)
 	registerAccessGrantRoutes(r, handlers, rateLimitMw)
@@ -326,6 +330,10 @@ func registerAuthenticatedRoutes(r chi.Router, handlers *rest.Deps, gqlSrv *grap
 		registerOutboundRoutes(r, handlers)
 		registerIntegrationPolicyRoutes(r, handlers)
 		registerAppRoutes(r, handlers)
+		if handlers.GitHubAppRegistrar != nil {
+			r.Post(githubappmanifest.StartPath, handlers.BeginGitHubAppManifest)
+			r.Get(githubappmanifest.StatusPath, handlers.GetRegisteredGitHubApp)
+		}
 		registerEnvByRepoIDRoutes(r, handlers)
 	})
 }
