@@ -54,6 +54,29 @@ func forgejoPullRequestHeadMatches(pr db.PullRequest, providerPR forgejointegrat
 	return strings.EqualFold(head, providerHead)
 }
 
+// A provider may resolve a closed PR's head through its still-live source
+// branch. Reusing that branch cannot change the historical merge decision.
+// Merged PRs are compared by their immutable merge result; an abandoned PR's
+// head is comparable only when the provider exposes its retained pull ref.
+func forgejoPullRequestContentMismatch(pr db.PullRequest, providerPR forgejointegration.PullRequestSnapshot) string {
+	if pr.Merged {
+		if strings.TrimSpace(pr.MergeCommitSHA) == "" || strings.TrimSpace(providerPR.MergeCommitSHA) == "" {
+			return fmt.Sprintf("AGS PR #%d or Forgejo PR #%d is merged without a recorded merge commit", pr.Number, providerPR.Number)
+		}
+		if !equalFoldTrim(pr.MergeCommitSHA, providerPR.MergeCommitSHA) {
+			return fmt.Sprintf("AGS PR #%d merge commit %s differs from Forgejo PR #%d merge commit %s", pr.Number, pr.MergeCommitSHA, providerPR.Number, providerPR.MergeCommitSHA)
+		}
+		return ""
+	}
+	if pr.State == db.StateClosed && providerPR.HeadRef == pr.HeadRef {
+		return ""
+	}
+	if !forgejoPullRequestHeadMatches(pr, providerPR) {
+		return fmt.Sprintf("AGS PR #%d head %s differs from Forgejo PR #%d head %s", pr.Number, pr.HeadSHA, providerPR.Number, providerPR.HeadSHA)
+	}
+	return ""
+}
+
 func equalFoldTrim(a, b string) bool {
 	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
@@ -63,6 +86,9 @@ func equalFoldTrim(a, b string) bool {
 // last_synced_sha to equal both the AGS and provider heads, and ExternalRepo
 // must match the configured Forgejo target.
 func forgejoPullRequestIntegrityMayResolve(pr db.PullRequest, projection db.PullRequestProjection, providerPR forgejointegration.PullRequestSnapshot, configuredExternalRepo string) bool {
+	if !forgejoPullRequestStateMatches(pr, providerPR) || forgejoPullRequestContentMismatch(pr, providerPR) != "" {
+		return false
+	}
 	if forgejoPullRequestCoordinateMismatch(pr, projection, providerPR, configuredExternalRepo) != "" {
 		return false
 	}
@@ -96,10 +122,10 @@ func forgejoPullRequestCoordinateMismatch(pr db.PullRequest, projection db.PullR
 	if strings.TrimSpace(projection.ExternalRepo) != configured {
 		return fmt.Sprintf("projection external_repo %q does not match configured Forgejo target %q", projection.ExternalRepo, configured)
 	}
-	if !equalFoldTrim(projection.SourceBranch, pr.HeadRef) {
+	if strings.TrimSpace(projection.SourceBranch) != strings.TrimSpace(pr.HeadRef) {
 		return fmt.Sprintf("projection source_branch %q does not match AGS head_ref %q", projection.SourceBranch, pr.HeadRef)
 	}
-	if !equalFoldTrim(projection.TargetBranch, pr.BaseRef) {
+	if strings.TrimSpace(projection.TargetBranch) != strings.TrimSpace(pr.BaseRef) {
 		return fmt.Sprintf("projection target_branch %q does not match AGS base_ref %q", projection.TargetBranch, pr.BaseRef)
 	}
 	if providerPR.Number != 0 && providerPR.Number != projection.ExternalNumber {
@@ -108,15 +134,51 @@ func forgejoPullRequestCoordinateMismatch(pr db.PullRequest, projection db.PullR
 	if strings.TrimSpace(providerPR.HeadRef) == "" || strings.TrimSpace(providerPR.BaseRef) == "" {
 		return "provider PR missing head/base ref"
 	}
-	// Closed Forgejo PRs report head as refs/pull/N/head. Integrity then only
-	// compares SHAs; open PRs still require the live branch name.
-	if pr.State == db.StateOpen && !pr.Merged && !equalFoldTrim(providerPR.HeadRef, pr.HeadRef) {
+	// A closed PR may expose its retained pull ref instead of its source branch.
+	// No other branch or PR's synthetic ref is interchangeable with this mapping.
+	retainedHead := fmt.Sprintf("refs/pull/%d/head", projection.ExternalNumber)
+	if providerPR.HeadRef != pr.HeadRef && !((pr.State == db.StateClosed || pr.Merged) && providerPR.HeadRef == retainedHead) {
 		return fmt.Sprintf("provider head_ref %q does not match AGS head_ref %q", providerPR.HeadRef, pr.HeadRef)
 	}
-	if !equalFoldTrim(providerPR.BaseRef, pr.BaseRef) {
+	if strings.TrimSpace(providerPR.BaseRef) != strings.TrimSpace(pr.BaseRef) {
 		return fmt.Sprintf("provider base_ref %q does not match AGS base_ref %q", providerPR.BaseRef, pr.BaseRef)
 	}
 	return ""
+}
+
+// Reconcile a stale cached base only after an exact provider observation agrees
+// with the native PR. This repairs metadata, never retargets a provider or changes
+// mapping identity/last-synced content. Both facts fence the compare-and-swap.
+func (s *Service) reconcileObservedForgejoProjectionBase(ctx context.Context, pr db.PullRequest, projection db.PullRequestProjection, providerPR forgejointegration.PullRequestSnapshot, configuredExternalRepo string) (db.PullRequestProjection, error) {
+	if projection.TargetBranch == pr.BaseRef {
+		return projection, nil
+	}
+	candidate := projection
+	candidate.TargetBranch = pr.BaseRef
+	if projection.ID == 0 || providerPR.Number != projection.ExternalNumber ||
+		!forgejoPullRequestStateMatches(pr, providerPR) || forgejoPullRequestContentMismatch(pr, providerPR) != "" ||
+		forgejoPullRequestCoordinateMismatch(pr, candidate, providerPR, configuredExternalRepo) != "" {
+		return projection, nil
+	}
+	native := s.DBForCtx(ctx).Model(&db.PullRequest{}).Select("1").
+		Where("id = ? AND repository_id = ? AND head_repository_id = ? AND head_ref = ? AND base_ref = ? AND head_sha = ? AND state = ? AND merged = ?",
+			pr.ID, pr.RepositoryID, pr.HeadRepositoryID, pr.HeadRef, pr.BaseRef, pr.HeadSHA, pr.State, pr.Merged)
+	if pr.Merged {
+		native = native.Where("merge_commit_sha = ?", pr.MergeCommitSHA)
+	}
+	result := s.DBForCtx(ctx).Model(&db.PullRequestProjection{}).
+		Where("id = ? AND repository_id = ? AND pull_request_id = ? AND provider = ? AND external_repo = ? AND external_number = ?",
+			projection.ID, projection.RepositoryID, pr.ID, ProjectionProviderForgejo, projection.ExternalRepo, projection.ExternalNumber).
+		Where("source_branch = ? AND target_branch = ? AND state = ? AND last_synced_sha = ?",
+			projection.SourceBranch, projection.TargetBranch, projection.State, projection.LastSyncedSHA).
+		Where("EXISTS (?)", native).Update("target_branch", pr.BaseRef)
+	if result.Error != nil {
+		return projection, fmt.Errorf("reconcile observed Forgejo projection base: %w", result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return projection, fmt.Errorf("Forgejo projection base observation became stale: %w", ErrInvalidState)
+	}
+	return candidate, nil
 }
 
 func (s *Service) pullRequestHeadRepoFullName(ctx context.Context, pr db.PullRequest, fallback string) (string, error) {
@@ -272,12 +334,18 @@ func (s *Service) scanForgejoPullRequestIntegrityScope(ctx context.Context, repo
 			continue
 		}
 		providerPR, found := live[projection.ExternalNumber]
-		if !found || !forgejoPullRequestStateMatches(pr, providerPR) || !forgejoPullRequestHeadMatches(pr, providerPR) {
+		if !found || !forgejoPullRequestStateMatches(pr, providerPR) || !forgejoPullRequestHeadMatches(pr, providerPR) ||
+			forgejoPullRequestContentMismatch(pr, providerPR) != "" || forgejoPullRequestCoordinateMismatch(pr, projection, providerPR, configuredExternalRepo) != "" {
 			exactPR, exactFound, exactErr := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, repoFullName, projection.ExternalRepo, projection.ExternalNumber)
 			if exactErr != nil {
 				return recorded, fmt.Errorf("confirm Forgejo PR #%d projection for AGS PR #%d: %w", projection.ExternalNumber, pr.Number, exactErr)
 			}
 			providerPR, found = exactPR, exactFound
+			if found {
+				live[projection.ExternalNumber] = providerPR
+			} else {
+				delete(live, projection.ExternalNumber)
+			}
 		}
 		if !found {
 			summary := fmt.Sprintf("AGS PR #%d projection points to missing Forgejo PR #%d", pr.Number, projection.ExternalNumber)
@@ -303,6 +371,10 @@ func (s *Service) scanForgejoPullRequestIntegrityScope(ctx context.Context, repo
 			recorded++
 			continue
 		}
+		projection, err = s.reconcileObservedForgejoProjectionBase(ctx, pr, projection, providerPR, configuredExternalRepo)
+		if err != nil {
+			return recorded, err
+		}
 		if mismatch := forgejoPullRequestCoordinateMismatch(pr, projection, providerPR, configuredExternalRepo); mismatch != "" {
 			summary := fmt.Sprintf("AGS PR #%d Forgejo mapping coordinates do not match: %s", pr.Number, mismatch)
 			if err := s.recordPullRequestIntegrityFailure(ctx, repoFullName, ref, pr, forgejointegration.ProjectionFailurePullRequestAuthorityMissing, pr.HeadSHA, providerPR.HeadSHA, summary, now); err != nil {
@@ -311,7 +383,19 @@ func (s *Service) scanForgejoPullRequestIntegrityScope(ctx context.Context, repo
 			recorded++
 			continue
 		}
-		if !forgejoPullRequestHeadMatches(pr, providerPR) {
+		if pr.State != db.StateOpen || pr.Merged {
+			if mismatch := forgejoPullRequestContentMismatch(pr, providerPR); mismatch != "" {
+				agsSHA, externalSHA := pr.HeadSHA, providerPR.HeadSHA
+				if pr.Merged {
+					agsSHA, externalSHA = pr.MergeCommitSHA, providerPR.MergeCommitSHA
+				}
+				if err := s.recordPullRequestIntegrityFailure(ctx, repoFullName, ref, pr, forgejointegration.ProjectionFailureSHADrift, agsSHA, externalSHA, mismatch, now); err != nil {
+					return recorded, err
+				}
+				recorded++
+				continue
+			}
+		} else if !forgejoPullRequestHeadMatches(pr, providerPR) {
 			headRepoName, headRepoErr := s.pullRequestHeadRepoFullName(ctx, pr, repoFullName)
 			if headRepoErr != nil {
 				summary := fmt.Sprintf("AGS PR #%d head repository cannot be resolved for integrity heal: %v", pr.Number, headRepoErr)
@@ -349,7 +433,11 @@ func (s *Service) scanForgejoPullRequestIntegrityScope(ctx context.Context, repo
 		if !forgejoPullRequestIntegrityMayResolve(pr, projection, providerPR, configuredExternalRepo) {
 			continue
 		}
-		if err := s.ResolveProjectionRefState(ctx, repoFullName, ProjectionProviderForgejo, ref, pr.HeadSHA, providerPR.HeadSHA, now); err != nil {
+		agsSHA, externalSHA := pr.HeadSHA, providerPR.HeadSHA
+		if pr.Merged {
+			agsSHA, externalSHA = pr.MergeCommitSHA, providerPR.MergeCommitSHA
+		}
+		if err := s.ResolveProjectionRefState(ctx, repoFullName, ProjectionProviderForgejo, ref, agsSHA, externalSHA, now); err != nil {
 			return recorded, err
 		}
 	}
@@ -361,6 +449,12 @@ func (s *Service) scanForgejoPullRequestIntegrityScope(ctx context.Context, repo
 	baseSHAs := map[string]string{}
 	baseErrors := map[string]error{}
 	for _, providerPR := range liveRows {
+		// Reuse a newer exact read instead of auditing a contradicted list row.
+		var present bool
+		providerPR, present = live[providerPR.Number]
+		if !present {
+			continue
+		}
 		if !providerPR.Merged {
 			continue
 		}

@@ -370,6 +370,7 @@ func (d *Deps) PutRepoContents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.syncOpenPRHeadsAfterBranchAdvance(r.Context(), "PutRepoContents", repo.ID, full, body.Branch)
+	logErr(r.Context(), "PutRepoContents: project native ref", d.Svc.ProjectNativeRefChange(r.Context(), full, service.ForgejoRefChange{Ref: gitstore.RefsHeadsPrefix + body.Branch}), "repo", full)
 	blobSHA, _ := d.Svc.Git.BlobSHAAtRef(r.Context(), full, path, body.Branch)
 	status := http.StatusCreated
 	if isUpdate {
@@ -435,6 +436,7 @@ func (d *Deps) DeleteRepoContents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.syncOpenPRHeadsAfterBranchAdvance(r.Context(), "DeleteRepoContents", repo.ID, full, body.Branch)
+	logErr(r.Context(), "DeleteRepoContents: project native ref", d.Svc.ProjectNativeRefChange(r.Context(), full, service.ForgejoRefChange{Ref: gitstore.RefsHeadsPrefix + body.Branch}), "repo", full)
 	respond.JSON(w, 200, map[string]any{
 		"content": nil,
 		"commit": map[string]any{
@@ -1083,6 +1085,7 @@ func (d *Deps) DeleteGitRef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.logGitAudit(r.Context(), repo, service.AuditActionGitRefDelete, full, "ref="+ref)
+	logErr(r.Context(), "DeleteGitRef: project native ref", d.Svc.ProjectNativeRefChange(r.Context(), full, service.ForgejoRefChange{Ref: ref, Deleted: true}), "repo", full)
 	respond.NoContent(w)
 }
 
@@ -1163,6 +1166,7 @@ func (d *Deps) UpdateGitRef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.syncOpenPRHeadsAfterBranchAdvance(r.Context(), "UpdateGitRef", repo.ID, full, branch)
+	logErr(r.Context(), "UpdateGitRef: project native ref", d.Svc.ProjectNativeRefChange(r.Context(), full, service.ForgejoRefChange{Ref: ref, Forced: body.Force}), "repo", full)
 	d.logGitAudit(r.Context(), repo, service.AuditActionGitRefUpdate, full, "ref="+ref+" sha="+body.SHA)
 	respond.JSON(w, 200, map[string]any{
 		"ref": ref,
@@ -1240,6 +1244,7 @@ func (d *Deps) UpdateGitRefGeneric(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(refName, gitstore.RefsHeadsPrefix) {
 		d.syncOpenPRHeadsAfterBranchAdvance(r.Context(), "UpdateGitRefGeneric", repo.ID, full, strings.TrimPrefix(refName, gitstore.RefsHeadsPrefix))
 	}
+	logErr(r.Context(), "UpdateGitRefGeneric: project native ref", d.Svc.ProjectNativeRefChange(r.Context(), full, service.ForgejoRefChange{Ref: refName, Forced: body.Force}), "repo", full)
 	d.logGitAudit(r.Context(), repo, service.AuditActionGitRefUpdate, full, "ref="+refName+" sha="+body.SHA)
 	respond.JSON(w, 200, transform.GitRef(refName, body.SHA))
 }
@@ -1265,6 +1270,7 @@ func (d *Deps) DeleteGitRefGeneric(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.logGitAudit(r.Context(), repo, service.AuditActionGitRefDelete, full, "ref="+refName)
+	logErr(r.Context(), "DeleteGitRefGeneric: project native ref", d.Svc.ProjectNativeRefChange(r.Context(), full, service.ForgejoRefChange{Ref: refName, Deleted: true}), "repo", full)
 	respond.NoContent(w)
 }
 
@@ -1339,6 +1345,7 @@ func (d *Deps) CreateGitRef(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(body.Ref, gitstore.RefsHeadsPrefix) {
 		d.syncOpenPRHeadsAfterBranchAdvance(r.Context(), "CreateGitRef", repo.ID, full, strings.TrimPrefix(body.Ref, gitstore.RefsHeadsPrefix))
 	}
+	logErr(r.Context(), "CreateGitRef: project native ref", d.Svc.ProjectNativeRefChange(r.Context(), full, service.ForgejoRefChange{Ref: body.Ref, Created: true}), "repo", full)
 	d.logGitAudit(r.Context(), repo, service.AuditActionGitRefCreate, full, "ref="+body.Ref+" sha="+body.SHA)
 	respond.JSON(w, 201, map[string]any{
 		"ref": body.Ref,
