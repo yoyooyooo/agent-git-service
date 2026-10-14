@@ -4,7 +4,7 @@ on:
   workflow_run:
     workflows: ['Fork CI']
     types: [completed]
-    branches: [main]
+    branches: [fork/main.20260924]
 
 permissions:
   actions: read
@@ -20,7 +20,8 @@ jobs:
       vars.AGS_AUTODEPLOY_ENABLED == 'true' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_branch == 'fork/main.20260924' &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch &&
       github.event.workflow_run.repository.full_name == github.repository &&
       github.repository == 'yoyooyooo/agent-git-service'
     environment: ags-autodeploy
@@ -35,8 +36,7 @@ jobs:
       - name: Join private deployment network
         uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
         with:
-          oauth-client-id: ${{ secrets.AGS_DEPLOY_TS_CLIENT_ID }}
-          oauth-secret: ${{ secrets.AGS_DEPLOY_TS_CLIENT_SECRET }}
+          authkey: ${{ secrets.AGS_DEPLOY_TS_AUTHKEY }}
           tags: tag:ags-deploy-trigger
       - name: Send one idempotent CI handoff
         env:

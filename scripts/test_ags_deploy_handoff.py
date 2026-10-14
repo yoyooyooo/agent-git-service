@@ -7,9 +7,9 @@ import unittest
 spec = importlib.util.spec_from_file_location('handoff', Path(__file__).with_name('ags-deploy-handoff.py'))
 handoff = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(handoff)
-EVENT = {'repository': {'full_name': handoff.REPO}, 'workflow_run': {
+EVENT = {'repository': {'full_name': handoff.REPO, 'default_branch':'fork/main.20260924'}, 'workflow_run': {
     'repository': {'full_name': handoff.REPO}, 'id': 42, 'run_attempt': 1,
-    'workflow_id': handoff.WORKFLOW_ID, 'head_sha': 'a' * 40, 'head_branch': 'main',
+    'workflow_id': handoff.WORKFLOW_ID, 'head_sha': 'a' * 40, 'head_branch': 'fork/main.20260924',
     'event': 'push', 'status': 'completed', 'conclusion': 'success'}}
 
 
@@ -22,7 +22,7 @@ class HandoffTests(unittest.TestCase):
 
     def test_rejects_untrusted_and_non_success_events(self):
         for patch in [{'conclusion': 'failure'}, {'status': 'in_progress'}, {'event': 'pull_request'},
-                      {'head_branch': 'fork/main.20260924'}, {'head_sha': '$(unsafe)'},
+                      {'head_branch': 'main'}, {'head_sha': '$(unsafe)'},
                       {'workflow_id': 1}, {'repository': {'full_name': 'attacker/fork'}},
                       {'id': True}, {'run_attempt': 0}]:
             event = copy.deepcopy(EVENT)
