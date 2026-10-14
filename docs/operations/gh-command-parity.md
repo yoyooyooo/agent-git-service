@@ -28,6 +28,11 @@ API origin and, for older Forgejo logs, the typed provider-log bridge described 
 | `gh run rerun --job ID`, `gh run delete`, `gh workflow run/enable/disable` | External adapter management remains explicitly unsupported. |
 | `gh run download` | External adapters do not publish artifacts; an empty artifact collection is not a claim that provider artifacts were inspected. Run-scoped artifact reads first validate the repository/backend/run identity; unknown or retired runs return 404. |
 
+A closed mapped Forgejo PR is reopened by its exact existing number before a
+metadata ensure can search open PRs; the readback must confirm the same unmerged
+head/base. It cannot silently create a second provider PR. Merged terminal PRs
+cannot be reopened through GraphQL or REST.
+
 GraphQL and REST share the native PR state lifecycle. Provider convergence remains
 an independent boundary: projection failure is logged after the native state
 write, as on REST PATCH. A returned native OPEN state is not proof that a remote

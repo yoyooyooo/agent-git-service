@@ -240,6 +240,9 @@ func (s *Service) ensureForgejoPullRequestWithPolicyAndAdmission(ctx context.Con
 		}
 	}
 	if rewrite == nil {
+		if err := s.reopenForgejoProjection(ctx, repoFullName, pr, beforeWrite); err != nil {
+			return forgejointegration.PullRequestResult{}, false, err
+		}
 		if err := s.retargetForgejoProjectionBase(ctx, repoFullName, repoPath, headSHA, pr, beforeWrite); err != nil {
 			return forgejointegration.PullRequestResult{}, false, err
 		}
@@ -298,6 +301,48 @@ func (s *Service) ensureForgejoPullRequestExternalWithPolicyAndAuthority(ctx con
 		return forgejointegration.PullRequestResult{}, false, nil
 	}
 	return res, true, nil
+}
+
+// Reopen the already mapped PR before Ensure searches only open PRs. Otherwise
+// a native reopen can create a second provider PR or leave the old one closed.
+func (s *Service) reopenForgejoProjection(ctx context.Context, repoFullName string, pr db.PullRequest, beforeWrite func(context.Context) error) error {
+	if s.ForgejoIntegration == nil || pr.State != db.StateOpen || pr.Merged {
+		return nil
+	}
+	projection, ok := s.forgejoProjectionForPullRequest(ctx, pr.ID)
+	if !ok || projection.State != ProjectionStateClosed || projection.ExternalNumber <= 0 {
+		return nil
+	}
+	before, found, err := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, repoFullName, projection.ExternalRepo, projection.ExternalNumber)
+	if err != nil {
+		return err
+	}
+	if !found || before.Merged || before.HeadRef != pr.HeadRef || before.BaseRef != pr.BaseRef || (before.State != db.StateClosed && before.State != db.StateOpen) {
+		return fmt.Errorf("mapped Forgejo pull request is not the unmerged head/base accepted for reopen")
+	}
+	if before.State == db.StateClosed {
+		if beforeWrite != nil {
+			if err := beforeWrite(ctx); err != nil {
+				return err
+			}
+		}
+		res, err := s.ForgejoIntegration.UpdatePullRequestState(ctx, repoFullName, projection.ExternalNumber, db.StateOpen)
+		if err != nil {
+			return err
+		}
+		if res.Number != projection.ExternalNumber || res.ExternalRepo != projection.ExternalRepo {
+			return fmt.Errorf("Forgejo reopen returned a different mapped pull request")
+		}
+		after, found, err := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, repoFullName, projection.ExternalRepo, projection.ExternalNumber)
+		if err != nil {
+			return err
+		}
+		if !found || after.Merged || after.State != db.StateOpen || after.HeadRef != pr.HeadRef || after.BaseRef != pr.BaseRef {
+			return fmt.Errorf("Forgejo reopen did not confirm the mapped open pull request")
+		}
+	}
+	projection.State = ProjectionStateOpen
+	return s.UpsertPullRequestProjection(ctx, projection)
 }
 
 // retargetForgejoProjectionBase moves one open mapped Forgejo pull request

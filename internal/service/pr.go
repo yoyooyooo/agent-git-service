@@ -604,6 +604,9 @@ func (s *Service) UpdatePR(ctx context.Context, repoFullName string, number int,
 		return pr, wrapErrf(err, "pull request #%d", number)
 	}
 
+	if in.State != nil && *in.State == db.StateOpen && pr.Merged {
+		return db.PullRequest{}, fmt.Errorf("%w: a merged pull request cannot be reopened", ErrInvalidState)
+	}
 	origTitle := pr.Title
 	origBody := pr.Body
 	origState := pr.State
@@ -703,6 +706,9 @@ func (s *Service) UpdatePRByID(ctx context.Context, id uint, state *string, draf
 	orig, err := s.GetPRByID(ctx, id)
 	if err != nil {
 		return err
+	}
+	if state != nil && *state == db.StateOpen && orig.Merged {
+		return fmt.Errorf("%w: a merged pull request cannot be reopened", ErrInvalidState)
 	}
 	updates := make(map[string]any)
 	if state != nil {
