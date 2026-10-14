@@ -364,56 +364,6 @@ func TestReadyz_RequiredProjectionAlertingMissing_Returns503(t *testing.T) {
 	}
 }
 
-func TestReadyz_ForgejoAuthorityPolicyDrift_Returns503(t *testing.T) {
-	mainDB := openTestDB(t)
-	handler := readyzHandler(readyzConfig{
-		MainDB:                       mainDB,
-		ProjectionAlertingRequired:   true,
-		ProjectionAlertingConfigured: true,
-		AuthorityPolicyCheck: func(context.Context) error {
-			return errors.New("allow_rebase_update is enabled")
-		},
-	})
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d", rec.Code)
-	}
-	var body map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-	checks := body["checks"].(map[string]any)
-	authority := checks["forgejo_authority_policy"].(map[string]any)
-	if authority["status"] != "unavailable" || !strings.Contains(authority["error"].(string), "allow_rebase_update") {
-		t.Fatalf("unexpected authority result: %#v", authority)
-	}
-}
-
-func TestReadyz_ForgejoAuthorityExplicitOptOut_IsVisible(t *testing.T) {
-	mainDB := openTestDB(t)
-	handler := readyzHandler(readyzConfig{
-		MainDB:                       mainDB,
-		ProjectionAlertingRequired:   true,
-		ProjectionAlertingConfigured: true,
-		AuthorityPolicyOptOut:        true,
-	})
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for explicit authority opt-out, got %d", rec.Code)
-	}
-	var body map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-	checks := body["checks"].(map[string]any)
-	authority := checks["forgejo_authority_policy"].(map[string]any)
-	if authority["status"] != "degraded" || authority["error"] != "explicit_opt_out" {
-		t.Fatalf("expected visible authority opt-out, got %#v", authority)
-	}
-}
-
 func TestReadyz_ProjectionAlertingExplicitOptOut_IsVisible(t *testing.T) {
 	mainDB := openTestDB(t)
 	handler := readyzHandler(readyzConfig{
@@ -421,7 +371,6 @@ func TestReadyz_ProjectionAlertingExplicitOptOut_IsVisible(t *testing.T) {
 		ProjectionAlertingRequired:   true,
 		ProjectionAlertingConfigured: false,
 		ProjectionAlertingOptOut:     true,
-		AuthorityPolicyCheck:         func(context.Context) error { return nil },
 	})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))

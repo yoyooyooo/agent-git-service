@@ -112,9 +112,8 @@ On an endpoint that actually exposes and enforces the exact force-push field,
 canonical base protection keeps force-push disabled. For the mapped base branch
 only, the migration first verifies normal protected-base authority,
 records a private no-secret force-window journal, fingerprints every observed
-protection field except `enable_force_push`, and uses the separate policy
-operator credential to toggle only that field. The integration-bot Git token
-then performs the exact lease rewrite. The original force setting is restored
+protection field except `enable_force_push`, and uses the shared Forgejo admin
+credential to toggle only that field and perform the exact lease rewrite. The original force setting is restored
 and normal authority is reverified before the journal is removed. Push failure
 still restores the policy. If the process dies anywhere after the journal is
 written, the next startup restores/verifies the policy before any rewrite,

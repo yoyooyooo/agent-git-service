@@ -584,9 +584,6 @@ func LoadFile(path string) (Config, error) {
 			if strings.TrimSpace(cfg.Forgejo.AuthorityPolicy.IntegrationBot) == "" {
 				return Config{}, fmt.Errorf("forgejo.authority_policy.integration_bot is required when authority policy is enabled")
 			}
-			if strings.TrimSpace(cfg.Forgejo.AuthorityPolicy.OperatorToken) == "" && strings.TrimSpace(cfg.Forgejo.AuthorityPolicy.OperatorTokenFile) == "" {
-				return Config{}, fmt.Errorf("forgejo.authority_policy.operator_token_file is required when authority policy is enabled")
-			}
 		}
 		if strings.TrimSpace(cfg.Forgejo.ActionsLogBridgeURL) != "" {
 			if strings.TrimSpace(cfg.Forgejo.ActionsLogBridgeTokenFile) == "" {

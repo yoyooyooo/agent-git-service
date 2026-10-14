@@ -164,7 +164,7 @@ type Config struct {
 	// AllowMissingProjectionAlerting is an explicit development/test opt-out.
 	// Production deployments using Forgejo workflow actions should leave it false.
 	AllowMissingProjectionAlerting     bool
-	AllowMissingForgejoAuthorityPolicy bool
+	AllowMissingForgejoAuthorityPolicy bool // Deprecated compatibility setting; authority diagnostics never gate readiness.
 }
 
 // New reads environment variables and returns a fully-populated Config.

@@ -3,174 +3,161 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 
+	"github.com/ngaut/agent-git-service/config"
 	"github.com/ngaut/agent-git-service/internal/forgejointegration"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 )
 
-func TestReadyzAuthorityRespectsCallerDeadline(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+// Exercise production mux composition, not only a standalone readiness handler.
+func newAuthorityReadinessServer(t *testing.T, providerURL string) *Server {
+	t.Helper()
+	root := t.TempDir()
+	file := filepath.Join(root, "integrations.yaml")
+	body := fmt.Sprintf(`forgejo:
+  enabled: true
+  base_url: %q
+  token: fixture-admin
+  webhook_secret: fixture-webhook
+  authority_policy:
+    enabled: true
+    operator_token: fixture-admin
+    webhook_url: https://primary.example.test/hook
+    integration_bot: fixture-admin
+  repos:
+    fixture/repo:
+      owner: fixture
+      repo: repo
+      base_branch: main
+`, providerURL)
+	if err := os.WriteFile(file, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{
+		DBdsn:                          "file:" + filepath.Join(root, "primary.db"),
+		GitRepoDir:                     filepath.Join(root, "repos"),
+		BaseURL:                        "http://primary.example.test",
+		ListenMode:                     "production",
+		Environment:                    "production",
+		IntegrationsConfigFile:         file,
+		AllowMissingProjectionAlerting: true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sqlDB, err := db.DB()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sqlDB.Close()
-	var deadlineRemaining time.Duration
-	handler := readyzHandler(readyzConfig{MainDB: db, ProjectionAlertingRequired: true, ProjectionAlertingConfigured: true, AuthorityPolicyCheck: func(ctx context.Context) error {
-		deadline, ok := ctx.Deadline()
-		if !ok {
-			t.Error("readiness probe has no deadline")
-		}
-		deadlineRemaining = time.Until(deadline)
-		<-ctx.Done()
-		return ctx.Err()
-	}})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest("GET", "/readyz", nil).WithContext(ctx))
-	if response.Code != http.StatusServiceUnavailable || deadlineRemaining > 25*time.Millisecond {
-		t.Fatal("canceled authority probe must fail readiness within caller deadline")
-	}
-}
-
-func TestReadyzCreatesProbeDeadline(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sqlDB, _ := db.DB()
-	defer sqlDB.Close()
-	handler := readyzHandler(readyzConfig{MainDB: db, ProjectionAlertingRequired: true, ProjectionAlertingConfigured: true, AuthorityPolicyCheck: func(ctx context.Context) error {
-		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) > 10*time.Second {
-			t.Error("readiness budget missing")
-		}
-		return nil
-	}})
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest("GET", "/readyz", nil))
-	if response.Code != 200 {
-		t.Fatal("healthy authority must preserve readiness")
-	}
-}
-
-// Ten mapped repositories take three waves with four workers. Even healthy
-// 300ms provider reads need 4.5s for five sequential reads in each wave.
-func TestReadyzAuthorityAllowsHealthyMultiRepositoryScan(t *testing.T) {
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sqlDB, err := database.DB()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sqlDB.Close()
-	var calls atomic.Int32
-	var active atomic.Int32
-	var maximum atomic.Int32
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Error("readiness must only read provider state")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		calls.Add(1)
-		n := active.Add(1)
-		defer active.Add(-1)
-		for old := maximum.Load(); n > old; old = maximum.Load() {
-			if maximum.CompareAndSwap(old, n) {
-				break
-			}
-		}
-		timer := time.NewTimer(300 * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-		case <-r.Context().Done():
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/permission"):
-			_, _ = w.Write([]byte(`{"permission":"write"}`))
-		case strings.Contains(r.URL.Path, "/branch_protections/"):
-			_, _ = w.Write([]byte(`{"enable_push":true,"enable_force_push":false,"enable_push_whitelist":false,"enable_merge_whitelist":false}`))
-		case strings.HasSuffix(r.URL.Path, "/labels"):
-			_, _ = w.Write([]byte(`[{"name":"ags/action-rebase"},{"name":"ags/status-rebasing"},{"name":"ags/status-projection-drift"},{"name":"ags/status-rebase-conflict"},{"name":"ags/status-blocked"},{"name":"ags/status-needs-rebase"}]`))
-		case strings.HasSuffix(r.URL.Path, "/hooks"):
-			_, _ = w.Write([]byte(`[{"id":1,"active":true,"events":["pull_request","issues","delete"],"config":{"url":"https://primary.example.test/hook"}}]`))
-		default:
-			_, _ = w.Write([]byte(`{"allow_rebase_update":false}`))
-		}
-	}))
-	defer provider.Close()
-	mappings := map[string]forgejointegration.RepoMapping{}
-	for n := range 10 {
-		repo := fmt.Sprintf("repo-%02d", n)
-		mappings["fixture/"+repo] = forgejointegration.RepoMapping{Owner: "fixture", Repo: repo, BaseBranch: "main"}
-	}
-	integration := forgejointegration.New(forgejointegration.Config{Enabled: true, BaseURL: provider.URL, WebhookSecret: "fixture-secret", AuthorityPolicyEnabled: true, WebhookURL: "https://primary.example.test/hook", IntegrationBot: "fixture-bot", RepoMap: mappings}, nil, nil)
-	handler := readyzHandler(readyzConfig{MainDB: database, ProjectionAlertingRequired: true, ProjectionAlertingConfigured: true, AuthorityPolicyCheck: func(ctx context.Context) error {
-		_, err := integration.VerifyRepositoryAuthorityReadiness(ctx)
-		return err
-	}})
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-	if response.Code != http.StatusOK {
-		t.Fatalf("healthy complete provider scan rejected: %d %s", response.Code, response.Body.String())
-	}
-	if calls.Load() != 50 || maximum.Load() > 4 {
-		t.Fatalf("calls=%d maximum=%d; all reads must complete with the existing concurrency cap", calls.Load(), maximum.Load())
-	}
-}
-
-func TestReadyzAuthorityDefaultBudgetExpires(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		sqlDB, err := database.DB()
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer sqlDB.Close()
-		handler := readyzHandler(readyzConfig{MainDB: database, ProjectionAlertingRequired: true, ProjectionAlertingConfigured: true, AuthorityPolicyCheck: func(ctx context.Context) error {
-			<-ctx.Done()
-			return ctx.Err()
-		}})
-		start := time.Now()
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-		var body struct {
-			Status string `json:"status"`
-			Checks map[string]struct {
-				Status string `json:"status"`
-				Error  string `json:"error"`
-			} `json:"checks"`
-		}
-		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
-			t.Fatal(err)
-		}
-		if response.Code != http.StatusServiceUnavailable || body.Status != "not_ready" || body.Checks["forgejo_authority_policy"].Error != context.DeadlineExceeded.Error() {
-			t.Fatalf("unresponsive provider must fail closed: %s", response.Body.String())
-		}
-		if elapsed := time.Since(start); elapsed > 10*time.Second {
-			t.Fatalf("readiness exceeded bounded budget: %s", elapsed)
+	t.Cleanup(func() {
+		if err := srv.Shutdown(context.Background()); err != nil {
+			t.Error(err)
 		}
 	})
+	return srv
+}
+
+func assertAuthorityReadinessWarning(t *testing.T, srv *Server) {
+	t.Helper()
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	var body struct {
+		Status string `json:"status"`
+		Checks map[string]struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	warning := body.Checks["forgejo_authority_policy"]
+	if response.Code != http.StatusOK || body.Status != "ready" || warning.Status != "degraded" || !strings.Contains(warning.Error, "diagnostic_only") {
+		t.Fatalf("authority diagnostics must not reject readiness: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestReadyzAuthorityTimeoutReturns200(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	var calls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		entered <- struct{}{}
+		<-r.Context().Done()
+	}))
+	defer provider.Close()
+	srv := newAuthorityReadinessServer(t, provider.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := srv.deps.SvcDeps.ForgejoIntegration.VerifyRepositoryAuthorityReadiness(ctx)
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("diagnostic never reached the provider")
+	}
+	// A diagnostic is hung at the provider, but readiness must finish before it.
+	assertAuthorityReadinessWarning(t, srv)
+	if ctx.Err() != nil {
+		t.Fatal("readiness waited for the external diagnostic deadline")
+	}
+	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected a diagnostic timeout, got %v", err)
+	}
+	assertAuthorityReadinessWarning(t, srv)
+	if calls.Load() != 1 {
+		t.Fatalf("readiness contacted Forgejo: %d calls", calls.Load())
+	}
+}
+
+// This client deliberately has no authority verifier capability.
+type noAuthorityVerifierClient struct{}
+
+func (noAuthorityVerifierClient) EnsureRepository(context.Context, string, string, bool) error {
+	return nil
+}
+func (noAuthorityVerifierClient) EnsurePullRequest(context.Context, forgejointegration.PullRequestRequest) (forgejointegration.PullRequestResult, error) {
+	return forgejointegration.PullRequestResult{}, nil
+}
+func (noAuthorityVerifierClient) UpdatePullRequestState(context.Context, string, string, int, string) (forgejointegration.PullRequestResult, error) {
+	return forgejointegration.PullRequestResult{}, nil
+}
+
+func TestReadyzAuthorityVerifierMissingReturns200(t *testing.T) {
+	srv := newAuthorityReadinessServer(t, "http://forgejo.example.test")
+	srv.deps.SvcDeps.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{
+		Enabled: true, WebhookSecret: "fixture-webhook", AuthorityPolicyEnabled: true,
+		WebhookURL: "https://primary.example.test/hook", IntegrationBot: "fixture-admin",
+		RepoMap: map[string]forgejointegration.RepoMapping{"fixture/repo": {Owner: "fixture", Repo: "repo", BaseBranch: "main"}},
+	}, noAuthorityVerifierClient{}, nil)
+	if err := srv.deps.SvcDeps.ForgejoIntegration.AuthorityPolicyConfigured(); err == nil || !strings.Contains(err.Error(), "verifier is not configured") {
+		t.Fatalf("expected a missing verifier, got %v", err)
+	}
+	assertAuthorityReadinessWarning(t, srv)
+}
+
+func TestReadyzAuthorityPermissionFailureReturns200WithWarning(t *testing.T) {
+	var calls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "fixture permission denied", http.StatusForbidden)
+	}))
+	defer provider.Close()
+	srv := newAuthorityReadinessServer(t, provider.URL)
+	_, err := srv.deps.SvcDeps.ForgejoIntegration.VerifyRepositoryAuthorityReadiness(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "status 403") {
+		t.Fatalf("expected provider permission failure, got %v", err)
+	}
+	assertAuthorityReadinessWarning(t, srv)
+	if calls.Load() != 1 {
+		t.Fatalf("readiness repeated the failed permission check: %d calls", calls.Load())
+	}
 }

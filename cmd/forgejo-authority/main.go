@@ -16,7 +16,7 @@ import (
 func main() {
 	configPath := flag.String("config", "", "path to AGS integrations YAML")
 	mode := flag.String("mode", "plan", "authority workflow mode: plan, apply, or verify")
-	operatorTokenFile := flag.String("operator-token-file", "", "optional Forgejo operator token file used only by this command")
+	operatorTokenFile := flag.String("operator-token-file", "", "optional shared Forgejo admin token file for this command")
 	timeout := flag.Duration("timeout", 30*time.Second, "Forgejo API operation timeout")
 	flag.Parse()
 
@@ -36,10 +36,6 @@ func main() {
 		cfg.AuthorityPolicyTokenFile = path
 	}
 	cfg, err = forgejointegration.LoadTokenFile(cfg)
-	if err != nil {
-		fail(err.Error())
-	}
-	cfg, err = forgejointegration.LoadAuthorityPolicyTokenFile(cfg)
 	if err != nil {
 		fail(err.Error())
 	}

@@ -521,12 +521,6 @@ func initForgejoIntegration(cfg config.Config) (*forgejointegration.Integration,
 	if err != nil {
 		return nil, err
 	}
-	if integrationCfg.AuthorityPolicyEnabled {
-		integrationCfg, err = forgejointegration.LoadAuthorityPolicyTokenFile(integrationCfg)
-		if err != nil {
-			return nil, err
-		}
-	}
 	integrationCfg, err = forgejointegration.LoadRepoMapFile(integrationCfg)
 	if err != nil {
 		return nil, err
@@ -1163,13 +1157,6 @@ func buildHTTPMux(cfg httpMuxConfig) (muxDeps, error) {
 	if cfg.ServiceDeps.OutboundDispatcher != nil {
 		outboundWorkerHealth = cfg.ServiceDeps.OutboundWorkerHealth
 	}
-	var authorityPolicyCheck func(context.Context) error
-	if cfg.ServiceDeps.ForgejoIntegration != nil {
-		authorityPolicyCheck = func(ctx context.Context) error {
-			_, err := cfg.ServiceDeps.ForgejoIntegration.VerifyRepositoryAuthorityReadiness(ctx)
-			return err
-		}
-	}
 	r.Get("/readyz", readyzHandler(readyzConfig{
 		MainDB:                       cfg.Database,
 		Version:                      cfg.Version,
@@ -1179,8 +1166,6 @@ func buildHTTPMux(cfg httpMuxConfig) (muxDeps, error) {
 		TypedMulticaWorkerAvailable:  typedMulticaWorkerAvailable,
 		OutboundWorkerHealth:         outboundWorkerHealth,
 		ProjectionAlertingOptOut:     cfg.Cfg.AllowMissingProjectionAlerting,
-		AuthorityPolicyCheck:         authorityPolicyCheck,
-		AuthorityPolicyOptOut:        cfg.Cfg.AllowMissingForgejoAuthorityPolicy,
 		GitMaintenanceHealth:         cfg.ServiceDeps.Git.MaintenanceHealth,
 	}))
 
@@ -1652,15 +1637,11 @@ type readyzConfig struct {
 	TypedMulticaWorkerAvailable  bool
 	OutboundWorkerHealth         func() service.OutboundWorkerHealth
 	ProjectionAlertingOptOut     bool
-	AuthorityPolicyCheck         func(context.Context) error
-	AuthorityPolicyOptOut        bool
 	GitMaintenanceHealth         func() gitstore.MaintenanceHealth
 }
 
-// A full authority scan can require several waves of five or more provider
-// reads. Keep the whole probe bounded while allowing healthy multi-repository
-// scans to finish; an earlier caller deadline still cancels every worker.
-const readyzTimeout = 10 * time.Second
+// Bound backing-store readiness independently from provider diagnostics.
+const readyzTimeout = 4 * time.Second
 
 func readyzHandler(cfg readyzConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1724,17 +1705,9 @@ func readyzHandler(cfg readyzConfig) http.HandlerFunc {
 				healthy = false
 			}
 
-			if cfg.AuthorityPolicyOptOut {
-				checks["forgejo_authority_policy"] = checkResult{Status: "degraded", Error: "explicit_opt_out"}
-			} else if cfg.AuthorityPolicyCheck == nil {
-				checks["forgejo_authority_policy"] = checkResult{Status: "unavailable", Error: "authority policy verifier is not configured"}
-				healthy = false
-			} else if err := cfg.AuthorityPolicyCheck(ctx); err != nil {
-				checks["forgejo_authority_policy"] = checkResult{Status: "unavailable", Error: err.Error()}
-				healthy = false
-			} else {
-				checks["forgejo_authority_policy"] = checkResult{Status: "ok"}
-			}
+			// Forgejo permissions and policy are independent diagnostics. Never
+			// call the provider from readiness, including when its verifier is absent.
+			checks["forgejo_authority_policy"] = checkResult{Status: "degraded", Error: "diagnostic_only: run forgejo-authority -mode verify"}
 		}
 
 		status := "ready"

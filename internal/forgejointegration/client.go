@@ -23,6 +23,7 @@ type HTTPClient struct {
 	baseURL string
 	token   string
 	client  *http.Client
+	admin   bool // Server composition uses an admin token, without repository grants.
 }
 
 // NewHTTPClient constructs a Forgejo REST client.
@@ -32,6 +33,15 @@ func NewHTTPClient(baseURL, token string) *HTTPClient {
 		token:   token,
 		client:  &http.Client{Timeout: defaultHTTPTimeout},
 	}
+}
+
+// newAdminHTTPClient binds the server-owned admin credential to all API calls.
+// Forgejo enforces token validity; AGS does not require collaborator grants for
+// an administrator on each configured repository.
+func newAdminHTTPClient(baseURL, token string) *HTTPClient {
+	client := NewHTTPClient(baseURL, token)
+	client.admin = true
+	return client
 }
 
 // GetRepository reads the exact provider repository identity without credentials.
