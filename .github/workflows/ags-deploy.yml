@@ -1,0 +1,46 @@
+name: AGS deploy handoff
+
+on:
+  workflow_run:
+    workflows: ['Fork CI']
+    types: [completed]
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: ags-deploy-handoff
+  cancel-in-progress: false
+
+jobs:
+  handoff:
+    if: >-
+      vars.AGS_AUTODEPLOY_ENABLED == 'true' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.repository.full_name == github.repository &&
+      github.repository == 'yoyooyooo/agent-git-service'
+    environment: ags-autodeploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out trusted handoff implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Join private deployment network
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
+        with:
+          oauth-client-id: ${{ secrets.AGS_DEPLOY_TS_CLIENT_ID }}
+          oauth-secret: ${{ secrets.AGS_DEPLOY_TS_CLIENT_SECRET }}
+          tags: tag:ags-deploy-trigger
+      - name: Send one idempotent CI handoff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGS_DEPLOY_WEBHOOK_URL: ${{ vars.AGS_DEPLOY_WEBHOOK_URL }}
+          AGS_DEPLOY_WEBHOOK_TOKEN: ${{ secrets.AGS_DEPLOY_WEBHOOK_TOKEN }}
+        run: python3 scripts/ags-deploy-handoff.py
