@@ -22,6 +22,7 @@ class HandoffTests(unittest.TestCase):
 
     def test_rejects_untrusted_and_non_success_events(self):
         for patch in [{'conclusion': 'failure'}, {'status': 'in_progress'}, {'event': 'pull_request'},
+                      {'event': 'workflow_dispatch'},
                       {'head_branch': 'main'}, {'head_sha': '$(unsafe)'},
                       {'workflow_id': 1}, {'repository': {'full_name': 'attacker/fork'}},
                       {'id': True}, {'run_attempt': 0}]:

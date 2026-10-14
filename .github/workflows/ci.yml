@@ -7,10 +7,6 @@ on:
     branches: ['main', 'fork/**']
   workflow_dispatch:
     inputs:
-      ags_network_probe:
-        description: Only join the scoped deployment network and send a read-only GET
-        type: boolean
-        default: false
       full_regression:
         description: Run every root package, client contracts and race checks
         type: boolean
@@ -35,7 +31,6 @@ env:
 
 jobs:
   checks:
-    if: github.event_name != 'workflow_dispatch' || inputs.ags_network_probe != true
     name: Source and governance
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -219,23 +214,3 @@ jobs:
           node-version: 22.22.0
       - name: Run official client against an isolated primary and CI fixtures
         run: node scripts/gh-native-acceptance.mjs --privileged-namespace
-
-  deployment-network-probe:
-    name: Deployment network probe
-    if: github.event_name == 'workflow_dispatch' && inputs.ags_network_probe == true
-    environment: ags-autodeploy-probe
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
-        with:
-          authkey: ${{ secrets.AGS_DEPLOY_TS_AUTHKEY }}
-          tags: tag:ags-deploy-trigger
-      - name: Read-only webhook reachability
-        env:
-          AGS_DEPLOY_WEBHOOK_URL: ${{ vars.AGS_DEPLOY_WEBHOOK_URL }}
-        run: python3 scripts/ags-deploy-probe.py
