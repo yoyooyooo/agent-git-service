@@ -1161,7 +1161,7 @@ func buildHTTPMux(cfg httpMuxConfig) (muxDeps, error) {
 	var authorityPolicyCheck func(context.Context) error
 	if cfg.ServiceDeps.ForgejoIntegration != nil {
 		authorityPolicyCheck = func(ctx context.Context) error {
-			_, err := cfg.ServiceDeps.ForgejoIntegration.VerifyRepositoryAuthority(ctx)
+			_, err := cfg.ServiceDeps.ForgejoIntegration.VerifyRepositoryAuthorityReadiness(ctx)
 			return err
 		}
 	}
@@ -1654,7 +1654,8 @@ type readyzConfig struct {
 
 func readyzHandler(cfg readyzConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		defer cancel()
 		w.Header().Set("Content-Type", "application/json")
 
 		type checkResult struct {
