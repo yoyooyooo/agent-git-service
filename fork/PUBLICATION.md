@@ -30,7 +30,7 @@ If the existing repository contains extensive private history, preserve it as a 
 - Complete upstream ancestry and tag inventory, with no invented version.
 - Current-tree and reachable-history privacy/secret checks, plus manual review.
 - Repository-specific former-publisher fencing and external-surface inventory.
-- GitHub-hosted CI with read-only permissions, no private runners, no production secrets and no untrusted privileged trigger.
+- GitHub-hosted CI with read-only permissions, no private runners, no production secrets and no untrusted privileged trigger. The separately gated deployment handoff is an operator integration: it uses environment approval and trusted default-branch code, keeps its network/webhook secrets unavailable to CI and contributor code, and remains disabled until independent operator activation.
 - A clean source identity and independently accepted build/release artifacts.
 
 Public source acceptance does not authorize upgrades, database migrations, credential rotation or changes to any running AGS/Edge service. Those actions retain their own backup, compatibility and rollback gates.

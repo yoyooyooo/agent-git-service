@@ -37,7 +37,9 @@ python3 fork/scripts/audit.py publication --private-policy /private/operator-pol
 
 The inventory includes empty commits, all changed paths, and explicit pending review state. `tree` scans the selected **committed** fork tree, not dirty working files, and explicitly does not examine commit metadata. `publication` examines all new reachable blobs **and commit metadata**, including removed historical content, and never prints matched values. A clean `tree` result cannot stand in for the historical gate. Its output is a preflight, not proof that there are no secrets. Run an independent secret scanner and review GitHub branches, tags, PRs, Actions logs and artifacts separately.
 
-Hosted CI uses read-only GitHub permissions and disposable test dependencies. No workflow may use a self-hosted runner, production credentials, deployment keys, or `pull_request_target` to execute contributor code. CI caches dependencies, not private deployment data; it never deploys automatically.
+Hosted CI uses read-only GitHub permissions and disposable test dependencies. CI caches dependencies, not private deployment data; it never deploys. No CI workflow may use a self-hosted runner, production credentials, deployment keys, or `pull_request_target` to execute contributor code.
+
+The separate [AGS deploy handoff](../.github/workflows/ags-deploy.yml) is disabled unless `AGS_AUTODEPLOY_ENABLED` is exactly `true` and the `ags-autodeploy` environment approves it. It handles only successful `main` push `Fork CI` events, runs trusted default-branch handoff code, and sends one authenticated private Dagu webhook; it never builds, installs or controls services. Deployment logic and the review/activation design belong to the operator automation repository. Its environment-scoped network/webhook credentials are not available to CI or PR code. No activation, credential provisioning or deployment is authorized by merging source.
 
 ## Release delivery
 
