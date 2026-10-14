@@ -1397,3 +1397,7 @@ Before introducing a new interface or moving logic across packages, answer:
 3. Does it remove a concrete coupling that is causing real friction today?
 
 If the answer is "no" to all three, prefer documentation and tests over abstraction.
+
+### Readiness authority observation
+
+`server` bounds each `/readyz` request to four seconds. Its Forgejo authority probe reads every configured repository with at most four concurrent repository scans, preserves deterministic target ordering, and fails readiness on drift, failed reads or deadline cancellation. It retains no authority cache; merge and mutation preflights continue to perform their existing exact reads. Each repository scan still checks repository settings, bot permission, branch protection, all label pages and the webhook.
