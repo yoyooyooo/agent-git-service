@@ -25,26 +25,30 @@ func (c *HTTPClient) InspectRepositoryAuthority(ctx context.Context, owner, repo
 	}
 	state.AllowRebaseUpdate = repository.AllowRebaseUpdate
 
-	collaboratorPath := apiPath("/api/v1/repos/%s/%s/collaborators/%s/permission", owner, repo, integrationBot)
-	status, response, err = c.request(ctx, http.MethodGet, collaboratorPath, nil)
-	if err != nil {
-		return state, err
-	}
-	if status >= 200 && status < 300 {
-		var permission struct {
-			Permission string `json:"permission"`
-			RoleName   string `json:"role_name"`
+	if c.admin {
+		state.IntegrationBotCollaborator = true
+	} else {
+		collaboratorPath := apiPath("/api/v1/repos/%s/%s/collaborators/%s/permission", owner, repo, integrationBot)
+		status, response, err = c.request(ctx, http.MethodGet, collaboratorPath, nil)
+		if err != nil {
+			return state, err
 		}
-		if err := json.Unmarshal(response, &permission); err != nil {
-			return state, fmt.Errorf("decode integration bot permission: %w", err)
+		if status >= 200 && status < 300 {
+			var permission struct {
+				Permission string `json:"permission"`
+				RoleName   string `json:"role_name"`
+			}
+			if err := json.Unmarshal(response, &permission); err != nil {
+				return state, fmt.Errorf("decode integration bot permission: %w", err)
+			}
+			effective := strings.ToLower(strings.TrimSpace(permission.Permission))
+			if effective == "" {
+				effective = strings.ToLower(strings.TrimSpace(permission.RoleName))
+			}
+			state.IntegrationBotCollaborator = effective == "write" || effective == "admin" || effective == "owner"
+		} else if status != http.StatusNotFound {
+			return state, fmt.Errorf("lookup integration bot permission returned status %d: %s", status, string(response))
 		}
-		effective := strings.ToLower(strings.TrimSpace(permission.Permission))
-		if effective == "" {
-			effective = strings.ToLower(strings.TrimSpace(permission.RoleName))
-		}
-		state.IntegrationBotCollaborator = effective == "write" || effective == "admin" || effective == "owner"
-	} else if status != http.StatusNotFound {
-		return state, fmt.Errorf("lookup integration bot permission returned status %d: %s", status, string(response))
 	}
 
 	protectionPath := apiPath("/api/v1/repos/%s/%s/branch_protections/%s", owner, repo, baseBranch)

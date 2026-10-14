@@ -25,7 +25,7 @@ var defaultPushGitConfig = []string{"core.compression=0", "pack.window=0"}
 type Config struct {
 	Enabled              bool
 	BaseURL              string
-	Token                string
+	Token                string // Server-owned Forgejo admin credential.
 	TokenFile            string
 	WebhookSecret        string
 	WebhookSecretFile    string
@@ -56,8 +56,8 @@ type Config struct {
 	WebhookURL string
 	// IntegrationBot is the only Forgejo identity allowed to push protected base refs.
 	IntegrationBot string
-	// AuthorityPolicyToken/File is a separate operator credential used only for
-	// live authority-policy reads. Projection pushes continue to use Token.
+	// AuthorityPolicyToken/File is the legacy operator/admin credential alias.
+	// When present it takes precedence for ALL Forgejo API and Git operations.
 	AuthorityPolicyToken     string
 	AuthorityPolicyTokenFile string
 	// ActionPrincipalBindings maps an exact Forgejo actor login to the immutable
@@ -336,12 +336,10 @@ func New(cfg Config, client Client, pusher GitPusher) *Integration {
 func NewWithGitCapabilities(cfg Config, client Client, pusher GitPusher, remoteRef GitRemoteRefReader) *Integration {
 	cfg = cfg.withDefaults()
 	if client == nil {
-		client = NewHTTPClient(cfg.BaseURL, cfg.Token)
+		client = newAdminHTTPClient(cfg.BaseURL, cfg.Token)
 	}
 	var authorityClient repositoryAuthorityClient
-	if strings.TrimSpace(cfg.AuthorityPolicyToken) != "" {
-		authorityClient = NewHTTPClient(cfg.BaseURL, cfg.AuthorityPolicyToken)
-	} else if candidate, ok := client.(repositoryAuthorityClient); ok {
+	if candidate, ok := client.(repositoryAuthorityClient); ok {
 		authorityClient = candidate
 	}
 	if pusher == nil {
@@ -362,6 +360,9 @@ func (i *Integration) WorkflowActionsEnabled() bool {
 }
 
 func (c Config) withDefaults() Config {
+	if token := strings.TrimSpace(c.AuthorityPolicyToken); token != "" {
+		c.Token = token
+	}
 	if c.RepoMap == nil {
 		c.RepoMap = map[string]RepoMapping{}
 	}
@@ -1467,9 +1468,8 @@ func (i *Integration) RemovePullRequestLabel(ctx context.Context, externalRepo s
 }
 
 // ActorHasWriteAccess reports whether a Forgejo actor has write-or-higher permission on the projected repository.
-// Forgejo restricts reads of another collaborator's permission, so a configured
-// authority-policy read client is preferred without transferring its authority
-// to projection or workflow writes.
+// The shared admin client reads the actor's permission; this is actor admission,
+// not a per-repository grant requirement for the server executor.
 func (i *Integration) ActorHasWriteAccess(ctx context.Context, externalRepo, username string) (bool, string, error) {
 	owner, repo, ok := splitRepoFullName(externalRepo)
 	if i == nil || !i.cfg.Enabled || !ok || strings.TrimSpace(username) == "" {
@@ -2023,8 +2023,23 @@ func scrubURLSecrets(text string) string {
 	return text
 }
 
-// LoadTokenFile reads a token file when Token is unset.
+// LoadTokenFile resolves the shared admin credential. The legacy operator
+// credential takes precedence even when the old projection token is inline.
 func LoadTokenFile(cfg Config) (Config, error) {
+	var err error
+	if cfg.AuthorityPolicyEnabled {
+		cfg, err = LoadAuthorityPolicyTokenFile(cfg)
+		if err != nil {
+			return cfg, err
+		}
+		if strings.TrimSpace(cfg.AuthorityPolicyTokenFile) != "" && strings.TrimSpace(cfg.AuthorityPolicyToken) == "" {
+			return cfg, fmt.Errorf("Forgejo admin token file is empty")
+		}
+	}
+	if token := strings.TrimSpace(cfg.AuthorityPolicyToken); token != "" {
+		cfg.Token = token
+		return cfg, nil
+	}
 	if strings.TrimSpace(cfg.Token) != "" || strings.TrimSpace(cfg.TokenFile) == "" {
 		return cfg, nil
 	}
