@@ -113,7 +113,14 @@ func TestRegistrationCallbackLoadsCredentialsAndAuthenticatesApp(t *testing.T) {
 }
 
 func TestRegistrarRejectsNonPrivateRedirects(t *testing.T) {
-	flow := &Flow{StatePath: "state", Paths: Paths{AppID: "id", PrivateKey: "key", WebhookSecret: "hook"}}
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	flow := &Flow{StatePath: filepath.Join(directory, "state"), Paths: Paths{AppID: filepath.Join(directory, "id"), PrivateKey: filepath.Join(directory, "key"), WebhookSecret: filepath.Join(directory, "hook")}}
+	if _, err := NewRegistrar(flow, "https://example.ts.net"+CallbackPath, "", nil); err != nil {
+		t.Fatal("valid private flow rejected")
+	}
 	for _, redirect := range []string{"http://example.ts.net" + CallbackPath, "https://public.example.test" + CallbackPath, "https://example.ts.net" + CallbackPath + "?token=secret"} {
 		if _, err := NewRegistrar(flow, redirect, "", nil); err == nil {
 			t.Fatal("unsafe callback accepted")
