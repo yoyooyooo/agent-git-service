@@ -1657,9 +1657,14 @@ type readyzConfig struct {
 	GitMaintenanceHealth         func() gitstore.MaintenanceHealth
 }
 
+// A full authority scan can require several waves of five or more provider
+// reads. Keep the whole probe bounded while allowing healthy multi-repository
+// scans to finish; an earlier caller deadline still cancels every worker.
+const readyzTimeout = 10 * time.Second
+
 func readyzHandler(cfg readyzConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), readyzTimeout)
 		defer cancel()
 		w.Header().Set("Content-Type", "application/json")
 
