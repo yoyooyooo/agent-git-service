@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/ngaut/agent-git-service/internal/githubappmanifest"
 
 	"github.com/ngaut/agent-git-service/internal/db"
 	applog "github.com/ngaut/agent-git-service/internal/logging"
@@ -127,6 +128,7 @@ type Deps struct {
 	Svc                    *service.Service
 	ConsoleBaseURL         string
 	ProviderLogBridge      http.Handler
+	GitHubAppRegistrar     *githubappmanifest.Registrar
 	// Owning-primary storage admission is applied after route authentication
 	// and rate limiting. It never supplies identity or repository permission.
 	RepositoryMaintenanceAdmission func(http.Handler) http.Handler

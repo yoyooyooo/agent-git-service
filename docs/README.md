@@ -60,3 +60,5 @@ accepted direction, or incremental work that has not fully landed yet.
 - [Token Lifecycle Test Coverage](testing/token-lifecycle.md)
 - [Dependency Licensing](governance/dependency-licensing.md)
 - [Monitoring Assets](monitoring/README.md)
+
+- [GitHub App registration](operations/github-app-registration.md): opt-in manifest creation, owner browser steps, credential reload and App identity checks.

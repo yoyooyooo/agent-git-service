@@ -194,12 +194,15 @@ const DefaultGitHubAppAPIBaseURL = "https://api.github.com"
 // GitHubAppConfig is the file-backed GitHub App surface. Secrets stay in
 // owner-only files; inline material is rejected and never loaded.
 type GitHubAppConfig struct {
-	Enabled           bool   `yaml:"enabled"`
-	AppIDFile         string `yaml:"app_id_file"`
-	PrivateKeyFile    string `yaml:"private_key_file"`
-	WebhookSecretFile string `yaml:"webhook_secret_file"`
-	APIBaseURL        string `yaml:"api_base_url"`
-	WebhookPath       string `yaml:"webhook_path"`
+	RegistrationEnabled     bool   `yaml:"registration_enabled"`
+	RegistrationStateFile   string `yaml:"registration_state_file"`
+	RegistrationRedirectURL string `yaml:"registration_redirect_url"`
+	Enabled                 bool   `yaml:"enabled"`
+	AppIDFile               string `yaml:"app_id_file"`
+	PrivateKeyFile          string `yaml:"private_key_file"`
+	WebhookSecretFile       string `yaml:"webhook_secret_file"`
+	APIBaseURL              string `yaml:"api_base_url"`
+	WebhookPath             string `yaml:"webhook_path"`
 	// AppID and WebhookSecret are filled only from the owner-only files when
 	// Enabled is true. Private key bytes are not retained by this config.
 	AppID         string `yaml:"-"`
@@ -724,6 +727,11 @@ func validateGitHubApp(cfg *GitHubAppConfig, document []byte) error {
 	}
 	if cfg.WebhookPath == "" {
 		cfg.WebhookPath = DefaultGitHubAppWebhookPath
+	}
+	if cfg.RegistrationEnabled {
+		if cfg.RegistrationStateFile == "" || cfg.RegistrationRedirectURL == "" || cfg.AppIDFile == "" || cfg.PrivateKeyFile == "" || cfg.WebhookSecretFile == "" {
+			return fmt.Errorf("github_app registration requires state, redirect and credential paths")
+		}
 	}
 	if !cfg.Enabled {
 		return nil

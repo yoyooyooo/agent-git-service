@@ -1123,7 +1123,12 @@ func buildHTTPMux(cfg httpMuxConfig) (muxDeps, error) {
 	if err != nil {
 		return muxDeps{}, err
 	}
+	registrar, err := initGitHubAppRegistrar(cfg.Cfg)
+	if err != nil {
+		return muxDeps{}, err
+	}
 	handlers := &rest.Deps{
+		GitHubAppRegistrar:             registrar,
 		Svc:                            cfg.ServiceDeps,
 		ReplicationAuthorityID:         cfg.Cfg.ReplicationAuthorityID,
 		LegacyExtensionAliases:         !cfg.Cfg.DisableLegacyExtensionAliases,
