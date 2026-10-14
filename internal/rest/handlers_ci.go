@@ -231,7 +231,12 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 			return
 		case "run-artifacts", "repo-artifacts":
 			if operation == "run-artifacts" {
-				if _, ok := readID("run_id"); !ok {
+				id, ok := readID("run_id")
+				if !ok {
+					return
+				}
+				if _, err := d.Svc.CIRun(r.Context(), repo.FullName, id); err != nil {
+					ciHTTPError(w, err)
 					return
 				}
 			}

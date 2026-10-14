@@ -737,6 +737,15 @@ func (s *Service) UpdatePRByID(ctx context.Context, id uint, state *string, draf
 		}); err != nil {
 			return err
 		}
+		if state != nil && *state == db.StateOpen && orig.State == db.StateClosed {
+			pr, err := s.GetPRByID(ctx, id)
+			if err != nil {
+				return err
+			}
+			if _, err := s.DispatchPullRequestIntegrations(ctx, pr); err != nil {
+				slog.WarnContext(ctx, "reopen PR projections failed", "pull_request_id", id, "error", err)
+			}
+		}
 		if state != nil && *state == db.StateClosed && orig.State != db.StateClosed {
 			pr, err := s.GetPRByID(ctx, id)
 			if err != nil {
