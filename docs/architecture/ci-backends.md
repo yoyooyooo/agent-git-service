@@ -65,6 +65,15 @@ workflow/run/job REST forms. Forgejo uses actual ActionRun and ActionTask shapes
 run ID, repository run number and task/job ID are distinct. It does not pretend
 that `/actions/jobs` exists on a Forgejo API that does not provide it.
 
+Some Forgejo versions expose the run collection without `GET actions/runs/{id}`.
+On a 404/405/501 from that read, AGS locates the exact provider database ID in
+bounded collection pages (the same `task_page_limit` budget). Repository run
+numbers are never used as database IDs. Duplicate IDs, changed totals, incomplete
+inventories and an exhausted budget return unavailable; authentication failures,
+transport failures and other provider errors do not trigger this fallback.
+Details, jobs and logs all use this lookup, so a successful `gh run list` does not
+lead to a false missing-run error solely because the single-run route is absent.
+
 Missing capabilities return unsupported. In particular the currently targeted
 Forgejo API does not expose standard cancel/rerun or a workflow catalogue; those
 mutations are not routed through private web endpoints, SQL or another backend.
@@ -138,6 +147,15 @@ gh run view --job "$JOB_ID" --log
 
 No Forgejo login, provider token, alternate origin or `ags-cli` PR command is
 required. The server-side backend and log bridge must already be configured.
+For direct REST reads, `gh api` has its own host selection. Use the authenticated
+AGS API hostname explicitly when the shell's default host is GitHub:
+
+```bash
+gh api --hostname primary.example.test "repos/$REPO/actions/runs/$RUN_ID"
+gh api --hostname primary.example.test "repos/$REPO/actions/runs/$RUN_ID/jobs"
+gh api --hostname primary.example.test "repos/$REPO/actions/runs/$RUN_ID/logs" > logs.zip
+```
+
 A successful API read is not a successful CI result; keep the run head and
 conclusion in the receipt. Missing provider step metadata may display as
 `UNKNOWN STEP`; whole-job output remains the original log, not fabricated steps.

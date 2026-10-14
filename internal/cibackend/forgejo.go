@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -116,6 +117,9 @@ func (f *Forgejo) Run(ctx context.Context, repo, id string) (Run, error) {
 		return Run{}, ErrInvalid
 	}
 	data, e := f.request(ctx, "GET", prefix+"runs/"+id, false)
+	if errors.Is(e, ErrNotFound) || errors.Is(e, ErrUnsupported) {
+		return f.findListedRun(ctx, repo, id)
+	}
 	if e != nil {
 		return Run{}, e
 	}
@@ -128,6 +132,48 @@ func (f *Forgejo) Run(ctx context.Context, repo, id string) (Run, error) {
 		return Run{}, ErrInvalid
 	}
 	return r, e
+}
+
+// Older Forgejo APIs expose the run collection without a single-run route.
+// Never interpret the database ID as index_in_repo, or guess a web/DB endpoint.
+func (f *Forgejo) findListedRun(ctx context.Context, repo, id string) (Run, error) {
+	limit := f.config.TaskPageLimit
+	if limit == 0 {
+		limit = 100
+	}
+	seen := map[string]bool{}
+	total := -1
+	for page := 1; page <= limit; page++ {
+		found, err := f.Runs(ctx, repo, Query{Page: page, PerPage: 50})
+		if err != nil {
+			return Run{}, err
+		}
+		if total >= 0 && total != found.Total {
+			return Run{}, fmt.Errorf("%w: CI run inventory changed during observation", ErrUnavailable)
+		}
+		total = found.Total
+		var match *Run
+		for _, run := range found.Items {
+			if seen[run.Key] {
+				return Run{}, fmt.Errorf("%w: repeated run in paged CI inventory", ErrUnavailable)
+			}
+			seen[run.Key] = true
+			if run.Key == id {
+				copy := run
+				match = &copy
+			}
+		}
+		if match != nil {
+			return *match, nil
+		}
+		if found.Complete {
+			if len(seen) != total {
+				return Run{}, fmt.Errorf("%w: incomplete CI run inventory", ErrUnavailable)
+			}
+			return Run{}, ErrNotFound
+		}
+	}
+	return Run{}, fmt.Errorf("%w: Forgejo run inventory exceeds bounded observation", ErrUnavailable)
 }
 
 type forgejoTask struct {

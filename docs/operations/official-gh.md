@@ -38,7 +38,8 @@ connections with no CI, and current configured CI evidence. External check-runs
 and empty artifact collections are projected for stock `gh run view` and
 `gh api`. Not every GitHub endpoint is fully replicated; unsupported external
 Actions management still fails explicitly rather than silently using unrelated
-native state. See [CI backends](../architecture/ci-backends.md).
+native state. See [CI backends](../architecture/ci-backends.md) and the
+[command coverage / AGSX follow-ups](gh-command-parity.md).
 
 GraphQL `mergeStateStatus` is `BEHIND` when an open, non-draft head does not
 contain the current base. A requested standard merge method that the repository
@@ -58,6 +59,11 @@ head. A source or PR head change during acknowledgement returns a conflict
 without advancing the base or marking the changed PR merged. A confirmed merged
 PR exposes the resulting SHA through `gh pr view --json mergeCommit` and GraphQL
 field discovery.
+
+`gh pr close` and `gh pr reopen` use GraphQL. Reopening refreshes provider
+projections through the same native lifecycle as REST PATCH; invalid node IDs or
+failed readback return errors instead of a fabricated successful state. Provider
+convergence remains separate from the committed native state.
 
 PR list state arguments follow the client's declared variable (official gh uses
 `$state`). GraphQL `CLOSED` excludes `MERGED`, while selecting both includes both.

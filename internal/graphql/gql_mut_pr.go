@@ -176,16 +176,19 @@ func (s *Server) doMergePR(ctx context.Context, req gqlRequest) map[string]any {
 func (s *Server) doSetPRState(ctx context.Context, req gqlRequest, state, mutName string) map[string]any {
 	inp := inputMap(req)
 	prID := strFrom(inp, "pullRequestId")
-	if dbID := parseNodeID(prID, "PullRequest"); dbID > 0 {
-		st := state
-		if err := s.Svc.UpdatePRByID(ctx, dbID, &st, nil); err != nil {
-			return errResp(err.Error())
-		}
-		if pr, err := s.Svc.ReloadPR(ctx, dbID); err == nil {
-			return wrap(mutName, map[string]any{"pullRequest": s.prGQL(ctx, pr)})
-		}
+	dbID := parseNodeID(prID, "PullRequest")
+	if dbID == 0 {
+		return errResp("invalid pull request ID")
 	}
-	return wrap(mutName, map[string]any{"pullRequest": map[string]any{"state": strings.ToUpper(state)}})
+	st := state
+	if err := s.Svc.UpdatePRByID(ctx, dbID, &st, nil); err != nil {
+		return errResp(err.Error())
+	}
+	pr, err := s.Svc.ReloadPR(ctx, dbID)
+	if err != nil {
+		return errResp(err.Error())
+	}
+	return wrap(mutName, map[string]any{"pullRequest": s.prGQL(ctx, pr)})
 }
 
 func (s *Server) doUpdatePR(ctx context.Context, req gqlRequest) map[string]any {

@@ -104,7 +104,9 @@ try {
     const path = url.pathname.replace(/^\/api\/v1/, "");
     if (req.method === "POST") { if (currentBackend !== "github" || !/\/runs\/17\/(cancel|rerun|rerun-failed-jobs)$/.test(path)) { json(res, {}, 405); return; } effects++; res.writeHead(202); res.end(); return; }
     if (path.endsWith("/actions/runs")) { json(res, { total_count: 1, workflow_runs: [runObject()] }); return; }
-    if (path.endsWith("/actions/runs/17")) { json(res, runObject()); return; }
+    // Forgejo versions with only the collection endpoint used to make every
+    // official-gh detail/jobs/log request fail after a successful run list.
+    if (path.endsWith("/actions/runs/17")) { if (currentBackend === "forgejo") { json(res, {}, 404); return; } json(res, runObject()); return; }
     if (path.endsWith("/actions/tasks")) { json(res, { total_count: 2, workflow_runs: jobs().map(j => ({ id: j.id, run_number: 9, workflow_id: "ci.yml", name: j.name, head_sha: head, head_branch: "feature", status: j.status === "in_progress" ? "running" : j.conclusion, url: j.html_url, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:01:00Z", run_started_at: j.started_at })) }); return; }
     if (path.endsWith("/actions/runs/17/jobs")) { json(res, { total_count: 2, jobs: jobs() }); return; }
     if (/\/actions\/jobs\/(41|42)$/.test(path)) { json(res, jobs().find(j => j.id === Number(path.split("/").at(-1)))); return; }
@@ -133,6 +135,10 @@ try {
   const edited = JSON.parse((await ghCheck("edited fields and comments", ["pr", "view", "1", "--json", "title,body,isDraft,comments,mergeCommit,headRefOid"])).stdout);
   assertions(edited.title === "Official gh edited" && edited.body === "edited body" && edited.isDraft && edited.comments.length === 2 && edited.comments[1].body === "body-file fixture\n\nsecond paragraph\n" && edited.mergeCommit === null && edited.headRefOid === head, "PR edit/comment/draft readback drift");
   await ghCheck("restore ready", ["pr", "ready", "1"]);
+  await ghCheck("close PR", ["pr", "close", "1"]);
+  response = await api(`/api/v3/repos/${repo}/pulls/1`); assertions(response.data.state === "closed", "close reported success without closed state");
+  await ghCheck("reopen PR", ["pr", "reopen", "1"]);
+  response = await api(`/api/v3/repos/${repo}/pulls/1`); assertions(response.data.state === "open" && response.data.closed_at === null, "reopen reported success without durable open state");
   const noCI = await ghCheck("no CI still has commit", ["pr", "checks", "1"], [1]); assertions(!noCI.stderr.includes("no commit found"), "missing CI removed commit shape");
   await start("github");
   await ghCheck("GitHub Actions failure", ["pr", "checks", "1", "--required"], [1]);
@@ -165,7 +171,19 @@ try {
   outcome = "pending";
   await ghCheck("Forgejo pending check timestamps", ["pr", "view", "1", "--json", "number,closedAt,mergedAt,statusCheckRollup"]);
   outcome = "success";
-  await ghCheck("Forgejo unsupported cancel", ["run", "cancel", String(forgejoRun)], [1]); assertions(effects === 1, "unsupported backend mutation fell back");
+  const details = JSON.parse((await ghCheck("Forgejo run detail without single-run provider endpoint", ["run", "view", String(forgejoRun), "--json", "databaseId,jobs,status"])).stdout);
+  assertions(details.databaseId === forgejoRun && details.jobs.length === 2, "run detail lost mapped run/job identity");
+  const failedLogs = await ghCheck("Forgejo failed-only logs", ["run", "view", String(forgejoRun), "--log-failed"]);
+  assertions(!failedLogs.stdout.includes("fixture log"), "successful jobs exposed as failed logs");
+  outcome = "failure";
+  const failureLogs = await ghCheck("Forgejo failed job logs without single-run endpoint", ["run", "view", String(forgejoRun), "--log-failed"]);
+  assertions(failureLogs.stdout.includes("unit fixture log") && !failureLogs.stdout.includes("lint fixture log"), "failed log selection drift");
+  outcome = "success";
+  for (const args of [["run", "cancel", String(forgejoRun)], ["run", "rerun", String(forgejoRun)], ["run", "rerun", String(forgejoRun), "--failed"]]) {
+    const unsupported = await ghCheck("Forgejo explicit unsupported " + args.slice(1).join(" "), args, [1]);
+    assertions(unsupported.stderr.includes("501") && !unsupported.stderr.includes("resource not found"), "unsupported action disguised as a missing run");
+  }
+  assertions(effects === 1, "unsupported backend mutation fell back");
   const before = await git(["rev-parse", "origin/main"]);
   await ghCheck("wrong head merge", ["pr", "merge", "1", "--merge", "--match-head-commit", "b".repeat(40)], [1]);
   response = await api(`/api/v3/repos/${repo}/branches/main`); assertions(response.data.commit.sha === before, "rejected merge changed destination");
