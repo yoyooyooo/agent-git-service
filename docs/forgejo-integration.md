@@ -24,6 +24,50 @@ git push AGS refs/heads/agent/demo
   -> Forgejo Runner executes jobs
 ```
 
+## Native branch writes and historical integrity
+
+### Native Git API branch writes
+
+The Git refs API and repository contents API also run the configured branch
+projection after committing a native branch change. Create, update, content
+write/delete and branch deletion use the same provider dispatchers as Git push;
+custom ref namespaces do not become mirrored branches. Existing caller admission
+and provider policies still apply. A provider failure is recorded as projection
+drift without changing a successful native API response into an ambiguous failure.
+Projection has a bounded execution window and is not a distributed transaction.
+Before projecting deletion, a successful native ref listing must prove the exact
+branch is still absent; a failed read or a recreated branch is not deletion proof.
+
+### Active work versus historical integrity
+
+An open PR requires the exact mapped provider identity, head/base coordinates and
+current head SHA. A closed provider PR can still expose the current head of a
+reused source branch. That mutable head must not be compared with an earlier
+delivery as if it were an immutable historical result.
+
+For a merged PR, the audit compares the two recorded merge commits; the separate
+merge-integrity audit still verifies reachability in AGS. A different or missing
+merge result remains drift. For a closed, unmerged PR, a still-live source branch
+is not a head-repair target; a retained `refs/pull/<mapped-number>/head` remains
+comparable. The exact closed/unmerged state and mapped coordinates must still
+match. An unrelated branch or another PR's retained ref is not an acceptable
+substitute. Git branch names are case-sensitive.
+
+Historical audits never create a new projection job for a terminal native PR.
+Generic enqueue reloads native lifecycle before admission, so a stale open-PR
+caller cannot recreate that work. Existing terminal jobs remain execution history.
+
+When an exact provider read proves that the provider base already equals AGS but
+the stored projection base is stale, the audit reconciles only that cached base.
+The update is compare-and-swap fenced by both the observed native PR and mapping.
+It does not change the mapped PR number, source branch, last-synced content or
+provider state, and makes no provider write. A failed provider read or changed
+native/mapping fact leaves the old evidence intact for another observation.
+
+These repairs do not authorize pruning provider-only branches, rewriting old
+commits or suppressing genuine state/merge discrepancies. Historical data cleanup
+must establish ownership and preserve recoverability separately.
+
 ## Native gh creation and projection links
 
 PR creation and provider projection have different completion times. AGS commits

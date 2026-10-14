@@ -192,7 +192,7 @@ func (s *Service) projectionPullRequestFact(ctx context.Context, pullRequestID u
 	var pr db.PullRequest
 	if err := s.DBForCtx(ctx).Select(
 		"id", "number", "repository_id", "head_repository_id", "author_id", "agent_session_id",
-		"title", "body", "head_ref", "head_sha", "base_ref", "base_sha", "state",
+		"title", "body", "head_ref", "head_sha", "base_ref", "base_sha", "state", "merged",
 	).First(&pr, pullRequestID).Error; err != nil {
 		return db.PullRequest{}, fmt.Errorf("load projection PR fact: %w", err)
 	}
@@ -245,6 +245,9 @@ func (s *Service) EnqueueForgejoPullRequestProjection(ctx context.Context, pr db
 	pr, err = s.projectionPullRequestFact(bgCtx, pr.ID)
 	if err != nil {
 		return db.PullRequestProjectionJob{}, err
+	}
+	if pr.State != db.StateOpen || pr.Merged {
+		return db.PullRequestProjectionJob{}, nil
 	}
 	repoFullName, err := s.projectionRepoFullNameFromPR(bgCtx, pr)
 	if err != nil {
