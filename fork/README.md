@@ -41,6 +41,12 @@ Hosted CI uses read-only GitHub permissions and disposable test dependencies. CI
 
 The separate [AGS deploy handoff](../.github/workflows/ags-deploy.yml) is disabled unless `AGS_AUTODEPLOY_ENABLED` is exactly `true` and the `ags-autodeploy` environment approves it. It handles only successful `fork/main.20260924` push `Fork CI` events, runs trusted default-branch handoff code, and sends one authenticated private Dagu webhook; it never builds, installs or controls services. Deployment logic and the review/activation design belong to the operator automation repository. Its environment-scoped network/webhook credentials are not available to CI or PR code. No activation, credential provisioning or deployment is authorized by merging source.
 
+The optional [hosted-runner network probe](../docs/operations/ags-network-probe.md)
+is a separate, manual workflow with its own concurrency group and a default-branch-only
+environment. It sends only an unauthenticated GET, never requests deployment, and
+does not replace or cancel `Fork CI`. Environment branch rules require explicit
+operator setup; merging the workflow does not grant network or deployment access.
+
 ## Release delivery
 
 [Release operations](../docs/operations/releases.md) owns exact-source native builds,

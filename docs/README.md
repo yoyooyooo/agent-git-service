@@ -56,6 +56,7 @@ accepted direction, or incremental work that has not fully landed yet.
 - [AGS Edge Primary Listener](operations/ags-edge-primary-listener.md) - explicit mTLS startup, filesystem preflight, shutdown and remaining rollout gates.
 - [AGS Edge Enrollment](operations/ags-edge-enrollment.md) - native-admin registration CLI, exact repository receipts and unapplied certificate-based peer plans.
 - [CI](ci.md)
+- [Hosted-runner Network Probe](operations/ags-network-probe.md) - optional default-branch-only, read-only deployment connectivity check, independent from CI and production handoff.
 - [Wiki Storage V2 Cutover Checklist](operations/wiki-storage-v2-cutover.md)
 - [Token Lifecycle Test Coverage](testing/token-lifecycle.md)
 - [Dependency Licensing](governance/dependency-licensing.md)
