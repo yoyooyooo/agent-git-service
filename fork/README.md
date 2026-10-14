@@ -39,7 +39,7 @@ The inventory includes empty commits, all changed paths, and explicit pending re
 
 Hosted CI uses read-only GitHub permissions and disposable test dependencies. CI caches dependencies, not private deployment data; it never deploys. No CI workflow may use a self-hosted runner, production credentials, deployment keys, or `pull_request_target` to execute contributor code.
 
-The separate [AGS deploy handoff](../.github/workflows/ags-deploy.yml) is disabled unless `AGS_AUTODEPLOY_ENABLED` is exactly `true` and the `ags-autodeploy` environment approves it. It handles only successful `main` push `Fork CI` events, runs trusted default-branch handoff code, and sends one authenticated private Dagu webhook; it never builds, installs or controls services. Deployment logic and the review/activation design belong to the operator automation repository. Its environment-scoped network/webhook credentials are not available to CI or PR code. No activation, credential provisioning or deployment is authorized by merging source.
+The separate [AGS deploy handoff](../.github/workflows/ags-deploy.yml) is disabled unless `AGS_AUTODEPLOY_ENABLED` is exactly `true` and the `ags-autodeploy` environment approves it. It handles only successful `fork/main.20260924` push `Fork CI` events, runs trusted default-branch handoff code, and sends one authenticated private Dagu webhook; it never builds, installs or controls services. Deployment logic and the review/activation design belong to the operator automation repository. Its environment-scoped network/webhook credentials are not available to CI or PR code. No activation, credential provisioning or deployment is authorized by merging source.
 
 ## Release delivery
 

@@ -16,24 +16,25 @@ def payload(event):
     run = event['workflow_run']
     sha = run['head_sha']
     if (event['repository']['full_name'] != REPO or run['repository']['full_name'] != REPO
-            or run['head_branch'] != 'main' or run['event'] != 'push'
+            or run['head_branch'] != 'fork/main.20260924'
+            or event['repository'].get('default_branch') != run['head_branch'] or run['event'] != 'push'
             or run['status'] != 'completed' or run['conclusion'] != 'success'
             or run['workflow_id'] != WORKFLOW_ID or not re.fullmatch('[0-9a-f]{40}', sha)
             or type(run['id']) is not int or run['id'] <= 0
             or type(run['run_attempt']) is not int or run['run_attempt'] <= 0):
         raise ValueError('invalid_ci_event')
     return {'dagRunId': f"ags-{run['id']}-{run['run_attempt']}-{sha[:12]}", 'payload': {
-        'repository': REPO, 'branch': 'main', 'sha': sha,
+        'repository': REPO, 'branch': 'fork/main.20260924', 'sha': sha,
         'run_id': run['id'], 'run_attempt': run['run_attempt']}}
 
 
 def main():
     with open(os.environ['GITHUB_EVENT_PATH']) as stream:
         body = payload(json.load(stream))
-    tip = subprocess.run(['gh', 'api', '--hostname', 'github.com', f'repos/{REPO}/branches/main', '--jq', '.commit.sha'],
+    tip = subprocess.run(['gh', 'api', '--hostname', 'github.com', f'repos/{REPO}/branches/fork%2Fmain.20260924', '--jq', '.commit.sha'],
                          capture_output=True, text=True, timeout=30)
     if tip.returncode != 0 or tip.stdout.strip() != body['payload']['sha']:
-        raise ValueError('stale_or_unverified_main')
+        raise ValueError('stale_or_unverified_default_branch')
     url = os.environ['AGS_DEPLOY_WEBHOOK_URL']
     parsed = urlparse(url)
     if (parsed.scheme != 'https' or parsed.username or parsed.password or parsed.query or parsed.fragment
