@@ -1341,10 +1341,8 @@ func TestResolveAbsentForgejoProjectionStatesMarksGoneRefsResolved(t *testing.T)
 	}
 }
 
-// Live samples, 2026-10-12 runtime.log:
-// 03:43:28 projection watch poll failed: jackie/agent-kit refs/heads/docs/t023-runtime-checkpoint
-// 03:58:28 projection watch poll failed: jackie/agent-kit refs/pull/293/projection-integrity
-// Both stayed generation 1 while the rendered external SHA changed, so the old
+// Branch and PR-integrity observations can both stay generation 1 while the
+// rendered external SHA changes. The old
 // generation-only key collided with the delivered row and dropped the notice.
 func TestSameGenerationDriftFactChangeDoesNotConflictWithDeliveredNotice(t *testing.T) {
 	svc := setupProjectionStateService(t)
@@ -1352,7 +1350,7 @@ func TestSameGenerationDriftFactChangeDoesNotConflictWithDeliveredNotice(t *test
 		t.Fatalf("migrate outbound: %v", err)
 	}
 	ctx := context.Background()
-	repo := db.Repository{OwnerID: 1, Name: "agent-kit", FullName: "jackie/agent-kit", DefaultBranch: "main"}
+	repo := db.Repository{OwnerID: 1, Name: "notice-demo", FullName: "example-owner/notice-demo", DefaultBranch: "main"}
 	if err := svc.DB.Create(&repo).Error; err != nil {
 		t.Fatalf("create repo: %v", err)
 	}
@@ -1378,7 +1376,7 @@ func TestSameGenerationDriftFactChangeDoesNotConflictWithDeliveredNotice(t *test
 	}
 	for _, sample := range samples {
 		first := &forgejointegration.ProjectionError{
-			Type: forgejointegration.ProjectionFailureSHADrift, Repo: repo.FullName, TargetRepo: "mirror/agent-kit",
+			Type: forgejointegration.ProjectionFailureSHADrift, Repo: repo.FullName, TargetRepo: "mirror/notice-demo",
 			Ref: sample.ref, Branch: sample.branch,
 			ExpectedSHA: "1200fdc61a571200fdc61a571200fdc61a571200", ActualSHA: sample.firstExternal,
 			ErrorSummary: sample.summary,
@@ -1407,7 +1405,7 @@ func TestSameGenerationDriftFactChangeDoesNotConflictWithDeliveredNotice(t *test
 		}
 
 		next := &forgejointegration.ProjectionError{
-			Type: forgejointegration.ProjectionFailureSHADrift, Repo: repo.FullName, TargetRepo: "mirror/agent-kit",
+			Type: forgejointegration.ProjectionFailureSHADrift, Repo: repo.FullName, TargetRepo: "mirror/notice-demo",
 			Ref: sample.ref, Branch: sample.branch,
 			ExpectedSHA: first.ExpectedSHA, ActualSHA: sample.nextExternal, ErrorSummary: sample.summary,
 		}
