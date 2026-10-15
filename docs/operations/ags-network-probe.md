@@ -87,4 +87,5 @@ by production handoff. Only a successful hosted run establishes live reachabilit
 
 The separate manual `Tailscale OAuth verify` workflow checks the injected generation, single-tag CI identity, Dagu health and denied TCP destinations without a deployment POST. Default-branch environment restrictions remain. Retire the old auth-key secret only after the environment canary passes.
 
-负向 TCP 探针使用经 Tailscale Services API 读回的 AGS VIP（100.101.222.132、100.66.212.180）；被拒绝的服务名称可能不出现在 runner 的 MagicDNS 中。DNS 不可见不当作 TCP 拒绝证据。服务重建导致 VIP 改变时，先读回并同步更新三个仓库的 canary。
+
+只读 canary 的网络配置由 environment variables TS_DAGU_HEALTH_URL 与 TS_CI_DENIED_TCP_TARGETS（JSON 四组 host/port）提供，不在公开 Git 内容记录私有域名/IP。后者应包括 mini SSH、Git HTTP，以及经 Services API 读回的两个 AGS VIP 443；被拒绝服务可能不提供 MagicDNS，不能以 DNS 失败证明 TCP 拒绝。服务重建时由运维读回并更新两 environment variables。

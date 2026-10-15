@@ -35,15 +35,20 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
       - name: Read-only identity and access checks
+        env:
+          DAGU_HEALTH_URL: ${{ vars.TS_DAGU_HEALTH_URL }}
+          DENIED_TCP_TARGETS: ${{ vars.TS_CI_DENIED_TCP_TARGETS }}
         run: |
           set -euo pipefail
           tailscale status --json | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s.get("BackendState")=="Running" and s.get("Self",{}).get("Online") is True and s.get("Self",{}).get("Tags")==["tag:ci"], "CI identity mismatch"'
-          curl --fail --silent --show-error --max-time 20 https://dagu-mini.tail9146e0.ts.net/health >/dev/null
+          curl --fail --silent --show-error --max-time 20 "${DAGU_HEALTH_URL:?TS_DAGU_HEALTH_URL is required}" >/dev/null
           # TCP, not Tailscale ping: the policy intentionally denies these services.
           python3 - <<'PYCODE'
-          import socket
+          import socket, os, json
           # Denied service names are hidden by MagicDNS. Probe VIPs read from Services API.
-          for host, port in [("mini.tail9146e0.ts.net",22),("mini.tail9146e0.ts.net",6666),("100.101.222.132",443),("100.66.212.180",443)]:
+          targets=json.loads(os.environ["DENIED_TCP_TARGETS"])
+          assert len(targets)==4, "four operator-configured denied destinations required"
+          for host, port in targets:
               socket.getaddrinfo(host,port)  # DNS failure is not proof of denied TCP access.
               try:
                   conn=socket.create_connection((host,port),timeout=3)

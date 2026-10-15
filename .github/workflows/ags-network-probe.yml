@@ -31,11 +31,13 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
       - name: Verify CI network identity
+        env:
+          DAGU_HEALTH_URL: ${{ vars.TS_DAGU_HEALTH_URL }}
         shell: bash
         run: |
           set -euo pipefail
           tailscale status --json | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s.get("BackendState")=="Running" and s.get("Self",{}).get("Online") is True and s.get("Self",{}).get("Tags")==["tag:ci"], "CI Tailscale identity unavailable"'
-          curl --fail --silent --show-error --max-time 20 https://dagu-mini.tail9146e0.ts.net/health >/dev/null
+          curl --fail --silent --show-error --max-time 20 "${DAGU_HEALTH_URL:?TS_DAGU_HEALTH_URL is required}" >/dev/null
       - name: Read-only webhook reachability
         env:
           AGS_DEPLOY_WEBHOOK_URL: ${{ vars.AGS_DEPLOY_WEBHOOK_URL }}
