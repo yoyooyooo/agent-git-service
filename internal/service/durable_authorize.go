@@ -14,7 +14,7 @@ import (
 )
 
 // DurableOperationAuthorizationResult is the response for a successful durable
-// operation authorization check, matching the ags-cli DurableOperationAuthorizationResult.
+// operation authorization check, returned by the durable authorization API.
 type DurableOperationAuthorizationResult struct {
 	Authorized         bool                                   `json:"authorized"`
 	PrincipalID        uint                                   `json:"principal_id"`
