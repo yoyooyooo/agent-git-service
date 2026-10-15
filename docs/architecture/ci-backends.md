@@ -145,7 +145,7 @@ gh run view "$RUN_ID" --log
 gh run view --job "$JOB_ID" --log
 ```
 
-No Forgejo login, provider token, alternate origin or `ags-cli` PR command is
+No Forgejo login, provider token, alternate origin or additional PR client is
 required. The server-side backend and log bridge must already be configured.
 For direct REST reads, `gh api` has its own host selection. Use the authenticated
 AGS API hostname explicitly when the shell's default host is GitHub:

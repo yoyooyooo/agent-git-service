@@ -327,7 +327,7 @@ func (s *Service) handleForgejoPullRequestActionLabel(ctx context.Context, event
 			return result, fmt.Errorf("terminalize exact action fact drift: %w", terminalErr)
 		}
 		result.WorkflowStatus = "denied"
-		if ackErr := s.acknowledgeForgejoActionRequest(ctx, event.RepoFullName, event.PRNumber, "AGS rebase request was blocked: live action facts do not match the exact intent. Use `ags-cli pr update-branch --rebase` or retry the label after AGS and Forgejo heads agree."); ackErr != nil {
+		if ackErr := s.acknowledgeForgejoActionRequest(ctx, event.RepoFullName, event.PRNumber, "AGS rebase request was blocked: live action facts do not match the exact intent. Use `gh pr update-branch --rebase` or retry the label after AGS and Forgejo heads agree."); ackErr != nil {
 			slog.WarnContext(ctx, "acknowledge failed Forgejo action-rebase request", "forgejo_repo", event.RepoFullName, "forgejo_pr", event.PRNumber, "error", ackErr)
 		}
 		return result, nil

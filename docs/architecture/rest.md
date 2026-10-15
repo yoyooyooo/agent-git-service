@@ -256,7 +256,7 @@ Wiki path-slug hierarchy rules:
 ### Durable Operation Authorization
 
 `POST /api/v3/operations/authorize` is an authenticated additive endpoint for
-profile-backed `ags-cli` commands. `handlers_integrations.go` decodes the exact
+legacy profile-backed clients. `handlers_integrations.go` decodes the exact
 `service=ags`, `owner/repo`, normalized operation name, constraint map,
 malformed revisions, and trailing JSON. The handler passes the decoded scope to
 `service.AuthorizeDurableOperation`; it does not make authority decisions.

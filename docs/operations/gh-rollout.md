@@ -62,7 +62,7 @@ public source. Moving retired material to Trash is not physical disk reclamation
 
 ## Companion adoption
 
-The executable remains `agsx`, distinct from the installed `ags-cli`. Ordinary
+The executable remains `agsx`, alongside official Git and gh. Ordinary
 Git/gh commands remain unwrapped. First trial host setup and read-only diagnosis,
 then the generated environment at one task-launch boundary. A native Agent identity
 must already exist; mat-only task launchers need an explicit source-identity intake

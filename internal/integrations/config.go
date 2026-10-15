@@ -62,7 +62,7 @@ type RepositoryConfig struct {
 	MergePolicy RepositoryMergePolicy `yaml:"merge_policy"`
 }
 
-// RepositoryMergePolicy is consumed by Access Grant pr.merge preflight and ags-cli.
+// RepositoryMergePolicy is consumed by Access Grant pr.merge preflight and native PR operations.
 type RepositoryMergePolicy struct {
 	MinApprovals                   int      `yaml:"min_approvals"`
 	RequireForgejoBranchProtection bool     `yaml:"require_forgejo_branch_protection"`

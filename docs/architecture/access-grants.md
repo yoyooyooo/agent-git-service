@@ -11,7 +11,7 @@ Implemented by:
 
 This layer turns one fresh, task-token-bound execution-context observation into
 an AGS-owned canonical actor and a short-lived task/repository authority grant.
-It is independent of a durable `~/.ags-cli` profile and does not expose a
+It is independent of a durable client profile and does not expose a
 Forgejo credential.
 
 For ordinary Git and GitHub-compatible API adapters, AGS can now derive a short-lived internal
@@ -154,7 +154,7 @@ Optional selectors cannot self-grant:
 
 The receipt records requested/effective classes, requested/effective
 operations, selector outcomes and stable warnings. AGS does not read process
-environment variables directly. A Runtime or `ags-cli` may translate optional
+environment variables directly. A Runtime may translate optional
 `AGS_AGENT_ID`, `AGS_POLICY_CLASS`, and `AGS_OPERATIONS` values into these
 request fields.
 

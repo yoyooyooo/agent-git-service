@@ -2,7 +2,7 @@
 
 Unmodified official gh is the standard client. AGS owns GitHub-shaped API
 compatibility; provider-specific operator capabilities belong in AGSX. Do not
-add a gh shim or new management features to ags-cli.
+add a gh shim or a parallel PR client.
 
 The command table describes the current server contracts. Local protocol
 fixtures and the official-gh acceptance job exercise writes without production
@@ -41,7 +41,7 @@ provider has converged. Source acceptance does not deploy or restart anything.
 ## AGSX follow-up backlog
 
 These are follow-ups, not implemented capabilities or permission to operate a
-provider. Do not put them in ags-cli.
+provider. Keep these capabilities in the companion surface.
 
 1. **Forgejo exact-run management**: research a supported, authenticated adapter
    for rerun-all, failed-only rerun, cancel and single-job rerun where the public

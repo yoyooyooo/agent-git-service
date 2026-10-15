@@ -13,7 +13,7 @@ It is not a fine-grained permission gateway for daily Agent work.
 - Association status is observability only: `linked | provisional | unlinked | conflict`.
 - Internal transport receipts may still exist, but they are not the product decision surface.
 - `AGS_CONTEXT_IDENTITY=1` only enriches association receipts.
-- `ags-cli context verify` judges association independently and must never gate push/PR create.
+- `agsx association.show` judges association independently and must never gate push/PR create.
 
 ## Server changes (this branch)
 
@@ -28,7 +28,7 @@ Conflict/provisional association does not remove collaboration operations from t
 
 ## CLI changes (agent-kit branch)
 
-- `ags-cli context verify`
+- `agsx association.show`
 - `context-identity` helpers and unit tests
 - Grant JSON may attach a `collaboration` block when `AGS_CONTEXT_IDENTITY=1`
 - Skill/docs path prefers direct `git`/`pr` over Grant lifecycle
