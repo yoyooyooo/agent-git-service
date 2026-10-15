@@ -105,8 +105,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn('workflow_call:', self.workflow)
 
     def test_probe_has_no_deployment_credential_or_deploy_step(self):
-        self.assertEqual(re.findall(r'secrets\.([A-Z_]+)', self.workflow), ['AGS_DEPLOY_TS_AUTHKEY'])
-        self.assertEqual(re.findall(r'^        run: (.+)$', self.workflow, re.M), ['python3 scripts/ags-deploy-probe.py'])
+        self.assertEqual(re.findall(r'secrets\.([A-Z_]+)', self.workflow), ['TS_OAUTH_CLIENT_ID', 'TS_OAUTH_SECRET'])
+        self.assertEqual(re.findall(r'^        run: (.+)$', self.workflow, re.M), ['|', 'python3 scripts/ags-deploy-probe.py'])
         self.assertNotIn('AGS_DEPLOY_WEBHOOK_TOKEN', self.workflow)
         self.assertNotIn('GH_TOKEN', self.workflow)
         self.assertIn('AGS_DEPLOY_WEBHOOK_URL: ${{ vars.AGS_DEPLOY_WEBHOOK_URL }}', self.workflow)

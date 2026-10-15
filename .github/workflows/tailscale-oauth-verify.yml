@@ -1,0 +1,54 @@
+name: Tailscale OAuth verify
+run-name: Tailscale OAuth verify ${{ inputs.generation }}
+on:
+  workflow_dispatch:
+    inputs:
+      generation:
+        required: true
+        type: string
+      client_id:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: choice
+        options: [ags-autodeploy, ags-autodeploy-probe]
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Check injected client generation
+        env:
+          ACTUAL_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          EXPECTED_CLIENT_ID: ${{ inputs.client_id }}
+          ACTUAL_GENERATION: ${{ vars.TS_OAUTH_GENERATION }}
+          EXPECTED_GENERATION: ${{ inputs.generation }}
+        run: python3 -c 'import os; assert os.environ["ACTUAL_CLIENT_ID"]==os.environ["EXPECTED_CLIENT_ID"] and os.environ["ACTUAL_GENERATION"]==os.environ["EXPECTED_GENERATION"], "credential generation mismatch"'
+      - uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      - name: Read-only identity and access checks
+        run: |
+          set -euo pipefail
+          tailscale status --json | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s.get("BackendState")=="Running" and s.get("Self",{}).get("Online") is True and s.get("Self",{}).get("Tags")==["tag:ci"], "CI identity mismatch"'
+          curl --fail --silent --show-error --max-time 20 https://dagu-mini.tail9146e0.ts.net/health >/dev/null
+          # TCP, not Tailscale ping: the policy intentionally denies these services.
+          python3 - <<'PYCODE'
+          import socket
+          for host, port in [("mini.tail9146e0.ts.net",22),("mini.tail9146e0.ts.net",6666),("ags-mini.tail9146e0.ts.net",443),("ags-imile-win.tail9146e0.ts.net",443)]:
+              socket.getaddrinfo(host,port)  # DNS failure is not proof of denied TCP access.
+              try:
+                  conn=socket.create_connection((host,port),timeout=3)
+              except (TimeoutError, OSError):
+                  continue
+              conn.close()
+              raise SystemExit("CI forbidden TCP destination reachable")
+          print("ci_network_verification=passed")
+          PYCODE
