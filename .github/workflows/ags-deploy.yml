@@ -34,10 +34,19 @@ jobs:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
       - name: Join private deployment network
-        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4
         with:
-          authkey: ${{ secrets.AGS_DEPLOY_TS_AUTHKEY }}
-          tags: tag:ags-deploy-trigger
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      - name: Verify CI network identity
+        env:
+          DAGU_HEALTH_URL: ${{ vars.TS_DAGU_HEALTH_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tailscale status --json | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s.get("BackendState")=="Running" and s.get("Self",{}).get("Online") is True and s.get("Self",{}).get("Tags")==["tag:ci"], "CI Tailscale identity unavailable"'
+          curl --fail --silent --show-error --max-time 20 "${DAGU_HEALTH_URL:?TS_DAGU_HEALTH_URL is required}" >/dev/null
       - name: Send one idempotent CI handoff
         env:
           GH_TOKEN: ${{ github.token }}
