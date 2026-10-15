@@ -86,3 +86,5 @@ and concurrency, default-branch admission, and rejection of manual probe events
 by production handoff. Only a successful hosted run establishes live reachability.
 
 The separate manual `Tailscale OAuth verify` workflow checks the injected generation, single-tag CI identity, Dagu health and denied TCP destinations without a deployment POST. Default-branch environment restrictions remain. Retire the old auth-key secret only after the environment canary passes.
+
+负向 TCP 探针使用经 Tailscale Services API 读回的 AGS VIP（100.101.222.132、100.66.212.180）；被拒绝的服务名称可能不出现在 runner 的 MagicDNS 中。DNS 不可见不当作 TCP 拒绝证据。服务重建导致 VIP 改变时，先读回并同步更新三个仓库的 canary。

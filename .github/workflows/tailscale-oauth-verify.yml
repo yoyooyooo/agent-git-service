@@ -42,7 +42,8 @@ jobs:
           # TCP, not Tailscale ping: the policy intentionally denies these services.
           python3 - <<'PYCODE'
           import socket
-          for host, port in [("mini.tail9146e0.ts.net",22),("mini.tail9146e0.ts.net",6666),("ags-mini.tail9146e0.ts.net",443),("ags-imile-win.tail9146e0.ts.net",443)]:
+          # Denied service names are hidden by MagicDNS. Probe VIPs read from Services API.
+          for host, port in [("mini.tail9146e0.ts.net",22),("mini.tail9146e0.ts.net",6666),("100.101.222.132",443),("100.66.212.180",443)]:
               socket.getaddrinfo(host,port)  # DNS failure is not proof of denied TCP access.
               try:
                   conn=socket.create_connection((host,port),timeout=3)
