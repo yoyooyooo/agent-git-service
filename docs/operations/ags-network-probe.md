@@ -39,9 +39,9 @@ deployment_branch_policies:
     type: branch
 ```
 
-Keep only the scoped `AGS_DEPLOY_TS_AUTHKEY` environment secret and the
+Keep shared OAuth `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_SECRET` environment secrets and the
 `AGS_DEPLOY_WEBHOOK_URL` variable. The network identity must remain limited by
-the deployment-network policy to the intended endpoint. Never add the production
+the tag:ci network policy to the intended Dagu service on TCP 443. Never add the production
 webhook token to this environment or expose its credentials to ordinary CI.
 Retain any additional environment protection rules already required by the owner.
 
@@ -84,3 +84,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_deploy_handoff.py
 These checks cover GET/no credentials, URL/status rejection, separate workflow
 and concurrency, default-branch admission, and rejection of manual probe events
 by production handoff. Only a successful hosted run establishes live reachability.
+
+The separate manual `Tailscale OAuth verify` workflow checks the injected generation, single-tag CI identity, Dagu health and denied TCP destinations without a deployment POST. Default-branch environment restrictions remain. Retire the old auth-key secret only after the environment canary passes.
+
+
+只读 canary 的网络配置由 environment variables TS_DAGU_HEALTH_URL 与 TS_CI_DENIED_TCP_TARGETS（JSON 四组 host/port）提供，不在公开 Git 内容记录私有域名/IP。后者应包括 mini SSH、Git HTTP，以及经 Services API 读回的两个 AGS VIP 443；被拒绝服务可能不提供 MagicDNS，不能以 DNS 失败证明 TCP 拒绝。服务重建时由运维读回并更新两 environment variables。
