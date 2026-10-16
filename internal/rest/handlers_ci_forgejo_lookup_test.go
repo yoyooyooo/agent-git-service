@@ -13,18 +13,26 @@ import (
 	"testing"
 
 	"github.com/ngaut/agent-git-service/internal/cibackend"
+	"github.com/ngaut/agent-git-service/internal/service"
 	"github.com/ngaut/agent-git-service/internal/testharness"
 	"github.com/stretchr/testify/require"
 )
 
-func TestForgejoCollectionOnlyRunDetailsJobsLogsAndUnsupportedRerun(t *testing.T) {
+func TestForgejoCollectionOnlyRunDetailsJobsLogsAndRerun(t *testing.T) {
 	h := testharness.New(t)
 	repo, head := seedCheckRunsRepo(t, h, "collection-only-ci")
 	writes := 0
+	runStatus := "failure"
+	writeStatus := 201
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writes++
-			w.WriteHeader(405)
+			require.Equal(t, "/api/v1/repos/ci/project/actions/workflows/ci.yml/dispatches", r.URL.Path)
+			require.Equal(t, "token provider-only", r.Header.Get("Authorization"))
+			var body map[string]any
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			require.Equal(t, head, body["ref"])
+			w.WriteHeader(writeStatus)
 			return
 		}
 		now := "2026-01-01T00:00:00Z"
@@ -32,7 +40,7 @@ func TestForgejoCollectionOnlyRunDetailsJobsLogsAndUnsupportedRerun(t *testing.T
 		case "/api/v1/repos/ci/project/actions/runs":
 			require.Equal(t, "token provider-only", r.Header.Get("Authorization"))
 			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "workflow_runs": []any{map[string]any{
-				"id": 17, "index_in_repo": 9, "workflow_id": "ci.yml", "prettyref": "feature", "commit_sha": head, "event": "push", "status": "failure", "created": now, "updated": now, "html_url": "https://ci.example.test/ci/project/actions/runs/9",
+				"id": 17, "index_in_repo": 9, "workflow_id": "ci.yml", "prettyref": "feature", "commit_sha": head, "event": "push", "status": runStatus, "created": now, "updated": now, "html_url": "https://ci.example.test/ci/project/actions/runs/9",
 			}}})
 		case "/api/v1/repos/ci/project/actions/tasks":
 			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "workflow_runs": []any{map[string]any{
@@ -81,12 +89,34 @@ func TestForgejoCollectionOnlyRunDetailsJobsLogsAndUnsupportedRerun(t *testing.T
 	jobLogs := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/jobs/%.0f/logs", repo.FullName, job["id"]), nil)
 	require.Equal(t, 200, jobLogs.Code, jobLogs.Body.String())
 	require.Equal(t, string(text), jobLogs.Body.String())
-	for _, action := range []string{"rerun", "rerun-failed-jobs", "cancel"} {
+	for _, action := range []string{"rerun", "rerun-failed-jobs"} {
 		res := h.DoREST(t, "POST", path+"/"+action, nil)
-		require.Equal(t, 501, res.Code, res.Body.String())
-		require.True(t, strings.Contains(res.Body.String(), "does not support"))
+		require.Equal(t, 201, res.Code, res.Body.String())
+		require.Equal(t, "workflow", res.Header().Get("X-AGS-CI-Rerun-Scope"))
 	}
-	require.Zero(t, writes, "Unsupported Forgejo mutations must perform no provider writes")
+	jobRerun := h.DoREST(t, "POST", fmt.Sprintf("/api/v3/repos/%s/actions/jobs/%.0f/rerun", repo.FullName, job["id"]), nil)
+	require.Equal(t, 201, jobRerun.Code, jobRerun.Body.String())
+	require.Equal(t, 3, writes, "one dispatch per rerun")
+	cancel := h.DoREST(t, "POST", path+"/cancel", nil)
+	require.Equal(t, 501, cancel.Code)
+	require.True(t, strings.Contains(cancel.Body.String(), "does not support"))
+	require.Equal(t, 3, writes, "cancel must not dispatch")
+	runStatus = "running"
+	active := h.DoREST(t, "POST", path+"/rerun", nil)
+	require.Equal(t, 409, active.Code, active.Body.String())
+	require.Equal(t, 3, writes)
+	runStatus = "failure"
+	writeStatus = 403
+	denied := h.DoREST(t, "POST", path+"/rerun", nil)
+	require.Equal(t, 403, denied.Code, denied.Body.String())
+	require.Equal(t, 4, writes)
+	for _, suffix := range []string{"rerun", "rerun-failed-jobs"} {
+		missing := h.DoREST(t, "POST", fmt.Sprintf("/api/v3/repos/%s/actions/runs/%d/%s", repo.FullName, service.CIExternalIDBase+999999, suffix), nil)
+		require.Equal(t, 404, missing.Code, missing.Body.String())
+	}
+	missingJob := h.DoREST(t, "POST", fmt.Sprintf("/api/v3/repos/%s/actions/jobs/%d/rerun", repo.FullName, service.CIExternalIDBase+999999), nil)
+	require.Equal(t, 404, missingJob.Code, missingJob.Body.String())
+	require.Equal(t, 4, writes)
 	foreign := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/runs/17", repo.FullName), nil)
 	require.Equal(t, 404, foreign.Code, "provider IDs cannot bypass AGS mappings")
 	unknownArtifacts := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/runs/17/artifacts", repo.FullName), nil)

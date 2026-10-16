@@ -54,16 +54,23 @@ func key(value string) (string, error) {
 	return url.PathEscape(value), nil
 }
 func (h *HTTP) request(ctx context.Context, method, path string, download bool) ([]byte, error) {
+	return h.requestBody(ctx, method, path, download, nil)
+}
+
+func (h *HTTP) requestBody(ctx context.Context, method, path string, download bool, body []byte) ([]byte, error) {
 	base := strings.TrimRight(h.config.URL, "/")
 	api := "/api/v1"
 	if h.config.Kind == "github-actions" {
 		api = ""
 	}
-	req, err := http.NewRequestWithContext(ctx, method, base+api+path, nil)
+	req, err := http.NewRequestWithContext(ctx, method, base+api+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, ErrInvalid
 	}
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("User-Agent", "ags-ci-backend/1")
 	if h.config.Kind == "forgejo" {
 		req.Header.Set("Authorization", "token "+h.token)
@@ -105,6 +112,15 @@ func (h *HTTP) request(ctx context.Context, method, path string, download bool) 
 	switch response.StatusCode {
 	case 200, 201, 202, 204:
 		return bounded(response.Body)
+	case 403:
+		return nil, ErrForbidden
+	case 409:
+		return nil, ErrConflict
+	case 400, 422:
+		if method == http.MethodPost {
+			return nil, ErrConflict
+		}
+		return nil, ErrInvalid
 	case 404:
 		return nil, ErrNotFound
 	case 405, 501:
@@ -397,7 +413,7 @@ func (h *HTTP) RunLogs(ctx context.Context, repo, id string) ([]byte, error) {
 	return h.request(ctx, "GET", p+"runs/"+id+"/logs", true)
 }
 func (h *HTTP) Action(ctx context.Context, repo, id, action string) error {
-	if action != "cancel" && action != "rerun" && action != "rerun-failed-jobs" {
+	if action != "cancel" && action != "rerun" && action != "rerun-failed-jobs" && action != "job-rerun" {
 		return ErrUnsupported
 	}
 	p, e := h.prefix(repo)
@@ -408,6 +424,10 @@ func (h *HTTP) Action(ctx context.Context, repo, id, action string) error {
 	if e != nil {
 		return e
 	}
-	_, e = h.request(ctx, "POST", p+"runs/"+id+"/"+action, false)
+	path := p + "runs/" + id + "/" + action
+	if action == "job-rerun" {
+		path = p + "jobs/" + id + "/rerun"
+	}
+	_, e = h.request(ctx, "POST", path, false)
 	return e
 }

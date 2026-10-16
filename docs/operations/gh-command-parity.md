@@ -24,8 +24,9 @@ API origin and, for older Forgejo logs, the typed provider-log bridge described 
 | `gh api actions/runs/ID[/jobs\|/logs]` | Supported; select the AGS hostname explicitly and use AGS `databaseId`, not a provider number. |
 | `gh api actions/runs/ID/attempts/1` | The exact observed Forgejo run is attempt 1; unobserved attempts are not invented. |
 | `gh workflow list`, `view` | Forgejo exposes observed workflow identities with state `unknown`, not a complete enabled-workflow catalogue. Workflow path/YAML is unavailable when the provider does not expose it. |
-| `gh run rerun ID`, `--failed`, `gh run cancel ID` | GitHub Actions supports its public API. The targeted Forgejo API does not: an existing run returns 501, never false success or a missing-run 404. No provider writes or native fallback. |
-| `gh run rerun --job ID`, `gh run delete`, `gh workflow run/enable/disable` | External adapter management remains explicitly unsupported. |
+| `gh run rerun ID`, `--failed`, `gh run rerun --job ID` | GitHub Actions forwards the native operation. Forgejo dispatches the original workflow at the exact original SHA; all variants execute the whole workflow with a new run identity and `workflow_dispatch` context. Success is 201; unknown IDs 404, write denial 403, active runs 409. See [rerun semantics](../architecture/ci-backends.md#rerunning-ci-with-official-gh). |
+| `gh run cancel ID` | GitHub Actions forwards cancel; Forgejo remains 501 with no provider write. |
+| `gh run delete`, `gh workflow run/enable/disable` | External adapter management remains explicitly unsupported. |
 | `gh run download` | External adapters do not publish artifacts; an empty artifact collection is not a claim that provider artifacts were inspected. Run-scoped artifact reads first validate the repository/backend/run identity; unknown or retired runs return 404. |
 
 A closed mapped Forgejo PR is reopened by its exact existing number before a
@@ -43,13 +44,11 @@ provider has converged. Source acceptance does not deploy or restart anything.
 These are follow-ups, not implemented capabilities or permission to operate a
 provider. Keep these capabilities in the companion surface.
 
-1. **Forgejo exact-run management**: research a supported, authenticated adapter
-   for rerun-all, failed-only rerun, cancel and single-job rerun where the public
-   API lacks them. Preserve exact repository, provider run ID, head SHA and
-   operation scope; require readback after an unknown write. Do not substitute
-   workflow dispatch, a dummy commit, another backend or SQL writes for rerun.
-   If a supported public API becomes available, prefer adding it to AGS so the
-   existing gh commands work without AGSX.
+1. **Forgejo exact-run management**: a future public retry API could preserve the
+   original event and select failed jobs or one job. Current AGS reruns explicitly
+   dispatch the whole original workflow at its immutable SHA. Cancel remains
+   unsupported. Never replace this with private web/SQL writes, dummy commits or
+   another backend; observe exact runs after an unknown write.
 2. **Provider workflow catalogue/YAML and dispatch controls**: expose explicit
    provider discovery in AGSX only when official gh cannot represent the observed
    scope truthfully. An observed filename must not become a fabricated enabled

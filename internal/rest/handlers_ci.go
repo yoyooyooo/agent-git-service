@@ -197,13 +197,16 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 				ciHTTPError(w, e)
 				return
 			}
+			if selected.Kind == "forgejo" && operation != "cancel" {
+				w.Header().Set("X-AGS-CI-Rerun-Scope", "workflow")
+			}
 			status := http.StatusCreated
 			if operation == "cancel" {
 				status = http.StatusAccepted
 			}
 			respond.JSON(w, status, map[string]any{})
 			return
-		case "job", "job-logs":
+		case "job", "job-logs", "job-rerun":
 			id, ok := readID("job_id")
 			if !ok {
 				return
@@ -211,6 +214,17 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 			job, e := d.Svc.CIJob(r.Context(), repo.FullName, id)
 			if e != nil {
 				ciHTTPError(w, e)
+				return
+			}
+			if operation == "job-rerun" {
+				if err := d.Svc.CIAction(r.Context(), repo.FullName, id, operation); err != nil {
+					ciHTTPError(w, err)
+					return
+				}
+				if selected.Kind == "forgejo" {
+					w.Header().Set("X-AGS-CI-Rerun-Scope", "workflow")
+				}
+				respond.JSON(w, http.StatusCreated, map[string]any{})
 				return
 			}
 			if operation == "job" {
@@ -256,12 +270,14 @@ func ciHTTPError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, service.ErrUnauthorized):
 		status = 401
-	case errors.Is(err, service.ErrForbidden):
+	case errors.Is(err, service.ErrForbidden), errors.Is(err, cibackend.ErrForbidden):
 		status = 403
 	case errors.Is(err, service.ErrNotFound), errors.Is(err, cibackend.ErrNotFound):
 		status = 404
 	case errors.Is(err, cibackend.ErrUnsupported):
 		status = 501
+	case errors.Is(err, service.ErrConflict), errors.Is(err, cibackend.ErrConflict):
+		status = 409
 	case errors.Is(err, service.ErrValidation):
 		status = 422
 	}
@@ -296,7 +312,7 @@ func ciCheckFromObservation(check service.CICheck, base string) map[string]any {
 		"id": id, "name": check.Name, "head_sha": "", "status": check.Status, "conclusion": nilIfEmpty(check.Conclusion),
 		"started_at": check.StartedAt, "completed_at": check.CompletedAt, "html_url": check.URL,
 		"details_url": check.URL, "url": fmt.Sprintf("%s/check-runs/%s", base, check.ID),
-		"check_suite": map[string]any{"id": check.ID},
+		"check_suite": map[string]any{"id": check.RunID},
 		"output":      map[string]any{"title": check.Name, "summary": "CI job status; structured annotations are not projected. See job logs."},
 	}
 }

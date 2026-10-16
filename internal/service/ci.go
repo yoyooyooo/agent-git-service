@@ -39,6 +39,7 @@ type CIRuns struct {
 }
 type CICheck struct {
 	ID                                             string
+	RunID                                          uint64
 	Name, Status, Conclusion, URL, Workflow, Event string
 	Required                                       bool
 	StartedAt, CompletedAt                         *time.Time
@@ -275,9 +276,29 @@ func (s *Service) CIAction(ctx context.Context, repository string, id uint64, ac
 	if !permission.AtLeast(RepoPermissionWrite) {
 		return ErrForbidden
 	}
+	if action == "job-rerun" {
+		job, err := s.CIJob(ctx, repository, id)
+		if err != nil {
+			return err
+		}
+		run, err := s.CIRun(ctx, repository, job.RunID)
+		if err != nil {
+			return err
+		}
+		if run.Run.Status != "completed" {
+			return ErrConflict
+		}
+		if sel.Kind == "forgejo" {
+			return ciError(sel.Backend.Action(ctx, sel.Binding.Repository, run.Run.Key, "rerun"))
+		}
+		return ciError(sel.Backend.Action(ctx, sel.Binding.Repository, job.Job.Key, action))
+	}
 	run, e := s.CIRun(ctx, repository, id)
 	if e != nil {
 		return e
+	}
+	if (action == "rerun" || action == "rerun-failed-jobs") && run.Run.Status != "completed" {
+		return ErrConflict
 	}
 	// No mutation fallback, no automatic retry. Transport failure is an unknown
 	// external result; callers must observe this exact run before another request.
@@ -286,6 +307,12 @@ func (s *Service) CIAction(ctx context.Context, repository string, id uint64, ac
 func ciError(err error) error {
 	if errors.Is(err, cibackend.ErrNotFound) {
 		return ErrNotFound
+	}
+	if errors.Is(err, cibackend.ErrForbidden) {
+		return ErrForbidden
+	}
+	if errors.Is(err, cibackend.ErrConflict) {
+		return ErrConflict
 	}
 	return err
 }
@@ -394,7 +421,7 @@ func (s *Service) readCIChecks(ctx context.Context, pr db.PullRequest, matchBran
 				return out, fmt.Errorf("%w: ambiguous CI check names", cibackend.ErrInvalid)
 			}
 			seenChecks[identity] = true
-			out.Checks = append(out.Checks, CICheck{ID: fmt.Sprint(view.ID), Name: run.Name, Status: run.Status, Conclusion: run.Conclusion, URL: run.URL, Workflow: run.Name, Event: run.Event, Required: required[run.Name], StartedAt: run.StartedAt})
+			out.Checks = append(out.Checks, CICheck{ID: fmt.Sprint(view.ID), RunID: view.ID, Name: run.Name, Status: run.Status, Conclusion: run.Conclusion, URL: run.URL, Workflow: run.Name, Event: run.Event, Required: required[run.Name], StartedAt: run.StartedAt})
 			delete(pending, run.Name)
 		}
 		for _, j := range jobs.Items {
@@ -410,7 +437,7 @@ func (s *Service) readCIChecks(ctx context.Context, pr db.PullRequest, matchBran
 			if e != nil {
 				return out, e
 			}
-			out.Checks = append(out.Checks, CICheck{ID: fmt.Sprint(id), Name: j.Name, Status: j.Status, Conclusion: j.Conclusion, URL: j.URL, Workflow: run.Name, Event: run.Event, Required: required[j.Name], StartedAt: j.StartedAt, CompletedAt: j.CompletedAt})
+			out.Checks = append(out.Checks, CICheck{ID: fmt.Sprint(id), RunID: view.ID, Name: j.Name, Status: j.Status, Conclusion: j.Conclusion, URL: j.URL, Workflow: run.Name, Event: run.Event, Required: required[j.Name], StartedAt: j.StartedAt, CompletedAt: j.CompletedAt})
 			delete(pending, j.Name)
 		}
 	}
@@ -464,6 +491,10 @@ func CIErrorMessage(err error) string {
 	switch {
 	case errors.Is(err, ErrNotFound):
 		return "CI resource not found in the selected backend"
+	case errors.Is(err, ErrForbidden), errors.Is(err, cibackend.ErrForbidden):
+		return "CI operation requires repository write access and backend permission"
+	case errors.Is(err, ErrConflict), errors.Is(err, cibackend.ErrConflict):
+		return "CI run cannot be rerun in its current state"
 	case errors.Is(err, cibackend.ErrUnsupported):
 		return "Selected CI backend does not support this operation"
 	case errors.Is(err, cibackend.ErrInvalid):

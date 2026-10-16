@@ -74,9 +74,9 @@ transport failures and other provider errors do not trigger this fallback.
 Details, jobs and logs all use this lookup, so a successful `gh run list` does not
 lead to a false missing-run error solely because the single-run route is absent.
 
-Missing capabilities return unsupported. In particular the currently targeted
-Forgejo API does not expose standard cancel/rerun or a workflow catalogue; those
-mutations are not routed through private web endpoints, SQL or another backend.
+Missing capabilities return unsupported. Forgejo cancel and workflow catalogue
+management remain unsupported. Reruns use the public workflow dispatch API as
+described below; no private web endpoints, SQL or another backend are used.
 For `gh run list` name lookup, an explicitly labelled catalogue of already
 observed workflow identities is available, with state `unknown`; this is not a
 list of enabled workflows.
@@ -101,6 +101,44 @@ the budget, the response is unavailable, never an empty/successful job set. An
 operator can tune observation work without changing resource identity. A repository
 whose newest runs have more than the budget of newer tasks still needs a
 run-specific task API or typed indexed bridge.
+
+## Rerunning CI with official gh
+
+The selected external backend supports these GitHub-shaped mutations:
+
+- `POST /repos/{owner}/{repo}/actions/runs/{id}/rerun`
+- `POST /repos/{owner}/{repo}/actions/runs/{id}/rerun-failed-jobs`
+- `POST /repos/{owner}/{repo}/actions/jobs/{id}/rerun`
+
+Successful requests return HTTP 201. Use the mapped AGS run/job ID reported by
+`gh run list` or `gh run view`; unknown, foreign and retired IDs return 404.
+Repository write permission is required (403). An unfinished run or a provider
+state/input conflict returns 409. Provider denial remains 403; outages remain
+errors. Mutations are sent once, without automatic replay or redirect following.
+After an unknown result, inspect provider runs at the exact head before retrying.
+
+GitHub Actions receives its native run, failed-jobs or job rerun request.
+Forgejo 12 has no public retry route, but its public
+`POST actions/workflows/{workflow}/dispatches` accepts a commit SHA. AGS dispatches
+the original workflow filename with `ref` set to the original run's exact
+`commit_sha`, never a moving branch. Forgejo creates a new run and job identity
+with event `workflow_dispatch`; list runs again with `--commit SHA` to find it.
+All three Forgejo rerun routes execute the **whole workflow**, including successful
+jobs, and return `X-AGS-CI-Rerun-Scope: workflow`. Original trigger context and
+custom dispatch inputs are not replayed; required inputs without defaults can
+prevent dispatch. Unapproved or fork PR runs are denied rather than escalating
+them to a trusted workflow dispatch. PR checks retain their existing preference
+for actual PR events, so a successful dispatch does not erase a failed PR check.
+
+```bash
+gh run rerun "$RUN_ID"
+gh run rerun "$RUN_ID" --failed
+gh run rerun --job "$JOB_ID"
+gh run list --commit "$HEAD_SHA" --json databaseId,headSha,event,status,conclusion
+```
+
+Native Actions keeps its separate native execution contract; these external
+adapters never fall back to native state. See [command coverage](../operations/gh-command-parity.md).
 
 ## Logs
 
@@ -195,7 +233,7 @@ logs for provider diagnostics. No synthetic file/line annotations are invented.
 `node scripts/gh-native-acceptance.mjs` builds this checkout and uses a hash-pinned,
 unmodified official gh. It tests origin-only routing, draft/HEAD, native-no-CI,
 GitHub Actions then Forgejo protocol fixtures, required checks, logs, old ID denial,
-unsupported mutation, standard merge, run identity and revocation. All resources
+rerun dispatch and unsupported cancel, standard merge, run identity and revocation. All resources
 are disposable in a loopback-only user/network namespace. Backend fixtures use the
 published API shapes; they are not evidence of running real hosted CI jobs.
 

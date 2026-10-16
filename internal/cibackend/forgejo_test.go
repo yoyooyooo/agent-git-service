@@ -105,7 +105,7 @@ func TestForgejoNativeRunTaskAndExplicitLogBridge(t *testing.T) {
 		t.Fatal("whole-run logs repeatedly enumerated repository task history")
 	}
 	before := len(calls)
-	if e := backend.Action(context.Background(), "ci/project", "17", "rerun"); !errors.Is(e, ErrUnsupported) || len(calls) != before {
+	if e := backend.Action(context.Background(), "ci/project", "17", "cancel"); !errors.Is(e, ErrUnsupported) || len(calls) != before {
 		t.Fatal("unsupported mutation performed I/O", e)
 	}
 	corrupt = true

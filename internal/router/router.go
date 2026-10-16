@@ -987,7 +987,7 @@ func registerWorkflowRunRoutes(r chi.Router, handlers *rest.Deps) {
 	r.Get("/api/v3/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip", handlers.CI(handlers.DownloadArtifact, "unsupported"))
 	r.Get("/api/v3/repos/{owner}/{repo}/actions/jobs/{job_id}", handlers.CI(handlers.GetWorkflowJob, "job"))
 	r.Get("/api/v3/repos/{owner}/{repo}/actions/jobs/{job_id}/logs", handlers.CI(handlers.GetWorkflowJobLogs, "job-logs"))
-	r.Post("/api/v3/repos/{owner}/{repo}/actions/jobs/{job_id}/rerun", handlers.CI(handlers.RerunWorkflowRunJob, "unsupported"))
+	r.Post("/api/v3/repos/{owner}/{repo}/actions/jobs/{job_id}/rerun", handlers.CI(handlers.RerunWorkflowRunJob, "job-rerun"))
 }
 
 func registerActionsCacheRoutes(r chi.Router, handlers *rest.Deps) {

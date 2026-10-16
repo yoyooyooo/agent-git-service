@@ -13,11 +13,14 @@ var (
 	ErrUnavailable = errors.New("CI backend is unavailable")
 	ErrInvalid     = errors.New("CI backend returned inconsistent evidence")
 	ErrNotFound    = errors.New("CI resource not found")
+	ErrForbidden   = errors.New("CI backend denied the operation")
+	ErrConflict    = errors.New("CI run cannot be rerun in its current state")
 )
 
 // Keys are opaque provider-local coordinates. The service allocates durable
 // GitHub-shaped numeric IDs; neither callers nor adapters guess across backends.
 type Run struct {
+	Untrusted    bool       `json:"-"`
 	Key          string     `json:"key"`
 	Workflow     string     `json:"workflow"`
 	Name         string     `json:"name"`
