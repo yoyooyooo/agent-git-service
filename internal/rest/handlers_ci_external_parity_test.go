@@ -131,6 +131,16 @@ func TestExternalCheckRunsAndEmptyArtifacts(t *testing.T) {
 		t.Fatalf("runs=%s", runs.Body.String())
 	}
 	runID := int(listed[0].(map[string]any)["id"].(float64))
+	// CheckSuite identifies the parent run, never the job backing this check.
+	suite := row["check_suite"].(map[string]any)
+	if int(suite["id"].(float64)) != runID {
+		t.Fatalf("check suite did not identify parent run: %s", checks.Body.String())
+	}
+	detail := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/runs/%d", repo.FullName, runID), nil)
+	assertStatusCode(t, detail, 200)
+	if testharness.DecodeJSON(t, detail)["head_sha"] != headSHA {
+		t.Fatal("check's parent run lost its head SHA")
+	}
 	artifacts := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/runs/%d/artifacts", repo.FullName, runID), nil)
 	assertStatusCode(t, artifacts, 200)
 	artifactBody := testharness.DecodeJSON(t, artifacts)

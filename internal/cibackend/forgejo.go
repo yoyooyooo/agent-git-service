@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -22,19 +23,21 @@ type Forgejo struct {
 	bridgeToken string
 }
 type forgejoRun struct {
-	ID       int64      `json:"id"`
-	Number   int64      `json:"index_in_repo"`
-	Workflow string     `json:"workflow_id"`
-	Title    string     `json:"title"`
-	Ref      string     `json:"prettyref"`
-	Head     string     `json:"commit_sha"`
-	Event    string     `json:"event"`
-	Status   string     `json:"status"`
-	URL      string     `json:"html_url"`
-	Created  time.Time  `json:"created"`
-	Updated  time.Time  `json:"updated"`
-	Started  *time.Time `json:"started"`
-	Stopped  *time.Time `json:"stopped"`
+	NeedApproval    bool       `json:"need_approval"`
+	ForkPullRequest bool       `json:"is_fork_pull_request"`
+	ID              int64      `json:"id"`
+	Number          int64      `json:"index_in_repo"`
+	Workflow        string     `json:"workflow_id"`
+	Title           string     `json:"title"`
+	Ref             string     `json:"prettyref"`
+	Head            string     `json:"commit_sha"`
+	Event           string     `json:"event"`
+	Status          string     `json:"status"`
+	URL             string     `json:"html_url"`
+	Created         time.Time  `json:"created"`
+	Updated         time.Time  `json:"updated"`
+	Started         *time.Time `json:"started"`
+	Stopped         *time.Time `json:"stopped"`
 }
 
 func (r forgejoRun) run() (Run, error) {
@@ -57,7 +60,7 @@ func (r forgejoRun) run() (Run, error) {
 	}
 	// Forgejo creates another run/task identity for retries; it does not expose
 	// GitHub's run_attempt counter. One concrete run is represented as attempt 1.
-	return Run{Key: strconv.FormatInt(r.ID, 10), Number: r.Number, Workflow: r.Workflow, Name: r.Workflow, Branch: branch, HeadSHA: r.Head, Event: r.Event, Status: status, Conclusion: conclusion, URL: r.URL, CreatedAt: r.Created, UpdatedAt: r.Updated, StartedAt: r.Started, Attempt: 1, PullRequests: prs}, nil
+	return Run{Untrusted: r.NeedApproval || r.ForkPullRequest, Key: strconv.FormatInt(r.ID, 10), Number: r.Number, Workflow: r.Workflow, Name: r.Workflow, Branch: branch, HeadSHA: r.Head, Event: r.Event, Status: status, Conclusion: conclusion, URL: r.URL, CreatedAt: r.Created, UpdatedAt: r.Updated, StartedAt: r.Started, Attempt: 1, PullRequests: prs}, nil
 }
 func (f *Forgejo) Runs(ctx context.Context, repo string, q Query) (Runs, error) {
 	prefix, e := f.prefix(repo)
@@ -351,7 +354,45 @@ func (f *Forgejo) Workflow(ctx context.Context, repo, id string) (Workflow, erro
 	// this adapter must not fabricate a workflow from an arbitrary filename.
 	return Workflow{}, ErrUnsupported
 }
-func (f *Forgejo) Action(context.Context, string, string, string) error { return ErrUnsupported }
+
+// Forgejo has no public retry API. Dispatch the original workflow at its exact
+// commit, never the branch tip. All rerun variants execute the whole workflow.
+func (f *Forgejo) Action(ctx context.Context, repo, id, action string) error {
+	if action != "rerun" && action != "rerun-failed-jobs" && action != "job-rerun" {
+		return ErrUnsupported
+	}
+	if action == "job-rerun" {
+		job, err := f.Job(ctx, repo, id)
+		if err != nil {
+			return err
+		}
+		id = job.Run
+	}
+	run, err := f.Run(ctx, repo, id)
+	if err != nil {
+		return err
+	}
+	if run.Untrusted {
+		return ErrForbidden
+	}
+	if run.Status != "completed" {
+		return ErrConflict
+	}
+	workflow, err := key(run.Workflow)
+	if err != nil {
+		return err
+	}
+	prefix, err := f.prefix(repo)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(map[string]any{"ref": run.HeadSHA, "return_run_info": true})
+	if err != nil {
+		return err
+	}
+	_, err = f.requestBody(ctx, "POST", prefix+"workflows/"+workflow+"/dispatches", false, body)
+	return err
+}
 func (f *Forgejo) JobLogs(ctx context.Context, repo, id string) ([]byte, error) {
 	if f.config.LogBridge == nil {
 		return nil, fmt.Errorf("%w: Forgejo log bridge is not configured", ErrUnsupported)

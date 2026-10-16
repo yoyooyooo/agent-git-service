@@ -102,7 +102,20 @@ try {
       json(res, { schema: "ags.internal-provider-log.v1", repo: "ci/project", task_id: task, run_number: 9, job_name: name, head_sha: head, provider_pr: 0, provider_ref: "refs/heads/feature", event: "push", text: `2026-01-01T00:00:00Z ${name} fixture log\n` }); return;
     }
     const path = url.pathname.replace(/^\/api\/v1/, "");
-    if (req.method === "POST") { if (currentBackend !== "github" || !/\/runs\/17\/(cancel|rerun|rerun-failed-jobs)$/.test(path)) { json(res, {}, 405); return; } effects++; res.writeHead(202); res.end(); return; }
+    if (req.method === "POST") {
+      if (currentBackend === "forgejo" && path === "/repos/ci/project/actions/workflows/ci.yml/dispatches") {
+        let text = "";
+        req.on("data", b => text += b);
+        req.on("end", () => {
+          const body = JSON.parse(text);
+          if (body.ref !== head || body.return_run_info !== true) { json(res, {}, 409); return; }
+          effects++; json(res, {id: 18, run_number: 10, jobs: ["unit", "lint"]}, 201);
+        });
+        return;
+      }
+      if (currentBackend !== "github" || !/\/(runs\/17\/(cancel|rerun|rerun-failed-jobs)|jobs\/41\/rerun)$/.test(path)) { json(res, {}, 405); return; }
+      effects++; res.writeHead(201); res.end(); return;
+    }
     if (path.endsWith("/actions/runs")) { json(res, { total_count: 1, workflow_runs: [runObject()] }); return; }
     // Forgejo versions with only the collection endpoint used to make every
     // official-gh detail/jobs/log request fail after a successful run list.
@@ -145,6 +158,11 @@ try {
   const listed = await ghCheck("GitHub Actions runs", ["run", "list", "--json", "databaseId,workflowName,status,conclusion,headSha"]); const githubRun = JSON.parse(listed.stdout)[0].databaseId; assertions(githubRun > 2 ** 52, "provider ID was not mapped");
   const logs = await ghCheck("GitHub Actions failed logs", ["run", "view", String(githubRun), "--log-failed"]); assertions(logs.stdout.includes("unit fixture log"), "lost failure logs");
   await ghCheck("GitHub Actions cancel", ["run", "cancel", String(githubRun)]); assertions(effects === 1, "CI mutation was repeated or not sent");
+  const githubJobs = await api(`/api/v3/repos/${repo}/actions/runs/${githubRun}/jobs`);
+  await ghCheck("GitHub Actions rerun", ["run", "rerun", String(githubRun)]);
+  await ghCheck("GitHub Actions rerun failed", ["run", "rerun", String(githubRun), "--failed"]);
+  await ghCheck("GitHub Actions rerun job", ["run", "rerun", "--job", String(githubJobs.data.jobs[0].id)]);
+  assertions(effects === 4, "GitHub reruns lost their run/job target");
   outcome = "pending"; await ghCheck("GitHub Actions pending", ["pr", "checks", "1", "--required"], [8]);
   outcome = "success"; await ghCheck("GitHub Actions success", ["pr", "checks", "1", "--required"]);
   await start("forgejo");
@@ -179,11 +197,17 @@ try {
   const failureLogs = await ghCheck("Forgejo failed job logs without single-run endpoint", ["run", "view", String(forgejoRun), "--log-failed"]);
   assertions(failureLogs.stdout.includes("unit fixture log") && !failureLogs.stdout.includes("lint fixture log"), "failed log selection drift");
   outcome = "success";
-  for (const args of [["run", "cancel", String(forgejoRun)], ["run", "rerun", String(forgejoRun)], ["run", "rerun", String(forgejoRun), "--failed"]]) {
-    const unsupported = await ghCheck("Forgejo explicit unsupported " + args.slice(1).join(" "), args, [1]);
-    assertions(unsupported.stderr.includes("501") && !unsupported.stderr.includes("resource not found"), "unsupported action disguised as a missing run");
-  }
-  assertions(effects === 1, "unsupported backend mutation fell back");
+  const unsupported = await ghCheck("Forgejo cancel stays unsupported", ["run", "cancel", String(forgejoRun)], [1]);
+  assertions(unsupported.stderr.includes("501"), "cancel incorrectly accepted");
+  await ghCheck("Forgejo rerun original workflow and SHA", ["run", "rerun", String(forgejoRun)]);
+  outcome = "failure";
+  await ghCheck("Forgejo rerun failed selects whole workflow", ["run", "rerun", String(forgejoRun), "--failed"]);
+  await ghCheck("Forgejo rerun job selects parent workflow", ["run", "rerun", "--job", String(checkID)]);
+  assertions(effects === 7, "Forgejo rerun must dispatch exactly once per request");
+  outcome = "pending";
+  const activeRerun = await api(`/api/v3/repos/${repo}/actions/runs/${forgejoRun}/rerun`, "POST");
+  assertions(activeRerun.status === 409 && effects === 7, "active rerun performed a provider mutation");
+  outcome = "success";
   const before = await git(["rev-parse", "origin/main"]);
   await ghCheck("wrong head merge", ["pr", "merge", "1", "--merge", "--match-head-commit", "b".repeat(40)], [1]);
   response = await api(`/api/v3/repos/${repo}/branches/main`); assertions(response.data.commit.sha === before, "rejected merge changed destination");

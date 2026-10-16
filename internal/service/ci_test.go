@@ -352,3 +352,58 @@ func TestCIChecksSameJobNameInDifferentWorkflowsStaysDistinct(t *testing.T) {
 		t.Fatal("same workflow and job name accepted", err)
 	}
 }
+
+func TestCIRerunAuthorizationStateAndJobIdentity(t *testing.T) {
+	s, ctx, repo, _, backend, _ := ciFixture(t)
+	runs, err := s.CIRuns(ctx, repo.FullName, cibackend.Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := runs.Runs[0].ID
+	jobs, err := s.CIJobs(ctx, repo.FullName, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"rerun", "rerun-failed-jobs", "job-rerun"} {
+		target := id
+		if action == "job-rerun" {
+			target = jobs[0].ID
+		}
+		before := backend.actions
+		if err = s.CIAction(ctx, repo.FullName, target, action); err != nil || backend.actions != before+1 {
+			t.Fatalf("%s: %v", action, err)
+		}
+		backend.runs[0].Status = "in_progress"
+		if err = s.CIAction(ctx, repo.FullName, target, action); !errors.Is(err, ErrConflict) || backend.actions != before+1 {
+			t.Fatalf("active %s: %v", action, err)
+		}
+		backend.runs[0].Status = "completed"
+		if err = s.CIAction(ctx, repo.FullName, CIExternalIDBase+999999, action); !errors.Is(err, ErrNotFound) || backend.actions != before+1 {
+			t.Fatalf("unknown %s: %v", action, err)
+		}
+	}
+	reader := db.User{Login: "rerun-reader", Type: db.TypeUser}
+	if err = s.DB.Create(&reader).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB.Create(&db.Collaborator{RepositoryID: repo.ID, UserID: reader.ID, Permission: "read"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	calls, writes := backend.calls, backend.actions
+	for _, target := range []uint64{id, jobs[0].ID} {
+		action := "rerun"
+		if target == jobs[0].ID {
+			action = "job-rerun"
+		}
+		if err = s.CIAction(ContextWithUser(context.Background(), reader), repo.FullName, target, action); !errors.Is(err, ErrForbidden) {
+			t.Fatal(err)
+		}
+	}
+	if backend.calls != calls || backend.actions != writes {
+		t.Fatal("read-only caller reached provider")
+	}
+	backend.failure = cibackend.ErrForbidden
+	if err = s.CIAction(ctx, repo.FullName, id, "rerun"); !errors.Is(err, ErrForbidden) {
+		t.Fatal(err)
+	}
+}

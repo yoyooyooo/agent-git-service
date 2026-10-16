@@ -34,7 +34,7 @@ func TestForgejoRunLookupWithoutSingleRunEndpoint(t *testing.T) {
 				if err != nil || run.Key != "17" || run.Number != 9 {
 					t.Fatalf("run=%+v err=%v", run, err)
 				}
-				if err = backend.Action(context.Background(), "ci/project", run.Key, "rerun"); !errors.Is(err, ErrUnsupported) {
+				if err = backend.Action(context.Background(), "ci/project", run.Key, "cancel"); !errors.Is(err, ErrUnsupported) {
 					t.Fatal(err)
 				}
 			} else if !errors.Is(err, ErrNotFound) {
