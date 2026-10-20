@@ -129,6 +129,7 @@ type Deps struct {
 	ConsoleBaseURL         string
 	ProviderLogBridge      http.Handler
 	GitHubAppRegistrar     *githubappmanifest.Registrar
+	GitHubAppWebhook       http.Handler
 	// Owning-primary storage admission is applied after route authentication
 	// and rate limiting. It never supplies identity or repository permission.
 	RepositoryMaintenanceAdmission func(http.Handler) http.Handler

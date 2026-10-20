@@ -683,9 +683,11 @@ Ownership:
 Rules:
 
 - this package has no Git client, no AGS database, and no GitHub write credential
-- fixtures stay in memory; the receiver does not dial GitHub
+- fixtures stay in memory; the production file spool commits mode-0600 envelopes in a mode-0700 directory with file and directory sync before acknowledgement; the receiver does not dial GitHub
 - logs carry the delivery GUID, installation ID, repository ID, and status only
-- nothing in this segment mounts the handler on the running AGS server or opens Funnel
+- `server` mounts the receiver through `router` only when `github_app.enabled` is true, using the validated file-backed App ID and webhook secret; no user token is required because the signature authenticates the delivery
+- the spool lives at `<GIT_REPO_DIR>/.github-app-deliveries`; without an intake, verified new deliveries are quarantined, with no provider or Git effects
+- routing does not activate external ingress or change GitHub App settings
 
 ### `githubintegration`
 
