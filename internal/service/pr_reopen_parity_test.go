@@ -3,6 +3,8 @@ package service_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os/exec"
 	"testing"
 
 	"github.com/ngaut/agent-git-service/internal/db"
@@ -75,4 +77,43 @@ func TestUpdatePRByIDReopenRefreshesForgejoProjection(t *testing.T) {
 	_, err = svc.UpdatePR(ctx, repo.FullName, pr.Number, service.UpdatePRInput{State: &open})
 	require.True(t, errors.Is(err, service.ErrInvalidState))
 	require.Equal(t, 2, client.stateWrites)
+}
+
+func TestReopenRefreshesCommitsPushedWhileClosed(t *testing.T) {
+	for _, transport := range []string{"graphql", "rest"} {
+		t.Run(transport, func(t *testing.T) {
+			svc, cleanup := setupTestService(t)
+			defer cleanup()
+			ctx := context.Background()
+			pr, oldHead := seedStandingExecutorProjectionPR(t, svc, "reopen-head", "agent/feature")
+			svc.DisableForgejoProjectionWorker = true
+			closed, open := db.StateClosed, db.StateOpen
+			require.NoError(t, svc.UpdatePRByID(ctx, pr.ID, &closed, nil))
+			tip, err := svc.Git.WriteFile(ctx, pr.Repository.FullName, pr.HeadRef, "after-close.txt", "advance while closed", []byte("next\n"))
+			require.NoError(t, err)
+			require.NotEqual(t, oldHead, tip)
+			stale, err := svc.GetPRByID(ctx, pr.ID)
+			require.NoError(t, err)
+			require.Equal(t, oldHead, stale.HeadSHA)
+			if transport == "graphql" {
+				require.NoError(t, svc.UpdatePRByID(ctx, pr.ID, &open, nil))
+			} else {
+				_, err = svc.UpdatePR(ctx, pr.Repository.FullName, pr.Number, service.UpdatePRInput{State: &open})
+				require.NoError(t, err)
+			}
+			current, err := svc.GetPRByID(ctx, pr.ID)
+			require.NoError(t, err)
+			require.Equal(t, db.StateOpen, current.State)
+			require.Equal(t, tip, current.HeadSHA)
+			require.Nil(t, current.ClosedAt)
+			path, err := svc.Git.GetRepoPath(ctx, pr.Repository.FullName)
+			require.NoError(t, err)
+			pullRef, err := exec.Command("git", "-C", path, "rev-parse", fmt.Sprintf("refs/pull/%d/head", pr.Number)).Output()
+			require.NoError(t, err)
+			require.Equal(t, tip+"\n", string(pullRef))
+			branch, err := svc.Git.HeadSHA(ctx, pr.Repository.FullName, pr.HeadRef)
+			require.NoError(t, err)
+			require.Equal(t, tip, branch, "reopen cannot rewrite the source branch")
+		})
+	}
 }

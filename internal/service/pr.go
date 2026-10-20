@@ -687,6 +687,12 @@ func (s *Service) UpdatePR(ctx context.Context, repoFullName string, number int,
 			slog.WarnContext(ctx, "close PR projections failed", "repo", repoFullName, "pr_number", number, "error", err)
 		}
 	} else if pr.State == db.StateOpen && (pr.Title != origTitle || pr.Body != origBody || baseRetarget != "" || (in.State != nil && *in.State == db.StateOpen && origState == db.StateClosed)) {
+		if in.State != nil && *in.State == db.StateOpen && origState == db.StateClosed {
+			pr, err = s.refreshReopenedPRHead(ctx, pr)
+			if err != nil {
+				return pr, err
+			}
+		}
 		if _, err := s.DispatchPullRequestIntegrations(ctx, pr); err != nil {
 			slog.WarnContext(ctx, "refresh PR projections failed", "repo", repoFullName, "pr_number", number, "error", err)
 		}
@@ -745,6 +751,10 @@ func (s *Service) UpdatePRByID(ctx context.Context, id uint, state *string, draf
 		}
 		if state != nil && *state == db.StateOpen && orig.State == db.StateClosed {
 			pr, err := s.GetPRByID(ctx, id)
+			if err != nil {
+				return err
+			}
+			pr, err = s.refreshReopenedPRHead(ctx, pr)
 			if err != nil {
 				return err
 			}
@@ -1003,4 +1013,14 @@ func (s *Service) updatePRCommitDataFromLoaded(ctx context.Context, baseFullName
 	}
 
 	return nil
+}
+
+// A closed PR deliberately retains its old head. Reopen must catch up with
+// pushes made while it was closed before projecting that historical SHA.
+func (s *Service) refreshReopenedPRHead(ctx context.Context, pr db.PullRequest) (db.PullRequest, error) {
+	headRepo, err := s.pullRequestHeadRepoFullName(ctx, pr, pr.Repository.FullName)
+	if err != nil {
+		return pr, err
+	}
+	return s.SyncPRHeadAfterPush(ctx, pr.ID, headRepo)
 }

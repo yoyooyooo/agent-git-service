@@ -2,8 +2,10 @@ package cibackend
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -80,4 +82,47 @@ func (h *HTTP) Workflow(ctx context.Context, repo, id string) (Workflow, error) 
 		return Workflow{}, ErrInvalid
 	}
 	return result, nil
+}
+
+// DispatchWorkflow performs one public API write. The service resolves the ref
+// to an immutable source commit before passing it to this adapter.
+func (h *HTTP) DispatchWorkflow(ctx context.Context, repo, workflow, sha string, inputs map[string]any) error {
+	prefix, err := h.prefix(repo)
+	if err != nil {
+		return err
+	}
+	encoded, err := key(workflow)
+	if err != nil {
+		return err
+	}
+	if h.config.Kind == "forgejo" && (!strings.HasSuffix(workflow, ".yml") && !strings.HasSuffix(workflow, ".yaml")) {
+		return ErrInvalid
+	}
+	if len(sha) != 40 || strings.Trim(sha, "0123456789abcdef") != "" {
+		return ErrInvalid
+	}
+	values := make(map[string]any, len(inputs))
+	for name, value := range inputs {
+		if name == "" {
+			return ErrInvalid
+		}
+		switch v := value.(type) {
+		case string:
+			values[name] = v
+		case bool, float64:
+			if h.config.Kind == "forgejo" {
+				values[name] = fmt.Sprint(v)
+			} else {
+				values[name] = v
+			}
+		default:
+			return ErrInvalid
+		}
+	}
+	body, err := json.Marshal(map[string]any{"ref": sha, "inputs": values})
+	if err != nil {
+		return ErrInvalid
+	}
+	_, err = h.requestBody(ctx, "POST", prefix+"workflows/"+encoded+"/dispatches", false, body)
+	return err
 }

@@ -963,7 +963,7 @@ func registerWorkflowRoutes(r chi.Router, handlers *rest.Deps) {
 	r.Get("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}", handlers.CI(handlers.GetWorkflow, "workflow"))
 	r.Put("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}/enable", handlers.CI(handlers.EnableWorkflow, "unsupported"))
 	r.Put("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}/disable", handlers.CI(handlers.DisableWorkflow, "unsupported"))
-	r.Post("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches", handlers.CI(handlers.DispatchWorkflow, "unsupported"))
+	r.Post("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches", handlers.CI(handlers.DispatchWorkflow, "dispatch"))
 	r.Get("/api/v3/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs", handlers.CI(handlers.ListWorkflowRunsByWorkflow, "runs"))
 }
 

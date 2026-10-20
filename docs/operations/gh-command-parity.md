@@ -15,7 +15,7 @@ API origin and, for older Forgejo logs, the typed provider-log bridge described 
 | `gh repo view`, `gh browse --no-browser` | Supported repository discovery and configured browser origin. |
 | `gh pr list`, `view`, `status`, `diff` | Supported; state filters and merged SHA are covered separately. |
 | `gh pr create`, `edit`, `comment`, `ready` | Supported through native PR owners; isolated official-gh tests include durable readback. |
-| `gh pr close`, `reopen` | GraphQL state writes refresh provider projections on reopen, like REST PATCH. Invalid IDs return errors rather than fabricated success. |
+| `gh pr close`, `reopen` | GraphQL and REST reopen refresh the head and pull ref from the source branch, then refresh provider projections. Invalid IDs return errors rather than fabricated success. |
 | `gh pr checks` | Current-head evidence from the selected backend. |
 | `gh issue list`, `gh release list`, `gh label list` | Native read surfaces; an empty repository collection is valid. |
 | `gh run list`, `view`, `view --exit-status` | Supported mapped run IDs; older Forgejo collection-only APIs have a bounded detail lookup. `--exit-status` preserves a failed run's exit status. |
@@ -26,7 +26,8 @@ API origin and, for older Forgejo logs, the typed provider-log bridge described 
 | `gh workflow list`, `view` | Forgejo exposes observed workflow identities with state `unknown`, not a complete enabled-workflow catalogue. Workflow path/YAML is unavailable when the provider does not expose it. |
 | `gh run rerun ID`, `--failed`, `gh run rerun --job ID` | GitHub Actions forwards the native operation. Forgejo dispatches the original workflow at the exact original SHA; all variants execute the whole workflow with a new run identity and `workflow_dispatch` context. Success is 201; unknown IDs 404, write denial 403, active runs 409. See [rerun semantics](../architecture/ci-backends.md#rerunning-ci-with-official-gh). |
 | `gh run cancel ID` | GitHub Actions forwards cancel; Forgejo remains 501 with no provider write. |
-| `gh run delete`, `gh workflow run/enable/disable` | External adapter management remains explicitly unsupported. |
+| `gh workflow run FILE --ref REF` | External dispatch requires native repository write permission, resolves branch/tag/commit to an immutable SHA, and forwards one provider request. Success is 204; list exact-head runs to observe it. See [dispatch semantics](../architecture/ci-backends.md#dispatching-workflows-with-official-gh). |
+| `gh run delete`, `gh workflow enable/disable` | External adapter management remains explicitly unsupported. |
 | `gh run download` | External adapters do not publish artifacts; an empty artifact collection is not a claim that provider artifacts were inspected. Run-scoped artifact reads first validate the repository/backend/run identity; unknown or retired runs return 404. |
 
 A closed mapped Forgejo PR is reopened by its exact existing number before a
@@ -52,7 +53,8 @@ provider. Keep these capabilities in the companion surface.
 2. **Provider workflow catalogue/YAML and dispatch controls**: expose explicit
    provider discovery in AGSX only when official gh cannot represent the observed
    scope truthfully. An observed filename must not become a fabricated enabled
-   workflow, guessed source directory, or new workflow dispatch.
+   workflow or guessed source directory. A separate explicit dispatch request follows
+   the authorization and immutable-ref contract above.
 3. **Provider artifacts, retention and deletion**: add provider-specific operations
    only with validated public APIs and explicit identity/authorization contracts.
    Until then, preserve empty/unprojected semantics and unsupported mutations.
