@@ -30,4 +30,6 @@ A missing/mismatched/expired state or repeated code fails closed. Query code/sta
 
 The generated manifest keeps webhook delivery **inactive** because GitHub cannot call a private tailnet receiver. Activating delivery requires a separately reviewed reachable ingress. The installation step above does not change that boundary.
 
+With `github_app.enabled: true`, the primary server mounts `POST /api/ext/v1/integrations/github/events`. The existing owner-only `webhook_secret_file` supplies HMAC-SHA256 verification; no native user token is needed. Invalid signatures receive 401, oversized bodies receive 413, and an unavailable spool receives 503. Verified deliveries are committed under `<GIT_REPO_DIR>/.github-app-deliveries` as mode-0600 envelopes in a mode-0700 directory before a 200 response. Treat this spool as private request data and include it in operator storage planning. It currently has no automatic retention or downstream intake: new deliveries return `quarantined`, repeats return `duplicate`, and a reused delivery ID with different signed bytes returns 409. Payloads, signatures and credentials are not logged. Disabling the App leaves the route unmounted. This route does not enable public ingress or modify App settings.
+
 [Module ownership](../module-contracts.md#githubappmanifest) · [Documentation navigation](../README.md)

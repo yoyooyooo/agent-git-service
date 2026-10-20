@@ -17,6 +17,7 @@ import (
 
 	"github.com/ngaut/agent-git-service/internal/githttp"
 	"github.com/ngaut/agent-git-service/internal/githubappmanifest"
+	"github.com/ngaut/agent-git-service/internal/githubappreceiver"
 	"github.com/ngaut/agent-git-service/internal/graphql"
 	srvmiddleware "github.com/ngaut/agent-git-service/internal/middleware"
 	"github.com/ngaut/agent-git-service/internal/oauth"
@@ -62,6 +63,9 @@ func RegisterRoutes(r chi.Router, handlers *rest.Deps, gitHandler *githttp.Handl
 	registerPublicAuthRoutes(r, handlers, rateLimitMw)
 	if handlers.GitHubAppRegistrar != nil {
 		r.Get(githubappmanifest.CallbackPath, handlers.GitHubAppRegistrar.Callback)
+	}
+	if handlers.GitHubAppWebhook != nil {
+		r.Post(githubappreceiver.Path, handlers.GitHubAppWebhook.ServeHTTP)
 	}
 	registerAgentPublicRoutes(r, handlers, rateLimitMw)
 	registerExecutionContextIntakeRoutes(r, handlers, rateLimitMw)
