@@ -102,6 +102,31 @@ operator can tune observation work without changing resource identity. A reposit
 whose newest runs have more than the budget of newer tasks still needs a
 run-specific task API or typed indexed bridge.
 
+## Dispatching workflows with official gh
+
+`POST /repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches` forwards
+an explicitly requested workflow dispatch to the selected external backend.
+Repository write permission is required. A filename is accepted directly; numeric
+IDs must resolve through the current repository/backend workflow identity map.
+AGS resolves the requested branch, tag or commit to an immutable local source SHA
+before one provider write. Missing refs return 422 and unknown/retired IDs return
+404 without provider writes. A successful dispatch returns 204 and does not
+create a native AGS workflow or invent a run ID. List runs at that exact SHA to
+observe the provider result.
+
+Forgejo accepts `.yml`/`.yaml` filenames and scalar inputs; boolean and numeric
+inputs become strings as required by its public API. Nested inputs are rejected.
+The provider validates workflow enablement and required inputs. It must expose
+its public workflow dispatch API; otherwise the request remains unsupported.
+An observed workflow identity is not proof that dispatch is enabled. Outages and
+unknown write outcomes are errors, with no redirect following or automatic POST
+replay. Read exact-head runs before deciding whether to retry.
+
+```bash
+gh workflow run ci.yml --ref "$SOURCE_REF" -f target=test
+gh run list --commit "$HEAD_SHA" --json databaseId,headSha,event,status,conclusion
+```
+
 ## Rerunning CI with official gh
 
 The selected external backend supports these GitHub-shaped mutations:

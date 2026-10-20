@@ -98,3 +98,8 @@ type Backend interface {
 	RunLogs(context.Context, string, string) ([]byte, error)
 	Action(context.Context, string, string, string) error
 }
+
+// WorkflowDispatcher is optional: a run-only backend need not expose dispatch.
+type WorkflowDispatcher interface {
+	DispatchWorkflow(context.Context, string, string, string, map[string]any) error
+}

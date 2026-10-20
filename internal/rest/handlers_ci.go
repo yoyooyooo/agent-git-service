@@ -56,6 +56,21 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 			return id, true
 		}
 		switch operation {
+		case "dispatch":
+			var payload struct {
+				Ref    string         `json:"ref"`
+				Inputs map[string]any `json:"inputs"`
+			}
+			if err := decodeBodyStrict(r, &payload); err != nil {
+				respond.Error(w, http.StatusBadRequest, "Invalid request body")
+				return
+			}
+			if err := d.Svc.CIDispatchWorkflow(r.Context(), repo.FullName, chi.URLParam(r, "workflow_id"), payload.Ref, payload.Inputs); err != nil {
+				ciHTTPError(w, err)
+				return
+			}
+			respond.NoContent(w)
+			return
 		case "check-run", "check-annotations":
 			id, ok := readID("check_run_id")
 			if !ok {

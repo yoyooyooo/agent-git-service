@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/ngaut/agent-git-service/internal/cibackend"
 	"github.com/ngaut/agent-git-service/internal/db"
 	"strconv"
+	"strings"
 )
 
 type CIWorkflow struct {
@@ -95,4 +97,51 @@ func (s *Service) CIWorkflow(ctx context.Context, repository string, id string) 
 		return CIWorkflow{}, e
 	}
 	return CIWorkflow{ID: mapped, Workflow: item, Backend: selected.Name}, nil
+}
+
+// CIDispatchWorkflow authorizes against the native repository, preserves mapped
+// workflow ownership, and pins moving refs without mutating the Git source.
+func (s *Service) CIDispatchWorkflow(ctx context.Context, repository, workflow, ref string, inputs map[string]any) error {
+	repo, selected, err := s.ciScope(ctx, repository)
+	if err != nil {
+		return err
+	}
+	user, err := s.GetCurrentUser(ctx)
+	if err != nil {
+		return err
+	}
+	permission, err := s.HasRepoAccess(ctx, repo.ID, user.ID)
+	if err != nil {
+		return err
+	}
+	if !permission.AtLeast(RepoPermissionWrite) {
+		return ErrForbidden
+	}
+	if selected.Backend == nil {
+		return ErrNotFound
+	}
+	dispatcher, ok := selected.Backend.(cibackend.WorkflowDispatcher)
+	if !ok {
+		return cibackend.ErrUnsupported
+	}
+	if number, parseErr := strconv.ParseUint(workflow, 10, 64); parseErr == nil {
+		mapped, err := s.resolveCI(ctx, repo, selected, "workflow", number)
+		if err != nil {
+			return err
+		}
+		workflow = mapped.ExternalID
+	}
+	if strings.TrimSpace(ref) == "" {
+		return fmt.Errorf("%w: workflow ref is required", ErrValidation)
+	}
+	if s.Git == nil {
+		return fmt.Errorf("%w: git backend not configured", ErrValidation)
+	}
+	sha, err := s.Git.ResolveContentCommit(ctx, repo.FullName, ref)
+	if err != nil {
+		return fmt.Errorf("%w: workflow ref cannot be resolved", ErrValidation)
+	}
+	// Provider validation owns workflow_dispatch enablement and required inputs.
+	// Never manufacture a native workflow/run or retry an uncertain write.
+	return ciError(dispatcher.DispatchWorkflow(ctx, selected.Binding.Repository, workflow, sha, inputs))
 }
