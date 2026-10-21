@@ -218,9 +218,9 @@ forgejo:
     enabled: true
     webhook_url: "https://ags.example.com/api/v3/integrations/forgejo/webhook"
     integration_bot: "ags-bot"
-    # Optional legacy admin alias; when set, overrides token_file for ALL
-    # Forgejo API calls and Git HTTP operations, including policy diagnostics.
-    # Omit this alias when token_file already holds the shared admin credential.
+    # Optional diagnostic/onboarding credential only. Never overrides the
+    # projection token_file for REST writes or Git push. Missing operator files
+    # do not block the server projection path.
     operator_token_file: "/path/to/forgejo-admin-token"
     # Exact Forgejo actor login -> immutable AGS numeric principal ID. There is
     # no same-login, provider-role, or repository-owner fallback.
@@ -398,7 +398,9 @@ go run ./cmd/forgejo-authority -config /path/to/integrations.yaml -mode apply
 go run ./cmd/forgejo-authority -config /path/to/integrations.yaml -mode verify
 ```
 
-Configure one Forgejo administrator token in `forgejo.token_file` for all REST reads/writes and Git HTTP operations. For existing configurations, an enabled `authority_policy.operator_token_file` (or inline `operator_token`) takes precedence over `forgejo.token_file`/`token` for all these operations, even when the old projection token is still configured. With the policy disabled, its stale token file is not read. The default integration uses one admin client for projection, labels, statuses, comments, policy diagnostics and actor inspection; the admin executor does not need per-repository collaborator grants or permission probes. Forgejo still validates the credential at each actual API/Git operation. Inspection of a bound human actor remains part of AGS action admission and does not change the executor credential. For one-shot onboarding, `-operator-token-file /path/to/forgejo-admin-token` selects the shared admin credential for that command without rewriting `integrations.yaml`.
+Configure the existing Forgejo administrator credential in `forgejo.token_file` for projection REST and Git HTTP. `authority_policy.operator_token_file` / `operator_token` no longer override it in the server or constructor. Operator credentials are loaded explicitly by `cmd/forgejo-authority` for diagnostic/onboarding operations; its `-operator-token-file` flag still overrides that command only. No token is rotated or narrowed by this change. If an older deployment relied on the override, verify the configured projection token's owner/admin status before upgrading. Missing operator files must not stop projection startup.
+
+See [outbound attribution](operations/outbound-attribution.md) for the shared identity map, Sudo recovery, audit fields, rollback and real-path verification. Attribution changes the actor of authorized writes, not AGS authorization or the power of the existing admin credential. Read APIs, repository provisioning, branch protection and webhook maintenance remain bot-owned.
 
 The command refuses to run without an enabled `projection_drift` target. `apply` disables Forgejo-native `allow_rebase_update`, grants the named integration bot write collaborator permission when missing, creates or updates base protection so only that bot can push, creates the AGS workflow labels, and creates or updates the signed webhook for `pull_request`, `issues`, and `delete`. It then re-reads provider state; repeated apply on a converged repository creates no duplicate labels, webhook, or protection.
 

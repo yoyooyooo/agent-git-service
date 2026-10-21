@@ -74,6 +74,15 @@ Client route planning must remain read-only, and rollback receipts may name only
 the exact URL-scoped keys the tool owns. These repaired boundaries have direct
 regressions and do not substitute for complete release verification.
 
+## Outbound attribution acceptance
+
+The project-local [verification skill](../.cursor/skills/verify-ags-attribution/SKILL.md)
+drives an isolated SQLite AGS with official gh and real Git against an explicitly
+selected Forgejo sandbox. Its feature map distinguishes REST actor attribution,
+permission recovery, bot-owned pushes, and GitHub text-only attribution. Never use
+a deployed database or a business repository as a test fixture. Sandbox evidence
+is separate from exact-source hosted CI; neither implies deployment permission.
+
 ## Priorities
 
 The major paths to protect first are:
