@@ -52,12 +52,6 @@ func (s *Service) ListProjectionDriftNotifications(ctx context.Context, throttle
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	// A poll-sized throttle made unchanged facts eligible every round and let
-	// the first capped page repeatedly displace later drift. Persisted reminders
-	// have a one-day floor; longer operator throttles remain effective.
-	if throttle < 24*time.Hour {
-		throttle = 24 * time.Hour
-	}
 	now := time.Now().UTC()
 	query := s.DBForCtx(ctx).Where("status = ?", ProjectionStatusActive)
 	if gracePeriod > 0 {
@@ -68,7 +62,7 @@ func (s *Service) ListProjectionDriftNotifications(ctx context.Context, throttle
 		query = query.Where("last_notified_at IS NULL OR last_notified_at < ?", cutoff)
 	}
 	var rows []db.ProjectionRefState
-	if err := query.Order("last_notified_at asc, first_seen_at asc, id asc").Limit(limit).Find(&rows).Error; err != nil {
+	if err := query.Order("last_seen_at asc, id asc").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return projectionDriftNotificationsFromRows(rows), nil

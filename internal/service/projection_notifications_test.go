@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/forgejointegration"
 )
 
@@ -155,103 +154,5 @@ func TestListResolvedProjectionDriftNotificationsOnlyAfterActiveAlert(t *testing
 	}
 	if len(resolvedRows) != 0 {
 		t.Fatalf("expected resolved notification to be one-shot, got %#v", resolvedRows)
-	}
-}
-
-func TestProjectionDriftUnchangedFactWaitsForDailyReminder(t *testing.T) {
-	svc := setupProjectionStateService(t)
-	ctx := context.Background()
-	fact := projectionFailureRecord{Provider: ProjectionProviderGitHub, RepoFullName: "example-owner/demo", Ref: "refs/heads/work", AGSSHA: "aaa", ExternalSHA: "bbb", Type: "sha_drift"}
-	if err := svc.recordProjectionFailure(ctx, fact); err != nil {
-		t.Fatal(err)
-	}
-	notes, err := svc.ListProjectionDriftNotifications(ctx, 15*time.Minute, 0, 50)
-	if err != nil || len(notes) != 1 {
-		t.Fatalf("notes=%v err=%v", notes, err)
-	}
-	if err := svc.MarkProjectionDriftNotified(ctx, notes[0].StateID, time.Now().UTC().Add(-16*time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	// A new scan updates last_seen_at, but does not create a new drift fact.
-	if err := svc.recordProjectionFailure(ctx, fact); err != nil {
-		t.Fatal(err)
-	}
-	notes, err = svc.ListProjectionDriftNotifications(ctx, 15*time.Minute, 0, 50)
-	if err != nil || len(notes) != 0 {
-		t.Fatalf("unchanged drift repeated next round: %v %v", notes, err)
-	}
-	all, err := svc.ListProjectionDriftNotifications(ctx, 0, 0, 50)
-	if err != nil || len(all) != 0 {
-		t.Fatalf("zero throttle bypassed reminder floor: %v %v", all, err)
-	}
-	var id uint
-	if err := svc.DB.Table("projection_ref_states").Select("id").Scan(&id).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.MarkProjectionDriftNotified(ctx, id, time.Now().UTC().Add(-25*time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	notes, err = svc.ListProjectionDriftNotifications(ctx, 15*time.Minute, 0, 50)
-	if err != nil || len(notes) != 1 {
-		t.Fatalf("daily reminder absent: %v %v", notes, err)
-	}
-}
-
-func TestProjectionDriftChangedActiveFactBecomesEligible(t *testing.T) {
-	for _, field := range []string{"target", "branch", "type", "authority", "ags_sha", "external_sha", "summary"} {
-		t.Run(field, func(t *testing.T) {
-			svc := setupProjectionStateService(t)
-			ctx := context.Background()
-			firstObserved := time.Now().UTC().Add(-time.Hour)
-			fact := projectionFailureRecord{Provider: ProjectionProviderGitHub, RepoFullName: "example-owner/demo", TargetRepo: "fixture/repo", Ref: "refs/heads/work", Branch: "work", Type: "sha_drift", Authority: ProjectionAuthorityAGS, AGSSHA: "aaa", ExternalSHA: "bbb", ErrorSummary: "first drift", OccurredAt: firstObserved}
-			if err := svc.recordProjectionFailure(ctx, fact); err != nil {
-				t.Fatal(err)
-			}
-			var before db.ProjectionRefState
-			if err := svc.DB.Where("ref = ?", fact.Ref).First(&before).Error; err != nil {
-				t.Fatal(err)
-			}
-			if err := svc.MarkProjectionDriftNotified(ctx, before.ID, time.Now().UTC().Add(-16*time.Minute)); err != nil {
-				t.Fatal(err)
-			}
-			fact.OccurredAt = time.Now().UTC()
-			if err := svc.recordProjectionFailure(ctx, fact); err != nil {
-				t.Fatal(err)
-			}
-			notes, err := svc.ListProjectionDriftNotifications(ctx, 15*time.Minute, 0, 50)
-			if err != nil || len(notes) != 0 {
-				t.Fatalf("unchanged refresh eligible: notes=%v err=%v", notes, err)
-			}
-			switch field {
-			case "target":
-				fact.TargetRepo = "fixture/changed"
-			case "branch":
-				fact.Branch = "renamed"
-			case "type":
-				fact.Type = "transport_error"
-			case "authority":
-				fact.Authority = "changed-authority"
-			case "ags_sha":
-				fact.AGSSHA = "ccc"
-			case "external_sha":
-				fact.ExternalSHA = "ddd"
-			case "summary":
-				fact.ErrorSummary = "changed drift"
-			}
-			if err := svc.recordProjectionFailure(ctx, fact); err != nil {
-				t.Fatal(err)
-			}
-			notes, err = svc.ListProjectionDriftNotifications(ctx, 15*time.Minute, 0, 50)
-			if err != nil || len(notes) != 1 {
-				t.Fatalf("changed active fact suppressed: notes=%v err=%v", notes, err)
-			}
-			var after db.ProjectionRefState
-			if err := svc.DB.First(&after, before.ID).Error; err != nil {
-				t.Fatal(err)
-			}
-			if after.Generation != before.Generation || !after.FirstSeenAt.Equal(before.FirstSeenAt) || after.LastNotifiedAt != nil {
-				t.Fatalf("changed fact lost lifecycle: before=%+v after=%+v", before, after)
-			}
-		})
 	}
 }

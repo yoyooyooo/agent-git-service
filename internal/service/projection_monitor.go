@@ -308,28 +308,13 @@ func (s *Service) recordProjectionFailure(ctx context.Context, failure projectio
 		"last_seen_at":   failure.OccurredAt,
 		"resolved_at":    nil,
 	}
-	if newGeneration || (existingErr == nil && existingState.Status == ProjectionStatusActive && projectionFailureFactChanged(existingState, failure)) {
+	if newGeneration {
 		updates["last_notified_at"] = nil
 	}
 	return s.DBForCtx(ctx).Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "provider"}, {Name: "repository_id"}, {Name: "ref"}},
 		DoUpdates: clause.Assignments(updates),
 	}).Create(&state).Error
-}
-
-// Observation timestamps do not change the alert fact. Material changes become
-// eligible immediately without starting a new unresolved drift generation.
-func projectionFailureFactChanged(existing db.ProjectionRefState, failure projectionFailureRecord) bool {
-	return existing.Provider != failure.Provider ||
-		existing.RepoFullName != failure.RepoFullName ||
-		existing.TargetRepo != failure.TargetRepo ||
-		existing.Ref != failure.Ref ||
-		existing.Branch != failure.Branch ||
-		existing.Type != failure.Type ||
-		existing.Authority != failure.Authority ||
-		existing.AGSSHA != failure.AGSSHA ||
-		existing.ExternalSHA != failure.ExternalSHA ||
-		string(existing.ErrorSummary) != failure.ErrorSummary
 }
 
 func (s *Service) preserveSpecificActiveProjectionFailure(ctx context.Context, repoID uint, failure projectionFailureRecord) projectionFailureRecord {
