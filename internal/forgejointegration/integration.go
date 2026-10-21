@@ -56,8 +56,8 @@ type Config struct {
 	WebhookURL string
 	// IntegrationBot is the only Forgejo identity allowed to push protected base refs.
 	IntegrationBot string
-	// AuthorityPolicyToken/File is the legacy operator/admin credential alias.
-	// When present it takes precedence for ALL Forgejo API and Git operations.
+	// AuthorityPolicyToken/File is an optional diagnostic credential only.
+	// Projection REST and Git always use Token/TokenFile.
 	AuthorityPolicyToken     string
 	AuthorityPolicyTokenFile string
 	// ActionPrincipalBindings maps an exact Forgejo actor login to the immutable
@@ -360,9 +360,6 @@ func (i *Integration) WorkflowActionsEnabled() bool {
 }
 
 func (c Config) withDefaults() Config {
-	if token := strings.TrimSpace(c.AuthorityPolicyToken); token != "" {
-		c.Token = token
-	}
 	if c.RepoMap == nil {
 		c.RepoMap = map[string]RepoMapping{}
 	}
@@ -2023,23 +2020,9 @@ func scrubURLSecrets(text string) string {
 	return text
 }
 
-// LoadTokenFile resolves the shared admin credential. The legacy operator
-// credential takes precedence even when the old projection token is inline.
+// LoadTokenFile resolves only the projection credential. Operator diagnostics
+// are loaded explicitly by their consumer and cannot gate projection startup.
 func LoadTokenFile(cfg Config) (Config, error) {
-	var err error
-	if cfg.AuthorityPolicyEnabled {
-		cfg, err = LoadAuthorityPolicyTokenFile(cfg)
-		if err != nil {
-			return cfg, err
-		}
-		if strings.TrimSpace(cfg.AuthorityPolicyTokenFile) != "" && strings.TrimSpace(cfg.AuthorityPolicyToken) == "" {
-			return cfg, fmt.Errorf("Forgejo admin token file is empty")
-		}
-	}
-	if token := strings.TrimSpace(cfg.AuthorityPolicyToken); token != "" {
-		cfg.Token = token
-		return cfg, nil
-	}
 	if strings.TrimSpace(cfg.Token) != "" || strings.TrimSpace(cfg.TokenFile) == "" {
 		return cfg, nil
 	}

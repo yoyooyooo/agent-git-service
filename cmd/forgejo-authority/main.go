@@ -35,6 +35,16 @@ func main() {
 		cfg.AuthorityPolicyToken = ""
 		cfg.AuthorityPolicyTokenFile = path
 	}
+	cfg, err = forgejointegration.LoadAuthorityPolicyTokenFile(cfg)
+	if err != nil {
+		fail(err.Error())
+	}
+	if cfg.AuthorityPolicyTokenFile != "" && cfg.AuthorityPolicyToken == "" {
+		fail("Forgejo authority operator credential is empty")
+	}
+	if cfg.AuthorityPolicyToken != "" {
+		cfg.Token = cfg.AuthorityPolicyToken
+	}
 	cfg, err = forgejointegration.LoadTokenFile(cfg)
 	if err != nil {
 		fail(err.Error())
