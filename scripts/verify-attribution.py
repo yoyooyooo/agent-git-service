@@ -34,12 +34,17 @@ def main():
     ap.add_argument('--output', required=True)
     ap.add_argument('--source-sha', default='')
     ap.add_argument('--source-repo', default='')
+    ap.add_argument('--mapping', choices=['enabled','absent','empty'], default='enabled')
     args = ap.parse_args()
     root = Path(args.output).resolve()
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
     token = Path(args.token_file).read_text().strip()
     ags_token = secrets.token_hex(24)
-    report = {'work': str(root), 'checks': [], 'source_sha': args.source_sha}
+    report = {'work': str(root), 'checks': [], 'source_sha': args.source_sha, 'mapping':args.mapping, 'binary_sha256':hashlib.sha256(Path(args.binary).read_bytes()).hexdigest()}
+    binary_meta=subprocess.run(['go','version','-m',args.binary],capture_output=True,text=True,check=True).stdout
+    report['binary_build_metadata']=binary_meta
+    if args.source_sha:
+        assert 'vcs.revision='+args.source_sha in binary_meta and 'vcs.modified=false' in binary_meta, 'binary must bind exact clean source SHA'
     server = proxy = None
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -72,7 +77,7 @@ def main():
         env = {k: os.environ[k] for k in ('PATH', 'GOROOT', 'GOPATH', 'GOCACHE', 'GOMODCACHE') if k in os.environ}
         env.update(HOME=str(root), LANG='C.UTF-8', GIT_TERMINAL_PROMPT='0', NO_PROXY='*', no_proxy='*',
                    GIT_AUTHOR_NAME=args.ags_login, GIT_COMMITTER_NAME=args.ags_login,
-                   GIT_AUTHOR_EMAIL=args.ags_login+'@example.test', GIT_COMMITTER_EMAIL=args.ags_login+'@example.test')
+                   GIT_AUTHOR_EMAIL=commit_email, GIT_COMMITTER_EMAIL=commit_email)
         if extra:
             env.update(extra)
         res = subprocess.run(cmd, cwd=cwd or root, env=env, capture_output=True, text=True, timeout=timeout)
@@ -90,6 +95,8 @@ def main():
         assert status == 200 and user['is_admin'], 'existing admin credential required'
         status, mapped = forgejo('/users/' + args.forgejo_login)
         assert status == 200, 'reuse an existing Forgejo user'
+        commit_email=mapped['email']
+        assert '@' in commit_email
         owner = user['login']
         name = 'ags-attribution-sandbox-' + time.strftime('%Y%m%d%H%M%S')
         target = owner + '/' + name
@@ -111,6 +118,10 @@ def main():
                   'forgejo': {'enabled': True, 'base_url': args.forgejo, 'token_file': str(Path(args.token_file).resolve()),
                               'auto_create_repo': False, 'auto_pr': True, 'private_repos': True,
                               'repos': {ags_repo: {'owner': owner, 'repo': name, 'base_branch': 'main', 'auto_pr': True}}}}
+        if args.mapping=='absent':
+            config.pop('attribution')
+        elif args.mapping=='empty':
+            config['attribution']['principals']={}
         (root/'integrations.yaml').write_text(json.dumps(config))
         (root/'integrations.yaml').chmod(0o600)
         log = open(root/'server.log', 'w')
@@ -142,10 +153,33 @@ def main():
         # Fixture setup only: this synthetic caller owns its repo but is not a
         # site admin during any Git/gh acceptance operation.
         with sqlite3.connect(root/'ags.sqlite') as fixture_db:
-            fixture_db.execute('UPDATE users SET site_admin = 0 WHERE login = ?', (args.ags_login,))
+            fixture_db.execute('UPDATE users SET site_admin = 0, email = ? WHERE login = ?', (commit_email,args.ags_login))
         status, who = request(base, '/api/v3/user', ags_token)
         assert status == 200 and who['login'] == args.ags_login and not who['site_admin']
         record('non-admin AGS caller', {'status':status,'login':who['login'],'site_admin':who['site_admin']})
+        if args.mapping=='enabled':
+            # Complete isolated fixture seeding first, then restart ONLY our
+            # instance with the explicit email contract and production/no-seed.
+            server.terminate()
+            server.wait(timeout=15)
+            config['attribution']['principals'][args.ags_login]['commit_email']=commit_email
+            (root/'integrations.yaml').write_text(json.dumps(config))
+            server_env['ENVIRONMENT']='production'
+            server=subprocess.Popen([str(Path(args.binary).resolve())],cwd=root,env=server_env,stdin=subprocess.DEVNULL,stdout=log,stderr=log)
+            deadline=time.monotonic()+45
+            while time.monotonic()<deadline:
+                if server.poll() is not None:
+                    raise RuntimeError('email-contract startup failed; inspect server.log')
+                try:
+                    if request(base,'/readyz',ags_token)[0]==200:
+                        break
+                except (OSError,urllib.error.URLError):
+                    pass
+                time.sleep(.15)
+            else:
+                raise RuntimeError('email-contract restart readiness timeout')
+            record('commit email contract startup',{'status':200,'email':commit_email,'server_pid':server.pid})
+
 
         # Stock gh uses HTTPS for custom host:port. This owned TLS front only
         # forwards to this run's loopback AGS; it never proxies a deployed server.
@@ -207,7 +241,31 @@ def main():
         head=run(['git','rev-parse','HEAD'],git_env,checkout)
         report['head_sha']=head
         record('git push through AGS',{'exit':0,'head_sha':head,'stdout':push})
+        # Forgejo updates branch caches asynchronously after receive-pack.
+        time.sleep(1)
         command=['gh','pr','create','--repo',ags_repo,'--head','agent/attribution','--base','main','--title','Sandbox attribution acceptance','--body','Isolated attribution verification; no business repository changes.']
+        if args.mapping=='enabled':
+            with sqlite3.connect(root/'ags.sqlite') as fixture_db:
+                original_owner=fixture_db.execute('SELECT owner_id FROM repositories WHERE full_name = ?', (ags_repo,)).fetchone()[0]
+                fixture_db.execute("INSERT INTO users (login,type,status,user_kind,site_admin,default_repository_permission) VALUES ('fixture-deny-owner','User','active','human',0,'none')")
+                denial_owner=fixture_db.execute("SELECT id FROM users WHERE login='fixture-deny-owner'").fetchone()[0]
+                fixture_db.execute('UPDATE repositories SET owner_id = ? WHERE full_name = ?', (denial_owner,ags_repo))
+            try:
+                try:
+                    run(command,gh_env,checkout)
+                except RuntimeError as denial:
+                    record('AGS unauthorized gh pr create',{'exit':'nonzero','output':str(denial)})
+                else:
+                    raise AssertionError('AGS denied identity unexpectedly created PR')
+                status,permission=forgejo('/repos/'+target+'/collaborators/'+args.forgejo_login+'/permission')
+                status_pr,denied_prs=forgejo('/repos/'+target+'/pulls?state=open')
+                with sqlite3.connect(root/'ags.sqlite') as observed_db:
+                    grants=observed_db.execute("SELECT COUNT(*) FROM audit_log_entries WHERE action='projection.collaborator_grant'").fetchone()[0]
+                assert permission.get('permission')=='none' and status_pr==200 and denied_prs==[] and grants==0
+                record('AGS denial has zero provider effects',{'provider_permission':permission.get('permission'),'provider_prs':len(denied_prs),'grant_audits':grants})
+            finally:
+                with sqlite3.connect(root/'ags.sqlite') as fixture_db:
+                    fixture_db.execute('UPDATE repositories SET owner_id = ? WHERE full_name = ?', (original_owner,ags_repo))
         opened=run(command,gh_env,checkout)
         record('gh pr create',{'exit':0,'stdout':opened,'ags_login':args.ags_login})
         deadline=time.monotonic()+60
@@ -223,10 +281,10 @@ def main():
         number=pr['number']
         report['forgejo_pr']=pr['html_url']
         record('Forgejo PR readback',{'status':status,'number':number,'user':pr['user']['login'],'head_sha':pr['head']['sha'],'url':pr['html_url']})
-        assert pr['user']['login']==args.forgejo_login
+        assert pr['user']['login']==(args.forgejo_login if args.mapping=='enabled' else owner)
         status, permission=forgejo('/repos/'+target+'/collaborators/'+args.forgejo_login+'/permission')
         record('permission recovery readback',{'status':status,'permission':permission.get('permission')})
-        assert status==200 and permission.get('permission')=='write'
+        assert status==200 and permission.get('permission')==('write' if args.mapping=='enabled' else 'none')
         # A second push after opening exercises synchronize, not only branch creation.
         (checkout/'attribution.txt').write_text('sandbox attribution update\n')
         run(['git','add','attribution.txt'],git_env,checkout)
@@ -243,19 +301,33 @@ def main():
         else:
             raise RuntimeError('PR update head did not synchronize')
         record('post-open git push readback',{'status':status,'head_sha':head,'user':pr['user']['login']})
-        assert pr['user']['login']==args.forgejo_login
+        assert pr['user']['login']==(args.forgejo_login if args.mapping=='enabled' else owner)
+        # Forgejo returns both the raw commit and associated provider users.
+        status,commit=forgejo('/repos/'+target+'/git/commits/'+head)
+        raw=commit['commit']
+        author=commit.get('author') or {}
+        committer=commit.get('committer') or {}
+        record('Forgejo commit attribution',{'status':status,'sha':commit.get('sha'),'author':author.get('login'),'committer':committer.get('login'),'author_email':raw['author']['email'],'committer_email':raw['committer']['email']})
+        assert status==200 and commit['sha']==head and author.get('login')==args.forgejo_login and committer.get('login')==args.forgejo_login
+        assert raw['author']['email']==commit_email and raw['committer']['email']==commit_email
+        local_object=run(['git','cat-file','commit',head],git_env,checkout)
+        assert ('<' + commit_email + '>') in local_object
         comment=run(['gh','pr','comment','1','--repo',ags_repo,'--body','attribution acceptance comment'],gh_env,checkout)
         record('gh pr comment',{'exit':0,'stdout':comment})
         status, comments=forgejo('/repos/'+target+f'/issues/{number}/comments')
         projected=[c for c in comments if c.get('body')=='attribution acceptance comment']
         record('Forgejo comment readback',{'status':status,'comments':[{'id':c['id'],'user':c['user']['login'],'body':c['body']} for c in projected]})
-        assert projected and all(c['user']['login']==args.forgejo_login for c in projected)
+        assert (projected and all(c['user']['login']==args.forgejo_login for c in projected)) if args.mapping=='enabled' else not comments
         close=run(['gh','pr','close','1','--repo',ags_repo],gh_env,checkout)
         record('gh pr close',{'exit':0,'stdout':close})
         status, timeline=forgejo('/repos/'+target+f'/issues/{number}/timeline')
         events=[{'type':c.get('type'),'user':c.get('user',{}).get('login')} for c in timeline if isinstance(c,dict)] if isinstance(timeline,list) else []
         record('Forgejo timeline readback',{'status':status,'events':events})
-        assert status==200 and any(e['type']=='close' and e['user']==args.forgejo_login for e in events)
+        assert status==200 and any(e['type']=='close' and e['user']==(args.forgejo_login if args.mapping=='enabled' else owner) for e in events)
+        if args.mapping!='enabled':
+            status,after_comments=forgejo('/repos/'+target+f'/issues/{number}/comments')
+            assert status==200 and not after_comments and 'AGS-Actor:' not in pr.get('body','')
+            record('empty mapping zero text or comment changes',{'mode':args.mapping,'comments':0,'sudo':False,'grants':0,'body_unchanged':True})
         # git pushes deliberately remain bot-owned. Confirm logs preserve the AGS actor.
         log.flush()
         records=[]
@@ -266,14 +338,14 @@ def main():
                 continue
             if entry.get('msg')=='projection attribution':
                 records.append(entry)
-        assert any(e.get('op')=='collaborator_grant' and e.get('grant_applied') for e in records)
-        assert any(e.get('op')=='push_ref' and e.get('ags_login')==args.ags_login and e.get('attribution')=='bot_only' for e in records)
+        assert any(e.get('op')=='collaborator_grant' and e.get('grant_applied') for e in records) if args.mapping=='enabled' else records==[]
+        assert any(e.get('op')=='push_ref' and e.get('ags_login')==args.ags_login and e.get('attribution')=='bot_only' for e in records) if args.mapping=='enabled' else records==[]
         (root/'attribution.json').write_text(json.dumps(records,indent=2))
         with sqlite3.connect(root/'ags.sqlite') as observed_db:
             audits=observed_db.execute("SELECT action, actor_login, details FROM audit_log_entries WHERE action LIKE 'projection.%' ORDER BY id").fetchall()
-        assert any(action=='projection.collaborator_grant' and login==args.ags_login for action,login,_ in audits)
+        assert any(action=='projection.collaborator_grant' and login==args.ags_login for action,login,_ in audits) if args.mapping=='enabled' else audits==[]
         (root/'audit.json').write_text(json.dumps([{'action':action,'actor_login':login,'details':json.loads(details)} for action,login,details in audits],indent=2))
-        record('structured attribution',{'grant_applied':True,'push_native_actor':owner,'ags_actor':args.ags_login,'evidence':str(root/'attribution.json')})
+        record('structured attribution',{'grant_applied':args.mapping=='enabled','push_native_actor':owner,'ags_actor':args.ags_login,'evidence':str(root/'attribution.json')})
         status, runs=forgejo('/repos/'+target+'/actions/runs?limit=30')
         (root/'forgejo-ci-initial.json').write_text(json.dumps(runs,indent=2))
         record('Forgejo CI initial readback',{'status':status,'runs':[{k:r.get(k) for k in ('id','commit_sha','status','event','html_url')} for r in runs.get('workflow_runs',[])]})

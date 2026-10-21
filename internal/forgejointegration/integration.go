@@ -59,8 +59,9 @@ type Config struct {
 	WebhookURL string
 	// IntegrationBot is the only Forgejo identity allowed to push protected base refs.
 	IntegrationBot string
-	// AuthorityPolicyToken/File is an optional diagnostic credential only.
-	// Projection REST and Git always use Token/TokenFile.
+	// With attribution enabled, operator credentials are diagnostics-only and
+	// projection REST/Git use Token/TokenFile. Empty attribution preserves the
+	// legacy operator override so opting out is a complete behavior rollback.
 	AuthorityPolicyToken     string
 	AuthorityPolicyTokenFile string
 	// ActionPrincipalBindings maps an exact Forgejo actor login to the immutable
@@ -374,6 +375,9 @@ func (i *Integration) WorkflowActionsEnabled() bool {
 }
 
 func (c Config) withDefaults() Config {
+	if !c.Attribution.Enabled() && strings.TrimSpace(c.AuthorityPolicyToken) != "" {
+		c.Token = strings.TrimSpace(c.AuthorityPolicyToken)
+	}
 	if c.RepoMap == nil {
 		c.RepoMap = map[string]RepoMapping{}
 	}
@@ -2037,6 +2041,25 @@ func scrubURLSecrets(text string) string {
 // LoadTokenFile resolves only the projection credential. Operator diagnostics
 // are loaded explicitly by their consumer and cannot gate projection startup.
 func LoadTokenFile(cfg Config) (Config, error) {
+	// Absent/empty mapping is a complete compatibility switch, including the
+	// pre-attribution operator credential precedence. Opt-in separates credentials.
+	if !cfg.Attribution.Enabled() {
+		var err error
+		if cfg.AuthorityPolicyEnabled {
+			cfg, err = LoadAuthorityPolicyTokenFile(cfg)
+			if err != nil {
+				return cfg, err
+			}
+			if cfg.AuthorityPolicyTokenFile != "" && cfg.AuthorityPolicyToken == "" {
+				return cfg, fmt.Errorf("Forgejo admin token file is empty")
+			}
+		}
+		if strings.TrimSpace(cfg.AuthorityPolicyToken) != "" {
+			cfg.Token = strings.TrimSpace(cfg.AuthorityPolicyToken)
+			return cfg, nil
+		}
+	}
+
 	if strings.TrimSpace(cfg.Token) != "" || strings.TrimSpace(cfg.TokenFile) == "" {
 		return cfg, nil
 	}

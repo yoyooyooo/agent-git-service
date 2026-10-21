@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/mail"
 	"regexp"
 	"sort"
 	"strings"
@@ -15,12 +16,16 @@ import (
 type Principal struct {
 	Forgejo string `yaml:"forgejo"`
 	GitHub  string `yaml:"github"`
+	// CommitEmail asserts existing Git identity linkage; never rewrites commits or provider users.
+	CommitEmail string `yaml:"commit_email"`
 }
 
 type Config struct {
-	Observer   func(context.Context, Event) error `yaml:"-"`
-	Instance   string                             `yaml:"instance"`
-	Principals map[string]Principal               `yaml:"principals"`
+	Observer func(context.Context, Event) error `yaml:"-"`
+	// Authorize is owned by AGS Service. A mapping or Actor is never a grant.
+	Authorize  func(context.Context, Actor, string, string, int) error `yaml:"-"`
+	Instance   string                                                  `yaml:"instance"`
+	Principals map[string]Principal                                    `yaml:"principals"`
 }
 
 var loginPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$`)
@@ -39,6 +44,12 @@ func (c Config) Validate() error {
 				return fmt.Errorf("invalid attribution target for %s", login)
 			}
 		}
+		if p.CommitEmail != "" {
+			address, err := mail.ParseAddress(p.CommitEmail)
+			if err != nil || address.Address != p.CommitEmail || strings.ContainsAny(p.CommitEmail, "\r\n") || p.Forgejo == "" {
+				return fmt.Errorf("invalid attribution commit_email for %s", login)
+			}
+		}
 		if p.Forgejo != "" {
 			key := strings.ToLower(p.Forgejo)
 			if prev, ok := seen[key]; ok {
@@ -49,6 +60,8 @@ func (c Config) Validate() error {
 	}
 	return nil
 }
+
+func (c Config) Enabled() bool { return len(c.Principals) > 0 }
 
 func (c Config) ForgejoLogins() []string {
 	out := []string{}
@@ -127,6 +140,9 @@ func Mark(body string, actor Actor, target, login, reason string) string {
 }
 
 func Log(ctx context.Context, cfg Config, target, op, repo, tokenOwner, sudo, mode string, pr, status int, grant bool, reason string, targetLogins ...string) {
+	if !cfg.Enabled() {
+		return
+	}
 	a := FromContext(ctx)
 	targetLogin := ""
 	if len(targetLogins) > 0 {

@@ -168,7 +168,7 @@ func (s *Service) mergePRRecordWithActor(ctx context.Context, actor db.User, pr 
 	if commitMsg == "" {
 		commitMsg = fmt.Sprintf("Merge pull request #%d", pr.Number)
 	}
-	if mergeMethod != "rebase" {
+	if mergeMethod != "rebase" && s.ForgejoIntegration.AttributionEnabled() {
 		commitMsg = attribution.MergeTrailer(commitMsg, actor.Login)
 	}
 	var sha string

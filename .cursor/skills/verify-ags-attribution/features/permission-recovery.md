@@ -2,7 +2,8 @@
 
 ## Sub-features
 
-Below-write user gets write after a definitive Sudo denial. Missing account,
+Forgejo ACLs project AGS authority: only a currently AGS-authorized user/operation
+gets minimum write after a definitive Sudo denial. Missing account,
 failed grant, second denial and protected merge fall back without failure loops.
 
 ## How to get to it (user POV)
@@ -21,6 +22,13 @@ second denials, private 404, no-grant merge 403/405 and non-replayed 409/500.
 
 ## Gotchas
 
-Do not pregrant the test user, create accounts, weaken branch protections, or
+Do not pregrant the test user, modify real accounts, weaken branch protections, or
 remove existing collaborators. Private Forgejo permission denial may be 404.
 The new sandbox grant remains retained evidence, not an automatic cleanup target.
+
+Run enabled, `--mapping absent` and `--mapping empty`. The enabled verifier first
+attempts an AGS-denied create and proves zero provider PR/grant, then restores only
+the isolated fixture's AGS access and observes one write projection. Adapter tests
+revoke admission before the grant; Service tests read fresh revoked grants and
+suspended users. No AGS denial may become Sudo or bot fallback. Empty maps produce
+no text mutation, comments, Sudo or ACL writes.

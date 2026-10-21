@@ -3,6 +3,8 @@ package forgejointegration
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -36,7 +38,7 @@ func TestAttributionWritesAndReadIsolation(t *testing.T) {
 	}))
 	defer server.Close()
 	c := NewHTTPClient(server.URL, "fixture-admin")
-	c.configureAttribution(Config{Attribution: attribution.Config{Principals: map[string]attribution.Principal{"alice": {Forgejo: "alice.remote"}}}})
+	c.configureAttribution(Config{Attribution: attribution.Config{Authorize: allowProjectionTestOperation, Principals: map[string]attribution.Principal{"alice": {Forgejo: "alice.remote"}}}})
 	ctx := attribution.WithActor(context.Background(), attribution.Actor{UserID: 7, Login: "alice"})
 	_, err := c.EnsurePullRequest(ctx, PullRequestRequest{Owner: "team", Repo: "demo", Head: "agent/topic", Base: "main", Body: "body"})
 	if err != nil {
@@ -145,7 +147,7 @@ func TestAttributionBoundedPermissionRecovery(t *testing.T) {
 				w.WriteHeader(201)
 			}))
 			defer server.Close()
-			cfg := Config{Attribution: attribution.Config{Principals: map[string]attribution.Principal{"alice": {Forgejo: "alice.remote"}}}}
+			cfg := Config{Attribution: attribution.Config{Authorize: allowProjectionTestOperation, Principals: map[string]attribution.Principal{"alice": {Forgejo: "alice.remote"}}}}
 			if tc.mapped {
 				cfg.RepoMap = map[string]RepoMapping{"ags/demo": {Owner: "team", Repo: "demo"}}
 			}
@@ -196,7 +198,7 @@ func TestAttributionMissingUserAndMissingMapping(t *testing.T) {
 				w.WriteHeader(201)
 			}))
 			defer server.Close()
-			cfg := Config{RepoMap: map[string]RepoMapping{"ags/demo": {Owner: "team", Repo: "demo"}}}
+			cfg := Config{Attribution: attribution.Config{Authorize: allowProjectionTestOperation, Principals: map[string]attribution.Principal{"other": {Forgejo: "other.remote"}}}, RepoMap: map[string]RepoMapping{"ags/demo": {Owner: "team", Repo: "demo"}}}
 			if mapped {
 				cfg.Attribution.Principals = map[string]attribution.Principal{"alice": {Forgejo: "gone"}}
 			}
@@ -241,7 +243,7 @@ func TestAttributionStartupValidation(t *testing.T) {
 				w.Write([]byte(`{"login":"alice.remote"}`))
 			}))
 			defer server.Close()
-			cfg, err := ValidateAttribution(context.Background(), Config{BaseURL: server.URL, Token: "fixture", Attribution: attribution.Config{Principals: map[string]attribution.Principal{"alice": {Forgejo: "alice.remote"}}}})
+			cfg, err := ValidateAttribution(context.Background(), Config{BaseURL: server.URL, Token: "fixture", Attribution: attribution.Config{Authorize: allowProjectionTestOperation, Principals: map[string]attribution.Principal{"alice": {Forgejo: "alice.remote"}}}})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err=%v", err)
 			}
@@ -261,8 +263,128 @@ func TestAttributionWebhookSenderRoundTrips(t *testing.T) {
 	if err != nil || !ok || event.SenderLogin != "alice.remote" {
 		t.Fatal("sender lost", err)
 	}
-	integration := New(Config{Attribution: attribution.Config{Principals: map[string]attribution.Principal{"alice": {Forgejo: "alice.remote"}}}}, nil, nil)
+	integration := New(Config{Attribution: attribution.Config{Authorize: allowProjectionTestOperation, Principals: map[string]attribution.Principal{"alice": {Forgejo: "alice.remote"}}}}, nil, nil)
 	if integration.AGSLoginForActor(event.SenderLogin) != "alice" || integration.AGSLoginForActor("unknown") != "forgejo" {
 		t.Fatal("reverse mapping failed")
+	}
+}
+
+func TestReviewPR46EmptyMappingIsBehaviorNoop(t *testing.T) {
+	for _, name := range []string{"absent", "empty"} {
+		t.Run(name, func(t *testing.T) {
+			var writes []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				json.NewDecoder(r.Body).Decode(&body)
+				raw, _ := json.Marshal(body)
+				writes = append(writes, r.Method+" "+r.URL.Path+" sudo="+r.Header.Get("Sudo")+" body="+string(raw))
+				w.WriteHeader(201)
+				w.Write([]byte(`{"number":1}`))
+			}))
+			defer server.Close()
+			c := NewHTTPClient(server.URL, "synthetic-review-token")
+			cfg := Config{}
+			if name == "empty" {
+				cfg.Attribution.Principals = map[string]attribution.Principal{}
+			}
+			c.configureAttribution(cfg)
+			ctx := attribution.WithActor(context.Background(), attribution.Actor{UserID: 7, Login: "alice"})
+			c.UpdatePullRequestState(ctx, "team", "demo", 1, "closed")
+			for _, w := range writes {
+				t.Log(w)
+			}
+			if len(writes) != 1 {
+				t.Errorf("legacy close has one PATCH, got %d writes (unexpected comment POST)", len(writes))
+			}
+			writes = nil
+			c.CreateIssueComment(ctx, "team", "demo", 1, "original body")
+			for _, w := range writes {
+				t.Log(w)
+			}
+			if len(writes) != 1 || !strings.Contains(writes[0], `body={"body":"original body"}`) {
+				t.Error("legacy comment body changed despite disabled attribution mapping")
+			}
+		})
+	}
+}
+
+func TestAttributionRequiresAGSAuthorizationBeforeWriteAndGrant(t *testing.T) {
+	for _, denyAt := range []int{1, 3} {
+		t.Run(fmt.Sprint(denyAt), func(t *testing.T) {
+			writes, grants, checks := 0, 0, 0
+			denial := errors.New("AGS denied operation")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "GET" {
+					if strings.HasPrefix(r.URL.Path, "/api/v1/users/") {
+						w.Write([]byte(`{"login":"alice.remote"}`))
+					} else {
+						w.WriteHeader(404)
+					}
+					return
+				}
+				writes++
+				if r.Method == "PUT" {
+					grants++
+				}
+				w.WriteHeader(403)
+			}))
+			defer server.Close()
+			c := NewHTTPClient(server.URL, "fixture-admin")
+			c.configureAttribution(Config{RepoMap: map[string]RepoMapping{"ags/demo": {Owner: "team", Repo: "demo"}}, Attribution: attribution.Config{Authorize: allowProjectionTestOperation, Principals: map[string]attribution.Principal{"alice": {Forgejo: "alice.remote"}}}})
+			c.attribution.Authorize = func(_ context.Context, _ attribution.Actor, repo, op string, _ int) error {
+				checks++
+				if repo != "ags/demo" || op != "comment" {
+					t.Fatalf("wrong authority coordinates %s %s", repo, op)
+				}
+				if checks == denyAt {
+					return denial
+				}
+				return nil
+			}
+			ctx := attribution.WithActor(context.Background(), attribution.Actor{UserID: 7, Login: "alice"})
+			err := c.CreateIssueComment(ctx, "team", "demo", 1, "body")
+			if !errors.Is(err, denial) || grants != 0 || writes != map[int]int{1: 0, 3: 1}[denyAt] {
+				t.Fatalf("err=%v writes=%d grants=%d", err, writes, grants)
+			}
+		})
+	}
+}
+
+func TestAttributionCommitEmailValidation(t *testing.T) {
+	for _, email := range []string{"alice@example.test", "wrong@example.test", ""} {
+		t.Run(email, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "GET" {
+					t.Error("email validation must not modify accounts")
+				}
+				if r.URL.Path == "/api/v1/user" {
+					w.Write([]byte(`{"login":"bot","is_admin":true}`))
+				} else {
+					w.Write([]byte(`{"login":"alice.remote","email":"alice@example.test"}`))
+				}
+			}))
+			defer server.Close()
+			_, err := ValidateAttribution(context.Background(), Config{BaseURL: server.URL, Token: "fixture", Attribution: attribution.Config{Authorize: allowProjectionTestOperation, Principals: map[string]attribution.Principal{"alice": {Forgejo: "alice.remote", CommitEmail: email}}}})
+			if (err != nil) != (email == "wrong@example.test") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+// Adapter tests model the Service-owned admission port, not actor-id admission.
+func allowProjectionTestOperation(context.Context, attribution.Actor, string, string, int) error {
+	return nil
+}
+
+func TestAttributionMappingAloneCannotWrite(t *testing.T) {
+	writes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writes++; w.WriteHeader(201) }))
+	defer server.Close()
+	c := NewHTTPClient(server.URL, "fixture")
+	c.configureAttribution(Config{Attribution: attribution.Config{Principals: map[string]attribution.Principal{"alice": {Forgejo: "alice.remote"}}}})
+	ctx := attribution.WithActor(context.Background(), attribution.Actor{UserID: 7, Login: "alice"})
+	if err := c.CreateIssueComment(ctx, "team", "demo", 1, "body"); !errors.Is(err, ErrAttributionAuthorizationRequired) || writes != 0 {
+		t.Fatalf("mapping admitted writes=%d err=%v", writes, err)
 	}
 }

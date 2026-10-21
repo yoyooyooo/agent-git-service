@@ -3,6 +3,7 @@ package forgejointegration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/ngaut/agent-git-service/internal/attribution"
 )
+
+var ErrAttributionAuthorizationRequired = errors.New("AGS operation authorization is required for projection attribution")
 
 // ValidateAttribution performs only startup reads. Invalid mappings never become
 // a half-active table; disappearance after startup uses request-local fallback.
@@ -41,9 +44,15 @@ func ValidateAttribution(ctx context.Context, cfg Config) (Config, error) {
 		status, data, err = c.request(ctx, http.MethodGet, apiPath("/api/v1/users/%s", login), nil)
 		var target struct {
 			Login string `json:"login"`
+			Email string `json:"email"`
 		}
 		if err != nil || status != http.StatusOK || json.Unmarshal(data, &target) != nil || !strings.EqualFold(target.Login, login) {
 			return cfg, fmt.Errorf("invalid Forgejo attribution user %s: status %d", login, status)
+		}
+		for ags, principal := range cfg.Attribution.Principals {
+			if strings.EqualFold(principal.Forgejo, login) && principal.CommitEmail != "" && !strings.EqualFold(principal.CommitEmail, target.Email) {
+				return cfg, fmt.Errorf("attribution commit_email does not match Forgejo primary email for %s", ags)
+			}
 		}
 	}
 	return cfg, nil
@@ -123,6 +132,9 @@ func markedWrite(body any, actor attribution.Actor, reason string) any {
 }
 
 func (c *HTTPClient) attributedRequest(ctx context.Context, method, path string, body any) (int, []byte, error) {
+	if !c.attribution.Enabled() {
+		return c.rawRequest(ctx, method, path, body, "")
+	}
 	repo, op, number := actorWrite(method, path, body)
 	if op == "" {
 		return c.rawRequest(ctx, method, path, body, "")
@@ -136,6 +148,20 @@ func (c *HTTPClient) attributedRequest(ctx context.Context, method, path string,
 		actor.Repo = c.attributionRepos[repo]
 		ctx = attribution.WithActor(ctx, actor)
 	}
+	// Forgejo accounts and their write ACL are AGS-managed projections. Check
+	// current AGS authorization BEFORE Sudo, bot fallback, grant, or replay. The
+	// callback is not synthesized from an attribution mapping or nonzero actor id.
+	authorize := func() error {
+		if actor.UserID == 0 || c.attribution.Authorize == nil {
+			return ErrAttributionAuthorizationRequired
+		}
+		return c.attribution.Authorize(ctx, actor, c.attributionRepos[repo], op, number)
+	}
+	if op != "merge_pr" && (actor.UserID != 0 || actor.Login != "") {
+		if err := authorize(); err != nil {
+			return 0, nil, err
+		}
+	}
 	login := c.attribution.Principals[actor.Login].Forgejo
 	if actor.UserID == 0 {
 		login = ""
@@ -148,6 +174,11 @@ func (c *HTTPClient) attributedRequest(ctx context.Context, method, path string,
 		}
 	}
 	attempt := func(sudo, mode, reason string, grant bool) (int, []byte, error) {
+		if actor.UserID != 0 && op != "merge_pr" {
+			if err := authorize(); err != nil {
+				return 0, nil, err
+			}
+		}
 		payload := body
 		if sudo == "" && reason != "" {
 			payload = markedWrite(body, actor, reason)
@@ -190,6 +221,9 @@ func (c *HTTPClient) attributedRequest(ctx context.Context, method, path string,
 	}
 	granted := false
 	if op != "merge_pr" && (status == http.StatusForbidden || status == http.StatusNotFound) && c.attributionRepos[repo] != "" && actor.UserID != 0 {
+		// This is permission projection, not an independent Forgejo grant model:
+		// AGS has already admitted this exact operation. Project only write, with
+		// fresh AGS authorization immediately before the provider ACL mutation.
 		// A private repo may hide a permission denial behind 404. Validate the user
 		// still exists before granting; never create a user in this path.
 		userStatus, _, userErr := c.rawRequest(ctx, http.MethodGet, apiPath("/api/v1/users/%s", login), nil, "")
@@ -199,6 +233,11 @@ func (c *HTTPClient) attributedRequest(ctx context.Context, method, path string,
 				reason = "grant_failed"
 			}
 			if permissionErr == nil && !forgejoPermissionAtLeastWrite(permission) && !strings.EqualFold(permission, "maintain") {
+				// Recheck immediately before the persistent ACL projection. AGS
+				// denial returns unchanged; it must never grant or bot-fallback.
+				if err := authorize(); err != nil {
+					return 0, nil, err
+				}
 				grantStatus, _, grantErr := c.rawRequest(ctx, http.MethodPut, "/api/v1/repos/"+repo+"/collaborators/"+login, map[string]any{"permission": "write"}, "")
 				granted = grantErr == nil && grantStatus >= 200 && grantStatus < 300
 				attribution.Log(ctx, c.attribution, "forgejo", "collaborator_grant", repo, c.tokenOwner, "", "bot_only", number, grantStatus, granted, "", login)
@@ -236,7 +275,20 @@ func (c *HTTPClient) fallbackNote(ctx context.Context, repo, op string, number i
 	if _, hasBody := b["body"]; hasBody {
 		return
 	}
+	if actor.UserID != 0 && op != "merge_pr" {
+		if c.attribution.Authorize == nil || c.attribution.Authorize(ctx, actor, c.attributionRepos[repo], op, number) != nil {
+			return
+		}
+	}
 	note := attribution.Mark("AGS projected "+op+" using its server credential.", actor, "forgejo", "", reason)
 	noteStatus, _, _ := c.rawRequest(ctx, http.MethodPost, "/api/v1/repos/"+repo+"/issues/"+strconv.Itoa(number)+"/comments", map[string]any{"body": note}, "")
 	attribution.Log(ctx, c.attribution, "forgejo", "comment", repo, c.tokenOwner, "", mode, number, noteStatus, false, reason)
+}
+
+// SetAttributionAuthorizer wires the owning AGS service at composition time,
+// before serving requests or resuming workers. Identity mappings grant nothing.
+func (i *Integration) SetAttributionAuthorizer(check func(context.Context, attribution.Actor, string, string, int) error) {
+	if c, ok := i.client.(*HTTPClient); ok {
+		c.attribution.Authorize = check
+	}
 }
