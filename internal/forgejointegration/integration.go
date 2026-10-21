@@ -25,6 +25,7 @@ var defaultPushGitConfig = []string{"core.compression=0", "pack.window=0"}
 // Config controls the optional AGS -> Forgejo post-push integration.
 type Config struct {
 	Attribution          attribution.Config
+	ManagedSSH           ManagedSSHConfig
 	TokenOwner           string
 	Enabled              bool
 	BaseURL              string
@@ -119,6 +120,7 @@ type PushRequest struct {
 	BranchName        string
 	GitConfig         []string
 	Timeout           time.Duration
+	SSH               *gittransport.SSHConfig
 	ForceWithLeaseRef string
 	ForceWithLeaseSHA string
 }
@@ -353,17 +355,11 @@ func NewWithGitCapabilities(cfg Config, client Client, pusher GitPusher, remoteR
 	if remoteRef == nil {
 		remoteRef = GitRemoteRefSHA
 	}
+	integration := &Integration{cfg: cfg, client: client, authorityClient: authorityClient, remoteRef: remoteRef}
 	rawPush := pusher
-	pusher = func(ctx context.Context, req PushRequest) error {
-		err := rawPush(ctx, req)
-		status := 0
-		if err != nil {
-			status = 1
-		}
-		attribution.Log(ctx, cfg.Attribution, "forgejo", "push_ref", req.Repo.Owner+"/"+req.Repo.Repo, cfg.TokenOwner, "", "bot_only", 0, status, false, "")
-		return err
+	integration.push = func(ctx context.Context, req PushRequest) error {
+		return integration.attributedPush(ctx, req, rawPush)
 	}
-	integration := &Integration{cfg: cfg, client: client, authorityClient: authorityClient, push: pusher, remoteRef: remoteRef}
 	integration.backupTag = integration.createRemoteBackupTag
 	return integration
 }
@@ -995,6 +991,14 @@ func (i *Integration) createRemoteBackupTag(ctx context.Context, repoPath, remot
 	local := "refs/ags-projection-backup-staging/" + sha
 	if _, err := gittransport.Run(ctx, remoteURL, "", "-C", repoPath, "fetch", "--no-tags", remoteURL, sha+":"+local); err != nil {
 		return err
+	}
+	actor := attribution.FromContext(ctx)
+	if i.cfg.Attribution.Principals[actor.Login].Forgejo != "" {
+		target, err := i.cfg.requireTargetFor(actor.Repo)
+		if err != nil {
+			return err
+		}
+		return i.push(ctx, i.pushRequest(repoPath, remoteURL, local+":refs/tags/"+tag, target, ""))
 	}
 	_, err := gittransport.Run(ctx, remoteURL, "", "-C", repoPath, "push", remoteURL, local+":refs/tags/"+tag)
 	return err
@@ -1809,7 +1813,7 @@ func deleteRefspec(ref string) string {
 
 func (i *Integration) pushAndVerify(ctx context.Context, req PushRequest, ref, expectedSHA string) error {
 	if err := i.push(ctx, req); err != nil {
-		if i.remoteRef == nil || strings.TrimSpace(expectedSHA) == "" {
+		if errors.Is(err, ErrMappedPushNotAttempted) || i.remoteRef == nil || strings.TrimSpace(expectedSHA) == "" {
 			return err
 		}
 		waitErr := i.waitForRemoteRef(ctx, req.RepoPath, req.RemoteURL, ref, expectedSHA, err)
@@ -1826,6 +1830,9 @@ func (i *Integration) pushAndVerify(ctx context.Context, req PushRequest, ref, e
 }
 
 func (i *Integration) waitForRemoteRef(ctx context.Context, repoPath, remoteURL, ref, expectedSHA string, pushErr error) error {
+	if errors.Is(pushErr, ErrMappedPushNotAttempted) {
+		return pushErr
+	}
 	delays := []time.Duration{0, 100 * time.Millisecond, 250 * time.Millisecond, 500 * time.Millisecond, 1 * time.Second}
 	var lastErr error
 	for _, delay := range delays {
@@ -1946,7 +1953,12 @@ func GitPush(ctx context.Context, req PushRequest) error {
 		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
 		defer cancel()
 	}
-	_, err := gittransport.Run(ctx, req.RemoteURL, "", gitPushArgs(req)...)
+	var err error
+	if req.SSH != nil {
+		_, err = gittransport.RunSSH(ctx, req.RemoteURL, *req.SSH, gitPushArgs(req)...)
+	} else {
+		_, err = gittransport.Run(ctx, req.RemoteURL, "", gitPushArgs(req)...)
+	}
 	if err != nil {
 		return fmt.Errorf("git push: %w", err)
 	}

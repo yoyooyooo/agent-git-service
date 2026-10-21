@@ -9,8 +9,8 @@ description: Verify AGS outbound attribution using official gh, real Git and For
 
 Run from the repository root with Go from `go.mod`, Python 3, Git, OpenSSL and
 official gh. Requires an explicitly authorized Forgejo test endpoint, a file with
-the existing admin projection credential, and an existing non-operator Forgejo
-login. Do not print credentials or source a live runtime env file.
+the existing admin projection credential, and an explicitly authorized temporary non-operator Forgejo
+login with no public keys. Do not print credentials or source a live runtime env file.
 
 ```bash
 go build -buildvcs=true -o /tmp/ags-attribution-verify ./cmd/gh-server
@@ -19,17 +19,22 @@ python3 scripts/verify-attribution.py \
   --forgejo "$VERIFY_FORGEJO_URL" \
   --token-file "$VERIFY_FORGEJO_TOKEN_FILE" \
   --forgejo-login "$VERIFY_FORGEJO_LOGIN" \
+  --ssh-url "$VERIFY_FORGEJO_SSH_URL" \
+  --known-hosts-file "$VERIFY_FORGEJO_KNOWN_HOSTS" \
   --ags-login fixture \
   --output "$VERIFY_EVIDENCE_DIR"
 ```
 
-The named inputs are explicit operator parameters, not product defaults.
+The named inputs are explicit operator parameters, not product defaults. Enabled
+mapping requires a trusted SSH endpoint and an independently verified known_hosts
+file. The helper copies the operator token into its own private fixture directory;
+managed keys never enter the installed AGS private directory.
 `VERIFY_EVIDENCE_DIR` must be new. The command owns random loopback ports, fresh
 SQLite/repos, an isolated gh home and TLS proxy. It runs foreground and tears
 down in `finally`; do not use a background terminal or an installed AGS database.
 The synthetic fixture bootstraps a repo, then drops its site-admin flag before
-any Git/gh operation; the caller is a regular owner admitted by AGS. Reuse a real
-existing provider account for normal attribution; never edit its email/login state. The AGS
+any Git/gh operation; the caller is a regular owner admitted by AGS. Use only the authorized temporary
+provider account for this lifecycle verification; never edit real accounts. The AGS
 login and Forgejo login intentionally need not match.
 
 ## Doctor
@@ -53,8 +58,9 @@ zero provider comments, no Sudo/grants, and no new attribution audit rows. The
 formal `TestReviewPR46EmptyMappingIsBehaviorNoop` covers exact request counts.
 
 In enabled mode the helper first removes AGS access in isolated fixture setup and
-attempts official gh PR creation: AGS must deny it while Forgejo permission stays
-none, no PR appears and no grant audit exists. After fixture access restoration,
+attempts official gh PR creation: AGS must deny it before the first Git projection, while Forgejo permission stays
+none, no key or PR appears and no grant audit exists. Empty repositories can return
+404 for the PR list before their first branch exists. After fixture access restoration,
 the same gh path succeeds and Service projects only the required write ACL.
 Forgejo permissions are derived AGS projection state, not extra user authority.
 Unit tests separately revoke AGS write immediately before the ACL attempt and
@@ -82,8 +88,13 @@ actors, exact head SHA, sandbox coordinates and cleanup. `server.log`,
 `attribution.json` and `forgejo-ci-initial.json` retain bounded provenance and CI
 observations. Preserve action + readback, not only the final PR URL. Unit tests
 cover ambiguous mappings, read isolation, no-grant merge fallback, grant failure
-and bounded retries. GitHub is text-only; never claim a native GitHub actor change
-or a bot-owned Git push as impersonation.
+and bounded retries. GitHub is text-only; never claim a native GitHub actor change. Enabled Forgejo verification strictly
+requires both timeline push actors and exact-head Actions trigger_user to match
+the mapped user. It checks repeated pushes reuse the same key id/private key,
+recovers a deliberately deleted sandbox public key, then clears the fixture map
+and restarts only the job-owned AGS to prove provider key revocation. This requires
+a temporary sandbox account with no pre-existing public keys; never use a real
+account for this lifecycle test.
 
 ## Cleanup
 

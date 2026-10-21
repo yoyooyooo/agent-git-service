@@ -94,27 +94,28 @@ type BranchPolicy struct {
 }
 
 type ForgejoConfig struct {
-	Enabled                   bool                         `yaml:"enabled"`
-	BaseURL                   string                       `yaml:"base_url"`
-	Token                     string                       `yaml:"token"`
-	TokenFile                 string                       `yaml:"token_file"`
-	WebhookSecret             string                       `yaml:"webhook_secret"`
-	WebhookSecretFile         string                       `yaml:"webhook_secret_file"`
-	DefaultOwner              string                       `yaml:"default_owner"`
-	PrivateRepos              bool                         `yaml:"private_repos"`
-	AutoCreateRepo            bool                         `yaml:"auto_create_repo"`
-	AutoPR                    bool                         `yaml:"auto_pr"`
-	DefaultBaseBranch         string                       `yaml:"default_base_branch"`
-	PushGitConfig             []string                     `yaml:"push_git_config"`
-	PushTimeout               string                       `yaml:"push_timeout"`
-	Mirror                    BranchPolicy                 `yaml:"mirror"`
-	PullRequest               BranchPolicy                 `yaml:"pull_request"`
-	Repos                     map[string]ForgejoRepoConfig `yaml:"repos"`
-	AuthorityPolicy           ForgejoAuthorityPolicyConfig `yaml:"authority_policy"`
-	ActionsLogDir             string                       `yaml:"actions_log_dir"`
-	ActionsLogBridgeURL       string                       `yaml:"actions_log_bridge_url"`
-	ActionsLogBridgeTokenFile string                       `yaml:"actions_log_bridge_token_file"`
-	ActionsLogBridgeToken     string                       `yaml:"-"`
+	ManagedSSH                forgejointegration.ManagedSSHConfig `yaml:"managed_ssh"`
+	Enabled                   bool                                `yaml:"enabled"`
+	BaseURL                   string                              `yaml:"base_url"`
+	Token                     string                              `yaml:"token"`
+	TokenFile                 string                              `yaml:"token_file"`
+	WebhookSecret             string                              `yaml:"webhook_secret"`
+	WebhookSecretFile         string                              `yaml:"webhook_secret_file"`
+	DefaultOwner              string                              `yaml:"default_owner"`
+	PrivateRepos              bool                                `yaml:"private_repos"`
+	AutoCreateRepo            bool                                `yaml:"auto_create_repo"`
+	AutoPR                    bool                                `yaml:"auto_pr"`
+	DefaultBaseBranch         string                              `yaml:"default_base_branch"`
+	PushGitConfig             []string                            `yaml:"push_git_config"`
+	PushTimeout               string                              `yaml:"push_timeout"`
+	Mirror                    BranchPolicy                        `yaml:"mirror"`
+	PullRequest               BranchPolicy                        `yaml:"pull_request"`
+	Repos                     map[string]ForgejoRepoConfig        `yaml:"repos"`
+	AuthorityPolicy           ForgejoAuthorityPolicyConfig        `yaml:"authority_policy"`
+	ActionsLogDir             string                              `yaml:"actions_log_dir"`
+	ActionsLogBridgeURL       string                              `yaml:"actions_log_bridge_url"`
+	ActionsLogBridgeTokenFile string                              `yaml:"actions_log_bridge_token_file"`
+	ActionsLogBridgeToken     string                              `yaml:"-"`
 }
 
 type ForgejoAuthorityPolicyConfig struct {
@@ -992,6 +993,7 @@ func (c ForgejoConfig) ToForgejoIntegrationConfig() forgejointegration.Config {
 	}
 	pushTimeout, _ := parseOptionalDuration("forgejo.push_timeout", c.PushTimeout)
 	return forgejointegration.Config{
+		ManagedSSH:               c.ManagedSSH,
 		Enabled:                  c.Enabled,
 		BaseURL:                  c.BaseURL,
 		Token:                    c.Token,

@@ -32,6 +32,10 @@ var ErrOutputLimit = errors.New("provider Git output exceeded limit")
 // a private ephemeral runtime filesystem and its normal orphan-file policy.
 // Other processes with the same OS identity or root remain trusted.
 func Run(ctx context.Context, remoteURL, token string, args ...string) ([]byte, error) {
+	return run(ctx, remoteURL, token, nil, args...)
+}
+
+func run(ctx context.Context, remoteURL, token string, sshConfig *SSHConfig, args ...string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -93,6 +97,13 @@ func Run(ctx context.Context, remoteURL, token string, args ...string) ([]byte, 
 	}
 	cmd := exec.CommandContext(ctx, "git", commandArgs...)
 	cmd.Env = processEnvironment()
+	if sshConfig != nil {
+		command, err := sshConfig.command()
+		if err != nil {
+			return nil, err
+		}
+		cmd.Env = append(cmd.Env, "GIT_SSH_COMMAND="+command)
+	}
 	cmd.WaitDelay = 3 * time.Second
 	stdout, stderr := &limitedOutput{}, &limitedOutput{}
 	cmd.Stdout, cmd.Stderr = stdout, stderr

@@ -288,6 +288,7 @@ func (c *HTTPClient) fallbackNote(ctx context.Context, repo, op string, number i
 // SetAttributionAuthorizer wires the owning AGS service at composition time,
 // before serving requests or resuming workers. Identity mappings grant nothing.
 func (i *Integration) SetAttributionAuthorizer(check func(context.Context, attribution.Actor, string, string, int) error) {
+	i.cfg.Attribution.Authorize = check
 	if c, ok := i.client.(*HTTPClient); ok {
 		c.attribution.Authorize = check
 	}

@@ -539,6 +539,9 @@ func initForgejoIntegration(cfg config.Config, databases ...*gorm.DB) (*forgejoi
 	if err != nil {
 		return nil, err
 	}
+	if err := forgejointegration.ReconcileManagedSSH(context.Background(), integrationCfg); err != nil {
+		return nil, err
+	}
 	slog.Info("forgejo integration enabled",
 		"base_url", integrationCfg.BaseURL,
 		"default_owner", integrationCfg.DefaultOwner,
