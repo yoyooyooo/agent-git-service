@@ -66,7 +66,7 @@ document the relevant contract below in the same change.
 
 | Package | Primary responsibility |
 |---|---|
-| `attribution` | shared outbound identity mapping, context-only provenance, generated text markers and bounded audit events; never authorization or credentials |
+| `attribution` | shared outbound identity/email assertions, provenance, generated text and bounded audit events; AGS Service owns admission through an explicit callback, mappings never grant authority |
 | `apperrors` | shared sentinel error catalog and helpers |
 | `artifactretirement` | exact-blob retirement plans, atomic local publication, private resumable state and physical verification; no provider or database authority |
 | `crypto` | NaCl-based secret encryption helpers |

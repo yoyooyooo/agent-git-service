@@ -1,6 +1,7 @@
 package forgejointegration
 
 import (
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,12 +38,21 @@ func TestLoadTokenFileDoesNotLoadOperatorCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, operatorFile := range []string{"", filepath.Join(t.TempDir(), "missing.token")} {
-		loaded, err := LoadTokenFile(Config{TokenFile: botFile, AuthorityPolicyEnabled: true, AuthorityPolicyTokenFile: operatorFile, AuthorityPolicyToken: "fixture-operator"})
+		loaded, err := LoadTokenFile(Config{Attribution: attribution.Config{Principals: map[string]attribution.Principal{"alice": {Forgejo: "alice.remote"}}}, TokenFile: botFile, AuthorityPolicyEnabled: true, AuthorityPolicyTokenFile: operatorFile, AuthorityPolicyToken: "fixture-operator"})
 		if err != nil || loaded.Token != "fixture-bot" {
 			t.Fatal("projection must use bot independently of operator", err)
 		}
 		if got := loaded.withDefaults().Token; got != "fixture-bot" {
 			t.Fatal("constructor replaced bot credential")
+		}
+	}
+}
+
+func TestEmptyAttributionPreservesOperatorCredentialPrecedence(t *testing.T) {
+	for _, principals := range []map[string]attribution.Principal{nil, {}} {
+		cfg, err := LoadTokenFile(Config{Token: "bot", AuthorityPolicyToken: "operator", Attribution: attribution.Config{Principals: principals}})
+		if err != nil || cfg.Token != "operator" || cfg.withDefaults().Token != "operator" {
+			t.Fatal("legacy credential selection changed", err)
 		}
 	}
 }

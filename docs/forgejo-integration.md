@@ -218,9 +218,8 @@ forgejo:
     enabled: true
     webhook_url: "https://ags.example.com/api/v3/integrations/forgejo/webhook"
     integration_bot: "ags-bot"
-    # Optional diagnostic/onboarding credential only. Never overrides the
-    # projection token_file for REST writes or Git push. Missing operator files
-    # do not block the server projection path.
+    # With nonempty attribution: diagnostic/onboarding credential only.
+    # Without attribution: retains the legacy REST/Git token override.
     operator_token_file: "/path/to/forgejo-admin-token"
     # Exact Forgejo actor login -> immutable AGS numeric principal ID. There is
     # no same-login, provider-role, or repository-owner fallback.
@@ -398,7 +397,7 @@ go run ./cmd/forgejo-authority -config /path/to/integrations.yaml -mode apply
 go run ./cmd/forgejo-authority -config /path/to/integrations.yaml -mode verify
 ```
 
-Configure the existing Forgejo administrator credential in `forgejo.token_file` for projection REST and Git HTTP. `authority_policy.operator_token_file` / `operator_token` no longer override it in the server or constructor. Operator credentials are loaded explicitly by `cmd/forgejo-authority` for diagnostic/onboarding operations; its `-operator-token-file` flag still overrides that command only. No token is rotated or narrowed by this change. If an older deployment relied on the override, verify the configured projection token's owner/admin status before upgrading. Missing operator files must not stop projection startup.
+Configure the existing Forgejo administrator credential in `forgejo.token_file` for attribution-enabled projection REST/Git. With a **nonempty** identity map, `authority_policy.operator_token_file` / `operator_token` are diagnostics-only; `cmd/forgejo-authority` loads them explicitly and its flag affects that command only. With no map or an empty map, legacy operator override and startup behavior remain exactly as before. No token is rotated or narrowed. Check the selected credential's owner/admin status before enabling attribution; clearing the map also restores legacy credential selection.
 
 See [outbound attribution](operations/outbound-attribution.md) for the shared identity map, Sudo recovery, audit fields, rollback and real-path verification. Attribution changes the actor of authorized writes, not AGS authorization or the power of the existing admin credential. Read APIs, repository provisioning, branch protection and webhook maintenance remain bot-owned.
 

@@ -25,3 +25,11 @@ checks durable provenance and its separation from service authorization.
 No personal provider token, GitHub Sudo, user-to-server auth or rewritten user
 commit is implemented. GitHub live writing is not part of the Forgejo sandbox
 helper; report package tests separately from any future authorized live test.
+
+The helper additionally uses the mapped account's existing primary email in its
+isolated AGS/Git fixture, declares `commit_email` in enabled configuration, and
+checks Forgejo author.login and committer.login plus raw commit emails/SHA. No
+production user or commit is rewritten. The optional account evaluation helper
+checks the real commit HTML: identical author/committer render as one account
+link. It evaluates prohibit_login on newly created temporary accounts only;
+normal validation does not create or disable provider users.

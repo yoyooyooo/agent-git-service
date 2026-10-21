@@ -27,3 +27,13 @@ func TestGitHubShadowUsesSharedMappingAndDoesNotSudo(t *testing.T) {
 		t.Fatal("close attribution missing", err)
 	}
 }
+
+func TestGitHubEmptyMappingPreservesText(t *testing.T) {
+	for _, principals := range []map[string]attribution.Principal{nil, {}} {
+		integration := NewWithClient(Config{Attribution: attribution.Config{Principals: principals}}, nil, &fakeAPIClient{})
+		ctx := attribution.WithActor(context.Background(), attribution.Actor{UserID: 7, Login: "alice"})
+		if got := integration.attributedText(ctx, "original body"); got != "original body" {
+			t.Fatal(got)
+		}
+	}
+}

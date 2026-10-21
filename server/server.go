@@ -334,6 +334,9 @@ func initServiceDeps(cfg config.Config, database *gorm.DB, store *gitstore.Store
 		WorkflowExecNoFile:                 cfg.WorkflowExecNoFile,
 		WorkflowExecTmpfs:                  cfg.WorkflowExecTmpfsSize,
 	}
+	if forgejoIntegration != nil {
+		forgejoIntegration.SetAttributionAuthorizer(svcDeps.AuthorizeProjectionAttribution)
+	}
 	if err := svcDeps.ReconcilePrincipalBindingRevocations(srvCtx); err != nil {
 		return deps, fmt.Errorf("reconcile principal binding revocations: %w", err)
 	}
@@ -528,6 +531,9 @@ func initForgejoIntegration(cfg config.Config, databases ...*gorm.DB) (*forgejoi
 	}
 	if len(databases) > 0 {
 		integrationCfg.Attribution.Observer = service.ProjectionAttributionRecorder(databases[0])
+		if err := service.ValidateProjectionCommitEmails(context.Background(), databases[0], integrationCfg.Attribution); err != nil {
+			return nil, err
+		}
 	}
 	integrationCfg, err = forgejointegration.ValidateAttribution(context.Background(), integrationCfg)
 	if err != nil {

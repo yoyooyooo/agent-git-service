@@ -511,7 +511,7 @@ func (i *Integration) EnsureShadowPullRequest(ctx context.Context, req ShadowPul
 		SourceBranch:   req.HeadBranch,
 		TargetBranch:   targetBranch,
 		Title:          firstNonEmpty(req.Title, fmt.Sprintf("%s -> %s", req.HeadBranch, targetBranch)),
-		Body:           attribution.Mark(shadowPRBody(req), attribution.FromContext(ctx), "github", i.cfg.Attribution.Principals[attribution.FromContext(ctx).Login].GitHub, "text-only"),
+		Body:           i.attributedText(ctx, shadowPRBody(req)),
 		BeforeWrite:    req.BeforeWrite,
 	})
 	if err != nil {
@@ -993,4 +993,11 @@ func redactToken(s, token string) string {
 		return s
 	}
 	return strings.ReplaceAll(s, token, "***")
+}
+
+func (i *Integration) attributedText(ctx context.Context, text string) string {
+	if len(i.cfg.Attribution.Principals) == 0 {
+		return text
+	}
+	return attribution.Mark(text, attribution.FromContext(ctx), "github", i.cfg.Attribution.Principals[attribution.FromContext(ctx).Login].GitHub, "text-only")
 }

@@ -79,7 +79,10 @@ regressions and do not substitute for complete release verification.
 The project-local [verification skill](../.cursor/skills/verify-ags-attribution/SKILL.md)
 drives an isolated SQLite AGS with official gh and real Git against an explicitly
 selected Forgejo sandbox. Its feature map distinguishes REST actor attribution,
-permission recovery, bot-owned pushes, and GitHub text-only attribution. Never use
+permission projection after fresh AGS admission, rejected operations with zero
+provider effects, absent/empty mapping no-ops, commit account linkage, bot-owned
+pushes, and GitHub text-only attribution. The separately authorized temporary-
+account helper evaluates prohibit_login without modifying real user accounts. Never use
 a deployed database or a business repository as a test fixture. Sandbox evidence
 is separate from exact-source hosted CI; neither implies deployment permission.
 

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -75,5 +76,94 @@ func TestProjectionAttributionAuditContainsNoCredentialsOrBody(t *testing.T) {
 	}
 	if entry.ActorLogin != "alice" || entry.ActorID == nil || *entry.ActorID != 7 || got.SudoAs != "alice.remote" || got.TargetPR != 5 || got.Attribution != "sudo" {
 		t.Fatal("incomplete audit")
+	}
+}
+
+func TestProjectionAttributionRechecksCurrentAGSGrant(t *testing.T) {
+	svc := setupProjectionStateService(t)
+	var repo db.Repository
+	if err := svc.DB.First(&repo).Error; err != nil {
+		t.Fatal(err)
+	}
+	var owner db.User
+	if err := svc.DB.First(&owner, repo.OwnerID).Error; err != nil {
+		t.Fatal(err)
+	}
+	outsider := db.User{Login: "projection-outsider", Type: db.TypeUser}
+	if err := svc.DB.Create(&outsider).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, user := range []db.User{owner, outsider} {
+		ctx := attribution.WithActor(context.Background(), attribution.Actor{UserID: user.ID, Login: user.Login})
+		err := svc.AuthorizeProjectionAttribution(ctx, attribution.FromContext(ctx), repo.FullName, "comment", 0)
+		if user.ID == owner.ID && err != nil {
+			t.Fatal(err)
+		}
+		if user.ID == outsider.ID && !errors.Is(err, ErrForbidden) {
+			t.Fatalf("unauthorized err=%v", err)
+		}
+		if _, ok := UserFromContext(ctx); ok {
+			t.Fatal("provenance became service user")
+		}
+	}
+}
+
+func TestProjectionAttributionFreshGrantRevocationAndDisabledUser(t *testing.T) {
+	svc := setupProjectionStateService(t)
+	if err := svc.DB.AutoMigrate(&db.Collaborator{}); err != nil {
+		t.Fatal(err)
+	}
+	var repo db.Repository
+	if err := svc.DB.First(&repo).Error; err != nil {
+		t.Fatal(err)
+	}
+	user := db.User{Login: "mapped-worker", Type: db.TypeUser, Status: db.UserStatusActive}
+	if err := svc.DB.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	actor := attribution.Actor{UserID: user.ID, Login: user.Login, Repo: repo.FullName}
+	ctx := attribution.WithActor(context.Background(), actor)
+	grant := db.Collaborator{RepositoryID: repo.ID, UserID: user.ID, Permission: "write"}
+	if err := svc.DB.Create(&grant).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AuthorizeProjectionAttribution(ctx, actor, repo.FullName, "comment", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DB.Model(&grant).Update("permission", "read").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AuthorizeProjectionAttribution(ctx, actor, repo.FullName, "comment", 1); !errors.Is(err, ErrForbidden) {
+		t.Fatal("stale grant admitted", err)
+	}
+	if err := svc.DB.Model(&grant).Update("permission", "write").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DB.Model(&user).Update("status", db.UserStatusSuspended).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AuthorizeProjectionAttribution(ctx, actor, repo.FullName, "comment", 1); !errors.Is(err, ErrForbidden) {
+		t.Fatal("suspended user admitted", err)
+	}
+	if _, ok := UserFromContext(ctx); ok {
+		t.Fatal("stored attribution became authority")
+	}
+}
+
+func TestProjectionAttributionCommitEmailContract(t *testing.T) {
+	svc := setupProjectionStateService(t)
+	var user db.User
+	if err := svc.DB.First(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DB.Model(&user).Update("email", "alice@example.test").Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, email := range []string{"alice@example.test", "wrong@example.test"} {
+		cfg := attribution.Config{Principals: map[string]attribution.Principal{user.Login: {Forgejo: "alice.remote", CommitEmail: email}}}
+		err := ValidateProjectionCommitEmails(context.Background(), svc.DB, cfg)
+		if (err != nil) != (email == "wrong@example.test") {
+			t.Fatal("commit email mismatch not detected", err)
+		}
 	}
 }

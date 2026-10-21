@@ -52,3 +52,7 @@ func githubWriteCoordinates(method, path string) (repo, op string, number int) {
 	}
 	return
 }
+
+func (i *Integration) AttributionEnabled() bool {
+	return i != nil && len(i.cfg.Attribution.Principals) > 0
+}

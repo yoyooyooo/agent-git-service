@@ -826,6 +826,9 @@ func (s *Service) processForgejoProjectionJobAttempt(ctx context.Context, job db
 	if s == nil || s.ForgejoIntegration == nil {
 		return newProjectionJobFailure(job.RemoteRef, job.HeadSHA, fmt.Errorf("forgejo integration is not configured"), false)
 	}
+	if job.AgentSessionID != nil {
+		ctx = context.WithValue(ctx, projectionAttributionSessionKey{}, *job.AgentSessionID)
+	}
 	ctx = attribution.WithActor(ctx, attribution.Actor{UserID: job.AttributionUserID, Login: job.AttributionLogin, RequestID: job.AttributionRequestID, Repo: job.RepoFullName, PR: job.AGSPRNumber})
 	pr := job.PullRequest
 	if pr.ID == 0 {
