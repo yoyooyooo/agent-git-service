@@ -155,10 +155,12 @@ type APIClient interface {
 
 // PullRequestInput describes a GitHub PR ensure request.
 type PullRequestInput struct {
-	SourceBranch string
-	TargetBranch string
-	Title        string
-	Body         string
+	// ExternalNumber pins reconciliation to an already observed PR.
+	ExternalNumber int
+	SourceBranch   string
+	TargetBranch   string
+	Title          string
+	Body           string
 }
 
 // PullRequest is the minimal GitHub PR shape used by AGS.
@@ -480,16 +482,21 @@ func (i *Integration) EnsureShadowPullRequest(ctx context.Context, req ShadowPul
 	if strings.TrimSpace(targetRepo) == "" || !strings.Contains(targetRepo, "/") {
 		return ShadowPullRequestResult{}, false, fmt.Errorf("github integration: owner/repo is required for pull request API")
 	}
+	number := 0
+	if found {
+		number = observed.Number
+	}
 	pr, err := i.client.EnsurePullRequest(ctx, targetRepo, PullRequestInput{
-		SourceBranch: req.HeadBranch,
-		TargetBranch: targetBranch,
-		Title:        firstNonEmpty(req.Title, fmt.Sprintf("%s -> %s", req.HeadBranch, targetBranch)),
-		Body:         shadowPRBody(req),
+		ExternalNumber: number,
+		SourceBranch:   req.HeadBranch,
+		TargetBranch:   targetBranch,
+		Title:          firstNonEmpty(req.Title, fmt.Sprintf("%s -> %s", req.HeadBranch, targetBranch)),
+		Body:           shadowPRBody(req),
 	})
 	if err != nil {
 		return ShadowPullRequestResult{}, false, err
 	}
-	return ShadowPullRequestResult{TargetRepo: targetRepo, SourceBranch: req.HeadBranch, TargetBranch: targetBranch, WebURL: pr.HTMLURL, Number: pr.Number, State: "open"}, true, nil
+	return ShadowPullRequestResult{TargetRepo: targetRepo, SourceBranch: req.HeadBranch, TargetBranch: targetBranch, WebURL: pr.HTMLURL, Number: pr.Number, State: firstNonEmpty(pr.State, "open")}, true, nil
 }
 
 // DeleteSourceBranch deletes the mirrored PR source branch from GitHub when configured.
@@ -746,14 +753,21 @@ func NewHTTPClient(baseURL, token string) *HTTPClient {
 	return &HTTPClient{baseURL: base, token: token, client: &http.Client{Timeout: 15 * time.Second}}
 }
 
-// EnsurePullRequest creates a GitHub PR unless an open one already exists for source/target.
+// EnsurePullRequest reconciles an exact observed PR, or observes all states
+// before creating. An open-only absence never authorizes a replacement shadow.
 func (c *HTTPClient) EnsurePullRequest(ctx context.Context, repo string, in PullRequestInput) (PullRequest, error) {
-	prs, err := c.listOpenPRs(ctx, repo, in.SourceBranch, in.TargetBranch)
+	existing, found, err := c.ObservePullRequest(ctx, repo, in.ExternalNumber, in.SourceBranch, in.TargetBranch)
 	if err != nil {
 		return PullRequest{}, err
 	}
-	if len(prs) > 0 {
-		return c.reconcilePullRequestMetadata(ctx, repo, prs[0], in)
+	if found {
+		if existing.State == "closed" || existing.Merged {
+			return existing, nil
+		}
+		return c.reconcilePullRequestMetadata(ctx, repo, existing, in)
+	}
+	if in.ExternalNumber > 0 {
+		return PullRequest{}, fmt.Errorf("github integration: observed pull request %d disappeared", in.ExternalNumber)
 	}
 	body := map[string]any{
 		"head":  in.SourceBranch,
