@@ -90,7 +90,16 @@ func (s *Service) reconcileGitHubPullRequestState(ctx context.Context, id uint) 
 	if err != nil {
 		return false, err
 	}
-	if !closed && exists {
+	var closeJobs int64
+	if !closed {
+		if err := s.DBForCtx(ctx).Model(&db.PullRequestProjectionJob{}).
+			Where("pull_request_id = ? AND provider = ? AND `trigger` = ?", id, ProjectionProviderGitHub, githubProjectionClose).Count(&closeJobs).Error; err != nil {
+			return false, err
+		}
+	}
+	// A reopen must supersede close work even if an existing terminal shadow
+	// needs no provider write. Let the durable ensure path observe it below.
+	if !closed && exists && closeJobs == 0 {
 		target, _ := s.GitHubIntegration.TargetRepoFor(repo)
 		state := ProjectionStateOpen
 		if observed.State == "closed" || observed.Merged {

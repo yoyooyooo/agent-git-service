@@ -32,8 +32,9 @@ func gitHubProjectionDesiredFact(pr db.PullRequest) string {
 	return hex.EncodeToString(digest[:])
 }
 
-// One provider row carries the desired state. A close supersedes ensure and
-// invalidates its claim; duplicate dispatch never resets attempts or backoff.
+// One provider row carries the desired state. Close and authoritative AGS
+// reopen transitions supersede the old trigger and invalidate its claim;
+// duplicate dispatch never resets attempts or backoff.
 func (s *Service) enqueueGitHubProjection(ctx context.Context, pr db.PullRequest, trigger string) (db.PullRequestProjectionJob, error) {
 	repo, err := s.projectionRepoFullNameFromPR(ctx, pr)
 	if err != nil {
@@ -63,6 +64,24 @@ func (s *Service) enqueueGitHubProjection(ctx context.Context, pr db.PullRequest
 			return job, err
 		}
 	}
+	if trigger == githubProjectionEnsure && job.Trigger == githubProjectionClose && pr.State == db.StateOpen && !pr.Merged {
+		// Reopening AGS starts new ensure work even when close completed without
+		// a mapping. Fence the full observed close snapshot, and require the
+		// authoritative PR to still be open at this atomic transition.
+		result := database.Model(&db.PullRequestProjectionJob{}).
+			Where("id = ? AND `trigger` = ? AND phase = ? AND attempt = ? AND (next_run_at = ? OR (next_run_at IS NULL AND ? IS NULL))", job.ID, job.Trigger, job.Phase, job.Attempt, job.NextRunAt, job.NextRunAt).
+			Where("pull_request_id IN (SELECT id FROM pull_requests WHERE id = ? AND state = ? AND merged = ?)", pr.ID, db.StateOpen, false).
+			Updates(map[string]any{"trigger": trigger, "github_desired_fact_hash": gitHubProjectionDesiredFact(pr), "head_sha": pr.HeadSHA, "head_ref": pr.HeadRef, "base_ref": pr.BaseRef,
+				"phase": ForgejoProjectionPhaseQueued, "attempt": 0, "next_run_at": now, "started_at": nil, "finished_at": nil, "last_error": "", "last_error_type": ""})
+		if result.Error != nil {
+			return job, result.Error
+		}
+		id := job.ID
+		job = db.PullRequestProjectionJob{}
+		if err := database.First(&job, id).Error; err != nil {
+			return job, err
+		}
+	}
 	if trigger == githubProjectionEnsure && job.Trigger == trigger && job.GitHubDesiredFactHash != gitHubProjectionDesiredFact(pr) {
 		result := database.Model(&db.PullRequestProjectionJob{}).Where("id = ? AND `trigger` = ? AND phase = ? AND attempt = ? AND (next_run_at = ? OR (next_run_at IS NULL AND ? IS NULL))", job.ID, trigger, job.Phase, job.Attempt, job.NextRunAt, job.NextRunAt).
 			Updates(map[string]any{"github_desired_fact_hash": gitHubProjectionDesiredFact(pr), "head_sha": pr.HeadSHA, "head_ref": pr.HeadRef, "base_ref": pr.BaseRef, "phase": ForgejoProjectionPhaseQueued, "attempt": 0, "next_run_at": now, "finished_at": nil})
@@ -74,6 +93,9 @@ func (s *Service) enqueueGitHubProjection(ctx context.Context, pr db.PullRequest
 		if err := database.First(&job, id).Error; err != nil {
 			return job, err
 		}
+	}
+	if job.Trigger != trigger {
+		return job, errGitHubProjectionPending
 	}
 	return job, nil
 }
