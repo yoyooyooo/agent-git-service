@@ -101,3 +101,11 @@ func TestGitHTTP_ReceivePackPushRefAdvancesGitHubPRLastSyncedSHAWithoutEnsure(t 
 		t.Fatalf("GitHub last_synced_sha after receive-pack PushRef stayed stale: %#v want sha=%s", row, pushedSHA)
 	}
 }
+
+func (c *receivePackGitHubClient) ObservePullRequest(ctx context.Context, repo string, number int, head, base string) (githubintegration.PullRequest, bool, error) {
+	return githubintegration.PullRequest{}, false, nil
+}
+
+func (c *receivePackGitHubClient) ClosePullRequest(ctx context.Context, repo string, number int) (githubintegration.PullRequest, error) {
+	return githubintegration.PullRequest{Number: number, State: "closed"}, nil
+}

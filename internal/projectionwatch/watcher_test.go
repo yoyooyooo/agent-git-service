@@ -135,3 +135,35 @@ func (n *fakeNotifier) NotifyProjectionDriftResolved(context.Context, service.Pr
 	n.resolved++
 	return nil
 }
+
+type stateReconciliationSource struct {
+	fakeSource
+	calls int
+	limit int
+}
+
+func (s *stateReconciliationSource) ReconcileGitHubPullRequestStates(_ context.Context, limit int) (int, error) {
+	s.calls++
+	s.limit = limit
+	return 1, nil
+}
+
+func TestReconcileRoundsIncludeBoundedGitHubPRStateButPollDoesNot(t *testing.T) {
+	source := &stateReconciliationSource{}
+	watcher := New(Config{Enabled: true, Limit: 7}, source, &fakeNotifier{})
+	if _, err := watcher.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if source.calls != 0 {
+		t.Fatal("notification polling performed PR state I/O")
+	}
+	if _, err := watcher.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := watcher.AuditOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if source.calls != 2 || source.limit != 7 {
+		t.Fatalf("calls=%d limit=%d", source.calls, source.limit)
+	}
+}

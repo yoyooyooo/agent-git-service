@@ -1461,6 +1461,10 @@ func run(sigCh <-chan struct{}, shutdownCfg shutdownConfig) (runErr error) {
 		return fmt.Errorf("resume pending Forgejo projection jobs: %w", err)
 	}
 
+	if err := deps.SvcDeps.ResumePendingGitHubProjectionJobs(deps.SrvCtx); err != nil {
+		return fmt.Errorf("resume pending GitHub projection jobs: %w", err)
+	}
+
 	// Bind every listener before serving any request, including the optional
 	// peer listener. A partial bind or later listener failure is a process error.
 	if err := instance.Start(); err != nil {

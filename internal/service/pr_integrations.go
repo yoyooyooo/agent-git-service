@@ -564,7 +564,7 @@ func (s *Service) ensureGitLabShadowMergeRequest(ctx context.Context, repoFullNa
 	return res, true, nil
 }
 
-func (s *Service) ensureGitHubShadowPullRequest(ctx context.Context, repoFullName, repoPath, headSHA string, pr db.PullRequest) (githubintegration.ShadowPullRequestResult, bool, error) {
+func (s *Service) ensureGitHubShadowPullRequestOnce(ctx context.Context, repoFullName, repoPath, headSHA string, pr db.PullRequest) (githubintegration.ShadowPullRequestResult, bool, error) {
 	if s.GitHubIntegration == nil {
 		return githubintegration.ShadowPullRequestResult{}, false, nil
 	}

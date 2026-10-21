@@ -84,14 +84,15 @@ type PushRefResult struct {
 
 // ShadowPullRequestRequest asks the integration to mirror a PR branch and ensure a shadow PR.
 type ShadowPullRequestRequest struct {
-	RepoFullName string
-	RepoPath     string
-	HeadBranch   string
-	HeadSHA      string
-	BaseBranch   string
-	Title        string
-	Body         string
-	AGSNumber    int
+	RepoFullName   string
+	RepoPath       string
+	HeadBranch     string
+	HeadSHA        string
+	BaseBranch     string
+	Title          string
+	Body           string
+	AGSNumber      int
+	ExternalNumber int
 	// BeforeWrite is a service-owned final authority check invoked immediately
 	// before each GitHub mutation.
 	BeforeWrite func(context.Context) error
@@ -99,6 +100,7 @@ type ShadowPullRequestRequest struct {
 
 // ShadowPullRequestResult describes an ensured shadow PR.
 type ShadowPullRequestResult struct {
+	State        string
 	TargetRepo   string
 	SourceBranch string
 	TargetBranch string
@@ -121,12 +123,14 @@ type DeleteSourceBranchResult struct {
 
 // CloseShadowPullRequestRequest asks the integration to close/comment shadow PRs after Forgejo merge.
 type CloseShadowPullRequestRequest struct {
-	RepoFullName string
-	HeadBranch   string
-	BaseBranch   string
-	PRNumber     int
-	MergedSHA    string
-	CloseReason  string
+	RepoFullName   string
+	HeadBranch     string
+	BaseBranch     string
+	PRNumber       int
+	MergedSHA      string
+	CloseReason    string
+	ExternalNumber int
+	BeforeWrite    func(context.Context) error
 }
 
 // CloseShadowPullRequestResult describes a closed/commented shadow PR.
@@ -143,6 +147,8 @@ type GitPusher func(ctx context.Context, repoPath, remoteURL, refspec string, to
 
 // APIClient is the small GitHub API surface needed by the integration.
 type APIClient interface {
+	ObservePullRequest(context.Context, string, int, string, string) (PullRequest, bool, error)
+	ClosePullRequest(context.Context, string, int) (PullRequest, error)
 	EnsurePullRequest(ctx context.Context, repo string, in PullRequestInput) (PullRequest, error)
 	ClosePullRequestForBranch(ctx context.Context, repo, sourceBranch, targetBranch, note string) (PullRequest, bool, error)
 }
@@ -158,6 +164,8 @@ type PullRequestInput struct {
 // PullRequest is the minimal GitHub PR shape used by AGS.
 type PullRequest struct {
 	Number  int    `json:"number"`
+	State   string `json:"state"`
+	Merged  bool   `json:"merged"`
 	HTMLURL string `json:"html_url"`
 	Title   string `json:"title"`
 	Body    string `json:"body"`
@@ -215,6 +223,28 @@ func LoadTokenFile(cfg Config) (Config, error) {
 // MirrorBranchEnabled reports whether a branch should be mirrored to GitHub on AGS push.
 func (c Config) MirrorBranchEnabled(branch string) bool {
 	return branchAllowed(branch, c.MirrorBranchIncludes, c.MirrorBranchExcludes)
+}
+
+// ShadowPullRequestEnabled applies the same mirror branch policy used for refs.
+func (i *Integration) ShadowPullRequestEnabled(repo, branch string) bool {
+	return i.ShadowPullRequestsConfigured(repo) && i.cfg.MirrorBranchEnabled(branch)
+}
+
+func (i *Integration) ShadowPullRequestsConfigured(repo string) bool {
+	if i == nil || i.ready() != nil || strings.TrimSpace(i.cfg.Token) == "" {
+		return false
+	}
+	_, ok := i.cfg.targetFor(repo)
+	return ok
+}
+
+// ObserveShadowPullRequest reads the recorded number, or all states for head/base.
+func (i *Integration) ObserveShadowPullRequest(ctx context.Context, repo string, number int, head, base string) (PullRequest, bool, error) {
+	mapping, ok := i.cfg.targetFor(repo)
+	if !ok || i.ready() != nil {
+		return PullRequest{}, false, errIntegrationDisabled
+	}
+	return i.client.ObservePullRequest(ctx, mapping.targetRepoOrDefault(repo, i.cfg.RemoteURL), number, head, mapping.targetBranchOr(base))
 }
 
 // TargetRepoFor returns the GitHub owner/repo for an AGS repo.
@@ -422,6 +452,16 @@ func (i *Integration) EnsureShadowPullRequest(ctx context.Context, req ShadowPul
 		return ShadowPullRequestResult{}, false, nil
 	}
 	targetBranch := mapping.targetBranchOr(req.BaseBranch)
+	targetRepo := mapping.targetRepoOrDefault(req.RepoFullName, i.cfg.RemoteURL)
+	observed, found, err := i.client.ObservePullRequest(ctx, targetRepo, req.ExternalNumber, req.HeadBranch, targetBranch)
+	if err != nil {
+		return ShadowPullRequestResult{}, false, err
+	}
+	// A terminal shadow is a historical fact, never an instruction to reopen or
+	// create a replacement. AGS remains authoritative and is not edited here.
+	if found && (observed.State == "closed" || observed.Merged) {
+		return ShadowPullRequestResult{TargetRepo: targetRepo, SourceBranch: req.HeadBranch, TargetBranch: targetBranch, Number: observed.Number, WebURL: observed.HTMLURL, State: "closed"}, true, nil
+	}
 	remoteURL, err := i.cfg.authenticatedRemoteURL(mapping)
 	if err != nil {
 		return ShadowPullRequestResult{}, false, err
@@ -436,7 +476,7 @@ func (i *Integration) EnsureShadowPullRequest(ctx context.Context, req ShadowPul
 	if err := runBeforeWrite(ctx, req.BeforeWrite); err != nil {
 		return ShadowPullRequestResult{}, false, err
 	}
-	targetRepo := mapping.targetRepoOrDefault(req.RepoFullName, i.cfg.RemoteURL)
+	targetRepo = mapping.targetRepoOrDefault(req.RepoFullName, i.cfg.RemoteURL)
 	if strings.TrimSpace(targetRepo) == "" || !strings.Contains(targetRepo, "/") {
 		return ShadowPullRequestResult{}, false, fmt.Errorf("github integration: owner/repo is required for pull request API")
 	}
@@ -449,7 +489,7 @@ func (i *Integration) EnsureShadowPullRequest(ctx context.Context, req ShadowPul
 	if err != nil {
 		return ShadowPullRequestResult{}, false, err
 	}
-	return ShadowPullRequestResult{TargetRepo: targetRepo, SourceBranch: req.HeadBranch, TargetBranch: targetBranch, WebURL: pr.HTMLURL, Number: pr.Number}, true, nil
+	return ShadowPullRequestResult{TargetRepo: targetRepo, SourceBranch: req.HeadBranch, TargetBranch: targetBranch, WebURL: pr.HTMLURL, Number: pr.Number, State: "open"}, true, nil
 }
 
 // DeleteSourceBranch deletes the mirrored PR source branch from GitHub when configured.
@@ -494,22 +534,26 @@ func (i *Integration) CloseShadowPullRequest(ctx context.Context, req CloseShado
 		return CloseShadowPullRequestResult{}, false, nil
 	}
 	targetBranch := mapping.targetBranchOr(req.BaseBranch)
-	reason := strings.TrimSpace(req.CloseReason)
-	note := ""
-	if reason != "" {
-		note = reason
-		if strings.TrimSpace(req.MergedSHA) != "" {
-			note += fmt.Sprintf(" AGS SHA: %s.", req.MergedSHA)
-		}
-	} else {
-		note = fmt.Sprintf("Closed by AGS after Forgejo PR #%d merged. Forgejo is merge authority; GitHub main is synchronized to `%s` only as backup.", req.PRNumber, req.MergedSHA)
-	}
 	targetRepo := mapping.targetRepoOrDefault(req.RepoFullName, i.cfg.RemoteURL)
-	pr, handled, err := i.client.ClosePullRequestForBranch(ctx, targetRepo, req.HeadBranch, targetBranch, note)
-	if err != nil || !handled {
-		return CloseShadowPullRequestResult{}, handled, err
+	pr, found, err := i.client.ObservePullRequest(ctx, targetRepo, req.ExternalNumber, req.HeadBranch, targetBranch)
+	result := CloseShadowPullRequestResult{TargetRepo: targetRepo, SourceBranch: req.HeadBranch, TargetBranch: targetBranch, Number: pr.Number, WebURL: pr.HTMLURL}
+	if err != nil {
+		return result, false, err
 	}
-	return CloseShadowPullRequestResult{TargetRepo: targetRepo, SourceBranch: req.HeadBranch, TargetBranch: targetBranch, WebURL: pr.HTMLURL, Number: pr.Number}, true, nil
+	if !found {
+		return result, false, nil
+	}
+	if pr.State != "closed" && !pr.Merged {
+		if err := runBeforeWrite(ctx, req.BeforeWrite); err != nil {
+			return result, false, err
+		}
+		pr, err = i.client.ClosePullRequest(ctx, targetRepo, pr.Number)
+		if err != nil {
+			return result, false, err
+		}
+		result.WebURL = firstNonEmpty(pr.HTMLURL, result.WebURL)
+	}
+	return result, true, nil
 }
 
 func shadowPRBody(req ShadowPullRequestRequest) string {
@@ -758,44 +802,80 @@ func (c *HTTPClient) reconcilePullRequestMetadata(ctx context.Context, repo stri
 
 // ClosePullRequestForBranch comments and closes the first open PR for source/target.
 func (c *HTTPClient) ClosePullRequestForBranch(ctx context.Context, repo, sourceBranch, targetBranch, note string) (PullRequest, bool, error) {
-	prs, err := c.listOpenPRs(ctx, repo, sourceBranch, targetBranch)
+	pr, found, err := c.ObservePullRequest(ctx, repo, 0, sourceBranch, targetBranch)
+	if err != nil || !found {
+		return pr, found, err
+	}
+	if pr.State == "closed" || pr.Merged {
+		return pr, true, nil
+	}
+	pr, err = c.ClosePullRequest(ctx, repo, pr.Number)
+	return pr, err == nil, err
+}
+
+// ClosePullRequest only closes; comments are deliberately omitted so an unknown
+// PATCH outcome can be retried by readback without duplicate comment noise.
+func (c *HTTPClient) ClosePullRequest(ctx context.Context, repo string, number int) (PullRequest, error) {
+	status, response, err := c.request(ctx, http.MethodPatch, fmt.Sprintf("/repos/%s/pulls/%d", repo, number), map[string]any{"state": "closed"})
 	if err != nil {
-		return PullRequest{}, false, err
+		return PullRequest{}, err
 	}
-	if len(prs) == 0 {
-		return PullRequest{}, false, nil
+	if status < 200 || status >= 300 {
+		return PullRequest{}, fmt.Errorf("close pull request returned status %d", status)
 	}
-	pr := prs[0]
-	if strings.TrimSpace(note) != "" {
-		status, response, err := c.request(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/issues/%d/comments", repo, pr.Number), map[string]any{"body": note})
+	var pr PullRequest
+	if err := json.Unmarshal(response, &pr); err != nil {
+		return pr, err
+	}
+	return pr, nil
+}
+
+func (c *HTTPClient) ObservePullRequest(ctx context.Context, repo string, number int, head, base string) (PullRequest, bool, error) {
+	if number > 0 {
+		status, response, err := c.request(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/pulls/%d", repo, number), nil)
 		if err != nil {
 			return PullRequest{}, false, err
 		}
-		if status < 200 || status >= 300 {
-			return PullRequest{}, false, fmt.Errorf("comment pull request returned status %d: %s", status, string(response))
+		if status == http.StatusNotFound {
+			return PullRequest{}, false, nil
 		}
+		if status != http.StatusOK {
+			return PullRequest{}, false, fmt.Errorf("get pull request returned status %d", status)
+		}
+		var pr PullRequest
+		if err := json.Unmarshal(response, &pr); err != nil {
+			return pr, false, err
+		}
+		if pr.Number != number || (pr.State != "open" && pr.State != "closed") {
+			return PullRequest{}, false, fmt.Errorf("invalid pull request observation")
+		}
+		return pr, true, nil
 	}
-	status, response, err := c.request(ctx, http.MethodPatch, fmt.Sprintf("/repos/%s/pulls/%d", repo, pr.Number), map[string]any{"state": "closed"})
-	if err != nil {
+	prs, err := c.listPRs(ctx, repo, head, base, "all")
+	if err != nil || len(prs) == 0 {
 		return PullRequest{}, false, err
 	}
-	if status < 200 || status >= 300 {
-		return PullRequest{}, false, fmt.Errorf("close pull request returned status %d: %s", status, string(response))
+	// Prefer an open PR when a branch has been reused; otherwise retain the
+	// latest terminal fact (GitHub's default list order is newest first).
+	for _, pr := range prs {
+		if pr.State == "open" {
+			return pr, true, nil
+		}
 	}
-	var closed PullRequest
-	if err := json.Unmarshal(response, &closed); err == nil && closed.Number != 0 {
-		pr = closed
-	}
-	return pr, true, nil
+	return prs[0], true, nil
 }
 
 func (c *HTTPClient) listOpenPRs(ctx context.Context, repo, sourceBranch, targetBranch string) ([]PullRequest, error) {
+	return c.listPRs(ctx, repo, sourceBranch, targetBranch, "open")
+}
+
+func (c *HTTPClient) listPRs(ctx context.Context, repo, sourceBranch, targetBranch, state string) ([]PullRequest, error) {
 	owner, _, ok := strings.Cut(strings.TrimSpace(repo), "/")
 	if !ok || strings.TrimSpace(owner) == "" {
 		return nil, fmt.Errorf("github integration: owner/repo is required")
 	}
 	q := url.Values{}
-	q.Set("state", "open")
+	q.Set("state", state)
 	q.Set("head", owner+":"+sourceBranch)
 	q.Set("base", targetBranch)
 	status, response, err := c.request(ctx, http.MethodGet, "/repos/"+repo+"/pulls?"+q.Encode(), nil)
