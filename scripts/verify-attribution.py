@@ -361,8 +361,13 @@ def main():
         push_events=[e for e in events if e['type']=='pull_push']
         assert push_events and all(e['user']==expected_actor for e in push_events), 'native push timeline actor must match mapping'
         # Actions push triggers independently prove the authenticated Git pusher.
-        status,native_runs=forgejo('/repos/'+target+'/actions/runs?limit=50')
-        push_runs=[r for r in native_runs.get('workflow_runs',[]) if r.get('event')=='push' and r.get('commit_sha')==head]
+        deadline=time.monotonic()+30
+        while time.monotonic()<deadline:
+            status,native_runs=forgejo('/repos/'+target+'/actions/runs?limit=50')
+            push_runs=[r for r in native_runs.get('workflow_runs',[]) if r.get('event')=='push' and r.get('commit_sha')==head]
+            if status==200 and push_runs:
+                break
+            time.sleep(.25)
         assert status==200 and push_runs and all((r.get('trigger_user') or {}).get('login')==expected_actor for r in push_runs)
         record('native push actor',{'head_sha':head,'timeline_actors':[e['user'] for e in push_events],'actions_actors':[(r.get('trigger_user') or {}).get('login') for r in push_runs],'expected':expected_actor})
         # Confirm logs preserve the AGS actor without credential material.
