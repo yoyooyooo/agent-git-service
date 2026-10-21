@@ -22,7 +22,7 @@ func ProjectionAttributionRecorder(database *gorm.DB) func(context.Context, attr
 		if err != nil {
 			return err
 		}
-		row := db.AuditLogEntry{Action: "projection." + event.Op, ActorLogin: event.Actor.Login, RepositoryFullName: event.Actor.Repo, TargetLogin: event.SudoAs, Details: string(payload), CreatedAt: time.Now().UTC()}
+		row := db.AuditLogEntry{Action: "projection." + event.Op, ActorLogin: event.Actor.Login, RepositoryFullName: event.Actor.Repo, TargetLogin: firstNonEmpty(event.TargetLogin, event.SudoAs), Details: string(payload), CreatedAt: time.Now().UTC()}
 		if event.Actor.UserID != 0 {
 			id := event.Actor.UserID
 			row.ActorID = &id

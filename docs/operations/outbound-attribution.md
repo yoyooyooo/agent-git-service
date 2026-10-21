@@ -81,7 +81,8 @@ SHA and audit provenance. No personal token is inserted into a Git remote.
 Each outbound user write and Git push emits an info record with `ags_instance`,
 `target`, `op`, `repo`, `target_repo`, `ags_pr`, `target_pr`, `ags_user_id`,
 `ags_login`, `token_owner`, `sudo_as`, `attribution`, `grant_applied`, `status`,
-`request_id`, and `fallback_reason`. Denied and retry attempts are separate rows;
+`request_id`, and `fallback_reason`. `target_login` additionally names the exact
+recipient of a collaborator grant, so rollback does not depend on today's map. Denied and retry attempts are separate rows;
 `collaborator_grant` is a separate operation. Git status is 0/1. Request ids reuse
 AGS request correlation when available, otherwise a UUID is created. The same
 credential/body-free subset is stored as `projection.<op>` audit events; audit
