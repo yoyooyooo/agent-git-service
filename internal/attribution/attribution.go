@@ -126,10 +126,14 @@ func Mark(body string, actor Actor, target, login, reason string) string {
 	return fmt.Sprintf("AGS-Actor: %s (ags-user-%d, %s)\n%s", who, actor.UserID, detail, body)
 }
 
-func Log(ctx context.Context, cfg Config, target, op, repo, tokenOwner, sudo, mode string, pr, status int, grant bool, reason string) {
+func Log(ctx context.Context, cfg Config, target, op, repo, tokenOwner, sudo, mode string, pr, status int, grant bool, reason string, targetLogins ...string) {
 	a := FromContext(ctx)
+	targetLogin := ""
+	if len(targetLogins) > 0 {
+		targetLogin = targetLogins[0]
+	}
 	if cfg.Observer != nil {
-		event := Event{Actor: a, Target: target, Op: op, TargetRepo: repo, TargetPR: pr, SudoAs: sudo, Attribution: mode, GrantApplied: grant, Status: status, FallbackReason: reason}
+		event := Event{TargetLogin: targetLogin, Actor: a, Target: target, Op: op, TargetRepo: repo, TargetPR: pr, SudoAs: sudo, Attribution: mode, GrantApplied: grant, Status: status, FallbackReason: reason}
 		if err := cfg.Observer(ctx, event); err != nil {
 			slog.WarnContext(ctx, "projection attribution audit unavailable", "target", target, "op", op)
 		}
@@ -139,7 +143,7 @@ func Log(ctx context.Context, cfg Config, target, op, repo, tokenOwner, sudo, mo
 		"repo", a.Repo, "target_repo", repo, "ags_pr", a.PR, "target_pr", pr,
 		"ags_user_id", a.UserID, "ags_login", a.Login, "token_owner", tokenOwner,
 		"sudo_as", sudo, "attribution", mode, "grant_applied", grant,
-		"status", status, "request_id", a.RequestID, "fallback_reason", reason)
+		"status", status, "request_id", a.RequestID, "fallback_reason", reason, "target_login", targetLogin)
 }
 
 // MergeTrailer is used only when AGS creates a new merge/squash object.
@@ -159,6 +163,7 @@ func MergeTrailer(message, login string) string {
 
 // Event is a bounded credential/body-free audit record.
 type Event struct {
+	TargetLogin    string `json:"target_login,omitempty"`
 	Actor          Actor  `json:"actor"`
 	Target         string `json:"target"`
 	Op             string `json:"op"`

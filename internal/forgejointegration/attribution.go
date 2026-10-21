@@ -159,7 +159,16 @@ func (c *HTTPClient) attributedRequest(ctx context.Context, method, path string,
 				loggedNumber = pr.Number
 			}
 		}
-		attribution.Log(ctx, c.attribution, "forgejo", op, repo, c.tokenOwner, sudo, mode, loggedNumber, status, grant, reason)
+		loggedReason := reason
+		if loggedReason == "" && sudo != "" {
+			switch status {
+			case http.StatusNotFound:
+				loggedReason = "sudo_404"
+			case http.StatusForbidden, http.StatusMethodNotAllowed:
+				loggedReason = "forbidden"
+			}
+		}
+		attribution.Log(ctx, c.attribution, "forgejo", op, repo, c.tokenOwner, sudo, mode, loggedNumber, status, grant, loggedReason)
 		return status, data, err
 	}
 	status, data, err := attempt(login, mode, reason, false)
@@ -192,7 +201,7 @@ func (c *HTTPClient) attributedRequest(ctx context.Context, method, path string,
 			if permissionErr == nil && !forgejoPermissionAtLeastWrite(permission) && !strings.EqualFold(permission, "maintain") {
 				grantStatus, _, grantErr := c.rawRequest(ctx, http.MethodPut, "/api/v1/repos/"+repo+"/collaborators/"+login, map[string]any{"permission": "write"}, "")
 				granted = grantErr == nil && grantStatus >= 200 && grantStatus < 300
-				attribution.Log(ctx, c.attribution, "forgejo", "collaborator_grant", repo, c.tokenOwner, "", "bot_only", number, grantStatus, granted, "")
+				attribution.Log(ctx, c.attribution, "forgejo", "collaborator_grant", repo, c.tokenOwner, "", "bot_only", number, grantStatus, granted, "", login)
 				if !granted {
 					reason = "grant_failed"
 				}
