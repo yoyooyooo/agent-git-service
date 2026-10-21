@@ -935,7 +935,7 @@ Ownership:
 - dispatch already-persisted projection-drift notifications on a local polling interval
 - periodically reconcile bounded active Forgejo projection state and GitHub shadow PR state through service-owned sources
 - run complete historical provider integrity audits on a separate low-frequency schedule
-- apply grace/throttle policy before projection-drift notifications; unchanged active facts have a minimum 24-hour reminder interval (longer configured throttles remain effective), with never-notified facts selected first. Restart preserves this timestamp; recurrent resolved-to-active generations reset it.
+- apply grace/throttle policy before projection-drift notifications; unchanged active facts have a minimum 24-hour reminder interval (longer configured throttles remain effective), with never-notified facts selected first. Restart preserves this timestamp; materially changed active facts reset it while preserving first-seen time and generation, and recurrent resolved-to-active generations also reset it.
 - mark notified drift records after successful notification attempts
 
 Rules:
