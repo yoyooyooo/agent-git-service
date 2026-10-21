@@ -156,3 +156,42 @@ func TestListResolvedProjectionDriftNotificationsOnlyAfterActiveAlert(t *testing
 		t.Fatalf("expected resolved notification to be one-shot, got %#v", resolvedRows)
 	}
 }
+
+func TestProjectionDriftUnchangedFactWaitsForDailyReminder(t *testing.T) {
+	svc := setupProjectionStateService(t)
+	ctx := context.Background()
+	fact := projectionFailureRecord{Provider: ProjectionProviderGitHub, RepoFullName: "example-owner/demo", Ref: "refs/heads/work", AGSSHA: "aaa", ExternalSHA: "bbb", Type: "sha_drift"}
+	if err := svc.recordProjectionFailure(ctx, fact); err != nil {
+		t.Fatal(err)
+	}
+	notes, err := svc.ListProjectionDriftNotifications(ctx, 15*time.Minute, 0, 50)
+	if err != nil || len(notes) != 1 {
+		t.Fatalf("notes=%v err=%v", notes, err)
+	}
+	if err := svc.MarkProjectionDriftNotified(ctx, notes[0].StateID, time.Now().UTC().Add(-16*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	// A new scan updates last_seen_at, but does not create a new drift fact.
+	if err := svc.recordProjectionFailure(ctx, fact); err != nil {
+		t.Fatal(err)
+	}
+	notes, err = svc.ListProjectionDriftNotifications(ctx, 15*time.Minute, 0, 50)
+	if err != nil || len(notes) != 0 {
+		t.Fatalf("unchanged drift repeated next round: %v %v", notes, err)
+	}
+	all, err := svc.ListProjectionDriftNotifications(ctx, 0, 0, 50)
+	if err != nil || len(all) != 0 {
+		t.Fatalf("zero throttle bypassed reminder floor: %v %v", all, err)
+	}
+	var id uint
+	if err := svc.DB.Table("projection_ref_states").Select("id").Scan(&id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.MarkProjectionDriftNotified(ctx, id, time.Now().UTC().Add(-25*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	notes, err = svc.ListProjectionDriftNotifications(ctx, 15*time.Minute, 0, 50)
+	if err != nil || len(notes) != 1 {
+		t.Fatalf("daily reminder absent: %v %v", notes, err)
+	}
+}

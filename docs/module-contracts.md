@@ -103,7 +103,7 @@ document the relevant contract below in the same change.
 | `operationconstraints` | exact default-operation constraint schemas plus shared JSON-safe integer, branch-ref, and SHA normalization |
 | `oidc` | generic OIDC discovery, device flow, and JWKS-backed ID token verification |
 | `oauth` | OAuth device-flow HTTP endpoints |
-| `projectionwatch` | periodic Forgejo projection drift scanner/notification loop |
+| `projectionwatch` | periodic Forgejo ref drift and bounded GitHub PR-state reconciliation/notification loop |
 | `providerlogbridge` | host-local, socket-peer-bound Forgejo Actions log bridge with exact DB/ref/SHA binding and bounded decoding |
 | `providerlogprotocol` | shared encoded/decoded byte ceilings for provider log transport |
 | `randutil` | shared random helper functions |
@@ -699,7 +699,7 @@ Ownership:
 - optional shadow branch/PR creation after AGS PR creation
 - optional backup push after a Forgejo-authoritative PR merge callback
 - map AGS repo full names to GitHub backup owner/repo remotes
-- comment/close GitHub shadow PRs after Forgejo merge
+- observe and close GitHub shadow PRs after AGS close or Forgejo merge (without retry-unsafe comments)
 - push the exact merged SHA from the AGS bare repo to a configured GitHub target branch
 
 Rules:
@@ -720,12 +720,16 @@ Current state:
 - after a successful GitHub `PushRef`, open GitHub `pull_request_projections` for that head branch advance `last_synced_sha` to the confirmed SHA (Forgejo required and GitLab optional projection rows are unchanged by this write-back)
 - invoked by AGS PR creation to create shadow branches/PRs and record projection mapping rows
 - invoked by the Forgejo merged-PR webhook after AGS main has been synced from Forgejo; a successful shadow-PR close (or GitHub already ancestry-merged with no open PR) upserts the GitHub projection row as `state=closed` with the merged SHA and never records GitHub as merge authority
+- generic create/ensure and close use the existing provider-unique `PullRequestProjectionJob` row; close supersedes ensure, each attempt claims a one-minute lease, failures persist exponential 5/10/20/40-second delays and stop after five attempts, and startup resumes queued, delayed or interrupted work. Duplicate dispatch and watch rounds do not reset exhausted failures; no migration is required.
+- retries observe the recorded GitHub PR number, or head/base with `state=all` when no number is known. Terminal or missing shadows require no close write; a closed AGS PR retires ensure work. A terminal GitHub shadow never reopens, triggers a replacement PR, or edits the AGS PR fact.
+- watch scan/audit rounds inspect at most the configured notification limit (default 50, maximum 100) PR candidates using a rotating ID cursor; failures and excluded branches advance the cursor. Only eligible open AGS PRs may create missing shadows; terminal AGS PRs without mappings are never backfilled. Legacy locally closed mappings are also observed because old merge bookkeeping was optimistic.
+- close completion records the mapping and any previously skipped Multica close intent in one transaction; merged PRs retain their existing Forgejo-authoritative merged terminal delivery. No reconciliation path merges, reopens or deletes a branch.
 - configured through `AGS_INTEGRATIONS_CONFIG`
 
 Assessment:
 
 - boundary is projection-only and replaceable
-- shadow-PR close/comment behavior should stay here, not in Forgejo or Git HTTP code
+- shadow-PR observation and close behavior stays here; service owns durable scheduling and authority
 
 
 ### `delegationpolicy`
@@ -929,9 +933,9 @@ Rules:
 Ownership:
 
 - dispatch already-persisted projection-drift notifications on a local polling interval
-- periodically reconcile bounded active Forgejo projection state through a service-backed source
+- periodically reconcile bounded active Forgejo projection state and GitHub shadow PR state through service-owned sources
 - run complete historical provider integrity audits on a separate low-frequency schedule
-- apply grace/throttle policy before projection-drift notifications
+- apply grace/throttle policy before projection-drift notifications; unchanged active facts have a minimum 24-hour reminder interval (longer configured throttles remain effective), with never-notified facts selected first. Restart preserves this timestamp; recurrent resolved-to-active generations reset it.
 - mark notified drift records after successful notification attempts
 
 Rules:
