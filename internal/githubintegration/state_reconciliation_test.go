@@ -113,3 +113,63 @@ func TestEnsureObservesTerminalShadowWithoutPushOrCreate(t *testing.T) {
 		t.Fatalf("result=%+v handled=%v err=%v", result, handled, err)
 	}
 }
+
+func TestEnsurePinsObservedIdentityAcrossTerminalTransitionAndBranchReuse(t *testing.T) {
+	for _, transition := range []bool{false, true} {
+		t.Run(fmt.Sprint(transition), func(t *testing.T) {
+			gets, patches, pushes := 0, 0, 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/fixture/repo/pulls/8":
+					gets++
+					state := "open"
+					if transition && gets > 1 {
+						state = "closed"
+					}
+					fmt.Fprintf(w, `{"number":8,"state":%q,"title":"old"}`, state)
+				case r.Method == http.MethodPatch && r.URL.Path == "/repos/fixture/repo/pulls/8":
+					patches++
+					fmt.Fprint(w, `{"number":8,"state":"open","title":"new"}`)
+				default:
+					// An unpinned branch lookup would pick competing PR #9,
+					// or an open-only absence could authorize a replacement.
+					t.Errorf("identity escaped: %s %s", r.Method, r.URL)
+					fmt.Fprint(w, `[{"number":9,"state":"open"}]`)
+				}
+			}))
+			defer server.Close()
+			integration := NewWithClient(Config{Enabled: true, Token: "synthetic", Repos: map[string]RepoMapping{"fixture/ags": {Owner: "fixture", Repo: "repo"}}}, func(context.Context, string, string, string, string) error { pushes++; return nil }, NewHTTPClient(server.URL, "synthetic"))
+			res, handled, err := integration.EnsureShadowPullRequest(context.Background(), ShadowPullRequestRequest{RepoFullName: "fixture/ags", RepoPath: "/fixture.git", HeadBranch: "work", BaseBranch: "main", HeadSHA: "aaa", Title: "new", ExternalNumber: 8})
+			wantState, wantPatches := "open", 1
+			if transition {
+				wantState, wantPatches = "closed", 0
+			}
+			if err != nil || !handled || res.Number != 8 || res.State != wantState || patches != wantPatches || gets != 2 || pushes != 1 {
+				t.Fatalf("res=%+v handled=%v err=%v gets=%d patches=%d pushes=%d", res, handled, err, gets, patches, pushes)
+			}
+		})
+	}
+}
+
+func TestEnsureAllStateReadbackBeforeCreation(t *testing.T) {
+	reads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Query().Get("state") != "all" {
+			t.Errorf("unexpected creation/lookup: %s %s", r.Method, r.URL)
+			w.WriteHeader(500)
+			return
+		}
+		reads++
+		if reads == 1 {
+			fmt.Fprint(w, `[]`)
+			return
+		}
+		fmt.Fprint(w, `[{"number":8,"state":"closed"}]`)
+	}))
+	defer server.Close()
+	integration := NewWithClient(Config{Enabled: true, Token: "synthetic", Repos: map[string]RepoMapping{"fixture/ags": {Owner: "fixture", Repo: "repo"}}}, func(context.Context, string, string, string, string) error { return nil }, NewHTTPClient(server.URL, "synthetic"))
+	res, handled, err := integration.EnsureShadowPullRequest(context.Background(), ShadowPullRequestRequest{RepoFullName: "fixture/ags", RepoPath: "/fixture.git", HeadBranch: "work", BaseBranch: "main", HeadSHA: "aaa"})
+	if err != nil || !handled || res.State != "closed" || res.Number != 8 || reads != 2 {
+		t.Fatalf("res=%+v handled=%v err=%v reads=%d", res, handled, err, reads)
+	}
+}
