@@ -31,29 +31,18 @@ func TestLoadRepoMapFile(t *testing.T) {
 	}
 }
 
-func TestLoadTokenFileUsesAdminBeforeLegacyTokenFile(t *testing.T) {
-	adminFile := filepath.Join(t.TempDir(), "admin.token")
-	if err := os.WriteFile(adminFile, []byte("fixture-admin\n"), 0600); err != nil {
+func TestLoadTokenFileDoesNotLoadOperatorCredential(t *testing.T) {
+	botFile := filepath.Join(t.TempDir(), "bot.token")
+	if err := os.WriteFile(botFile, []byte("fixture-bot\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := LoadTokenFile(Config{
-		TokenFile:              filepath.Join(t.TempDir(), "missing-legacy.token"),
-		AuthorityPolicyEnabled: true, AuthorityPolicyTokenFile: adminFile,
-	})
-	if err != nil || loaded.Token != "fixture-admin" {
-		t.Fatal("legacy projection credential must not precede the admin credential", err)
-	}
-}
-
-func TestLoadTokenFileRejectsEmptyAdminCredential(t *testing.T) {
-	adminFile := filepath.Join(t.TempDir(), "admin.token")
-	if err := os.WriteFile(adminFile, []byte("\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := LoadTokenFile(Config{
-		Token: "fixture-old-projection", AuthorityPolicyEnabled: true, AuthorityPolicyTokenFile: adminFile,
-	})
-	if err == nil {
-		t.Fatal("empty explicit admin credential must not silently select the old projection token")
+	for _, operatorFile := range []string{"", filepath.Join(t.TempDir(), "missing.token")} {
+		loaded, err := LoadTokenFile(Config{TokenFile: botFile, AuthorityPolicyEnabled: true, AuthorityPolicyTokenFile: operatorFile, AuthorityPolicyToken: "fixture-operator"})
+		if err != nil || loaded.Token != "fixture-bot" {
+			t.Fatal("projection must use bot independently of operator", err)
+		}
+		if got := loaded.withDefaults().Token; got != "fixture-bot" {
+			t.Fatal("constructor replaced bot credential")
+		}
 	}
 }

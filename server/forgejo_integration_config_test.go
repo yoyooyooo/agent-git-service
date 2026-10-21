@@ -86,23 +86,26 @@ func TestForgejoAdminTokenWiring(t *testing.T) {
 			defer provider.Close()
 			root := t.TempDir()
 			adminFile := filepath.Join(root, "admin.token")
-			if err := os.WriteFile(adminFile, []byte(adminToken+"\n"), 0600); err != nil {
+			if err := os.WriteFile(adminFile, []byte("fixture-operator-token\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
 			cfg := config.Config{
 				ForgejoIntegrationEnabled: true, ForgejoIntegrationBaseURL: provider.URL,
-				ForgejoIntegrationToken:       "fixture-old-projection-token",
+				ForgejoIntegrationToken:       adminToken,
 				ForgejoAuthorityPolicyEnabled: true, ForgejoAuthorityPolicyTokenFile: adminFile,
 				ForgejoIntegrationBot: "fixture-admin",
 			}
 			if source != "environment_operator_file" {
-				credential := "  token: fixture-old-projection-token\n"
+				credential := "  token: " + adminToken + "\n"
 				operator := fmt.Sprintf("    operator_token_file: %q\n", adminFile)
 				if source == "yaml_shared_admin_file" {
+					if err := os.WriteFile(adminFile, []byte(adminToken+"\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
 					credential = fmt.Sprintf("  token_file: %q\n", adminFile)
 					operator = ""
 				} else if source == "yaml_operator_inline" {
-					operator = "    operator_token: " + adminToken + "\n"
+					operator = "    operator_token: fixture-operator-token\n"
 				}
 				body := fmt.Sprintf("forgejo:\n  enabled: true\n  base_url: %q\n%s  authority_policy:\n    enabled: true\n    webhook_url: https://primary.example.test/hook\n    integration_bot: fixture-admin\n%s  repos:\n    fixture/repo:\n      owner: fixture\n      repo: repo\n      base_branch: main\n", provider.URL, credential, operator)
 				cfg.IntegrationsConfigFile = filepath.Join(root, "integrations.yaml")
