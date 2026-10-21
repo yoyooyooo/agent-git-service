@@ -52,6 +52,14 @@ blocks against `min_free_bytes`. A mount beneath an otherwise same-filesystem Gi
 root cannot silently evade the per-source check. No source objects or source
 configuration are altered by the probes.
 
+A low-space preflight returns `reason: disk_free_below_threshold` together with
+`available_bytes` and `minimum_bytes` in its structured observation and typed
+error. The error text carries the same fields into bootstrap logs; headroom
+admission errors still match `snapshotstore.ErrHeadroom`. The single-root
+launcher's [startup health report](user-runtime.md#process-and-diagnostic-output)
+also exposes this reason and both values without labelling valid configuration
+as corrupt. No public health endpoint is added: a failed startup has no listener.
+
 **Free space is an observation, not a reservation or OS quota.** The host-gateway
 extension adds import-stream checks every 4 MiB and before publication using the
 configured minimum. Concurrent indexing, capture pins, compaction and unrelated

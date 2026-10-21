@@ -21,9 +21,16 @@ import sys
 import time
 
 
+class CheckFailure(ValueError):
+    """Allowlisted diagnostics only; never serialize config values or exception text."""
+    def __init__(self, reason: str, **details):
+        super().__init__(reason)
+        self.details = {'reason': reason, **details}
+
+
 def environment(path: Path) -> dict[str, str]:
     result: dict[str, str] = {}
-    for line in path.read_text().splitlines():
+    for number, line in enumerate(path.read_text().splitlines(), 1):
         line = line.strip()
         if not line or line.startswith('#'):
             continue
@@ -31,10 +38,13 @@ def environment(path: Path) -> dict[str, str]:
             line = line[7:]
         key, separator, raw = line.partition('=')
         if not separator or not key or not key.isascii() or not key.replace('_', 'a').isalnum() or key[0].isdigit():
-            raise ValueError('invalid runtime environment entry')
-        words = shlex.split(raw, comments=True, posix=True)
+            raise CheckFailure('environment_entry_invalid', line=number)
+        try:
+            words = shlex.split(raw, comments=True, posix=True)
+        except ValueError:
+            raise CheckFailure('environment_entry_invalid', line=number) from None
         if len(words) > 1 or key in result:
-            raise ValueError('ambiguous runtime environment entry')
+            raise CheckFailure('environment_entry_ambiguous', line=number)
         result[key] = words[0] if words else ''
     return result
 
@@ -69,20 +79,25 @@ def retention_limits(root: Path) -> dict:
     if not path.exists() and not path.is_symlink():
         return {'log_segment_bytes': 10 * 1024 * 1024, 'log_backups': 4}
     if not private_file(path) or path.stat().st_size > 65536:
-        raise ValueError('unsafe retention configuration')
-    value = json.loads(path.read_text())
+        raise CheckFailure('retention_file_unsafe_or_too_large')
+    try:
+        value = json.loads(path.read_text())
+    except ValueError:
+        raise CheckFailure('retention_json_invalid') from None
     if not isinstance(value, dict):
-        raise ValueError('invalid retention configuration')
+        raise CheckFailure('retention_not_object')
     maximum = value.get('log_segment_bytes', 10 * 1024 * 1024)
     backups = value.get('log_backups', 4)
-    if (type(maximum) is not int or not 65536 <= maximum <= 64 * 1024 * 1024
-            or type(backups) is not int or not 0 <= backups <= 8):
-        raise ValueError('invalid retention limits')
+    if type(maximum) is not int or not 65536 <= maximum <= 64 * 1024 * 1024:
+        raise CheckFailure('log_segment_bytes_out_of_range', minimum_bytes=65536, maximum_bytes=64 * 1024 * 1024)
+    if type(backups) is not int or not 0 <= backups <= 8:
+        raise CheckFailure('log_backups_out_of_range', minimum=0, maximum=8)
     return {'log_segment_bytes': maximum, 'log_backups': backups}
 
 
 def inspect(root: Path) -> dict:
     checks: dict[str, str] = {}
+    details: dict[str, dict] = {}
     root_ok = root.is_dir() and not root.is_symlink() and root.resolve() == root.absolute()
     checks['root'] = 'ok' if root_ok and root.stat().st_uid == os.getuid() and root.stat().st_mode & 0o077 == 0 else 'unsafe'
     marker = root / 'state/installing.json'
@@ -93,16 +108,20 @@ def inspect(root: Path) -> dict:
     try:
         retention_limits(root)
         checks['retention_config'] = 'ok'
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError) as error:
         checks['retention_config'] = 'invalid_or_unsafe'
+        details['retention_config'] = (error.details if isinstance(error, CheckFailure)
+                                       else {'reason': 'retention_file_unreadable', 'error_type': type(error).__name__})
     env_file = root / 'config/runtime.env'
     checks['runtime_environment'] = 'ok' if private_file(env_file) else 'missing_or_unsafe'
     env: dict[str, str] = {}
     if checks['runtime_environment'] == 'ok':
         try:
             env = environment(env_file)
-        except (ValueError, OSError):
+        except (ValueError, OSError) as error:
             checks['runtime_environment'] = 'invalid'
+            details['runtime_environment'] = (error.details if isinstance(error, CheckFailure)
+                                              else {'reason': 'environment_file_unreadable', 'error_type': type(error).__name__})
     binary = root / 'bin/gh-server'
     checks['binary'] = 'ok' if binary.is_file() and not binary.is_symlink() and os.access(binary, os.X_OK) else 'missing_or_unsafe'
     try:
@@ -132,25 +151,66 @@ def inspect(root: Path) -> dict:
         config_path = Path(value)
         checks['replication_config'] = 'ok' if durable_path(root, config_path) and private_file(config_path) else 'missing_or_unsafe'
         if checks['replication_config'] == 'ok':
+            stage = 'config_read_failed'
             try:
-                config = json.loads(config_path.read_text())
+                content = config_path.read_text()
+                stage = 'config_json_invalid'
+                config = json.loads(content)
+                if not isinstance(config, dict):
+                    raise CheckFailure('config_not_object')
+                paths = {}
                 for key in ('ca_file', 'certificate_file', 'private_key_file', 'snapshot_root'):
+                    if key not in config:
+                        raise CheckFailure('config_field_missing', field=key)
+                    if not isinstance(config[key], str) or not config[key] or '\x00' in config[key]:
+                        raise CheckFailure('config_field_invalid', field=key)
                     path = Path(config[key])
                     if not path.is_absolute():
                         path = config_path.parent / path
+                    paths[key] = path
+                    stage = 'replication_dependency_inspection_failed'
                     valid = durable_path(root, path) and path.exists()
                     if key == 'private_key_file':
                         valid = valid and private_file(path)
                     checks['replication_' + key] = 'ok' if valid else 'missing_or_unsafe'
-                cert = Path(config['certificate_file'])
-                if not cert.is_absolute():
-                    cert = config_path.parent / cert
-                result = subprocess.run(['openssl', 'x509', '-in', str(cert), '-noout', '-checkend', '0'], capture_output=True, timeout=5)
-                checks['replication_certificate_valid'] = 'ok' if result.returncode == 0 else 'expired_or_invalid'
-            except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+                minimum = config.get('min_free_bytes')
+                if type(minimum) is not int or not 0 < minimum <= 1 << 60:
+                    raise CheckFailure('config_field_invalid', field='min_free_bytes')
+                if checks['replication_snapshot_root'] == 'ok':
+                    try:
+                        space = os.statvfs(paths['snapshot_root'])
+                        available = space.f_bavail * space.f_frsize
+                        checks['replication_disk_free'] = 'ok' if available >= minimum else 'invalid'
+                        if available < minimum:
+                            details['replication_disk_free'] = {'reason': 'disk_free_below_threshold',
+                                                               'available_bytes': available, 'minimum_bytes': minimum}
+                    except OSError as error:
+                        checks['replication_disk_free'] = 'invalid'
+                        details['replication_disk_free'] = {'reason': 'disk_free_probe_failed',
+                                                           'error_type': type(error).__name__}
+                if checks['replication_certificate_file'] == 'ok':
+                    try:
+                        result = subprocess.run(['openssl', 'x509', '-in', str(paths['certificate_file']),
+                                                 '-noout', '-checkend', '0'], capture_output=True, timeout=5)
+                        checks['replication_certificate_valid'] = 'ok' if result.returncode == 0 else 'expired_or_invalid'
+                        if result.returncode != 0:
+                            details['replication_certificate_valid'] = {'reason': 'certificate_expired_or_invalid',
+                                                                       'exit_code': result.returncode}
+                    except (OSError, subprocess.TimeoutExpired) as error:
+                        checks['replication_certificate_valid'] = 'invalid'
+                        details['replication_certificate_valid'] = {
+                            'reason': 'certificate_probe_timeout' if isinstance(error, subprocess.TimeoutExpired)
+                                      else 'certificate_probe_failed', 'error_type': type(error).__name__}
+            except (OSError, ValueError, KeyError, TypeError) as error:
                 checks['replication_config'] = 'invalid'
+                details['replication_config'] = (error.details if isinstance(error, CheckFailure)
+                                                 else {'reason': stage, 'error_type': type(error).__name__})
+    # Keep v1 string statuses compatible; add credential-free details for every failure.
+    for name, status in checks.items():
+        if status != 'ok' and name not in details:
+            details[name] = {'reason': status}
     report = {'schema': 'ags.startup-health.v1', 'checked_at': dt.datetime.now(dt.timezone.utc).isoformat(),
-              'ready_to_start': all(value == 'ok' for value in checks.values()), 'checks': checks}
+              'ready_to_start': all(value == 'ok' for value in checks.values()), 'checks': checks, 'check_details': details}
     return report
 
 
@@ -240,11 +300,11 @@ def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock)
             if time.monotonic() >= next_check:
                 report = inspect(root)
                 atomic_json(root / 'state/startup-health.json', report)
-                if not report['ready_to_start'] and report['checks'] != last_checks:
+                if not report['ready_to_start'] and (report['checks'], report['check_details']) != last_checks:
                     log.write((json.dumps(report) + '\n').encode())
                 elif last_checks is not None and report['ready_to_start']:
                     log.write((json.dumps(report) + '\n').encode())
-                last_checks = report['checks'] if not report['ready_to_start'] else None
+                last_checks = (report['checks'], report['check_details']) if not report['ready_to_start'] else None
                 next_check = time.monotonic() + 60
         code = child.wait()
         current.update(exit_code=code, stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())

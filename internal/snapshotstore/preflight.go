@@ -13,6 +13,7 @@ type FilesystemPreflight struct {
 	HardlinkVerified bool   `json:"hardlink_verified"`
 	AvailableBytes   uint64 `json:"available_bytes"`
 	MinimumBytes     uint64 `json:"minimum_bytes"`
+	Reason           string `json:"reason,omitempty"`
 }
 
 // CheckCaptureFilesystem checks disjoint existing roots, actual hardlink support
@@ -87,7 +88,9 @@ func CheckCaptureFilesystem(sourceRoot, snapshotRoot string, minimum uint64) (Fi
 		return report, errors.New("filesystem free-space inspection failed")
 	}
 	if report.AvailableBytes < minimum {
-		return report, errors.New("insufficient filesystem headroom for replication")
+		failure := headroomError(report.AvailableBytes, minimum)
+		report.Reason = failure.Reason
+		return report, failure
 	}
 	return report, nil
 }

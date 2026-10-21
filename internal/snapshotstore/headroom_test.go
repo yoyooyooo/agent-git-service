@@ -19,8 +19,11 @@ func TestHeadroomGateRefusesImportWithoutDamagingPublishedView(t *testing.T) {
 	if err := s.ConfigureHeadroom(1); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ConfigureHeadroom(1 << 60); !errors.Is(err, ErrHeadroom) {
-		t.Fatalf("impossible headroom accepted: %v", err)
+	err = s.ConfigureHeadroom(1 << 60)
+	var failure *HeadroomError
+	if !errors.Is(err, ErrHeadroom) || !errors.As(err, &failure) ||
+		failure.Reason != "disk_free_below_threshold" || failure.AvailableBytes == 0 || failure.MinimumBytes != 1<<60 {
+		t.Fatalf("missing headroom diagnostics: %v", err)
 	}
 	called := false
 	err = s.Install(context.Background(), m, func(context.Context, io.Writer) error { called = true; return nil })
