@@ -128,13 +128,13 @@ func TestProjectionAttributionFreshGrantRevocationAndDisabledUser(t *testing.T) 
 	if err := svc.DB.Create(&grant).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AuthorizeProjectionAttribution(ctx, actor, repo.FullName, "comment", 1); err != nil {
+	if err := svc.AuthorizeProjectionAttribution(ctx, actor, repo.FullName, "push_ref", 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.DB.Model(&grant).Update("permission", "read").Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AuthorizeProjectionAttribution(ctx, actor, repo.FullName, "comment", 1); !errors.Is(err, ErrForbidden) {
+	if err := svc.AuthorizeProjectionAttribution(ctx, actor, repo.FullName, "push_ref", 1); !errors.Is(err, ErrForbidden) {
 		t.Fatal("stale grant admitted", err)
 	}
 	if err := svc.DB.Model(&grant).Update("permission", "write").Error; err != nil {
@@ -143,7 +143,7 @@ func TestProjectionAttributionFreshGrantRevocationAndDisabledUser(t *testing.T) 
 	if err := svc.DB.Model(&user).Update("status", db.UserStatusSuspended).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AuthorizeProjectionAttribution(ctx, actor, repo.FullName, "comment", 1); !errors.Is(err, ErrForbidden) {
+	if err := svc.AuthorizeProjectionAttribution(ctx, actor, repo.FullName, "push_ref", 1); !errors.Is(err, ErrForbidden) {
 		t.Fatal("suspended user admitted", err)
 	}
 	if _, ok := UserFromContext(ctx); ok {

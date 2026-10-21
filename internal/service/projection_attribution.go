@@ -53,7 +53,7 @@ func (s *Service) AuthorizeProjectionAttribution(ctx context.Context, actor attr
 	}
 
 	switch op {
-	case "create_pr", "edit_pr", "close_pr", "reopen_pr", "comment", "label_add", "label_remove":
+	case "push_ref", "create_pr", "edit_pr", "close_pr", "reopen_pr", "comment", "label_add", "label_remove":
 	default:
 		return ErrForbidden
 	}
@@ -80,6 +80,19 @@ func (s *Service) AuthorizeProjectionAttribution(ctx context.Context, actor attr
 		}
 		operation, capability := "", ""
 		switch op {
+		case "push_ref":
+			// Bound actions were revalidated above. For other delegated pushes,
+			// retain the operation that admitted this Git/PR projection.
+			switch session.OperationName {
+			case "git.push":
+				operation, capability = "git.push", "repo:write"
+			case "pr.create":
+				operation, capability = "pr.create", "pr:create"
+			case "pr.edit":
+				operation, capability = "pr.edit", "repo:write"
+			default:
+				return ErrForbidden
+			}
 		case "create_pr":
 			operation, capability = "pr.create", "pr:create"
 		case "edit_pr":
@@ -98,7 +111,7 @@ func (s *Service) AuthorizeProjectionAttribution(ctx context.Context, actor attr
 			operation, capability = "pr.create", "pr:create"
 		}
 		constraints := map[string]string{}
-		if actor.PR > 0 {
+		if actor.PR > 0 && operation != "git.push" {
 			var pr db.PullRequest
 			if gdb.WithContext(ctx).Where("repository_id = ? AND number = ?", repo.ID, actor.PR).First(&pr).Error != nil {
 				return ErrForbidden

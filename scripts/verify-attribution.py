@@ -30,6 +30,8 @@ def main():
     ap.add_argument('--forgejo', required=True)
     ap.add_argument('--token-file', required=True)
     ap.add_argument('--forgejo-login', required=True)
+    ap.add_argument('--ssh-url', default='')
+    ap.add_argument('--known-hosts-file', default='')
     ap.add_argument('--ags-login', default='fixture')
     ap.add_argument('--output', required=True)
     ap.add_argument('--source-sha', default='')
@@ -101,6 +103,9 @@ def main():
         name = 'ags-attribution-sandbox-' + time.strftime('%Y%m%d%H%M%S')
         target = owner + '/' + name
         report['forgejo_repo'] = target
+        if args.mapping=='enabled':
+            status,initial_keys=forgejo('/users/'+args.forgejo_login+'/keys')
+            assert status==200 and initial_keys==[], 'lifecycle verification requires an authorized temporary account without public keys'
         status, created = forgejo('/user/repos', 'POST', {'name': name, 'private': True, 'auto_init': False, 'default_branch': 'main'})
         assert status == 201, f'sandbox create: {status}'
         # This is a new sandbox only; no existing repository permissions change.
@@ -115,13 +120,18 @@ def main():
         base = f'http://127.0.0.1:{http_port}'
         ags_repo = args.ags_login + '/' + name
         config = {'attribution': {'instance': 'verification', 'principals': {args.ags_login: {'forgejo': args.forgejo_login}}},
-                  'forgejo': {'enabled': True, 'base_url': args.forgejo, 'token_file': str(Path(args.token_file).resolve()),
+                  'forgejo': {'managed_ssh': {'url': args.ssh_url, 'known_hosts_file': args.known_hosts_file}, 'enabled': True, 'base_url': args.forgejo, 'token_file': str(Path(args.token_file).resolve()),
                               'auto_create_repo': False, 'auto_pr': True, 'private_repos': True,
                               'repos': {ags_repo: {'owner': owner, 'repo': name, 'base_branch': 'main', 'auto_pr': True}}}}
         if args.mapping=='absent':
             config.pop('attribution')
         elif args.mapping=='empty':
             config['attribution']['principals']={}
+        private=root/'private'
+        private.mkdir(mode=0o700)
+        (private/'forgejo-operator-token.txt').write_text(token)
+        (private/'forgejo-operator-token.txt').chmod(0o600)
+        config['forgejo']['token_file']=str(private/'forgejo-operator-token.txt')
         (root/'integrations.yaml').write_text(json.dumps(config))
         (root/'integrations.yaml').chmod(0o600)
         log = open(root/'server.log', 'w')
@@ -232,17 +242,6 @@ def main():
         (workflows/'attribution.yml').write_text(json.dumps(workflow))
         run(['git','add','.forgejo'],git_env,checkout)
         run(['git','commit','-m','test: sandbox attribution workflow'],git_env,checkout)
-        run(['git','push','origin','main'],git_env,checkout)
-        run(['git','switch','-c','agent/attribution'],git_env,checkout)
-        (checkout/'attribution.txt').write_text('sandbox attribution\n')
-        run(['git','add','attribution.txt'],git_env,checkout)
-        run(['git','commit','-m','test: attributed change'],git_env,checkout)
-        push=run(['git','push','-u','origin','agent/attribution'],git_env,checkout)
-        head=run(['git','rev-parse','HEAD'],git_env,checkout)
-        report['head_sha']=head
-        record('git push through AGS',{'exit':0,'head_sha':head,'stdout':push})
-        # Forgejo updates branch caches asynchronously after receive-pack.
-        time.sleep(1)
         command=['gh','pr','create','--repo',ags_repo,'--head','agent/attribution','--base','main','--title','Sandbox attribution acceptance','--body','Isolated attribution verification; no business repository changes.']
         if args.mapping=='enabled':
             with sqlite3.connect(root/'ags.sqlite') as fixture_db:
@@ -261,11 +260,35 @@ def main():
                 status_pr,denied_prs=forgejo('/repos/'+target+'/pulls?state=open')
                 with sqlite3.connect(root/'ags.sqlite') as observed_db:
                     grants=observed_db.execute("SELECT COUNT(*) FROM audit_log_entries WHERE action='projection.collaborator_grant'").fetchone()[0]
-                assert permission.get('permission')=='none' and status_pr==200 and denied_prs==[] and grants==0
-                record('AGS denial has zero provider effects',{'provider_permission':permission.get('permission'),'provider_prs':len(denied_prs),'grant_audits':grants})
+                key_status,denied_keys=forgejo('/users/'+args.forgejo_login+'/keys')
+                assert key_status==200 and denied_keys==[]
+                assert permission.get('permission')=='none' and ((status_pr==200 and denied_prs==[]) or status_pr==404) and grants==0, {'permission':permission,'pr_status':status_pr,'prs':denied_prs,'grants':grants}
+                record('AGS denial has zero provider effects',{'provider_permission':permission.get('permission'),'provider_prs':0,'grant_audits':grants})
             finally:
                 with sqlite3.connect(root/'ags.sqlite') as fixture_db:
                     fixture_db.execute('UPDATE repositories SET owner_id = ? WHERE full_name = ?', (original_owner,ags_repo))
+        run(['git','push','origin','main'],git_env,checkout)
+        run(['git','switch','-c','agent/attribution'],git_env,checkout)
+        (checkout/'attribution.txt').write_text('sandbox attribution\n')
+        run(['git','add','attribution.txt'],git_env,checkout)
+        run(['git','commit','-m','test: attributed change'],git_env,checkout)
+        push=run(['git','push','-u','origin','agent/attribution'],git_env,checkout)
+        head=run(['git','rev-parse','HEAD'],git_env,checkout)
+        report['head_sha']=head
+        record('git push through AGS',{'exit':0,'head_sha':head,'stdout':push})
+        first_keys=[]
+        if args.mapping=='enabled':
+            key_status,first_keys=forgejo('/users/'+args.forgejo_login+'/keys')
+            assert key_status==200 and len(first_keys)==1
+            assert first_keys[0]['title']=='ags-managed:verification:'+args.ags_login
+            private_keys=list(private.glob('forgejo-managed-ssh/**/*.key'))
+            assert len(private_keys)==1 and private_keys[0].stat().st_mode & 0o777==0o600
+            first_private_hash=hashlib.sha256(private_keys[0].read_bytes()).hexdigest()
+            record('managed SSH first push',{'key_id':first_keys[0]['id'],'key_count':len(first_keys),'private_mode':'0600'})
+
+        # Forgejo updates branch caches asynchronously after receive-pack.
+        time.sleep(1)
+        command=['gh','pr','create','--repo',ags_repo,'--head','agent/attribution','--base','main','--title','Sandbox attribution acceptance','--body','Isolated attribution verification; no business repository changes.']
         opened=run(command,gh_env,checkout)
         record('gh pr create',{'exit':0,'stdout':opened,'ags_login':args.ags_login})
         deadline=time.monotonic()+60
@@ -301,6 +324,12 @@ def main():
         else:
             raise RuntimeError('PR update head did not synchronize')
         record('post-open git push readback',{'status':status,'head_sha':head,'user':pr['user']['login']})
+        if args.mapping=='enabled':
+            key_status,second_keys=forgejo('/users/'+args.forgejo_login+'/keys')
+            assert key_status==200 and [k['id'] for k in second_keys]==[k['id'] for k in first_keys]
+            assert hashlib.sha256(private_keys[0].read_bytes()).hexdigest()==first_private_hash
+            record('managed SSH reused across pushes',{'first_key_id':first_keys[0]['id'],'second_key_id':second_keys[0]['id'],'key_count':len(second_keys),'same_private_key':True})
+
         assert pr['user']['login']==(args.forgejo_login if args.mapping=='enabled' else owner)
         # Forgejo returns both the raw commit and associated provider users.
         status,commit=forgejo('/repos/'+target+'/git/commits/'+head)
@@ -328,7 +357,15 @@ def main():
             status,after_comments=forgejo('/repos/'+target+f'/issues/{number}/comments')
             assert status==200 and not after_comments and 'AGS-Actor:' not in pr.get('body','')
             record('empty mapping zero text or comment changes',{'mode':args.mapping,'comments':0,'sudo':False,'grants':0,'body_unchanged':True})
-        # git pushes deliberately remain bot-owned. Confirm logs preserve the AGS actor.
+        expected_actor=args.forgejo_login if args.mapping=='enabled' else owner
+        push_events=[e for e in events if e['type']=='pull_push']
+        assert push_events and all(e['user']==expected_actor for e in push_events), 'native push timeline actor must match mapping'
+        # Actions push triggers independently prove the authenticated Git pusher.
+        status,native_runs=forgejo('/repos/'+target+'/actions/runs?limit=50')
+        push_runs=[r for r in native_runs.get('workflow_runs',[]) if r.get('event')=='push' and r.get('commit_sha')==head]
+        assert status==200 and push_runs and all((r.get('trigger_user') or {}).get('login')==expected_actor for r in push_runs)
+        record('native push actor',{'head_sha':head,'timeline_actors':[e['user'] for e in push_events],'actions_actors':[(r.get('trigger_user') or {}).get('login') for r in push_runs],'expected':expected_actor})
+        # Confirm logs preserve the AGS actor without credential material.
         log.flush()
         records=[]
         for line in (root/'server.log').read_text().splitlines():
@@ -339,16 +376,47 @@ def main():
             if entry.get('msg')=='projection attribution':
                 records.append(entry)
         assert any(e.get('op')=='collaborator_grant' and e.get('grant_applied') for e in records) if args.mapping=='enabled' else records==[]
-        assert any(e.get('op')=='push_ref' and e.get('ags_login')==args.ags_login and e.get('attribution')=='bot_only' for e in records) if args.mapping=='enabled' else records==[]
+        assert any(e.get('op')=='push_ref' and e.get('ags_login')==args.ags_login and e.get('attribution')=='ssh' and e.get('target_login')==args.forgejo_login for e in records) if args.mapping=='enabled' else records==[]
         (root/'attribution.json').write_text(json.dumps(records,indent=2))
         with sqlite3.connect(root/'ags.sqlite') as observed_db:
             audits=observed_db.execute("SELECT action, actor_login, details FROM audit_log_entries WHERE action LIKE 'projection.%' ORDER BY id").fetchall()
         assert any(action=='projection.collaborator_grant' and login==args.ags_login for action,login,_ in audits) if args.mapping=='enabled' else audits==[]
         (root/'audit.json').write_text(json.dumps([{'action':action,'actor_login':login,'details':json.loads(details)} for action,login,details in audits],indent=2))
-        record('structured attribution',{'grant_applied':args.mapping=='enabled','push_native_actor':owner,'ags_actor':args.ags_login,'evidence':str(root/'attribution.json')})
+        record('structured attribution',{'grant_applied':args.mapping=='enabled','push_native_actor':expected_actor,'ags_actor':args.ags_login,'evidence':str(root/'attribution.json')})
         status, runs=forgejo('/repos/'+target+'/actions/runs?limit=30')
         (root/'forgejo-ci-initial.json').write_text(json.dumps(runs,indent=2))
         record('Forgejo CI initial readback',{'status':status,'runs':[{k:r.get(k) for k in ('id','commit_sha','status','event','html_url')} for r in runs.get('workflow_runs',[])]})
+        if args.mapping=='enabled':
+            # Delete the public key independently; next use must heal it without rotating private material.
+            status,_=forgejo('/admin/users/'+args.forgejo_login+'/keys/'+str(first_keys[0]['id']),'DELETE')
+            assert status==204
+            (checkout/'attribution.txt').write_text('sandbox missing key recovery\n')
+            run(['git','commit','-am','test: recover deleted managed key'],git_env,checkout)
+            run(['git','push','origin','agent/attribution'],git_env,checkout)
+            status,recovered=forgejo('/users/'+args.forgejo_login+'/keys')
+            assert status==200 and len(recovered)==1 and recovered[0]['key']==first_keys[0]['key']
+            assert hashlib.sha256(private_keys[0].read_bytes()).hexdigest()==first_private_hash
+            record('deleted managed public key recovered',{'old_key_id':first_keys[0]['id'],'new_key_id':recovered[0]['id'],'key_count':len(recovered),'same_public_key':True,'same_private_key':True})
+            server.terminate()
+            server.wait(timeout=15)
+            config['attribution']['principals']={}
+            (root/'integrations.yaml').write_text(json.dumps(config))
+            server=subprocess.Popen([str(Path(args.binary).resolve())],cwd=root,env=server_env,stdin=subprocess.DEVNULL,stdout=log,stderr=log)
+            deadline=time.monotonic()+45
+            while time.monotonic()<deadline:
+                if server.poll() is not None:
+                    raise RuntimeError('mapping removal startup failed; inspect server.log')
+                try:
+                    if request(base,'/readyz',ags_token)[0]==200:
+                        break
+                except (OSError,urllib.error.URLError):
+                    pass
+                time.sleep(.15)
+            else:
+                raise RuntimeError('mapping removal startup timeout')
+            status,remaining=forgejo('/users/'+args.forgejo_login+'/keys')
+            assert status==200 and remaining==[]
+            record('mapping removal revokes managed public key',{'status':status,'remaining_keys':len(remaining),'retained_private_mode':'0600'})
         report['result']='passed'
     except Exception as e:
         report['result']='failed'

@@ -13,9 +13,10 @@ sandbox in which their existing Forgejo identity has no write permission.
 
 ## Driving it with Python + official gh
 
-The helper checks initial `none`/read/404, then executes gh create. The evidence
-must contain the initial denied create, a bot-owned `collaborator_grant` for only
-write, one Sudo retry and a PR user equal to the mapping. Final API readback must
+The helper checks initial `none`/read/404, denies gh create before the first Git
+projection and checks zero provider key/grant/PR effects. After restoring fixture
+AGS access, the first SSH Git push projects only write ACL with a bot-owned
+`collaborator_grant`; gh create then uses Sudo with a mapped PR user. Final API readback must
 show write. `TestAttributionBoundedPermissionRecovery` covers failed grants,
 second denials, private 404, no-grant merge 403/405 and non-replayed 409/500.
 `TestAttributionMissingUserAndMissingMapping` covers fallback markers.

@@ -649,7 +649,11 @@ AGS_E2E_RUNNER_IMAGE_REPO=/srv/example/runner-images \
 The script creates an AGS PR with PNG-like binaries under `ppt-images/`, waits for async Forgejo projection, verifies the projection job's `last_synced_ags_head_sha` and `remote_sha` match the AGS head SHA, verifies an external Forgejo PR URL is recorded, and calls the retry endpoint after success to prove the repair path is idempotent. The runner label/image are recorded as validation baseline only; projection failures should be diagnosed from AGS projection status/jobs, not conflated with runner image or dependency failures. Future missing CI dependencies belong in the `runner-images` repo/worktree (`/srv/example/runner-images`), not in the projection repair path.
 `POST /api/v3/repos/{owner}/{repo}/pulls` and the exact numbered `GET` expose `external_projections` plus the current generic Forgejo `projection_job`. The job is a presentation receipt for bounded clients: it includes `job_id`, phase/status, `attempt`, retained `attempts` history, safe failure fields, external locator and observed SHA facts. Zero Forgejo mapping rows with a live job are pending, not missing mapping. Success does not clear prior attempt errors from `last_error` or `attempts`. The receipt does not move provider authority into the request path or make PR creation synchronous. Clients may poll the exact numbered GET for a bounded interval, must prefer the Forgejo `external_number` over branch-name inference, and must keep the already-created AGS PR when the projection remains pending or fails. Merge remains fail-closed until an exact Forgejo mapping exists.
 
-The push actor in Forgejo/GitLab is the configured token owner. Commit authors are preserved from Git history.
+The Forgejo push actor is the mapped user when outbound attribution and managed
+SSH are configured; unmapped identities and empty maps retain the configured bot
+HTTP transport. GitLab remains token-owned. Commit authors are preserved from Git
+history. See [managed SSH lifecycle and trust](operations/outbound-attribution.md#github-and-git-transport)
+for key reuse, revocation and strict host-key verification.
 
 For an AGS PR linked to a delegated session, the projected Forgejo PR body also
 contains a server-generated `Delegated workload` section with the immutable

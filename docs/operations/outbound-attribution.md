@@ -19,7 +19,8 @@ attribution:
 Keys are AGS `users.login`, never token names. Columns are independent explicit
 provider logins. Do not infer them from commit email, display names or webhook
 `action_principal_bindings` (which is a separate authority contract). No accounts,
-invitations, personal tokens or email bindings are created. Changes take effect
+invitations, personal tokens or email bindings are created. AGS manages one
+long-lived SSH key per mapped Forgejo identity for Git writes. Changes take effect
 on the next separately authorized restart. Case-insensitive duplicate Forgejo
 logins, invalid login/header characters and unknown attribution YAML keys reject
 startup. When configured, startup reads `/user` and mapped `/users/{login}` with
@@ -86,11 +87,56 @@ with the AGS identity and optional mapped GitHub login. Native opener/pusher sta
 the configured token owner. User-to-server tokens are not implemented. GitHub App
 manifest/webhook reception and GitLab projection are unchanged.
 
-Forgejo and GitHub Git pushes still use their configured bot/server credentials.
-A PR timeline `pull_push` entry may name the PR creator, while a push webhook's
-`pusher` and Actions push trigger still name the bot. Do not treat that display
-entry as proof that the Git transport impersonated the user. Compare the exact
-SHA and audit provenance. No personal token is inserted into a Git remote.
+Mapped Forgejo Git pushes authenticate using an AGS-managed ed25519 user key,
+so the native push actor is the mapped Forgejo user. GitHub Git pushes and
+unmapped/empty-map Forgejo pushes retain the configured bot HTTP credential.
+No personal provider token is required and user commit objects are unchanged.
+
+Configure trusted routing explicitly alongside the identity table:
+
+```yaml
+forgejo:
+  managed_ssh:
+    url: ssh://git@forgejo.example.test:2222
+    known_hosts_file: /etc/ags/private/forgejo_known_hosts
+```
+
+The known_hosts file must contain the independently verified provider host key
+for that exact host/port. SSH uses strict host checking, no agent/password or
+user SSH config, and never disables verification. A mapped push fails closed
+if routing, trust, current AGS admission or SSH authentication fails; it never
+replays as bot. Existing ref, forced work-branch and exact lease semantics are
+preserved. Ref readback cannot turn a pre-dispatch authorization/key failure
+into success merely because the remote already has the desired SHA.
+
+Private keys have mode 0600 under `forgejo-managed-ssh/<provider-id>/` beside
+`forgejo.authority_policy.operator_token_file`, or beside `forgejo.token_file`
+when no operator file is configured. The directory is mode 0700. Each key is
+registered by the existing admin API with title
+`ags-managed:<attribution.instance>:<AGS login>`. The same private directory and
+instance name must remain stable. Registration checks the actual public key
+before each use, recovering a deleted provider key without rotating the private
+key. A cross-process file lock serializes creation, registration, revocation
+and push; a second process sharing the directory reuses the same key. Processes
+with different private directories are separate instances and must use distinct
+instance names. SSH user keys inherit that user's Git repository permissions;
+they are neither repository-scoped nor expiring credentials.
+
+AGS rechecks current authorization before key registration, a minimum write ACL
+projection and the push itself. Only an explicit repository mapping can receive
+an ACL projection. This does not weaken protected base branches: a mapped user
+who cannot push a protected ref still receives a provider denial.
+
+At startup, reconciliation revokes locally recorded public keys whose identity
+mapping disappeared or changed, including when the principals table is cleared (retain the instance name). Other instance
+names sharing the private directory are never reconciled by this instance. This is
+the only empty-table lifecycle side effect when prior managed state exists;
+a fresh absent/empty table makes zero key API requests. Configuration changes
+still require the normal separately authorized restart. Reconciliation failure
+rejects startup, and unknown key-creation outcomes are read back rather than
+blindly replayed. Private files and credential-free metadata remain for review
+and potential reuse; removing a mapping revokes the provider credential, not
+historical commits, comments or collaborator ACLs.
 
 ## Diagnostics and rollback
 
@@ -105,7 +151,7 @@ credential/body-free subset is stored as `projection.<op>` audit events; audit
 failure is logged without changing an already-completed provider write.
 No token, Authorization value, authenticated remote or user body belongs in logs.
 
-Modes: `sudo`, `fallback_unmapped`, `fallback_forbidden`, `text_only`, `bot_only`.
+Modes: `ssh` (Git; `target_login` is the authenticated mapped user), `sudo`, `fallback_unmapped`, `fallback_forbidden`, `text_only`, `bot_only`.
 Reasons: `unmapped`, `sudo_404`, `forbidden`, `grant_failed`.
 
 ## Empty-table compatibility and rollback
@@ -115,7 +161,8 @@ original payload and write count, no Sudo, grants, generated close comments, new
 native comment projection, GitHub markers, merge trailers or attribution audits.
 Even legacy operator-token precedence is preserved in this mode. Enabling a
 nonempty map opts into projection-token separation and startup validation; clearing
-the map and separately restarting restores the base credential choice too. Tokens
+the map and separately restarting restores the base credential choice too, after
+revoking any previously managed public keys. Tokens
 are not rotated or narrowed. Tests cover absent and explicit empty independently.
 
 New defaulted provenance columns can remain when downgrading. Never remove or
