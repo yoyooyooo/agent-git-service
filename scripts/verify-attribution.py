@@ -190,6 +190,11 @@ def main():
             assert args.source_repo.startswith('https://github.com/') and args.source_repo.endswith('.git')
             command += f'\ngit clone --filter=blob:none --no-checkout {args.source_repo} source\ngit -C source fetch origin {args.source_sha}\ngit -C source checkout --detach {args.source_sha}\ntest "$(git -C source rev-parse HEAD)" = {args.source_sha}\ncd source\ngo version\ngo test ./internal/attribution ./internal/forgejointegration ./internal/githubintegration ./internal/integrations -count=1 -timeout=120s'
         workflow = {'name':'Attribution acceptance','on':['push','pull_request'],'jobs':{'verify':{'runs-on':'ubuntu-latest','steps':[{'name':'Verify sandbox and exact candidate','run':command}]}}}
+        if args.source_sha:
+            source_root=Path(__file__).resolve().parents[1]
+            version=(source_root/'.go-version').read_text().strip()
+            assert all(c in '0123456789.' for c in version)
+            workflow['jobs']['verify']['container']={'image':'golang:'+version+'-bookworm'}
         (workflows/'attribution.yml').write_text(json.dumps(workflow))
         run(['git','add','.forgejo'],git_env,checkout)
         run(['git','commit','-m','test: sandbox attribution workflow'],git_env,checkout)
