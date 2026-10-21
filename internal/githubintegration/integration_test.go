@@ -241,13 +241,13 @@ func (f *fakeAPIClient) ClosePullRequestForBranch(ctx context.Context, repo, sou
 
 func TestEnsureShadowPullRequestFinalAuthorityDriftMakesZeroProviderWrites(t *testing.T) {
 	pushes := 0
-	integration := New(Config{
+	integration := NewWithClient(Config{
 		Enabled: true, Token: "secret-token", MergeAuthority: "forgejo",
 		Repos: map[string]RepoMapping{"operator/project-kit": {Owner: "example-org", Repo: "project-kit", TargetBranch: "main"}},
 	}, func(context.Context, string, string, string, string) error {
 		pushes++
 		return nil
-	})
+	}, &fakeAPIClient{})
 	checks := 0
 	_, _, err := integration.EnsureShadowPullRequest(context.Background(), ShadowPullRequestRequest{
 		RepoFullName: "operator/project-kit", RepoPath: "/tmp/demo.git", HeadBranch: "agent/demo", HeadSHA: "abc123", BaseBranch: "main",
@@ -390,8 +390,8 @@ func TestCloseShadowPullRequestCommentsAndClosesPR(t *testing.T) {
 	if api.closeRepo != "example-org/project-kit" || api.closeSource != "agent/test" || api.closeTarget != "main" {
 		t.Fatalf("api close=%#v source=%q target=%q", api.closeRepo, api.closeSource, api.closeTarget)
 	}
-	if !strings.Contains(api.closeNote, "Forgejo PR #9 merged") || !strings.Contains(api.closeNote, "def456") {
-		t.Fatalf("note=%q", api.closeNote)
+	if api.closeNote != "" {
+		t.Fatalf("close must not post retry-unsafe comments: %q", api.closeNote)
 	}
 }
 
@@ -457,4 +457,15 @@ func TestHTTPClientCreatesPullRequestWhenNoneOpen(t *testing.T) {
 	if pr.Number != 11 {
 		t.Fatalf("pr=%#v", pr)
 	}
+}
+
+func (c *fakeAPIClient) ObservePullRequest(ctx context.Context, repo string, number int, head, base string) (PullRequest, bool, error) {
+	c.closeRepo = repo
+	c.closeSource = head
+	c.closeTarget = base
+	return PullRequest{Number: 8, State: "open"}, true, nil
+}
+
+func (c *fakeAPIClient) ClosePullRequest(ctx context.Context, repo string, number int) (PullRequest, error) {
+	return PullRequest{Number: number, State: "closed"}, nil
 }

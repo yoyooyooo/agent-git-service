@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/ngaut/agent-git-service/internal/db"
-	"github.com/ngaut/agent-git-service/internal/githubintegration"
 	"github.com/ngaut/agent-git-service/internal/gitlabintegration"
 )
 
@@ -30,9 +29,26 @@ func (s *Service) DispatchPullRequestClosedIntegrations(ctx context.Context, pr 
 	if err := s.DBForCtx(ctx).Where("pull_request_id = ?", pr.ID).Find(&projections).Error; err != nil {
 		return fmt.Errorf("load PR projections for close: %w", err)
 	}
+	// An ensure may have reached GitHub before its response/mapping was lost.
+	// Closing by head/base must remain durable even when no mapping was saved.
+	hasGitHub := false
+	for _, projection := range projections {
+		if projection.Provider == ProjectionProviderGitHub {
+			hasGitHub = true
+		}
+	}
+	missingGitHubFailed := false
+	if !hasGitHub && s.GitHubIntegration != nil && s.GitHubIntegration.ShadowPullRequestsConfigured(repoFullName) {
+		if _, _, err := s.closeGitHubProjectionDurably(ctx, pr); err != nil {
+			missingGitHubFailed = true
+		}
+	}
 	closedProjectionIDs := make([]uint, 0, len(projections))
 	openProjectionCount := 0
 	failedProjectionCount := 0
+	if missingGitHubFailed {
+		failedProjectionCount++
+	}
 	for _, projection := range projections {
 		if projection.State == ProjectionStateClosed {
 			continue
@@ -97,26 +113,12 @@ func (s *Service) closeExternalPullRequestProjection(ctx context.Context, repoFu
 		}
 		return true
 	case ProjectionProviderGitHub:
-		if s.GitHubIntegration == nil {
-			return false
-		}
-		_, handled, err := s.GitHubIntegration.CloseShadowPullRequest(ctx, githubintegration.CloseShadowPullRequestRequest{
-			RepoFullName: repoFullName,
-			HeadBranch:   firstNonEmpty(projection.SourceBranch, pr.HeadRef),
-			BaseBranch:   firstNonEmpty(projection.TargetBranch, pr.BaseRef),
-			PRNumber:     pr.Number,
-			MergedSHA:    firstNonEmpty(pr.HeadSHA, projection.LastSyncedSHA),
-			CloseReason:  fmt.Sprintf("Closed by AGS after AGS PR #%d closed without merge.", pr.Number),
-		})
+		_, _, err := s.closeGitHubProjectionDurably(ctx, pr)
 		if err != nil {
-			slog.WarnContext(ctx, "close GitHub shadow PR projection failed", "repo", repoFullName, "pr_number", pr.Number, "external_number", projection.ExternalNumber, "error", err)
-			return false
+			slog.WarnContext(ctx, "close GitHub shadow PR projection failed", "repo", repoFullName, "pr_number", pr.Number, "error", err)
 		}
-		if !handled {
-			slog.WarnContext(ctx, "GitHub shadow PR projection not found for close", "repo", repoFullName, "pr_number", pr.Number, "external_number", projection.ExternalNumber)
-			return false
-		}
-		return true
+		return err == nil
+
 	}
 	return false
 }

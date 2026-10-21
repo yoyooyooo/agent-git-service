@@ -31,6 +31,10 @@ type driftScanner interface {
 	ScanForgejoProjectionDrift(context.Context, int) (int, error)
 }
 
+type pullRequestStateReconciler interface {
+	ReconcileGitHubPullRequestStates(context.Context, int) (int, error)
+}
+
 type driftAuditor interface {
 	AuditForgejoProjectionDrift(context.Context, int) (int, error)
 }
@@ -179,6 +183,13 @@ func (w *Watcher) reconcileOnce(ctx context.Context, fullAudit bool) (int, int, 
 		}
 	} else if scanner, ok := w.source.(driftScanner); ok {
 		n, err := scanner.ScanForgejoProjectionDrift(ctx, w.cfg.Limit)
+		recorded += n
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if reconciler, ok := w.source.(pullRequestStateReconciler); ok {
+		n, err := reconciler.ReconcileGitHubPullRequestStates(ctx, w.cfg.Limit)
 		recorded += n
 		if err != nil {
 			errs = append(errs, err)

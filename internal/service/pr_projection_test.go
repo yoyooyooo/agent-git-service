@@ -1920,7 +1920,7 @@ func TestUpdatePRCloseMarksExternalProjectionsClosed(t *testing.T) {
 	if gitHubClient.closeSource != "agent/close" || gitHubClient.closeTarget != "main" {
 		t.Fatalf("github close source=%q target=%q", gitHubClient.closeSource, gitHubClient.closeTarget)
 	}
-	if gitHubClient.closeNote == "" || strings.Contains(gitHubClient.closeNote, "merged") {
+	if gitHubClient.closeNote != "" {
 		t.Fatalf("github close note=%q", gitHubClient.closeNote)
 	}
 }

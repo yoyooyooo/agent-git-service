@@ -68,6 +68,10 @@ type Service struct {
 	ForgejoProjectionWorkerRetryDelay  time.Duration
 	GitLabIntegration                  *gitlabintegration.Integration
 	GitHubIntegration                  *githubintegration.Integration
+	DisableGitHubProjectionWorker      bool
+	githubProjectionJobLocks           sync.Map
+	githubProjectionScanMu             sync.Mutex
+	githubProjectionScanCursor         uint
 	MulticaProjection                  *multicaprojection.Projection
 	ExecutionContextPuller             interface {
 		Pull(context.Context, executioncontext.PullRequest) (executioncontext.PullResult, error)

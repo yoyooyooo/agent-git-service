@@ -1261,23 +1261,8 @@ func (s *Service) closeGitHubShadowPullRequest(ctx context.Context, event forgej
 	if s == nil || s.GitHubIntegration == nil {
 		return githubintegration.CloseShadowPullRequestResult{}, false, nil
 	}
-	result, handled, err := s.GitHubIntegration.CloseShadowPullRequest(ctx, githubintegration.CloseShadowPullRequestRequest{
-		RepoFullName: event.RepoFullName,
-		HeadBranch:   event.HeadBranch,
-		BaseBranch:   event.BaseBranch,
-		PRNumber:     event.PRNumber,
-		MergedSHA:    sha,
-	})
-	if err != nil {
-		return result, handled, err
-	}
-	// CloseShadowPullRequest returning handled=false is the ancestry-merged
-	// case (no open GitHub PR). AGS still records the projection as closed
-	// with the Forgejo merged SHA; GitHub is never merge authority.
-	if recordErr := s.recordGitHubShadowProjectionClosed(ctx, pr, result, sha); recordErr != nil {
-		slog.WarnContext(ctx, "record GitHub shadow projection closed failed", "repo", event.RepoFullName, "ags_pr", pr.Number, "sha", sha, "error", recordErr)
-	}
-	return result, handled, nil
+	return s.closeGitHubProjectionDurably(ctx, pr)
+
 }
 
 func forgejoWebhookSignatureFromHeaders(headers http.Header) string {

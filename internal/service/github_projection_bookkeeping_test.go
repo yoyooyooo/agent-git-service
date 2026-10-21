@@ -162,9 +162,13 @@ func TestDispatchGitLabIntegrationDoesNotAdvanceGitHubOpenPRLastSyncedSHA(t *tes
 
 func TestCloseGitHubShadowPullRequestRecordsProjectionClosed(t *testing.T) {
 	svc := setupProjectionStateService(t)
+	svc.DisableGitHubProjectionWorker = true
 	createSHA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	mergedSHA := "dddddddddddddddddddddddddddddddddddddddd"
 	repo, pr := seedOpenHeadPR(t, svc, "example-team/app-fixture", createSHA, 88)
+	if err := svc.DB.Model(&pr).Updates(map[string]any{"state": db.StateClosed, "merged": true, "merge_commit_sha": mergedSHA}).Error; err != nil {
+		t.Fatal(err)
+	}
 	seedProjection(t, svc, pr, ProjectionProviderGitHub, "backup/demo", 6, ProjectionStateOpen, createSHA)
 	seedProjection(t, svc, pr, ProjectionProviderForgejo, "forgejo/demo", 42, ProjectionStateOpen, createSHA)
 	client := &bookkeepingGitHubClient{
@@ -197,9 +201,13 @@ func TestCloseGitHubShadowPullRequestRecordsProjectionClosed(t *testing.T) {
 
 func TestCloseGitHubShadowPullRequestRecordsClosedWhenAlreadyMergedByAncestry(t *testing.T) {
 	svc := setupProjectionStateService(t)
+	svc.DisableGitHubProjectionWorker = true
 	createSHA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	mergedSHA := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	repo, pr := seedOpenHeadPR(t, svc, "example-team/app-fixture", createSHA, 86)
+	if err := svc.DB.Model(&pr).Updates(map[string]any{"state": db.StateClosed, "merged": true, "merge_commit_sha": mergedSHA}).Error; err != nil {
+		t.Fatal(err)
+	}
 	seedProjection(t, svc, pr, ProjectionProviderGitHub, "backup/demo", 9, ProjectionStateOpen, createSHA)
 	client := &bookkeepingGitHubClient{handled: false}
 	svc.GitHubIntegration = githubintegration.NewWithClient(githubintegration.Config{
@@ -210,7 +218,7 @@ func TestCloseGitHubShadowPullRequestRecordsClosedWhenAlreadyMergedByAncestry(t 
 	result, handled, err := svc.closeGitHubShadowPullRequest(context.Background(), forgejointegration.MergedPullRequestEvent{
 		RepoFullName: repo.FullName, PRNumber: 41, HeadBranch: pr.HeadRef, BaseBranch: pr.BaseRef,
 	}, mergedSHA, pr)
-	if err != nil || handled || client.calls != 1 {
+	if err != nil || !handled || client.calls != 1 {
 		t.Fatalf("ancestry-merged close: handled=%v err=%v calls=%d result=%#v", handled, err, client.calls, result)
 	}
 	gitHub := loadProjection(t, svc, pr.ID, ProjectionProviderGitHub)
@@ -221,8 +229,12 @@ func TestCloseGitHubShadowPullRequestRecordsClosedWhenAlreadyMergedByAncestry(t 
 
 func TestCloseGitHubShadowPullRequestFailureDoesNotRewriteProjection(t *testing.T) {
 	svc := setupProjectionStateService(t)
+	svc.DisableGitHubProjectionWorker = true
 	createSHA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	repo, pr := seedOpenHeadPR(t, svc, "example-team/app-fixture", createSHA, 88)
+	if err := svc.DB.Model(&pr).Update("state", db.StateClosed).Error; err != nil {
+		t.Fatal(err)
+	}
 	seedProjection(t, svc, pr, ProjectionProviderGitHub, "backup/demo", 6, ProjectionStateOpen, createSHA)
 	closeErr := errors.New("github close transport failed")
 	client := &bookkeepingGitHubClient{err: closeErr}
@@ -241,4 +253,13 @@ func TestCloseGitHubShadowPullRequestFailureDoesNotRewriteProjection(t *testing.
 	if gitHub.State != ProjectionStateOpen || gitHub.LastSyncedSHA != createSHA {
 		t.Fatalf("failed close must not upsert GitHub projection: %#v", gitHub)
 	}
+}
+
+func (c *bookkeepingGitHubClient) ObservePullRequest(ctx context.Context, repo string, number int, head, base string) (githubintegration.PullRequest, bool, error) {
+	c.calls++
+	return c.pr, c.handled, c.err
+}
+
+func (c *bookkeepingGitHubClient) ClosePullRequest(ctx context.Context, repo string, number int) (githubintegration.PullRequest, error) {
+	return c.pr, c.err
 }

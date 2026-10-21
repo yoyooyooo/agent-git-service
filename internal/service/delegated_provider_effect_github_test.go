@@ -106,3 +106,11 @@ func TestUnboundHistoricalGitHubRebaseFailsClosed(t *testing.T) {
 		t.Fatalf("provider calls for unbound rebase: pushes=%d ensures=%d", pushes, client.ensureCalls)
 	}
 }
+
+func (c *actionGitHubClient) ObservePullRequest(ctx context.Context, repo string, number int, head, base string) (githubintegration.PullRequest, bool, error) {
+	return githubintegration.PullRequest{}, false, nil
+}
+
+func (c *actionGitHubClient) ClosePullRequest(ctx context.Context, repo string, number int) (githubintegration.PullRequest, error) {
+	return githubintegration.PullRequest{Number: number, State: "closed"}, nil
+}

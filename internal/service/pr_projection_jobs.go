@@ -84,7 +84,7 @@ func nonTerminalGenericProjectionConflictWhere() clause.Where {
 }
 
 // EnqueuePullRequestCreatedIntegrations records durable async Forgejo PR projection work
-// and keeps non-Forgejo integrations best-effort. REST/GraphQL PR creation uses this
+// and durable GitHub shadow work; GitLab stays best-effort. REST/GraphQL PR creation uses this
 // instead of running Forgejo git push/PR ensure in the request context.
 func (s *Service) EnqueuePullRequestCreatedIntegrations(ctx context.Context, pr db.PullRequest) error {
 	if s == nil || (s.ForgejoIntegration == nil && s.GitLabIntegration == nil && s.GitHubIntegration == nil) {
@@ -122,11 +122,20 @@ func (s *Service) EnqueuePullRequestCreatedIntegrations(ctx context.Context, pr 
 		}
 	}
 
+	var durableGitHubJob db.PullRequestProjectionJob
+	if s.GitHubIntegration != nil && pr.State == db.StateOpen && !pr.Merged && s.GitHubIntegration.ShadowPullRequestEnabled(repoFullName, pr.HeadRef) {
+		durableGitHubJob, err = s.enqueueGitHubProjection(bgCtx, pr, githubProjectionEnsure)
+		if err != nil {
+			return errors.Join(forgejoErr, err)
+		}
+	}
 	if (s.GitLabIntegration == nil && s.GitHubIntegration == nil) || s.Git == nil {
+		s.scheduleGitHubProjection(bgCtx, durableGitHubJob.ID)
 		return forgejoErr
 	}
 	repoPath, err := s.Git.GetRepoPath(bgCtx, repoFullName)
 	if err != nil {
+		s.scheduleGitHubProjection(bgCtx, durableGitHubJob.ID)
 		if forgejoErr != nil {
 			return errors.Join(forgejoErr, fmt.Errorf("lookup AGS repo path for shadow PR integration: %w", err))
 		}
@@ -193,6 +202,7 @@ func (s *Service) projectionPullRequestFact(ctx context.Context, pullRequestID u
 	if err := s.DBForCtx(ctx).Select(
 		"id", "number", "repository_id", "head_repository_id", "author_id", "agent_session_id",
 		"title", "body", "head_ref", "head_sha", "base_ref", "base_sha", "state", "merged",
+		"merge_commit_sha", "closed_at", "updated_at",
 	).First(&pr, pullRequestID).Error; err != nil {
 		return db.PullRequest{}, fmt.Errorf("load projection PR fact: %w", err)
 	}
