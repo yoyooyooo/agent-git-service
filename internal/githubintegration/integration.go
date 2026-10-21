@@ -161,6 +161,9 @@ type PullRequestInput struct {
 	TargetBranch   string
 	Title          string
 	Body           string
+	// BeforeWrite revalidates authority after observation, immediately before
+	// the HTTP client performs a create or metadata mutation.
+	BeforeWrite func(context.Context) error
 }
 
 // PullRequest is the minimal GitHub PR shape used by AGS.
@@ -492,6 +495,7 @@ func (i *Integration) EnsureShadowPullRequest(ctx context.Context, req ShadowPul
 		TargetBranch:   targetBranch,
 		Title:          firstNonEmpty(req.Title, fmt.Sprintf("%s -> %s", req.HeadBranch, targetBranch)),
 		Body:           shadowPRBody(req),
+		BeforeWrite:    req.BeforeWrite,
 	})
 	if err != nil {
 		return ShadowPullRequestResult{}, false, err
@@ -775,6 +779,9 @@ func (c *HTTPClient) EnsurePullRequest(ctx context.Context, repo string, in Pull
 		"title": in.Title,
 		"body":  in.Body,
 	}
+	if err := runBeforeWrite(ctx, in.BeforeWrite); err != nil {
+		return PullRequest{}, err
+	}
 	status, response, err := c.request(ctx, http.MethodPost, "/repos/"+repo+"/pulls", body)
 	if err != nil {
 		return PullRequest{}, err
@@ -799,6 +806,9 @@ func (c *HTTPClient) reconcilePullRequestMetadata(ctx context.Context, repo stri
 	}
 	if len(update) == 0 {
 		return existing, nil
+	}
+	if err := runBeforeWrite(ctx, in.BeforeWrite); err != nil {
+		return PullRequest{}, err
 	}
 	status, response, err := c.request(ctx, http.MethodPatch, fmt.Sprintf("/repos/%s/pulls/%d", repo, existing.Number), update)
 	if err != nil {
