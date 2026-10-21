@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +26,12 @@ const (
 	githubProjectionAttemptTimeout = time.Minute
 )
 
+func gitHubProjectionDesiredFact(pr db.PullRequest) string {
+	fact, _ := json.Marshal([]string{pr.HeadSHA, pr.HeadRef, pr.BaseRef, pr.Title, string(pr.Body)})
+	digest := sha256.Sum256(fact)
+	return hex.EncodeToString(digest[:])
+}
+
 // One provider row carries the desired state. A close supersedes ensure and
 // invalidates its claim; duplicate dispatch never resets attempts or backoff.
 func (s *Service) enqueueGitHubProjection(ctx context.Context, pr db.PullRequest, trigger string) (db.PullRequestProjectionJob, error) {
@@ -33,11 +42,12 @@ func (s *Service) enqueueGitHubProjection(ctx context.Context, pr db.PullRequest
 	now := time.Now().UTC()
 	job := db.PullRequestProjectionJob{PullRequestID: pr.ID, RepositoryID: pr.RepositoryID, AgentSessionID: pr.AgentSessionID,
 		Provider: ProjectionProviderGitHub, Trigger: trigger, RepoFullName: repo, AGSPRNumber: pr.Number,
-		HeadRef: pr.HeadRef, BaseRef: pr.BaseRef, HeadSHA: pr.HeadSHA, Phase: ForgejoProjectionPhaseQueued, NextRunAt: &now}
+		HeadRef: pr.HeadRef, BaseRef: pr.BaseRef, HeadSHA: pr.HeadSHA, GitHubDesiredFactHash: gitHubProjectionDesiredFact(pr), Phase: ForgejoProjectionPhaseQueued, NextRunAt: &now}
 	database := s.DBForCtx(ctx)
 	if err := database.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "pull_request_id"}, {Name: "provider"}}, DoNothing: true}).Create(&job).Error; err != nil {
 		return job, err
 	}
+	job = db.PullRequestProjectionJob{}
 	if err := database.Where("pull_request_id = ? AND provider = ?", pr.ID, ProjectionProviderGitHub).First(&job).Error; err != nil {
 		return job, err
 	}
@@ -47,17 +57,21 @@ func (s *Service) enqueueGitHubProjection(ctx context.Context, pr db.PullRequest
 		if result.Error != nil {
 			return job, result.Error
 		}
-		if err := database.First(&job, job.ID).Error; err != nil {
+		id := job.ID
+		job = db.PullRequestProjectionJob{}
+		if err := database.First(&job, id).Error; err != nil {
 			return job, err
 		}
 	}
-	if trigger == githubProjectionEnsure && job.Trigger == trigger && job.Phase == ForgejoProjectionPhaseProjected && job.HeadSHA != pr.HeadSHA {
-		result := database.Model(&db.PullRequestProjectionJob{}).Where("id = ? AND `trigger` = ? AND phase = ? AND attempt = ?", job.ID, trigger, job.Phase, job.Attempt).
-			Updates(map[string]any{"head_sha": pr.HeadSHA, "head_ref": pr.HeadRef, "base_ref": pr.BaseRef, "phase": ForgejoProjectionPhaseQueued, "attempt": 0, "next_run_at": now, "finished_at": nil})
+	if trigger == githubProjectionEnsure && job.Trigger == trigger && job.GitHubDesiredFactHash != gitHubProjectionDesiredFact(pr) {
+		result := database.Model(&db.PullRequestProjectionJob{}).Where("id = ? AND `trigger` = ? AND phase = ? AND attempt = ? AND (next_run_at = ? OR (next_run_at IS NULL AND ? IS NULL))", job.ID, trigger, job.Phase, job.Attempt, job.NextRunAt, job.NextRunAt).
+			Updates(map[string]any{"github_desired_fact_hash": gitHubProjectionDesiredFact(pr), "head_sha": pr.HeadSHA, "head_ref": pr.HeadRef, "base_ref": pr.BaseRef, "phase": ForgejoProjectionPhaseQueued, "attempt": 0, "next_run_at": now, "finished_at": nil})
 		if result.Error != nil {
 			return job, result.Error
 		}
-		if err := database.First(&job, job.ID).Error; err != nil {
+		id := job.ID
+		job = db.PullRequestProjectionJob{}
+		if err := database.First(&job, id).Error; err != nil {
 			return job, err
 		}
 	}
@@ -82,26 +96,31 @@ func (s *Service) claimGitHubProjection(ctx context.Context, job db.PullRequestP
 		return job, false, nil
 	}
 	if job.Attempt >= githubProjectionMaxAttempts {
-		err := s.DBForCtx(ctx).Model(&db.PullRequestProjectionJob{}).Where("id = ? AND `trigger` = ? AND attempt = ?", job.ID, job.Trigger, job.Attempt).
+		err := s.DBForCtx(ctx).Model(&db.PullRequestProjectionJob{}).Where("id = ? AND `trigger` = ? AND phase = ? AND attempt = ? AND (next_run_at IS NULL OR next_run_at <= ?) AND (next_run_at = ? OR (next_run_at IS NULL AND ? IS NULL))", job.ID, job.Trigger, job.Phase, job.Attempt, now, job.NextRunAt, job.NextRunAt).
 			Updates(map[string]any{"phase": ForgejoProjectionPhaseFailedTerminal, "next_run_at": nil, "finished_at": now}).Error
 		return job, false, err
 	}
-	lease := now.Add(githubProjectionAttemptTimeout)
+	// Match the deployed MySQL/TiDB datetime(3) lease precision without
+	// rounding the due-time comparison back before a just-enqueued job.
+	lease := now.Add(githubProjectionAttemptTimeout).Truncate(time.Millisecond)
 	result := s.DBForCtx(ctx).Model(&db.PullRequestProjectionJob{}).
 		Where("id = ? AND `trigger` = ? AND phase = ? AND attempt = ? AND (next_run_at IS NULL OR next_run_at <= ?) AND (next_run_at = ? OR (next_run_at IS NULL AND ? IS NULL))", job.ID, job.Trigger, job.Phase, job.Attempt, now, job.NextRunAt, job.NextRunAt).
 		Updates(map[string]any{"attempt": job.Attempt + 1, "phase": ForgejoProjectionPhasePreflight, "next_run_at": lease, "started_at": now, "finished_at": nil})
 	if result.Error != nil || result.RowsAffected != 1 {
 		return job, false, result.Error
 	}
-	if err := s.DBForCtx(ctx).First(&job, job.ID).Error; err != nil {
-		return job, false, err
-	}
+	// Return only our own CAS values, never a newer worker's fencing token.
+	job.Attempt++
+	job.Phase = ForgejoProjectionPhasePreflight
+	job.NextRunAt = &lease
+	job.StartedAt = &now
+	job.FinishedAt = nil
 	return job, true, nil
 }
 
 func (s *Service) gitHubProjectionClaimScope(ctx context.Context, job db.PullRequestProjectionJob) *gorm.DB {
 	return s.DBForCtx(ctx).Model(&db.PullRequestProjectionJob{}).
-		Where("id = ? AND provider = ? AND `trigger` = ? AND attempt = ? AND phase = ? AND next_run_at = ?", job.ID, ProjectionProviderGitHub, job.Trigger, job.Attempt, ForgejoProjectionPhasePreflight, job.NextRunAt)
+		Where("id = ? AND provider = ? AND `trigger` = ? AND attempt = ? AND phase = ? AND next_run_at = ? AND (github_desired_fact_hash = ? OR (github_desired_fact_hash IS NULL AND ? = ''))", job.ID, ProjectionProviderGitHub, job.Trigger, job.Attempt, ForgejoProjectionPhasePreflight, job.NextRunAt, job.GitHubDesiredFactHash, job.GitHubDesiredFactHash)
 }
 
 func (s *Service) revalidateGitHubProjectionWrite(ctx context.Context, job db.PullRequestProjectionJob) error {
@@ -115,6 +134,9 @@ func (s *Service) revalidateGitHubProjectionWrite(ctx context.Context, job db.Pu
 	pr, err := s.projectionPullRequestFact(ctx, job.PullRequestID)
 	if err != nil {
 		return err
+	}
+	if job.GitHubDesiredFactHash != "" && gitHubProjectionDesiredFact(pr) != job.GitHubDesiredFactHash {
+		return errGenericProjectionClaimChanged
 	}
 	if pr.State != db.StateOpen || pr.Merged {
 		return fmt.Errorf("AGS PR no longer open: %w", ErrInvalidState)
@@ -246,6 +268,9 @@ func (s *Service) finishGitHubProjection(ctx context.Context, job db.PullRequest
 		}
 		if job.Trigger == githubProjectionClose && current.State == db.StateOpen && !current.Merged {
 			return ErrInvalidState
+		}
+		if job.Trigger == githubProjectionEnsure && record != nil && job.GitHubDesiredFactHash != "" && gitHubProjectionDesiredFact(current) != job.GitHubDesiredFactHash {
+			return errGenericProjectionClaimChanged
 		}
 		txCtx := ContextWithDB(ctx, tx)
 		result := s.gitHubProjectionClaimScope(txCtx, job).Where("next_run_at > ?", time.Now().UTC()).Updates(map[string]any{"phase": ForgejoProjectionPhaseProjected, "next_run_at": nil, "finished_at": time.Now().UTC(), "last_error": "", "last_error_type": ""})

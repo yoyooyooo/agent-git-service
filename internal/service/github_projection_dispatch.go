@@ -55,7 +55,7 @@ func (s *Service) ensureGitHubShadowPullRequest(ctx context.Context, repoFullNam
 		return githubintegration.ShadowPullRequestResult{}, false, err
 	}
 	row, ok, err := s.gitHubProjection(ctx, pr.ID)
-	return githubintegration.ShadowPullRequestResult{TargetRepo: row.ExternalRepo, Number: row.ExternalNumber, WebURL: row.ExternalURL, SourceBranch: row.SourceBranch, TargetBranch: row.TargetBranch}, ok, err
+	return githubintegration.ShadowPullRequestResult{TargetRepo: row.ExternalRepo, Number: row.ExternalNumber, WebURL: row.ExternalURL, SourceBranch: row.SourceBranch, TargetBranch: row.TargetBranch, State: row.State}, ok, err
 }
 
 func (s *Service) closeGitHubProjectionDurably(ctx context.Context, pr db.PullRequest) (githubintegration.CloseShadowPullRequestResult, bool, error) {

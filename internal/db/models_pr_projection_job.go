@@ -15,26 +15,28 @@ type PullRequestProjectionJob struct {
 	// ActionIntentID binds an action-rebase generation to its exact durable
 	// authority record. It remains nullable for historical and generic projection
 	// jobs; action workers fail closed when the binding is absent.
-	ActionIntentID            *string `gorm:"size:64;uniqueIndex:idx_pr_projection_job_action_intent"`
-	Provider                  string  `gorm:"size:32;not null;uniqueIndex:idx_pr_projection_job_pr_provider;index:idx_pr_projection_job_provider_phase_next,priority:1"`
-	Trigger                   string  `gorm:"size:64;not null;default:'pull_request_projection';index"`
-	ActionGeneration          uint    `gorm:"not null;default:0"`
-	CorrelationID             string  `gorm:"size:255;index"`
-	RepoFullName              string  `gorm:"size:512;not null;index"`
-	AGSPRNumber               int     `gorm:"column:ags_pr_number;not null;index"`
-	HeadRef                   string  `gorm:"size:255;index"`
-	BaseRef                   string  `gorm:"size:255;index"`
-	HeadSHA                   string  `gorm:"size:40;index"`
-	PreflightAGSHeadSHA       string  `gorm:"size:40;index"`
-	PreflightBaseSHA          string  `gorm:"size:40;index"`
-	ExpectedForgejoOldHeadSHA string  `gorm:"size:40;index"`
-	DesiredAGSHeadSHA         string  `gorm:"size:40;index"`
-	ObservedForgejoHeadSHA    string  `gorm:"size:40;index"`
-	Phase                     string  `gorm:"size:32;not null;default:'queued';index:idx_pr_projection_job_provider_phase_next,priority:3"`
-	Attempt                   int     `gorm:"not null;default:0"`
-	LastErrorType             string  `gorm:"size:96"`
-	LastError                 string  `gorm:"type:text"`
-	ExternalRepo              string  `gorm:"size:512"`
+	ActionIntentID   *string `gorm:"size:64;uniqueIndex:idx_pr_projection_job_action_intent"`
+	Provider         string  `gorm:"size:32;not null;uniqueIndex:idx_pr_projection_job_pr_provider;index:idx_pr_projection_job_provider_phase_next,priority:1"`
+	Trigger          string  `gorm:"size:64;not null;default:'pull_request_projection';index"`
+	ActionGeneration uint    `gorm:"not null;default:0"`
+	CorrelationID    string  `gorm:"size:255;index"`
+	RepoFullName     string  `gorm:"size:512;not null;index"`
+	AGSPRNumber      int     `gorm:"column:ags_pr_number;not null;index"`
+	HeadRef          string  `gorm:"size:255;index"`
+	BaseRef          string  `gorm:"size:255;index"`
+	// GitHubDesiredFactHash fences title/body/ref/SHA refreshes without storing user text.
+	GitHubDesiredFactHash     string `gorm:"column:github_desired_fact_hash;size:64"`
+	HeadSHA                   string `gorm:"size:40;index"`
+	PreflightAGSHeadSHA       string `gorm:"size:40;index"`
+	PreflightBaseSHA          string `gorm:"size:40;index"`
+	ExpectedForgejoOldHeadSHA string `gorm:"size:40;index"`
+	DesiredAGSHeadSHA         string `gorm:"size:40;index"`
+	ObservedForgejoHeadSHA    string `gorm:"size:40;index"`
+	Phase                     string `gorm:"size:32;not null;default:'queued';index:idx_pr_projection_job_provider_phase_next,priority:3"`
+	Attempt                   int    `gorm:"not null;default:0"`
+	LastErrorType             string `gorm:"size:96"`
+	LastError                 string `gorm:"type:text"`
+	ExternalRepo              string `gorm:"size:512"`
 	ExternalNumber            int
 	ExternalURL               string     `gorm:"size:2048"`
 	RemoteRef                 string     `gorm:"size:512"`

@@ -114,3 +114,28 @@ func (c *actionGitHubClient) ObservePullRequest(ctx context.Context, repo string
 func (c *actionGitHubClient) ClosePullRequest(ctx context.Context, repo string, number int) (githubintegration.PullRequest, error) {
 	return githubintegration.PullRequest{Number: number, State: "closed"}, nil
 }
+
+func TestGitHubActionBoundEnsurePreservesTerminalShadowIdentity(t *testing.T) {
+	svc, pr, projection := setupIntentTestService(t)
+	intent := seedDispatchedIntent(t, svc, pr, projection)
+	job := db.PullRequestProjectionJob{PullRequestID: pr.ID, RepositoryID: pr.RepositoryID, Provider: ProjectionProviderForgejo, Trigger: ForgejoProjectionTriggerActionRebase, RepoFullName: "example-owner/demo", AGSPRNumber: pr.Number, HeadRef: pr.HeadRef, BaseRef: pr.BaseRef, Phase: ForgejoProjectionPhasePushingRef}
+	ctx := bindTestActionJob(t, svc, intent, &job)
+	if err := svc.DB.Create(&job).Error; err != nil {
+		t.Fatal(err)
+	}
+	seedProjection(t, svc, pr, ProjectionProviderGitHub, "fixture/repo", 8, ProjectionStateOpen, pr.HeadSHA)
+	client := &retryGitHubClient{exists: true, remote: githubintegration.PullRequest{Number: 8, State: "closed"}}
+	pushes := 0
+	svc.GitHubIntegration = githubintegration.NewWithClient(githubintegration.Config{Enabled: true, Token: "synthetic", Repos: map[string]githubintegration.RepoMapping{"example-owner/demo": {Owner: "fixture", Repo: "repo"}}}, func(context.Context, string, string, string, string) error { pushes++; return nil }, client)
+	res, handled, err := svc.ensureGitHubShadowPullRequest(ctx, "example-owner/demo", "/fixture.git", pr.HeadSHA, pr)
+	if err != nil || !handled || res.State != "closed" || res.Number != 8 {
+		t.Fatalf("res=%+v handled=%v err=%v", res, handled, err)
+	}
+	if len(client.observations) != 1 || client.observations[0] != 8 || pushes != 0 || client.ensures != 0 || loadProjection(t, svc, pr.ID, ProjectionProviderGitHub).State != ProjectionStateClosed {
+		t.Fatalf("identity/state lost: %+v", client)
+	}
+	current, err := svc.projectionPullRequestFact(ctx, pr.ID)
+	if err != nil || current.State != db.StateOpen || current.Merged {
+		t.Fatalf("AGS state changed: %+v %v", current, err)
+	}
+}

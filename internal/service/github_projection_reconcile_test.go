@@ -126,3 +126,18 @@ func TestGitHubProjectionOpenAGSAndClosedShadowDoesNotReopen(t *testing.T) {
 		t.Fatalf("unexpected state changes: projection=%+v PR=%+v client=%+v", row, current, client)
 	}
 }
+
+func TestGitHubProjectionWatchRepairsTerminalStateForOpenAGS(t *testing.T) {
+	svc, pr, client, pushes := retryGitHubService(t)
+	seedProjection(t, svc, pr, ProjectionProviderGitHub, "fixture/repo", 8, ProjectionStateOpen, pr.HeadSHA)
+	client.exists = true
+	client.remote = githubintegration.PullRequest{Number: 8, State: "closed"}
+	changed, err := svc.reconcileGitHubPullRequestState(context.Background(), pr.ID)
+	if err != nil || !changed || loadProjection(t, svc, pr.ID, ProjectionProviderGitHub).State != ProjectionStateClosed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	current, err := svc.projectionPullRequestFact(context.Background(), pr.ID)
+	if err != nil || current.State != db.StateOpen || current.Merged || client.closes != 0 || client.ensures != 0 || *pushes != 0 {
+		t.Fatalf("AGS fact or remote changed: pr=%+v client=%+v err=%v", current, client, err)
+	}
+}

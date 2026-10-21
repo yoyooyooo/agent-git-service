@@ -10,6 +10,7 @@ import (
 	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/githubintegration"
 	"github.com/ngaut/agent-git-service/internal/multicaprojection"
+	"gorm.io/gorm"
 )
 
 type retryGitHubClient struct {
@@ -21,14 +22,16 @@ type retryGitHubClient struct {
 	observations []int
 	closes       int
 	ensures      int
+	inputs       []githubintegration.PullRequestInput
 }
 
 func (c *retryGitHubClient) ObservePullRequest(_ context.Context, _ string, number int, _, _ string) (githubintegration.PullRequest, bool, error) {
 	c.observations = append(c.observations, number)
 	return c.remote, c.exists, c.observeErr
 }
-func (c *retryGitHubClient) EnsurePullRequest(context.Context, string, githubintegration.PullRequestInput) (githubintegration.PullRequest, error) {
+func (c *retryGitHubClient) EnsurePullRequest(_ context.Context, _ string, in githubintegration.PullRequestInput) (githubintegration.PullRequest, error) {
 	c.ensures++
+	c.inputs = append(c.inputs, in)
 	if c.ensureErr != nil {
 		return githubintegration.PullRequest{}, c.ensureErr
 	}
@@ -52,6 +55,7 @@ func retryGitHubService(t *testing.T) (*Service, db.PullRequest, *retryGitHubCli
 	t.Helper()
 	svc := setupProjectionStateService(t)
 	svc.DisableGitHubProjectionWorker = true
+	svc.BaseURL = "https://ags.example"
 	_, pr := seedOpenHeadPR(t, svc, "work/eligible", strings.Repeat("a", 40), 91)
 	client := &retryGitHubClient{}
 	pushes := new(int)
@@ -314,5 +318,136 @@ func TestGitHubProjectionCloseWithoutMappingRetiresUnknownEnsure(t *testing.T) {
 	row := loadProjection(t, svc, pr.ID, ProjectionProviderGitHub)
 	if row.State != ProjectionStateClosed || client.closes != 1 || client.ensures != 0 || *pushes != 0 || client.observations[0] != 0 {
 		t.Fatalf("row=%+v client=%+v", row, client)
+	}
+}
+
+func TestGitHubProjectionClaimDoesNotAdoptSupersedingWorkerToken(t *testing.T) {
+	svc, pr, _, _ := retryGitHubService(t)
+	ctx := context.Background()
+	job, err := svc.enqueueGitHubProjection(ctx, pr, githubProjectionEnsure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fired := false
+	// Supersede A's successful claim before it returns, in the same database
+	// transaction. This deterministically exercises the former reload window.
+	const callback = "test:supersede_github_claim"
+	if err := svc.DB.Callback().Update().After("gorm:update").Register(callback, func(tx *gorm.DB) {
+		if fired || tx.Statement.Table != "pull_request_projection_jobs" {
+			return
+		}
+		fired = true
+		otherLease := time.Now().UTC().Add(2 * time.Minute)
+		if err := tx.Session(&gorm.Session{NewDB: true}).Model(&db.PullRequestProjectionJob{}).Where("id = ?", job.ID).Updates(map[string]any{"trigger": githubProjectionClose, "attempt": 1, "phase": ForgejoProjectionPhasePreflight, "next_run_at": otherLease}).Error; err != nil {
+			tx.AddError(err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.DB.Callback().Update().Remove(callback) })
+	claimed, ok, err := svc.claimGitHubProjection(ctx, job)
+	if err != nil || !ok || !fired {
+		t.Fatalf("claim=%+v ok=%v fired=%v err=%v", claimed, ok, fired, err)
+	}
+	current := githubJob(t, svc, pr)
+	if claimed.Trigger != githubProjectionEnsure || claimed.Attempt != 1 || claimed.NextRunAt.Equal(*current.NextRunAt) {
+		t.Fatalf("adopted successor token: claim=%+v current=%+v", claimed, current)
+	}
+	if err := svc.revalidateGitHubProjectionWrite(ctx, claimed); !errors.Is(err, errGenericProjectionClaimChanged) {
+		t.Fatalf("stale write authority: %v", err)
+	}
+	if err := svc.finishGitHubProjection(ctx, claimed, nil); !errors.Is(err, errGenericProjectionClaimChanged) {
+		t.Fatalf("stale completion: %v", err)
+	}
+}
+
+func TestGitHubProjectionStaleExhaustionCannotOverwriteCompletion(t *testing.T) {
+	svc, pr, _, _ := retryGitHubService(t)
+	ctx := context.Background()
+	job, err := svc.enqueueGitHubProjection(ctx, pr, githubProjectionEnsure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DB.Model(&job).Update("attempt", githubProjectionMaxAttempts-1).Error; err != nil {
+		t.Fatal(err)
+	}
+	job = githubJob(t, svc, pr)
+	claim, ok, err := svc.claimGitHubProjection(ctx, job)
+	if err != nil || !ok {
+		t.Fatalf("claim=%v %v", ok, err)
+	}
+	// Shorten only this fixture's lease so the delayed scheduler can run after
+	// successful completion with its previously loaded fifth-attempt snapshot.
+	lease := time.Now().UTC().Add(100 * time.Millisecond)
+	if err := svc.DB.Model(&job).Update("next_run_at", lease).Error; err != nil {
+		t.Fatal(err)
+	}
+	claim = githubJob(t, svc, pr)
+	if err := svc.finishGitHubProjection(ctx, claim, func(txCtx context.Context) error {
+		return svc.UpsertPullRequestProjection(txCtx, db.PullRequestProjection{PullRequestID: pr.ID, RepositoryID: pr.RepositoryID, Provider: ProjectionProviderGitHub, ExternalRepo: "fixture/repo", ExternalNumber: 8, State: ProjectionStateOpen})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Until(lease) + time.Millisecond)
+	if _, ok, err := svc.claimGitHubProjection(ctx, claim); err != nil || ok {
+		t.Fatalf("stale scheduler=%v %v", ok, err)
+	}
+	current := githubJob(t, svc, pr)
+	if current.Phase != ForgejoProjectionPhaseProjected || loadProjection(t, svc, pr.ID, ProjectionProviderGitHub).ExternalNumber != 8 {
+		t.Fatalf("completion overwritten: %+v", current)
+	}
+}
+
+func TestGitHubProjectionRefreshesMetadataWithoutSHAChange(t *testing.T) {
+	svc, pr, client, _ := retryGitHubService(t)
+	ctx := context.Background()
+	for _, field := range []string{"initial", "title", "body", "duplicate"} {
+		switch field {
+		case "title":
+			pr.Title = "updated title"
+		case "body":
+			pr.Body = "updated body"
+		}
+		if err := svc.DB.Model(&pr).Updates(map[string]any{"title": pr.Title, "body": pr.Body}).Error; err != nil {
+			t.Fatal(err)
+		}
+		res, handled, err := svc.ensureGitHubShadowPullRequest(ctx, "example-owner/demo", "/fixture.git", pr.HeadSHA, pr)
+		if err != nil || !handled || res.Number != 8 {
+			t.Fatalf("%s: res=%+v handled=%v err=%v", field, res, handled, err)
+		}
+	}
+	if client.ensures != 3 || len(client.inputs) != 3 || client.inputs[1].Title != "updated title" || !strings.Contains(client.inputs[2].Body, "updated body") {
+		t.Fatalf("metadata refresh lost: %+v", client)
+	}
+	job := githubJob(t, svc, pr)
+	if job.HeadSHA != pr.HeadSHA || job.GitHubDesiredFactHash != gitHubProjectionDesiredFact(pr) || job.Phase != ForgejoProjectionPhaseProjected {
+		t.Fatalf("receipt=%+v", job)
+	}
+}
+
+func TestGitHubProjectionMetadataChangeFencesInflightEnsure(t *testing.T) {
+	svc, pr, _, _ := retryGitHubService(t)
+	ctx := context.Background()
+	job, err := svc.enqueueGitHubProjection(ctx, pr, githubProjectionEnsure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := svc.claimGitHubProjection(ctx, job)
+	if err != nil || !ok {
+		t.Fatalf("claim=%v %v", ok, err)
+	}
+	pr.Title = "changed during ensure"
+	if err := svc.DB.Model(&pr).Update("title", pr.Title).Error; err != nil {
+		t.Fatal(err)
+	}
+	refresh, err := svc.enqueueGitHubProjection(ctx, pr, githubProjectionEnsure)
+	if err != nil || refresh.Phase != ForgejoProjectionPhaseQueued || refresh.Attempt != 0 {
+		t.Fatalf("refresh=%+v err=%v", refresh, err)
+	}
+	if err := svc.revalidateGitHubProjectionWrite(ctx, claim); !errors.Is(err, errGenericProjectionClaimChanged) {
+		t.Fatalf("old metadata write allowed: %v", err)
+	}
+	if err := svc.finishGitHubProjection(ctx, claim, func(context.Context) error { t.Fatal("stale fact materialized"); return nil }); !errors.Is(err, errGenericProjectionClaimChanged) {
+		t.Fatalf("old receipt accepted: %v", err)
 	}
 }
