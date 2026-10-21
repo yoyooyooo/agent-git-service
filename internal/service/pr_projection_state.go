@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/gitlabintegration"
 )
@@ -25,6 +26,7 @@ func (s *Service) DispatchPullRequestClosedIntegrations(ctx context.Context, pr 
 		pr.Repository = repo
 	}
 
+	ctx = attribution.WithCoordinates(ctx, repoFullName, pr.Number)
 	var projections []db.PullRequestProjection
 	if err := s.DBForCtx(ctx).Where("pull_request_id = ?", pr.ID).Find(&projections).Error; err != nil {
 		return fmt.Errorf("load PR projections for close: %w", err)

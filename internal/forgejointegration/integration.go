@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"github.com/ngaut/agent-git-service/internal/gittransport"
 )
 
@@ -23,6 +24,8 @@ var defaultPushGitConfig = []string{"core.compression=0", "pack.window=0"}
 
 // Config controls the optional AGS -> Forgejo post-push integration.
 type Config struct {
+	Attribution          attribution.Config
+	TokenOwner           string
 	Enabled              bool
 	BaseURL              string
 	Token                string // Server-owned Forgejo admin credential.
@@ -337,6 +340,7 @@ func NewWithGitCapabilities(cfg Config, client Client, pusher GitPusher, remoteR
 	cfg = cfg.withDefaults()
 	if client == nil {
 		client = newAdminHTTPClient(cfg.BaseURL, cfg.Token)
+		client.(*HTTPClient).configureAttribution(cfg)
 	}
 	var authorityClient repositoryAuthorityClient
 	if candidate, ok := client.(repositoryAuthorityClient); ok {
@@ -347,6 +351,16 @@ func NewWithGitCapabilities(cfg Config, client Client, pusher GitPusher, remoteR
 	}
 	if remoteRef == nil {
 		remoteRef = GitRemoteRefSHA
+	}
+	rawPush := pusher
+	pusher = func(ctx context.Context, req PushRequest) error {
+		err := rawPush(ctx, req)
+		status := 0
+		if err != nil {
+			status = 1
+		}
+		attribution.Log(ctx, cfg.Attribution, "forgejo", "push_ref", req.Repo.Owner+"/"+req.Repo.Repo, cfg.TokenOwner, "", "bot_only", 0, status, false, "")
+		return err
 	}
 	integration := &Integration{cfg: cfg, client: client, authorityClient: authorityClient, push: pusher, remoteRef: remoteRef}
 	integration.backupTag = integration.createRemoteBackupTag

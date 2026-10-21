@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"log/slog"
 	"net/http"
 	"os/exec"
@@ -78,7 +79,7 @@ func (s *Service) HandleForgejoWebhook(ctx context.Context, headers http.Header,
 		return s.handleForgejoPullRequestActionLabel(ctx, actionEvent)
 	}
 	if !closedEvent.Merged {
-		agsPR, err := s.MarkPullRequestClosedFromProjection(ctx, ProjectionProviderForgejo, closedEvent.RepoFullName, closedEvent.PRNumber, "forgejo")
+		agsPR, err := s.MarkPullRequestClosedFromProjection(ctx, ProjectionProviderForgejo, closedEvent.RepoFullName, closedEvent.PRNumber, s.ForgejoIntegration.AGSLoginForActor(closedEvent.SenderLogin))
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
 				slog.WarnContext(ctx, "ignore closed Forgejo PR without AGS projection", "forgejo_repo", closedEvent.RepoFullName, "forgejo_pr", closedEvent.PRNumber)
@@ -89,6 +90,7 @@ func (s *Service) HandleForgejoWebhook(ctx context.Context, headers http.Header,
 		return ForgejoWebhookResult{Handled: true, RepoFullName: closedEvent.RepoFullName, PRNumber: closedEvent.PRNumber, BaseBranch: closedEvent.BaseBranch, AGSPRNumber: agsPR.Number}, nil
 	}
 	event := forgejointegration.MergedPullRequestEvent{
+		SenderLogin:  closedEvent.SenderLogin,
 		RepoFullName: closedEvent.RepoFullName,
 		PRNumber:     closedEvent.PRNumber,
 		PRURL:        closedEvent.PRURL,
@@ -102,13 +104,21 @@ func (s *Service) HandleForgejoWebhook(ctx context.Context, headers http.Header,
 	if errors.Is(err, ErrNotFound) {
 		return s.handleUnmappedForgejoMergedPullRequest(ctx, event)
 	}
+	// Signed webhook provenance is text/audit only, not a service user or grant.
+	login := s.ForgejoIntegration.AGSLoginForActor(event.SenderLogin)
+	if login != "forgejo" {
+		var actor db.User
+		if s.DBForCtx(ctx).Select("id", "login").Where("login = ?", login).First(&actor).Error == nil {
+			ctx = attribution.WithActor(ctx, attribution.Actor{UserID: actor.ID, Login: actor.Login, Repo: agsPR.Repository.FullName, PR: agsPR.Number})
+		}
+	}
 	agsEvent := event
 	agsEvent.RepoFullName = agsPR.Repository.FullName
 	sha, err := s.syncForgejoMergedBranchToAGS(ctx, agsEvent)
 	if err != nil {
 		return ForgejoWebhookResult{}, err
 	}
-	agsPR, err = s.MarkPullRequestMergedFromProjection(ctx, ProjectionProviderForgejo, event.RepoFullName, event.PRNumber, sha, "forgejo")
+	agsPR, err = s.MarkPullRequestMergedFromProjection(ctx, ProjectionProviderForgejo, event.RepoFullName, event.PRNumber, sha, s.ForgejoIntegration.AGSLoginForActor(event.SenderLogin))
 	if err != nil {
 		return ForgejoWebhookResult{}, fmt.Errorf("record AGS PR merge from Forgejo projection: %w", err)
 	}

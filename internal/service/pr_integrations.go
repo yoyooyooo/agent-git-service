@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/forgejointegration"
 	"github.com/ngaut/agent-git-service/internal/githubintegration"
@@ -275,6 +276,7 @@ func (s *Service) ensureForgejoPullRequestExternalWithPolicyAndAuthority(ctx con
 	if s.ForgejoIntegration == nil {
 		return forgejointegration.PullRequestResult{}, false, nil
 	}
+	ctx = attribution.WithCoordinates(ctx, repoFullName, pr.Number)
 	body := s.forgejoPullRequestBody(ctx, repoFullName, pr)
 	request := forgejointegration.PullRequestSyncRequest{
 		RepoFullName: repoFullName,
@@ -600,6 +602,7 @@ func (s *Service) ensureGitHubShadowPullRequestOnce(ctx context.Context, repoFul
 	if target, configured := s.GitHubIntegration.TargetRepoFor(repoFullName); configured && projection.ExternalRepo != "" && projection.ExternalRepo != target {
 		return githubintegration.ShadowPullRequestResult{}, false, fmt.Errorf("GitHub projection target changed: %w", ErrInvalidState)
 	}
+	ctx = attribution.WithCoordinates(ctx, repoFullName, pr.Number)
 	res, handled, err := s.GitHubIntegration.EnsureShadowPullRequest(ctx, githubintegration.ShadowPullRequestRequest{
 		RepoFullName:   repoFullName,
 		RepoPath:       repoPath,

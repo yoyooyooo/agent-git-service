@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/forgejointegration"
 )
@@ -30,6 +31,7 @@ func (s *Service) DispatchForgejoIntegration(ctx context.Context, repoFullName, 
 		_ = s.RecordForgejoProjectionFailure(ctx, repoFullName, changes, err)
 		return err
 	}
+	ctx = attribution.WithCoordinates(ctx, repoFullName, 0)
 	event := forgejointegration.PushEvent{
 		RepoFullName: repoFullName,
 		RepoPath:     repoPath,

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/forgejointegration"
 	"github.com/ngaut/agent-git-service/internal/githubintegration"
@@ -24,6 +25,7 @@ func (s *Service) DispatchGitHubIntegration(ctx context.Context, repoFullName, r
 		}
 		return err
 	}
+	ctx = attribution.WithCoordinates(ctx, repoFullName, 0)
 	var firstErr error
 	for _, change := range changes {
 		res, handled, err := s.GitHubIntegration.PushRef(ctx, githubintegration.PushRefRequest{

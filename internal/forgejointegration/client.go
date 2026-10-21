@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"io"
 	"net/http"
 	"net/url"
@@ -20,10 +21,13 @@ const (
 
 // HTTPClient calls Forgejo's Gitea-compatible REST API.
 type HTTPClient struct {
-	baseURL string
-	token   string
-	client  *http.Client
-	admin   bool // Server composition uses an admin token, without repository grants.
+	baseURL          string
+	token            string
+	client           *http.Client
+	attribution      attribution.Config
+	attributionRepos map[string]string
+	tokenOwner       string
+	admin            bool // Server composition uses an admin token, without repository grants.
 }
 
 // NewHTTPClient constructs a Forgejo REST client.
@@ -515,6 +519,9 @@ func (c *HTTPClient) CollaboratorPermission(ctx context.Context, owner, repo, us
 	if err != nil {
 		return "", err
 	}
+	if status == http.StatusNotFound {
+		return "none", nil
+	}
 	if status < 200 || status >= 300 {
 		return "", fmt.Errorf("lookup collaborator permission returned status %d: %s", status, string(response))
 	}
@@ -626,6 +633,10 @@ func (c *HTTPClient) GetWorkflowRunLogs(ctx context.Context, owner, repo string,
 }
 
 func (c *HTTPClient) request(ctx context.Context, method, apiPath string, body any) (int, []byte, error) {
+	return c.attributedRequest(ctx, method, apiPath, body)
+}
+
+func (c *HTTPClient) rawRequest(ctx context.Context, method, apiPath string, body any, sudo string) (int, []byte, error) {
 	var reader io.Reader
 	if body != nil {
 		payload, err := json.Marshal(body)
@@ -643,6 +654,9 @@ func (c *HTTPClient) request(ctx context.Context, method, apiPath string, body a
 	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "token "+c.token)
+	}
+	if sudo != "" {
+		req.Header.Set("Sudo", sudo)
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
