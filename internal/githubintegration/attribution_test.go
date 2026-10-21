@@ -2,6 +2,7 @@ package githubintegration
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -22,9 +23,22 @@ func TestGitHubShadowUsesSharedMappingAndDoesNotSudo(t *testing.T) {
 	if !strings.HasPrefix(client.ensureInput.Body, "AGS-Actor: alice") || !strings.Contains(client.ensureInput.Body, "github=alice-gh") || !strings.Contains(client.ensureInput.Body, "AGS PR: #3") {
 		t.Fatal(client.ensureInput.Body)
 	}
-	_, _, err = integration.CloseShadowPullRequest(ctx, CloseShadowPullRequestRequest{RepoFullName: "ags/demo", HeadBranch: "agent/topic", BaseBranch: "main", PRNumber: 3})
-	if err != nil || !strings.HasPrefix(client.closeNote, "AGS-Actor: alice") || !strings.Contains(client.closeNote, "github=alice-gh") {
-		t.Fatal("close attribution missing", err)
+	// Closing now reconciles the exact PR without retry-unsafe comments. Its
+	// attributed body remains intact, and authority is checked before the write.
+	body := client.ensureInput.Body
+	checks := 0
+	req := CloseShadowPullRequestRequest{RepoFullName: "ags/demo", HeadBranch: "agent/topic", BaseBranch: "main", PRNumber: 3, ExternalNumber: 8, BeforeWrite: func(context.Context) error {
+		checks++
+		return nil
+	}}
+	res, handled, err := integration.CloseShadowPullRequest(ctx, req)
+	if err != nil || !handled || res.Number != 8 || client.closeNumber != 8 || checks != 1 || client.closeNote != "" || client.ensureInput.Body != body {
+		t.Fatalf("exact close lost attribution or authority: result=%+v handled=%v checks=%d client=%+v err=%v", res, handled, checks, client, err)
+	}
+	client.closeNumber = 0
+	req.BeforeWrite = func(context.Context) error { return context.Canceled }
+	if _, _, err := integration.CloseShadowPullRequest(ctx, req); !errors.Is(err, context.Canceled) || client.closeNumber != 0 || client.closeNote != "" {
+		t.Fatalf("denied close mutated provider: client=%+v err=%v", client, err)
 	}
 }
 

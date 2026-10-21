@@ -223,6 +223,7 @@ type fakeAPIClient struct {
 	closeSource string
 	closeTarget string
 	closeNote   string
+	closeNumber int
 }
 
 func (f *fakeAPIClient) EnsurePullRequest(ctx context.Context, repo string, in PullRequestInput) (PullRequest, error) {
@@ -467,5 +468,6 @@ func (c *fakeAPIClient) ObservePullRequest(ctx context.Context, repo string, num
 }
 
 func (c *fakeAPIClient) ClosePullRequest(ctx context.Context, repo string, number int) (PullRequest, error) {
+	c.closeNumber = number
 	return PullRequest{Number: number, State: "closed"}, nil
 }
