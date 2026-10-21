@@ -83,15 +83,19 @@ func (s *Service) AuthorizeProjectionAttribution(ctx context.Context, actor attr
 		case "create_pr":
 			operation, capability = "pr.create", "pr:create"
 		case "edit_pr":
-			operation, capability = "pr.edit", "pr:edit"
+			operation, capability = "pr.edit", "repo:write"
 		case "close_pr":
-			operation, capability = "pr.close", "pr:close"
+			operation, capability = "pr.close", "repo:write"
 		case "reopen_pr":
-			operation, capability = "pr.reopen", "pr:reopen"
+			operation, capability = "pr.reopen", "repo:write"
 		case "comment":
-			operation, capability = "pr.comment", "pr:comment"
+			operation, capability = "pr.comment", "repo:write"
 		default:
 			return ErrForbidden
+		}
+		// A create admission can reconcile its own generated metadata during ensure.
+		if op == "edit_pr" && session.OperationName == "pr.create" {
+			operation, capability = "pr.create", "pr:create"
 		}
 		constraints := map[string]string{}
 		if actor.PR > 0 {
@@ -99,12 +103,9 @@ func (s *Service) AuthorizeProjectionAttribution(ctx context.Context, actor attr
 			if gdb.WithContext(ctx).Where("repository_id = ? AND number = ?", repo.ID, actor.PR).First(&pr).Error != nil {
 				return ErrForbidden
 			}
-			constraints = map[string]string{"pull_request_number": fmt.Sprint(pr.Number), "head_ref": pr.HeadRef, "base_ref": pr.BaseRef}
+			constraints = projectionAttributionConstraints(operation, pr)
 		}
-		// A create admission can reconcile its own generated metadata during ensure.
-		if op == "edit_pr" && session.OperationName == "pr.create" {
-			operation, capability = "pr.create", "pr:create"
-		}
+
 		checkCtx := ContextWithDelegatedSession(ContextWithUser(ctx, user), db.DelegatedAgentSession{ID: sessionID})
 		_, err := s.RevalidateDelegatedSession(checkCtx, repo.ID, operation, capability, constraints)
 		return err
@@ -133,4 +134,13 @@ func ValidateProjectionCommitEmails(ctx context.Context, database *gorm.DB, cfg 
 		}
 	}
 	return nil
+}
+
+// Only the concrete constraints belonging to this operation may enter Match;
+// extra unrelated keys fail the closed canonical operation schema.
+func projectionAttributionConstraints(operation string, pr db.PullRequest) map[string]string {
+	if operation == "pr.create" {
+		return map[string]string{"head_ref": pr.HeadRef, "base_ref": pr.BaseRef}
+	}
+	return map[string]string{"pull_request_number": fmt.Sprint(pr.Number)}
 }

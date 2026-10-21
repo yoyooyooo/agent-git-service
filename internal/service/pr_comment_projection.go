@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/ngaut/agent-git-service/internal/attribution"
@@ -48,7 +49,7 @@ func (s *Service) projectNativePRComment(ctx context.Context, comment db.IssueCo
 	}
 	ctx = attribution.WithCoordinates(ctx, repo.FullName, pr.Number)
 	if _, delegated := DelegatedSessionIDFromContext(ctx); delegated {
-		if _, err := s.RevalidateDelegatedSession(ctx, pr.RepositoryID, "pr.comment", "pr:comment", map[string]string{}); err != nil {
+		if _, err := s.RevalidateDelegatedSession(ctx, pr.RepositoryID, "pr.comment", "repo:write", map[string]string{"pull_request_number": fmt.Sprint(pr.Number)}); err != nil {
 			return
 		}
 	}

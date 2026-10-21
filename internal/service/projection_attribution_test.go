@@ -10,6 +10,7 @@ import (
 	"github.com/ngaut/agent-git-service/internal/attribution"
 	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/forgejointegration"
+	"github.com/ngaut/agent-git-service/internal/operationconstraints"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -164,6 +165,19 @@ func TestProjectionAttributionCommitEmailContract(t *testing.T) {
 		err := ValidateProjectionCommitEmails(context.Background(), svc.DB, cfg)
 		if (err != nil) != (email == "wrong@example.test") {
 			t.Fatal("commit email mismatch not detected", err)
+		}
+	}
+}
+
+func TestProjectionAttributionDelegatedConstraintsMatchCanonicalSchema(t *testing.T) {
+	pr := db.PullRequest{Number: 3, HeadRef: "agent/topic", BaseRef: "main"}
+	for _, operation := range []string{"pr.create", "pr.edit", "pr.close", "pr.reopen", "pr.comment"} {
+		facts := projectionAttributionConstraints(operation, pr)
+		if _, err := operationconstraints.NormalizeStored(operation, facts); err != nil {
+			t.Fatal(operation, err)
+		}
+		if !operationconstraints.Match(operation, facts, facts) {
+			t.Fatal("canonical facts rejected", operation)
 		}
 	}
 }
