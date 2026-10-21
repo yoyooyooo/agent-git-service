@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/forgejointegration"
 	"github.com/ngaut/agent-git-service/internal/gitlabintegration"
@@ -211,7 +212,9 @@ func (s *Service) projectionPullRequestFact(ctx context.Context, pullRequestID u
 
 func (s *Service) recordTerminalProjectionAdmissionJob(ctx context.Context, pr db.PullRequest, provider, repoFullName, headSHA string, admissionErr error) error {
 	now := time.Now().UTC()
+	a := attribution.FromContext(ctx)
 	job := db.PullRequestProjectionJob{
+		AttributionUserID: a.UserID, AttributionLogin: a.Login, AttributionRequestID: a.RequestID,
 		PullRequestID: pr.ID, RepositoryID: pr.RepositoryID, AgentSessionID: pr.AgentSessionID,
 		Provider: provider, Trigger: ForgejoProjectionTriggerPullRequest, RepoFullName: repoFullName,
 		AGSPRNumber: pr.Number, HeadRef: pr.HeadRef, BaseRef: pr.BaseRef, HeadSHA: headSHA,
@@ -268,7 +271,9 @@ func (s *Service) EnqueueForgejoPullRequestProjection(ctx context.Context, pr db
 		headSHA, _ = s.Git.HeadSHA(bgCtx, repoFullName, pr.HeadRef)
 	}
 	now := time.Now().UTC()
+	a := attribution.FromContext(ctx)
 	job := db.PullRequestProjectionJob{
+		AttributionUserID: a.UserID, AttributionLogin: a.Login, AttributionRequestID: a.RequestID,
 		PullRequestID:  pr.ID,
 		RepositoryID:   pr.RepositoryID,
 		AgentSessionID: pr.AgentSessionID,
@@ -307,9 +312,10 @@ func (s *Service) EnqueueForgejoPullRequestProjection(ctx context.Context, pr db
 	if (headAdvanced && job.Phase != ForgejoProjectionPhaseFailedTerminal) || admissionHeal {
 		now = time.Now().UTC()
 		updates := map[string]any{
-			"attempt":         gorm.Expr("attempt + 1"),
-			"correlation_id":  "",
-			"phase":           ForgejoProjectionPhaseQueued,
+			"attempt":             gorm.Expr("attempt + 1"),
+			"correlation_id":      "",
+			"phase":               ForgejoProjectionPhaseQueued,
+			"attribution_user_id": a.UserID, "attribution_login": a.Login, "attribution_request_id": a.RequestID,
 			"head_sha":        headSHA,
 			"remote_sha":      headSHA,
 			"remote_ref":      "refs/heads/" + strings.TrimSpace(pr.HeadRef),
@@ -643,6 +649,7 @@ func (s *Service) projectionBackgroundContext(ctx context.Context) context.Conte
 		if viewer, ok := UserFromContext(ctx); ok {
 			bgCtx = ContextWithUser(bgCtx, viewer)
 		}
+		bgCtx = attribution.WithActor(bgCtx, attribution.FromContext(ctx))
 		if sessionID, ok := DelegatedSessionIDFromContext(ctx); ok {
 			bgCtx = ContextWithDelegatedSession(bgCtx, db.DelegatedAgentSession{ID: sessionID})
 		}
@@ -819,6 +826,7 @@ func (s *Service) processForgejoProjectionJobAttempt(ctx context.Context, job db
 	if s == nil || s.ForgejoIntegration == nil {
 		return newProjectionJobFailure(job.RemoteRef, job.HeadSHA, fmt.Errorf("forgejo integration is not configured"), false)
 	}
+	ctx = attribution.WithActor(ctx, attribution.Actor{UserID: job.AttributionUserID, Login: job.AttributionLogin, RequestID: job.AttributionRequestID, Repo: job.RepoFullName, PR: job.AGSPRNumber})
 	pr := job.PullRequest
 	if pr.ID == 0 {
 		if err := s.DBForCtx(ctx).Preload("Repository").Preload("HeadRepository").Preload("Author").First(&pr, job.PullRequestID).Error; err != nil {

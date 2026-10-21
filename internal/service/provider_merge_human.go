@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/forgejointegration"
 )
@@ -86,6 +87,7 @@ func (s *Service) executeNativeProviderMerge(ctx context.Context, repository str
 		return HumanProviderMergeReceipt{}, fmt.Errorf("%w: authoritative provider projection is unavailable", ErrConflict)
 	}
 
+	ctx = attribution.WithCoordinates(ctx, repository, prNumber)
 	receipt := HumanProviderMergeReceipt{
 		Schema: "ags.provider-merge-receipt.v1", Repository: repository, AGSPRNumber: prNumber,
 		ActorID: actor.ID, ActorLogin: actor.Login, Provider: ProjectionProviderForgejo,

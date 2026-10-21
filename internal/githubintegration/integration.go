@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"github.com/ngaut/agent-git-service/internal/gittransport"
 )
 
@@ -26,6 +27,8 @@ const (
 // GitHub is GitLab-class: branch PushRef, merged-SHA PushBackup, and shadow
 // pull requests. Forgejo remains merge authority; AGS never merges GitHub PRs.
 type Config struct {
+	Attribution          attribution.Config
+	TokenOwner           string
 	Enabled              bool
 	BaseURL              string
 	RemoteURL            string
@@ -198,6 +201,19 @@ func NewWithClient(cfg Config, pusher GitPusher, client APIClient) *Integration 
 	}
 	if client == nil {
 		client = NewHTTPClient(cfg.BaseURL, cfg.Token)
+		client.(*HTTPClient).attribution = cfg.Attribution
+		client.(*HTTPClient).tokenOwner = cfg.TokenOwner
+	}
+	rawPush := pusher
+	pusher = func(ctx context.Context, repoPath, remoteURL, refspec, token string) error {
+		err := rawPush(ctx, repoPath, remoteURL, refspec, token)
+		status := 0
+		if err != nil {
+			status = 1
+		}
+		target, _ := ownerRepoFromRemote(remoteURL)
+		attribution.Log(ctx, cfg.Attribution, "github", attribution.PushOp(ctx), target, cfg.TokenOwner, "", "text_only", 0, status, false, "")
+		return err
 	}
 	return &Integration{cfg: cfg, push: pusher, client: client}
 }
@@ -276,6 +292,7 @@ func (i *Integration) ready() error {
 
 // PushBackup pushes the exact merged SHA from AGS to the configured GitHub backup branch.
 func (i *Integration) PushBackup(ctx context.Context, req PushRequest) (PushResult, bool, error) {
+	ctx = attribution.WithPushOp(attribution.WithCoordinates(ctx, req.RepoFullName, attribution.FromContext(ctx).PR), "push_backup")
 	if err := i.ready(); err != nil {
 		if err == errIntegrationDisabled {
 			return PushResult{}, false, nil
@@ -494,7 +511,7 @@ func (i *Integration) EnsureShadowPullRequest(ctx context.Context, req ShadowPul
 		SourceBranch:   req.HeadBranch,
 		TargetBranch:   targetBranch,
 		Title:          firstNonEmpty(req.Title, fmt.Sprintf("%s -> %s", req.HeadBranch, targetBranch)),
-		Body:           shadowPRBody(req),
+		Body:           attribution.Mark(shadowPRBody(req), attribution.FromContext(ctx), "github", i.cfg.Attribution.Principals[attribution.FromContext(ctx).Login].GitHub, "text-only"),
 		BeforeWrite:    req.BeforeWrite,
 	})
 	if err != nil {
@@ -743,9 +760,11 @@ func GitPush(ctx context.Context, repoPath, remoteURL, refspec string, token str
 
 // HTTPClient calls GitHub's REST API.
 type HTTPClient struct {
-	baseURL string
-	token   string
-	client  *http.Client
+	attribution attribution.Config
+	tokenOwner  string
+	baseURL     string
+	token       string
+	client      *http.Client
 }
 
 // NewHTTPClient constructs a GitHub REST client.
@@ -940,6 +959,14 @@ func (c *HTTPClient) request(ctx context.Context, method, apiPath string, body a
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.client.Do(req)
+	if method != http.MethodGet {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		repo, op, number := githubWriteCoordinates(method, apiPath)
+		attribution.Log(ctx, c.attribution, "github", op, repo, c.tokenOwner, "", "text_only", number, status, false, "")
+	}
 	if err != nil {
 		return 0, nil, err
 	}

@@ -825,6 +825,7 @@ func (s *Service) CreateIssueComment(ctx context.Context, repoFullName string, i
 			}
 		}
 	}
+	s.projectNativePRComment(ctx, c)
 	return c, nil
 }
 

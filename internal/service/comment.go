@@ -465,6 +465,7 @@ func (s *Service) addComment(ctx context.Context, repoID uint, issueNumber int, 
 			}
 		}
 	}
+	s.projectNativePRComment(ctx, c)
 	return c, nil
 }
 

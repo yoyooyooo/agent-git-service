@@ -240,7 +240,7 @@ func initServiceDeps(cfg config.Config, database *gorm.DB, store *gitstore.Store
 	wikiBlob := wikicatalog.NewBlobStore(dataRoot)
 	wikiCat := wikicatalog.New(database, wikiBlob)
 
-	forgejoIntegration, err := initForgejoIntegration(cfg)
+	forgejoIntegration, err := initForgejoIntegration(cfg, database)
 	if err != nil {
 		return deps, fmt.Errorf("forgejo integration: %w", err)
 	}
@@ -248,7 +248,7 @@ func initServiceDeps(cfg config.Config, database *gorm.DB, store *gitstore.Store
 	if err != nil {
 		return deps, fmt.Errorf("gitlab integration: %w", err)
 	}
-	gitHubIntegration, err := initGitHubIntegration(cfg)
+	gitHubIntegration, err := initGitHubIntegration(cfg, database)
 	if err != nil {
 		return deps, fmt.Errorf("github integration: %w", err)
 	}
@@ -481,6 +481,7 @@ func forgejoIntegrationConfig(cfg config.Config, fileCfg integrations.Config) fo
 		return integrationCfg
 	}
 	integrationCfg = fileCfg.Forgejo.ToForgejoIntegrationConfig()
+	integrationCfg.Attribution = fileCfg.Attribution
 	if strings.TrimSpace(integrationCfg.WebhookURL) == "" {
 		integrationCfg.WebhookURL = strings.TrimRight(cfg.BaseURL, "/") + "/api/v3/integrations/forgejo/webhook"
 	}
@@ -490,7 +491,7 @@ func forgejoIntegrationConfig(cfg config.Config, fileCfg integrations.Config) fo
 	return integrationCfg
 }
 
-func initForgejoIntegration(cfg config.Config) (*forgejointegration.Integration, error) {
+func initForgejoIntegration(cfg config.Config, databases ...*gorm.DB) (*forgejointegration.Integration, error) {
 	var fileCfg integrations.Config
 	if cfg.IntegrationsConfigFile != "" {
 		loaded, err := integrations.LoadFile(cfg.IntegrationsConfigFile)
@@ -522,6 +523,13 @@ func initForgejoIntegration(cfg config.Config) (*forgejointegration.Integration,
 		return nil, err
 	}
 	integrationCfg, err = forgejointegration.LoadRepoMapFile(integrationCfg)
+	if err != nil {
+		return nil, err
+	}
+	if len(databases) > 0 {
+		integrationCfg.Attribution.Observer = service.ProjectionAttributionRecorder(databases[0])
+	}
+	integrationCfg, err = forgejointegration.ValidateAttribution(context.Background(), integrationCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -583,7 +591,7 @@ func initGitLabIntegration(cfg config.Config) (*gitlabintegration.Integration, e
 	return gitlabintegration.New(integrationCfg, nil), nil
 }
 
-func initGitHubIntegration(cfg config.Config) (*githubintegration.Integration, error) {
+func initGitHubIntegration(cfg config.Config, databases ...*gorm.DB) (*githubintegration.Integration, error) {
 	if cfg.IntegrationsConfigFile == "" {
 		slog.Info("github integration disabled", "reason", "integrations config not configured")
 		return nil, nil
@@ -593,11 +601,19 @@ func initGitHubIntegration(cfg config.Config) (*githubintegration.Integration, e
 		return nil, err
 	}
 	integrationCfg := fileCfg.GitHub.ToGitHubIntegrationConfig()
+	integrationCfg.Attribution = fileCfg.Attribution
 	if !integrationCfg.Enabled {
 		slog.Info("github integration disabled", "reason", "not configured")
 		return nil, nil
 	}
 	integrationCfg, err = githubintegration.LoadTokenFile(integrationCfg)
+	if err != nil {
+		return nil, err
+	}
+	if len(databases) > 0 {
+		integrationCfg.Attribution.Observer = service.ProjectionAttributionRecorder(databases[0])
+	}
+	integrationCfg, err = githubintegration.ValidateAttribution(context.Background(), integrationCfg)
 	if err != nil {
 		return nil, err
 	}

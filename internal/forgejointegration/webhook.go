@@ -23,6 +23,7 @@ const (
 
 // MergedPullRequestEvent is the minimal Forgejo PR-merged event used for merge authority callbacks.
 type MergedPullRequestEvent struct {
+	SenderLogin  string
 	RepoFullName string
 	PRNumber     int
 	PRURL        string
@@ -32,6 +33,7 @@ type MergedPullRequestEvent struct {
 
 // ClosedPullRequestEvent is the minimal Forgejo PR-closed event used for lifecycle authority callbacks.
 type ClosedPullRequestEvent struct {
+	SenderLogin  string
 	RepoFullName string
 	PRNumber     int
 	PRURL        string
@@ -208,7 +210,10 @@ func pullRequestHasLabel(labels []struct {
 
 func ParseClosedPullRequestWebhook(body []byte) (ClosedPullRequestEvent, bool, error) {
 	var payload struct {
-		Action     string `json:"action"`
+		Action string `json:"action"`
+		Sender struct {
+			Login string `json:"login"`
+		} `json:"sender"`
 		Repository struct {
 			FullName      string `json:"full_name"`
 			DefaultBranch string `json:"default_branch"`
@@ -236,6 +241,7 @@ func ParseClosedPullRequestWebhook(body []byte) (ClosedPullRequestEvent, bool, e
 		base = payload.Repository.DefaultBranch
 	}
 	return ClosedPullRequestEvent{
+		SenderLogin:  payload.Sender.Login,
 		RepoFullName: payload.Repository.FullName,
 		PRNumber:     payload.PullRequest.Number,
 		PRURL:        payload.PullRequest.HTMLURL,
@@ -251,6 +257,7 @@ func ParseMergedPullRequestWebhook(body []byte) (MergedPullRequestEvent, bool, e
 		return MergedPullRequestEvent{}, false, err
 	}
 	return MergedPullRequestEvent{
+		SenderLogin:  event.SenderLogin,
 		RepoFullName: event.RepoFullName,
 		PRNumber:     event.PRNumber,
 		PRURL:        event.PRURL,

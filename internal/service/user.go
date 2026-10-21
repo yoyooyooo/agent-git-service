@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strings"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"github.com/ngaut/agent-git-service/internal/db"
 
 	"gorm.io/gorm"
@@ -80,6 +82,7 @@ const (
 
 // ContextWithUser returns a copy of ctx carrying the authenticated user.
 func ContextWithUser(ctx context.Context, u db.User) context.Context {
+	ctx = attribution.WithActor(ctx, attribution.Actor{UserID: u.ID, Login: u.Login, RequestID: chimiddleware.GetReqID(ctx)})
 	return context.WithValue(ctx, ctxKeyUser, u)
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/gitstore"
 
@@ -166,6 +167,9 @@ func (s *Service) mergePRRecordWithActor(ctx context.Context, actor db.User, pr 
 	}
 	if commitMsg == "" {
 		commitMsg = fmt.Sprintf("Merge pull request #%d", pr.Number)
+	}
+	if mergeMethod != "rebase" {
+		commitMsg = attribution.MergeTrailer(commitMsg, actor.Login)
 	}
 	var sha string
 	var mergeErr error

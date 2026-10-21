@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ngaut/agent-git-service/internal/attribution"
 	"github.com/ngaut/agent-git-service/internal/cibackend"
 	"github.com/ngaut/agent-git-service/internal/delegationpolicy"
 	"github.com/ngaut/agent-git-service/internal/executioncontext"
@@ -29,8 +30,9 @@ const maxTypedOutboundDispatchTimeout = 2 * time.Minute
 
 // Config is the file-backed integration configuration.
 type Config struct {
-	CI         cibackend.Config        `yaml:"ci"`
-	Delegation delegationpolicy.Config `yaml:"delegation"`
+	Attribution attribution.Config      `yaml:"attribution"`
+	CI          cibackend.Config        `yaml:"ci"`
+	Delegation  delegationpolicy.Config `yaml:"delegation"`
 	// TeamAuthority is the current Multica workspace → AGS principal binding
 	// surface (AGS-T022 Stage 5). It replaces the retired principal_sessions
 	// permission projection key. Runtime code still consumes the normalized
@@ -551,11 +553,25 @@ func LoadFile(path string) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("decode integrations config: %w", err)
 	}
+	if err := cfg.Attribution.Validate(); err != nil {
+		return Config{}, err
+	}
 	// CI is a new explicit contract: misspelled selectors must not quietly
 	// revert a repository to native execution while appearing configured.
 	var sections map[string]yaml.Node
 	if err := yaml.Unmarshal(data, &sections); err != nil {
 		return Config{}, fmt.Errorf("invalid integrations document")
+	}
+	if node, exists := sections["attribution"]; exists {
+		encoded, err := yaml.Marshal(&node)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid attribution configuration")
+		}
+		decoder := yaml.NewDecoder(strings.NewReader(string(encoded)))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(&cfg.Attribution); err != nil {
+			return Config{}, fmt.Errorf("attribution configuration has unknown or invalid fields")
+		}
 	}
 	if node, exists := sections["ci"]; exists {
 		encoded, err := yaml.Marshal(&node)
