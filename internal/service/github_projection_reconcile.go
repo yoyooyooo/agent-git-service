@@ -91,13 +91,13 @@ func (s *Service) reconcileGitHubPullRequestState(ctx context.Context, id uint) 
 		return false, err
 	}
 	if !closed && exists {
-		if found {
-			return false, nil
-		}
 		target, _ := s.GitHubIntegration.TargetRepoFor(repo)
 		state := ProjectionStateOpen
 		if observed.State == "closed" || observed.Merged {
 			state = ProjectionStateClosed
+		}
+		if found && projection.State == state {
+			return false, nil
 		}
 		return true, s.UpsertPullRequestProjection(ctx, db.PullRequestProjection{PullRequestID: id, RepositoryID: pr.RepositoryID, Provider: ProjectionProviderGitHub, ExternalRepo: target, ExternalNumber: observed.Number, ExternalURL: observed.HTMLURL, SourceBranch: pr.HeadRef, TargetBranch: pr.BaseRef, State: state, LastSyncedSHA: pr.HeadSHA})
 	}

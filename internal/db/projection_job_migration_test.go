@@ -39,8 +39,11 @@ func TestMigrateAddsSafeDefaultsForLegacyProjectionJobs(t *testing.T) {
 	if err := database.First(&migrated, legacy.ID).Error; err != nil {
 		t.Fatalf("load migrated projection job: %v", err)
 	}
-	if migrated.Trigger != "pull_request_projection" || migrated.ActionGeneration != 0 || migrated.ActionIntentID != nil || migrated.DesiredAGSHeadSHA != "" || migrated.SuccessCommentedAt != nil {
+	if migrated.Trigger != "pull_request_projection" || migrated.ActionGeneration != 0 || migrated.ActionIntentID != nil || migrated.DesiredAGSHeadSHA != "" || migrated.SuccessCommentedAt != nil || migrated.GitHubDesiredFactHash != "" {
 		t.Fatalf("unsafe legacy projection job defaults: %#v", migrated)
+	}
+	if !database.Migrator().HasColumn(&PullRequestProjectionJob{}, "github_desired_fact_hash") {
+		t.Fatal("expected nullable GitHub desired-fact hash without rewriting legacy receipts")
 	}
 	if !database.Migrator().HasTable(&PullRequestProjectionJobAttempt{}) {
 		t.Fatal("expected pull_request_projection_job_attempts after migrate")

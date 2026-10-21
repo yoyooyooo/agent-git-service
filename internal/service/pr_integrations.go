@@ -593,16 +593,24 @@ func (s *Service) ensureGitHubShadowPullRequestOnce(ctx context.Context, repoFul
 			}
 		}
 	}
+	projection, _, err := s.gitHubProjection(ctx, pr.ID)
+	if err != nil {
+		return githubintegration.ShadowPullRequestResult{}, false, err
+	}
+	if target, configured := s.GitHubIntegration.TargetRepoFor(repoFullName); configured && projection.ExternalRepo != "" && projection.ExternalRepo != target {
+		return githubintegration.ShadowPullRequestResult{}, false, fmt.Errorf("GitHub projection target changed: %w", ErrInvalidState)
+	}
 	res, handled, err := s.GitHubIntegration.EnsureShadowPullRequest(ctx, githubintegration.ShadowPullRequestRequest{
-		RepoFullName: repoFullName,
-		RepoPath:     repoPath,
-		HeadBranch:   pr.HeadRef,
-		HeadSHA:      headSHA,
-		BaseBranch:   pr.BaseRef,
-		Title:        pr.Title,
-		Body:         string(pr.Body),
-		AGSNumber:    pr.Number,
-		BeforeWrite:  beforeWrite,
+		RepoFullName:   repoFullName,
+		RepoPath:       repoPath,
+		HeadBranch:     pr.HeadRef,
+		HeadSHA:        headSHA,
+		BaseBranch:     pr.BaseRef,
+		Title:          pr.Title,
+		Body:           string(pr.Body),
+		AGSNumber:      pr.Number,
+		ExternalNumber: projection.ExternalNumber,
+		BeforeWrite:    beforeWrite,
 	})
 	if err != nil {
 		return githubintegration.ShadowPullRequestResult{}, false, fmt.Errorf("ensure GitHub shadow PR: %w", err)
@@ -619,7 +627,7 @@ func (s *Service) ensureGitHubShadowPullRequestOnce(ctx context.Context, repoFul
 		ExternalURL:    res.WebURL,
 		SourceBranch:   res.SourceBranch,
 		TargetBranch:   res.TargetBranch,
-		State:          ProjectionStateOpen,
+		State:          firstNonEmpty(res.State, ProjectionStateOpen),
 		LastSyncedSHA:  headSHA,
 	}); err != nil {
 		return githubintegration.ShadowPullRequestResult{}, false, fmt.Errorf("record GitHub projection: %w", err)
