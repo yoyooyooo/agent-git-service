@@ -2,6 +2,7 @@ package db
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gorm.io/driver/sqlite"
@@ -47,5 +48,36 @@ func TestMigrateAddsSafeDefaultsForLegacyProjectionJobs(t *testing.T) {
 	}
 	if !database.Migrator().HasTable(&PullRequestProjectionJobAttempt{}) {
 		t.Fatal("expected pull_request_projection_job_attempts after migrate")
+	}
+}
+
+func TestMigratePreservesGitHubDesiredFactHashOnRepeat(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "repeat.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&legacyPullRequestProjectionJob{}); err != nil {
+		t.Fatal(err)
+	}
+	legacy := legacyPullRequestProjectionJob{PullRequestID: 7, RepositoryID: 3, Provider: "github", RepoFullName: "fixture/repo", AGSPRNumber: 9, Phase: "projected"}
+	if err := database.Create(&legacy).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(database); err != nil {
+		t.Fatal(err)
+	}
+	fact := strings.Repeat("a", 64)
+	if err := database.Model(&PullRequestProjectionJob{}).Where("id = ?", legacy.ID).Update("github_desired_fact_hash", fact).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(database); err != nil {
+		t.Fatal(err)
+	}
+	var current PullRequestProjectionJob
+	if err := database.First(&current, legacy.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if current.GitHubDesiredFactHash != fact || current.Phase != legacy.Phase || current.Provider != legacy.Provider || current.PullRequestID != legacy.PullRequestID || current.RepositoryID != legacy.RepositoryID || current.AGSPRNumber != legacy.AGSPRNumber || current.RepoFullName != legacy.RepoFullName {
+		t.Fatalf("repeat migration changed receipt: %+v", current)
 	}
 }

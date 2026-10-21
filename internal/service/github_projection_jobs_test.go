@@ -350,6 +350,9 @@ func TestGitHubProjectionClaimDoesNotAdoptSupersedingWorkerToken(t *testing.T) {
 		t.Fatalf("claim=%+v ok=%v fired=%v err=%v", claimed, ok, fired, err)
 	}
 	current := githubJob(t, svc, pr)
+	if claimed.NextRunAt.Nanosecond()%int(time.Millisecond) != 0 {
+		t.Fatalf("lease exceeds database precision: %s", claimed.NextRunAt)
+	}
 	if claimed.Trigger != githubProjectionEnsure || claimed.Attempt != 1 || claimed.NextRunAt.Equal(*current.NextRunAt) {
 		t.Fatalf("adopted successor token: claim=%+v current=%+v", claimed, current)
 	}
