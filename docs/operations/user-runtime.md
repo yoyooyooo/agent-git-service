@@ -80,11 +80,46 @@ the remaining process group, so the service manager needs a longer exit time.
 
 Before launch, and once per minute while running, it checks the installed primary
 hash, interrupted-install marker, environment, durable Git/database paths and
-referenced replication files/certificate lifetime. It writes the latest
+referenced replication files/certificate lifetime and snapshot filesystem free
+space against the configured `min_free_bytes`. It writes the latest
 `state/startup-health.json`. A later missing file changes this record and emits a
 bounded diagnostic; it does **not** kill a still-working primary. This is startup
 dependency visibility, not a substitute for primary/Edge readiness, full protocol
 acceptance, online revocation checking or an external alert delivery service.
+
+Startup health keeps the `ags.startup-health.v1` string-valued `checks` map for
+compatibility. The additive `check_details` map supplies a machine-readable
+`reason` for every failing check. `doctor` prints the same report that startup
+and periodic checks persist to `state/startup-health.json` and emit to the bounded
+runtime log. Reasons and numeric observations are allowlisted; configuration
+values, environment names/values, exception messages and OpenSSL output are not
+included. Environment syntax errors include a line number; missing or malformed
+replication fields include only the known field name. Certificate probe failures
+are separate from malformed replication configuration.
+
+For example, insufficient space is an operational failure, not evidence that
+replication configuration is corrupt:
+
+```json
+{
+  "checks": {"replication_config": "ok", "replication_disk_free": "invalid"},
+  "check_details": {
+    "replication_disk_free": {
+      "reason": "disk_free_below_threshold",
+      "available_bytes": 1073741824,
+      "minimum_bytes": 2147483648
+    }
+  }
+}
+```
+
+Available space uses filesystem blocks available to the runtime user, not total
+free blocks. Equality with the configured threshold passes. A failed filesystem
+probe reports `disk_free_probe_failed` without pretending to measure zero bytes.
+Periodic diagnostics also track reason/value changes when a status stays invalid,
+and report recovery without restarting the running primary. This is still an
+observation, not a quota or reservation; the native replication admission and
+stream checks remain authoritative.
 
 Malformed, unsafe or out-of-range retention configuration fails startup rather
 than silently falling back to normal operation. A bounded diagnostic still records

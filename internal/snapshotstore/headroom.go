@@ -3,10 +3,29 @@ package snapshotstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 )
 
 var ErrHeadroom = errors.New("snapshot filesystem headroom exhausted")
+
+// HeadroomError preserves the measured capacity for startup and import diagnostics.
+// It still matches ErrHeadroom so callers keep their existing admission semantics.
+type HeadroomError struct {
+	Reason         string `json:"reason"`
+	AvailableBytes uint64 `json:"available_bytes"`
+	MinimumBytes   uint64 `json:"minimum_bytes"`
+}
+
+func (e *HeadroomError) Error() string {
+	return fmt.Sprintf("%s: available_bytes=%d minimum_bytes=%d", e.Reason, e.AvailableBytes, e.MinimumBytes)
+}
+
+func (e *HeadroomError) Is(target error) bool { return target == ErrHeadroom }
+
+func headroomError(available, minimum uint64) *HeadroomError {
+	return &HeadroomError{Reason: "disk_free_below_threshold", AvailableBytes: available, MinimumBytes: minimum}
+}
 
 // FilesystemAvailable is an observation, not a reservation, quota or guarantee
 // that another process cannot fill this filesystem immediately afterwards.
@@ -38,7 +57,7 @@ func (s *Store) checkHeadroom() error {
 		return errors.New("snapshot filesystem probe unavailable")
 	}
 	if free < s.minFree {
-		return ErrHeadroom
+		return headroomError(free, s.minFree)
 	}
 	return nil
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Real isolated files/processes for the single-root installer and supervisor."""
+import contextlib
 import fcntl
 import hashlib
 import importlib.util
@@ -14,7 +15,7 @@ import tarfile
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 HERE = Path(__file__).resolve().parent
 
@@ -143,6 +144,148 @@ class SingleRootTests(unittest.TestCase):
         self.assertEqual(report['checks']['replication_config'], 'missing_or_unsafe')
         self.assertNotIn('never-print-me', json.dumps(report))
         self.assertFalse(runtime.durable_path(self.root, self.root / 'deployments/old/config.json'))
+
+    def replication_configured(self):
+        self.configured()
+        config = {'min_free_bytes': 2048, 'ca_file': 'ca.pem',
+                  'certificate_file': 'cert.pem', 'private_key_file': 'key.pem',
+                  'snapshot_root': str(self.root / 'cache/snapshots')}
+        for name in ('ca.pem', 'cert.pem', 'key.pem'):
+            path = self.root / 'config' / name
+            path.write_text('never-print-me')
+            path.chmod(0o600)
+        (self.root / 'cache/snapshots').mkdir(mode=0o700)
+        runtime.atomic_json(self.root / 'config/replication.json', config)
+        with (self.root / 'config/runtime.env').open('a') as output:
+            output.write('AGS_REPLICATION_CONFIG_FILE="' + str(self.root / 'config/replication.json') + '"\n')
+        return config
+
+    def test_replication_low_disk_reason_reaches_result_state_and_log(self):
+        self.replication_configured()
+        # f_bavail, not total free blocks, is what the runtime user can use.
+        space = os.statvfs_result((512, 512, 100, 100, 3, 100, 100, 100, 0, 255))
+        with patch.object(runtime.os, 'statvfs', return_value=space), patch.object(
+                runtime.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+            report = runtime.inspect(self.root)
+            self.assertFalse(report['ready_to_start'])
+            self.assertEqual(report['checks']['replication_config'], 'ok')
+            self.assertEqual(report['checks']['replication_disk_free'], 'invalid')
+            expected = {'reason': 'disk_free_below_threshold',
+                        'available_bytes': 1536, 'minimum_bytes': 2048}
+            self.assertEqual(report['check_details']['replication_disk_free'], expected)
+            with patch.object(runtime, 'supervise') as spawn:
+                self.assertEqual(runtime.serve(self.root), 78)
+                spawn.assert_not_called()
+        state = json.loads((self.root / 'state/startup-health.json').read_text())
+        log = json.loads((self.root / 'logs/runtime.log').read_text().splitlines()[-1])
+        for output in (state, log):
+            self.assertEqual(output['check_details']['replication_disk_free'], expected)
+            self.assertNotIn('never-print-me', json.dumps(output))
+
+    def test_replication_disk_threshold_equality_and_recovery(self):
+        self.replication_configured()
+        for blocks, ready in ((3, False), (4, True), (5, True)):
+            with self.subTest(blocks=blocks), patch.object(runtime.os, 'statvfs', return_value=
+                    os.statvfs_result((512, 512, 100, 100, blocks, 100, 100, 100, 0, 255))), patch.object(
+                    runtime.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+                report = runtime.inspect(self.root)
+                self.assertEqual(report['ready_to_start'], ready)
+                self.assertEqual(report['checks']['replication_disk_free'], 'ok' if ready else 'invalid')
+                if ready:
+                    self.assertNotIn('replication_disk_free', report['check_details'])
+
+    def test_invalid_checks_have_sanitized_reasons(self):
+        self.replication_configured()
+        config_path = self.root / 'config/replication.json'
+        for value, reason in (([], 'config_not_object'), ({}, 'config_field_missing'),
+                              ({'ca_file': 7}, 'config_field_invalid')):
+            with self.subTest(value=value):
+                runtime.atomic_json(config_path, value)
+                report = runtime.inspect(self.root)
+                self.assertEqual(report['checks']['replication_config'], 'invalid')
+                self.assertEqual(report['check_details']['replication_config']['reason'], reason)
+        config_path.write_text('{"secret": "never-print-me", broken}')
+        report = runtime.inspect(self.root)
+        self.assertEqual(report['check_details']['replication_config']['reason'], 'config_json_invalid')
+        env = self.root / 'config/runtime.env'
+        env.write_text('PRIVATE_TEST_TOKEN="never-print-me\n')
+        report = runtime.inspect(self.root)
+        self.assertEqual(report['check_details']['runtime_environment']['reason'], 'environment_entry_invalid')
+        self.assertEqual(report['check_details']['runtime_environment']['line'], 1)
+        runtime.atomic_json(self.root / 'config/retention.json', {'log_backups': True})
+        report = runtime.inspect(self.root)
+        self.assertEqual(report['check_details']['retention_config']['reason'], 'log_backups_out_of_range')
+        for name, status in report['checks'].items():
+            if status != 'ok':
+                self.assertTrue(report['check_details'][name]['reason'])
+        self.assertNotIn('never-print-me', json.dumps(report))
+
+    def test_replication_probe_failures_are_distinct_and_redacted(self):
+        config = self.replication_configured()
+        with patch.object(runtime.os, 'statvfs', side_effect=OSError('never-print-me')), patch.object(
+                runtime.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+            report = runtime.inspect(self.root)
+        self.assertEqual(report['checks']['replication_config'], 'ok')
+        self.assertEqual(report['check_details']['replication_disk_free'],
+                         {'reason': 'disk_free_probe_failed', 'error_type': 'OSError'})
+        for error, reason in ((FileNotFoundError('never-print-me'), 'certificate_probe_failed'),
+                              (subprocess.TimeoutExpired('never-print-me', 5, output=b'never-print-me'),
+                               'certificate_probe_timeout')):
+            with self.subTest(reason=reason), patch.object(runtime.subprocess, 'run', side_effect=error):
+                report = runtime.inspect(self.root)
+                self.assertEqual(report['checks']['replication_config'], 'ok')
+                self.assertEqual(report['check_details']['replication_certificate_valid']['reason'], reason)
+                self.assertNotIn('never-print-me', json.dumps(report))
+        with patch.object(runtime.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                [], 1, b'never-print-me', b'never-print-me')):
+            report = runtime.inspect(self.root)
+        self.assertEqual(report['check_details']['replication_certificate_valid'],
+                         {'reason': 'certificate_expired_or_invalid', 'exit_code': 1})
+        for minimum in (None, True, 0, -1, 1.5, 'never-print-me', (1 << 60) + 1):
+            config['min_free_bytes'] = minimum
+            runtime.atomic_json(self.root / 'config/replication.json', config)
+            report = runtime.inspect(self.root)
+            self.assertEqual(report['check_details']['replication_config'],
+                             {'reason': 'config_field_invalid', 'field': 'min_free_bytes'})
+            self.assertNotIn('never-print-me', json.dumps(report))
+
+    def test_doctor_prints_structured_reasons(self):
+        config = self.replication_configured()
+        config['min_free_bytes'] = 1 << 60
+        runtime.atomic_json(self.root / 'config/replication.json', config)
+        output = io.StringIO()
+        with patch.object(sys, 'argv', ['ags-runtime.py', '--root', str(self.root), 'doctor']), contextlib.redirect_stdout(output):
+            self.assertEqual(runtime.main(), 1)
+        report = json.loads(output.getvalue())
+        details = report['check_details']['replication_disk_free']
+        self.assertEqual(details['reason'], 'disk_free_below_threshold')
+        self.assertGreater(details['available_bytes'], 0)
+        self.assertEqual(details['minimum_bytes'], 1 << 60)
+        self.assertNotIn('never-print-me', output.getvalue())
+
+    def test_periodic_log_records_reason_value_changes_and_recovery(self):
+        self.configured()
+        def report(available):
+            ready = available >= 2048
+            return {'ready_to_start': ready,
+                    'checks': {'replication_disk_free': 'ok' if ready else 'invalid'},
+                    'check_details': {} if ready else {'replication_disk_free': {
+                        'reason': 'disk_free_below_threshold', 'available_bytes': available, 'minimum_bytes': 2048}}}
+        reports = [report(1536), report(1024), report(2048)]
+        child = Mock(pid=123, stdout=io.BytesIO())
+        child.wait.return_value = 0
+        child.poll.return_value = 0
+        selector = Mock()
+        selector.get_map.side_effect = [True, True, True, False]
+        selector.select.return_value = []
+        log = io.BytesIO()
+        with patch.object(runtime.subprocess, 'Popen', return_value=child), patch.object(
+                runtime.selectors, 'DefaultSelector', return_value=selector), patch.object(
+                runtime.time, 'monotonic', side_effect=[0, 60, 60, 120, 120, 180, 180]), patch.object(
+                runtime.signal, 'signal'), patch.object(runtime, 'inspect', side_effect=reports):
+            self.assertEqual(runtime.supervise(self.root, {}, {}, log, Mock()), 0)
+        self.assertEqual([json.loads(line) for line in log.getvalue().splitlines()], reports)
+        self.assertEqual(json.loads((self.root / 'state/startup-health.json').read_text()), reports[-1])
 
     def test_log_budget_is_enforced_on_large_unbroken_output(self):
         directory = self.directory / 'logs'; directory.mkdir()
