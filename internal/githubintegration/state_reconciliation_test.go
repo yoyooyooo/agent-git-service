@@ -173,3 +173,26 @@ func TestEnsureAllStateReadbackBeforeCreation(t *testing.T) {
 		t.Fatalf("res=%+v handled=%v err=%v reads=%d", res, handled, err, reads)
 	}
 }
+
+func TestEnsureObservedIdentityDisappearsWithoutReplacement(t *testing.T) {
+	reads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/fixture/repo/pulls/8" {
+			t.Errorf("disappeared identity escaped: %s %s", r.Method, r.URL)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		reads++
+		if reads == 1 {
+			fmt.Fprint(w, `{"number":8,"state":"open"}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	integration := NewWithClient(Config{Enabled: true, Token: "synthetic", Repos: map[string]RepoMapping{"fixture/ags": {Owner: "fixture", Repo: "repo"}}}, func(context.Context, string, string, string, string) error { return nil }, NewHTTPClient(server.URL, "synthetic"))
+	_, handled, err := integration.EnsureShadowPullRequest(context.Background(), ShadowPullRequestRequest{RepoFullName: "fixture/ags", RepoPath: "/fixture.git", HeadBranch: "work", BaseBranch: "main", HeadSHA: "aaa", ExternalNumber: 8})
+	if err == nil || handled || reads != 2 {
+		t.Fatalf("handled=%v err=%v reads=%d", handled, err, reads)
+	}
+}
