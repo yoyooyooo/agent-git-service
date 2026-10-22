@@ -159,11 +159,15 @@ Reasons: `unmapped`, `sudo_404`, `forbidden`, `grant_failed`.
 Absent `attribution` or `principals: {}` is a complete opt-out. REST uses its
 original payload and write count, no Sudo, grants, generated close comments, new
 native comment projection, GitHub markers, merge trailers or attribution audits.
-Even legacy operator-token precedence is preserved in this mode. Enabling a
-nonempty map opts into projection-token separation and startup validation; clearing
-the map and separately restarting restores the base credential choice too, after
-revoking any previously managed public keys. Tokens
-are not rotated or narrowed. Tests cover absent and explicit empty independently.
+Credential selection is independent of this opt-out: projection REST/Git always
+use `forgejo.token_file`/`token`. Operator credentials remain explicitly scoped to
+policy diagnostics/onboarding. Clearing the map disables attribution only; it
+never substitutes the operator credential for the bot or rewrites provider policy.
+Native push diagnostics observe the selected credential login even without a map;
+observation failure is explicitly `unverified` and does not gate readiness. A nonempty
+map validates mapped identities and requires a site-admin projection credential.
+Revoke previously managed public keys only through a separately authorized rollback.
+Tokens are not rotated or narrowed. Tests cover absent and explicit empty maps.
 
 New defaulted provenance columns can remain when downgrading. Never remove or
 downgrade provider collaborators automatically in an attribution rollback: they

@@ -1589,8 +1589,24 @@ func TestGitHTTP_DurableCredentialCannotPushProtectedBranch(t *testing.T) {
 	if err := env.DB.First(&repo, "full_name = ?", "protectedowner/protectedrepo").Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := env.DB.Create(&db.BranchProtection{RepositoryID: repo.ID, BranchName: "main", EnforceAdmins: true}).Error; err != nil {
+	// Apply the documented desired state through the public API, not a DB insert.
+	policy, err := os.ReadFile("../../docs/examples/pr-only-branch-protection.json")
+	if err != nil {
 		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPut, env.Server.URL+"/api/v3/repos/protectedowner/protectedrepo/branches/main/protection", strings.NewReader(string(policy)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "token token-protectedowner")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("apply declarative branch policy: HTTP %d", response.StatusCode)
 	}
 
 	localDir := filepath.Join(t.TempDir(), "local")

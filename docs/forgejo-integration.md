@@ -196,9 +196,6 @@ projection_watch:
     on: ["drift", "projection_failure"]
     throttle_window: "15m"
     grace_period: "2m"
-  repair:
-    auto: false
-    safe_repairs: []
 forgejo:
   enabled: true
   base_url: "https://forgejo.example.test"
@@ -397,7 +394,21 @@ go run ./cmd/forgejo-authority -config /path/to/integrations.yaml -mode apply
 go run ./cmd/forgejo-authority -config /path/to/integrations.yaml -mode verify
 ```
 
-Configure the existing Forgejo administrator credential in `forgejo.token_file` for attribution-enabled projection REST/Git. With a **nonempty** identity map, `authority_policy.operator_token_file` / `operator_token` are diagnostics-only; `cmd/forgejo-authority` loads them explicitly and its flag affects that command only. With no map or an empty map, legacy operator override and startup behavior remain exactly as before. No token is rotated or narrowed. Check the selected credential's owner/admin status before enabling attribution; clearing the map also restores legacy credential selection.
+`forgejo.token_file` (or `token`) is the projection credential for both REST and
+Git, with or without an attribution map. It must belong to the integration bot
+allowed by the Forgejo protected-branch push policy; being a site administrator
+alone does not bypass `apply_to_admins`. Mapped Git writes retain their dedicated
+managed SSH identity and current AGS admission checks. `authority_policy.operator_token_file`
+/ `operator_token` are used only when explicitly loaded by `cmd/forgejo-authority`;
+they never replace the projection credential. Clearing attribution does not change
+this boundary. Native push diagnostics read `/api/v1/user` with the selected projection credential
+to record its actual login (or `unverified` if observation fails); this does not
+add a startup/readiness dependency. Attribution additionally requires a site-admin credential.
+Push outcome logs include `authenticated_login` (token owner or mapped SSH login),
+not credentials or provider response bodies. A native protected-branch refusal is
+`protected_branch_blocked`; an HTTP 403 without a protected-branch reason is
+`permission_denied`, not an assertion about branch protection.
+
 
 See [outbound attribution](operations/outbound-attribution.md) for the shared identity map, Sudo recovery, audit fields, rollback and real-path verification. Attribution changes the actor of authorized writes, not AGS authorization or the power of the existing admin credential. Read APIs, repository provisioning, branch protection and webhook maintenance remain bot-owned.
 
@@ -473,16 +484,64 @@ Multica issue identity is workspace-scoped. Prefer PR markers and CLI arguments 
 - Persisted summaries and payload URLs are sanitized before insert; authenticated URLs, tokens, webhook secrets, and query credentials must not be stored.
 - Enabled `outbound.events.projection_drift` also supports compact fallback alerts from the periodic watcher. Legacy `notifications.events.projection_drift` is accepted during migration.
 - `notify.grace_period` is the persistence confirmation window for watcher-discovered candidates, and `notify.throttle_window` limits repeats after an active alert is enqueued. Candidates that converge before the grace period never produce a Feishu message, including a standalone `resolved` message. Required action failures are already exact operation failures and do not wait for the polling interval.
-- `repair.auto` should remain `false` unless a future explicit safe-repair policy is reviewed. Current repair path is the operator wrapper `ags-team converge-projection --authority ags --apply`.
+- The watcher detects and records drift; it never rewrites provider refs. The former `repair.auto` / `safe_repairs` keys had no execution path and are removed from the supported schema. Old YAML keys are ignored for compatibility, not interpreted as repair authorization.
 - If a Forgejo-merged PR source branch has already been deleted on Forgejo but still exists on AGS, the scanner records `source_branch_cleanup_pending`. This is not a request to restore Forgejo. Delete the stale AGS source branch or let the signed Forgejo `delete` webhook clean it up.
 - Historical loss may be suppressed only by an audited disposition: label the Forgejo PR `ags/integrity-superseded` and include `[AGS-INTEGRITY-SUPERSEDED]` (legacy `Merge-Integrity-Superseded-By:` is also accepted) in its body. A label or body marker alone is insufficient. For a mapped lifecycle mismatch, this suppression is accepted only when the AGS PR is already closed and unmerged; it cannot hide an open AGS PR.
 
 Alerts are generated from structured projection state, not journal scraping. The expected operator loop is:
 
-1. `GET /api/v3/repos/{owner}/{repo}/projection/status` or `ags-team verify-repo --repo <owner/repo>`.
-2. Inspect `type`, `ags_sha`, `forgejo_sha`, and `error_summary`.
-3. Dry-run `ags-team converge-projection --repo <owner/repo> --ref <ref> --authority ags`.
-4. Apply only when the plan converges Forgejo to the authoritative AGS SHA and creates backup refs first.
+1. Read `GET /api/v3/repos/{owner}/{repo}/projection/status` and both live refs.
+2. Distinguish the persisted failure from the default-branch live status overlay:
+   the API may show `sha_drift` even when storage preserves the original failure.
+3. Correct projection credentials/policy first. For an existing open PR head job,
+   use `POST /api/v3/repos/{owner}/{repo}/projection/forgejo/pulls/{number}/retry`.
+   A terminal generic PR projection may require `/repair` with
+   `{"confirm":"<full-current-AGS-head-SHA>"}`; this is PR-head authority repair,
+   not a default-branch or general ref convergence API.
+4. There is no generic ref repair API or shipped convergence command. For a
+   lagging default branch, an authorized deployment administrator may use the
+   server-owned integration-bot credential, read the exact AGS SHA `A` and
+   Forgejo SHA `F`, preserve `F` in an operator backup ref, prove `F` is an ancestor
+   of `A`, then push the **pinned object** `A:refs/heads/<base>` without `+`, force
+   or force-with-lease. Use the deployment's private credential mechanism, never
+   a credential-bearing command line, terminal output, or user-token fallback.
+   Stop on divergence, deletion, unknown outcome, or changed source facts. Read
+   back both refs after the write; the periodic scanner resolves persisted drift
+   when it observes equality. A no-op `git push` to AGS is not a replay mechanism.
+   Normal subsequent eligible branch changes also invoke the existing projector,
+   but should not be manufactured solely to trigger recovery.
+5. Ref equality does not mark an open PR merged. Close an already-contained PR
+   only after checking its exact head is an ancestor of both mains and recording
+   that disposition; do not fabricate merge metadata.
+
+### AGS PR-only branch policy
+
+Default-branch naming does **not** enable PR-only protection automatically.
+Without a native protection row, durable Git HTTP credentials can fast-forward
+that branch (the storage guard still rejects default-branch deletion/non-FF).
+Forgejo protection applies only at Forgejo; it cannot protect the AGS ingress.
+
+The desired state in [`examples/pr-only-branch-protection.json`](examples/pr-only-branch-protection.json)
+can be reviewed and applied by the repository administrator:
+
+```sh
+# Explicit production mutation: do not run as part of diagnostics or deployment.
+gh api --hostname primary.example.test --method PUT \
+  repos/example-team/demo/branches/main/protection \
+  --input docs/examples/pr-only-branch-protection.json
+# Verify the returned native policy; a missing row/404 is not protected.
+gh api --hostname primary.example.test \
+  repos/example-team/demo/branches/main/protection
+```
+
+This uses the existing API/data policy, not a new global default or a production
+migration. Every configured protected branch rejects direct Git HTTP pushes,
+including fast-forwards and administrator pushes, with a hint to use the
+authoritative PR workflow. Work branches remain writable; authorized server-owned
+PR merge publication is a distinct path and remains permitted. Set project-owned
+review/status requirements separately; the example imposes no invented CI names.
+This ingress policy is not a claim that every native content/ref API is PR-only;
+those APIs retain their existing authorization and ref-update contracts.
 
 ## Runtime behavior
 
@@ -516,7 +575,7 @@ Projection status is exposed at:
 GET /api/v3/repos/{owner}/{repo}/projection/status
 ```
 
-A healthy projection must converge to the invariant `AGS ref SHA == Forgejo ref SHA` for every ref covered by the mirror policy. If the status reports drift, use a controlled wrapper such as `ags-team converge-projection --repo <owner/repo> --ref <ref> --authority ags --apply`; do not run `git push forgejo` manually.
+A healthy projection must converge to `AGS ref SHA == Forgejo ref SHA` for every mirror-eligible ref. Recovery uses the bounded operator procedure above, not a user-side force push or an unimplemented convergence wrapper.
 
 Forced AGS work-branch updates observed by the generic Git Smart HTTP post-push mirror path are mirrored with a forced refspec. The synchronous `ags/action-rebase` path is stricter: it accepts only an existing mapped non-base PR work branch whose AGS branch, AGS PR, Forgejo branch, Forgejo PR, and durable `last_synced_sha` agree at preflight, then pushes with `--force-with-lease=<exact-ref>:<accepted-old-sha>`. It never uses a `+refspec`, naked `--force`, or a lease inferred from a later remote read. Before mutating AGS it creates a `forgejo_action_rebase` generation in `pull_request_projection_jobs`. The row persists preflight and desired/observed SHA facts through `preflight`, `rebasing`, `projection_resume`, push/ref/PR verification, recording, retryable/terminal failure, `needs_rebase`, and `projected` phases. Only the same bound job generation may resume its durably recorded desired SHA through DB-CAS startup/manual retry; duplicate labels and duplicate webhooks cannot select or regenerate that state. In-process mutexes remain only an optimization. If Forgejo is still at the saved old head, that same generation may reuse the exact saved lease; if it is already at the desired head, it independently verifies the PR and records convergence; any third head is terminal drift. A new signed label or intent must instead match its own persisted expected AGS/Forgejo head and base facts and may not borrow an operator-inspected, interrupted, or pre-job legacy head as recovery. Exact live convergence is recorded only by its owning generation; unknown or newer heads fail closed. AGS bare repositories reject deletion and non-fast-forward rewrites of their symbolic-HEAD default branch; ordinary work heads remain rewriteable for PR rebase flows. The managed `pre-receive` dispatcher keeps this guard in `hooks/pre-receive.d/50-gh-server-authority`; an existing repo-local hook is preserved as `10-local-preserved` rather than overwritten during hook refresh. Git HTTP repository resolution refreshes this layout for existing repositories and fails closed if the guard cannot be installed. AGS branch deletes are mirrored with a delete refspec so Forgejo does not retain extra projection refs after AGS has removed the authoritative head. Raw branch pushes never create Forgejo PRs; AGS PR create/update remains the metadata authority and the only path that may ensure a Forgejo PR projection.
 

@@ -214,3 +214,18 @@ jobs:
           node-version: 22.22.0
       - name: Run official client against an isolated primary and CI fixtures
         run: node scripts/gh-native-acceptance.mjs --privileged-namespace
+
+  forgejo-projection:
+    name: Real Forgejo protected-branch projection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: .go-version
+      - name: Exercise real Forgejo with generated fixture credentials only
+        run: python3 scripts/test-forgejo-projection.py
