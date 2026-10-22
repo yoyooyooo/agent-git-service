@@ -187,12 +187,7 @@ func (s *Service) CIJobs(ctx context.Context, repository string, id uint64) ([]C
 		}
 		seen[j.Key] = true
 		j.HeadSHA = run.Run.HeadSHA
-		if backend, ok := sel.Backend.(cibackend.StepBackend); ok {
-			j.Steps, e = backend.JobSteps(ctx, sel.Binding.Repository, run.Run, j)
-			if e != nil {
-				return nil, ciError(e)
-			}
-		}
+		j.Steps = ciJobSteps(ctx, sel.Backend, sel.Binding.Repository, run.Run, j)
 		id, e := s.mapCI(ctx, repo, sel, "job", j.Key, j.Run)
 		if e != nil {
 			return nil, e
@@ -232,13 +227,21 @@ func (s *Service) CIJob(ctx context.Context, repository string, id uint64) (CIJo
 		return CIJob{}, e
 	}
 	job.HeadSHA = run.HeadSHA
-	if backend, ok := sel.Backend.(cibackend.StepBackend); ok {
-		job.Steps, e = backend.JobSteps(ctx, sel.Binding.Repository, run, job)
-		if e != nil {
-			return CIJob{}, ciError(e)
-		}
-	}
+	job.Steps = ciJobSteps(ctx, sel.Backend, sel.Binding.Repository, run, job)
 	return CIJob{ID: id, RunID: mapped.ID, Job: job, Backend: sel.Name}, nil
+}
+
+func ciJobSteps(ctx context.Context, backend cibackend.Backend, repo string, run cibackend.Run, job cibackend.Job) []cibackend.Step {
+	if steps, ok := backend.(cibackend.StepBackend); ok {
+		result, err := steps.JobSteps(ctx, repo, run, job)
+		if err != nil {
+			// Steps are optional metadata. Keep all access/binding checks in the
+			// adapter and discard even partial data on failure, not the job itself.
+			return nil
+		}
+		return result
+	}
+	return job.Steps
 }
 func (s *Service) CILogs(ctx context.Context, repository string, id uint64, job bool) ([]byte, error) {
 	_, sel, e := s.ciScope(ctx, repository)
