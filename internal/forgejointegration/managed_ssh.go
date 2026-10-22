@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -276,7 +277,18 @@ func ReconcileManagedSSH(ctx context.Context, cfg Config) error {
 
 func (i *Integration) attributedPush(ctx context.Context, req PushRequest, push GitPusher) (result error) {
 	dispatched := false
+	pushLogin := i.cfg.TokenOwner
+	if pushLogin == "" {
+		pushLogin = "unverified"
+	}
 	defer func() {
+		if dispatched {
+			status := "success"
+			if result != nil {
+				status = ClassifyProjectionError("", "", result).Type
+			}
+			slog.InfoContext(ctx, "Forgejo projection push", "target_repo", req.Repo.Owner+"/"+req.Repo.Repo, "branch", req.BranchName, "authenticated_login", pushLogin, "status", status)
+		}
 		if result != nil && !dispatched {
 			result = fmt.Errorf("%w: %w", ErrMappedPushNotAttempted, result)
 		}
@@ -284,6 +296,19 @@ func (i *Integration) attributedPush(ctx context.Context, req PushRequest, push 
 	actor := attribution.FromContext(ctx)
 	login := i.cfg.Attribution.Principals[actor.Login].Forgejo
 	if !i.cfg.Attribution.Enabled() || login == "" {
+		// Resolve the selected credential, not the configured bot name. This is
+		// push-scoped diagnostics, never a startup/readiness dependency.
+		if i.nativePush && i.cfg.TokenOwner == "" {
+			identityCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			status, data, err := NewHTTPClient(i.cfg.BaseURL, i.cfg.Token).request(identityCtx, http.MethodGet, "/api/v1/user", nil)
+			cancel()
+			var user struct {
+				Login string `json:"login"`
+			}
+			if err == nil && status == http.StatusOK && json.Unmarshal(data, &user) == nil && user.Login != "" {
+				pushLogin = user.Login
+			}
+		}
 		dispatched = true
 		err := push(ctx, req)
 		status := 0
@@ -357,6 +382,7 @@ func (i *Integration) attributedPush(ctx context.Context, req PushRequest, push 
 			return err
 		}
 		req.SSH = &gittransport.SSHConfig{IdentityFile: path, KnownHostsFile: i.cfg.ManagedSSH.KnownHostsFile}
+		pushLogin = login
 		dispatched = true
 		return push(ctx, req)
 	})

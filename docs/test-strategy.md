@@ -86,6 +86,24 @@ account helper evaluates prohibit_login without modifying real user accounts. Ne
 a deployed database or a business repository as a test fixture. Sandbox evidence
 is separate from exact-source hosted CI; neither implies deployment permission.
 
+### Protected-branch projection identity
+
+`python3 scripts/test-forgejo-projection.py` creates a new loopback-only Forgejo
+12 container and generated fixture credentials (never production secrets). It
+protects `main` with a bot-only push whitelist applied to admins, demonstrates
+operator rejection without ref movement, then loads the separate projection
+credential with empty attribution and proves exact-head fast-forward convergence.
+It also checks sanitized failure classification and actual-login push logs. The
+runner stops its own container without removing retained data; it accepts no
+existing provider URL or account. Hosted CI runs this as **Real Forgejo
+protected-branch projection**, independently of root package shards.
+
+`TestGitHTTP_DurableCredentialCannotPushProtectedBranch` applies the documented
+JSON policy through the real AGS REST API, rejects a native fast-forward HTTP
+push with the PR-workflow hint and unchanged main, permits a work-branch push,
+and verifies authorized server-owned merge publication. Production policy apply
+is a separate administrator action, not part of these fixtures.
+
 ## Priorities
 
 The major paths to protect first are:

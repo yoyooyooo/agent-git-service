@@ -86,3 +86,10 @@ func TestSanitizeProjectionErrorSummaryRedactsCredentialsForAnyURLScheme(t *test
 		t.Fatalf("expected both credential URLs redacted: %s", got)
 	}
 }
+
+func TestClassifyProjectionErrorDetectsSanitizedForbidden(t *testing.T) {
+	got := ClassifyProjectionError("refs/heads/main", "abc123", errors.New("provider Git 403 forbidden: exit status 128"))
+	if got.Type != ProjectionFailurePermissionDenied {
+		t.Fatalf("unclassified HTTP rejection: %s", got.Type)
+	}
+}

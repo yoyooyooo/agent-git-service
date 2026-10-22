@@ -275,18 +275,12 @@ type ProjectionWatchConfig struct {
 	Repos             string                      `yaml:"repos"`
 	RefPolicy         string                      `yaml:"ref_policy"`
 	Notify            ProjectionWatchNotifyConfig `yaml:"notify"`
-	Repair            ProjectionWatchRepairConfig `yaml:"repair"`
 }
 
 type ProjectionWatchNotifyConfig struct {
 	On             []string `yaml:"on"`
 	ThrottleWindow string   `yaml:"throttle_window"`
 	GracePeriod    string   `yaml:"grace_period"`
-}
-
-type ProjectionWatchRepairConfig struct {
-	Auto        bool     `yaml:"auto"`
-	SafeRepairs []string `yaml:"safe_repairs"`
 }
 
 const (

@@ -216,6 +216,13 @@ func (w *limitedOutput) Write(p []byte) (int, error) {
 
 func failureClass(stderr string) string {
 	text := strings.ToLower(stderr)
+	// Preserve only fixed classes, never the provider-controlled response.
+	switch {
+	case strings.Contains(text, "protected branch"), strings.Contains(text, "protected_branch"), strings.Contains(text, "pre-receive hook declined"):
+		return "protected branch rejected"
+	case strings.Contains(text, "403"), strings.Contains(text, "forbidden"):
+		return "403 forbidden"
+	}
 	for _, known := range []string{"stale info", "non-fast-forward", "fetch first", "authentication failed", "repository not found", "could not resolve host", "connection refused", "certificate problem", "redirect"} {
 		if strings.Contains(text, known) {
 			return known

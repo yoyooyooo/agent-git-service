@@ -60,9 +60,6 @@ projection_watch:
     on: [new, worsened, resolved]
     throttle_window: 30m
     grace_period: 90s
-  repair:
-    auto: false
-    safe_repairs: [delete_smoke_refs, recreate_missing_webhook]
 forgejo:
   enabled: true
   base_url: http://forgejo.local:5555
@@ -254,9 +251,6 @@ multica:
 	}
 	if len(cfg.ProjectionWatch.Notify.On) != 3 || cfg.ProjectionWatch.Notify.ThrottleWindow != "30m" || cfg.ProjectionWatch.Notify.GracePeriod != "90s" {
 		t.Fatalf("projection watch notify mismatch: %#v", cfg.ProjectionWatch.Notify)
-	}
-	if cfg.ProjectionWatch.Repair.Auto || len(cfg.ProjectionWatch.Repair.SafeRepairs) != 2 {
-		t.Fatalf("projection watch repair mismatch: %#v", cfg.ProjectionWatch.Repair)
 	}
 	if !cfg.Multica.Enabled || cfg.Multica.TargetInstance != "primary-b" || cfg.Multica.Command != "/usr/local/bin/multica" || cfg.Multica.Workspace != "workspace-alpha" || cfg.Multica.WorkspaceID != "22222222-2222-4222-8222-222222222222" {
 		t.Fatalf("multica config mismatch: %#v", cfg.Multica)

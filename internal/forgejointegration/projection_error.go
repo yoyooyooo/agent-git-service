@@ -12,6 +12,7 @@ const (
 	ProjectionFailureNonFastForward               = "non_fast_forward_blocked"
 	ProjectionFailureProtectedBranch              = "protected_branch_blocked"
 	ProjectionFailureAuthFailed                   = "auth_failed"
+	ProjectionFailurePermissionDenied             = "permission_denied"
 	ProjectionFailureRepoMissing                  = "forgejo_repo_missing"
 	ProjectionFailureSHADrift                     = "sha_drift"
 	ProjectionFailureSourceBranchCleanupPending   = "source_branch_cleanup_pending"
@@ -91,6 +92,8 @@ func ClassifyProjectionError(ref, expectedSHA string, err error) ProjectionError
 		pe.Type = ProjectionFailureNonFastForward
 	case strings.Contains(msg, "not allowed to push to protected branch") || strings.Contains(msg, "protected branch") || strings.Contains(msg, "pre-receive hook declined"):
 		pe.Type = ProjectionFailureProtectedBranch
+	case strings.Contains(msg, "403 forbidden"):
+		pe.Type = ProjectionFailurePermissionDenied
 	case strings.Contains(msg, "authentication failed") || strings.Contains(msg, "凭据不正确") || strings.Contains(msg, "requires authentication") || strings.Contains(msg, "401"):
 		pe.Type = ProjectionFailureAuthFailed
 	case strings.Contains(msg, "repository not found") || strings.Contains(msg, "not found") || strings.Contains(msg, "404"):
