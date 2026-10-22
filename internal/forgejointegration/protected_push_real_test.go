@@ -86,6 +86,17 @@ func TestRealForgejoProtectedPushIdentity(t *testing.T) {
 	if err := seed.HandlePush(ctx, event); err != nil {
 		t.Fatal("seed push:", err)
 	}
+	// Forgejo indexes the first push asynchronously; do not race its empty-repo flag.
+	for attempt := 0; attempt < 50; attempt++ {
+		snapshot := api("GET", "/repos/"+repo, bot, nil)
+		if snapshot["empty"] == false {
+			break
+		}
+		if attempt == 49 {
+			t.Fatal("seed push never made Forgejo repository nonempty")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	api("POST", "/repos/"+repo+"/branch_protections", bot, map[string]any{"branch_name": "main", "enable_push": true, "enable_push_whitelist": true, "push_whitelist_usernames": []string{"projection-bot"}, "apply_to_admins": true})
 	git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-m", "fast-forward")
 	head := git("rev-parse", "HEAD")

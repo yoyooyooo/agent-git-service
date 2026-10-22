@@ -215,8 +215,7 @@ forgejo:
     enabled: true
     webhook_url: "https://ags.example.com/api/v3/integrations/forgejo/webhook"
     integration_bot: "ags-bot"
-    # With nonempty attribution: diagnostic/onboarding credential only.
-    # Without attribution: retains the legacy REST/Git token override.
+    # Explicit authority command only; never overrides projection REST/Git.
     operator_token_file: "/path/to/forgejo-admin-token"
     # Exact Forgejo actor login -> immutable AGS numeric principal ID. There is
     # no same-login, provider-role, or repository-owner fallback.
