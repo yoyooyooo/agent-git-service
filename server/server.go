@@ -1109,7 +1109,7 @@ func initProviderLogBridge(cfg config.Config) (http.Handler, error) {
 		return nil, fmt.Errorf("open provider log bridge database: %w", err)
 	}
 	return providerlogbridge.New(providerlogbridge.Config{
-		DB: forgejoDB, ActionsLogDir: cfg.ForgejoActionsLogDir, ServiceToken: token,
+		DB: forgejoDB, ActionsLogDir: cfg.ForgejoActionsLogDir, ActionsArtifactDir: cfg.ForgejoActionsArtifactDir, ServiceToken: token,
 		MaxBytes: cfg.ProviderLogBridgeMaxBytes, AllowedCIDRs: cfg.ProviderLogBridgeAllowedCIDRs,
 	})
 }

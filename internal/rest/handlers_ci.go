@@ -258,20 +258,40 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 		case "checks-for-ref":
 			d.listExternalCheckRunsForRef(w, r, *repo, base)
 			return
+		case "artifact-download":
+			id, ok := readID("artifact_id")
+			if !ok {
+				return
+			}
+			data, err := d.Svc.CIArtifactDownload(r.Context(), repo.FullName, id)
+			if err != nil {
+				ciHTTPError(w, err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/zip")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write(data)
+			return
 		case "run-artifacts", "repo-artifacts":
 			if operation == "run-artifacts" {
 				id, ok := readID("run_id")
 				if !ok {
 					return
 				}
-				if _, err := d.Svc.CIRun(r.Context(), repo.FullName, id); err != nil {
+				artifacts, err := d.Svc.CIArtifacts(r.Context(), repo.FullName, id)
+				if err != nil {
 					ciHTTPError(w, err)
 					return
 				}
+				rows := make([]any, 0, len(artifacts))
+				for _, a := range artifacts {
+					rows = append(rows, map[string]any{"id": a.ID, "name": a.Artifact.Name, "size_in_bytes": a.Artifact.Size, "expired": a.Artifact.Expired, "created_at": a.Artifact.CreatedAt, "updated_at": a.Artifact.UpdatedAt, "expires_at": a.Artifact.ExpiresAt, "url": fmt.Sprintf("%s/actions/artifacts/%d", base, a.ID), "archive_download_url": fmt.Sprintf("%s/actions/artifacts/%d/zip", base, a.ID), "workflow_run": map[string]any{"id": a.RunID}})
+				}
+				respond.JSON(w, 200, map[string]any{"total_count": len(rows), "artifacts": rows})
+				return
 			}
-			// External adapters do not publish Actions artifacts. An empty
-			// collection is the truthful observation; 501 makes stock gh abort
-			// run view before it can show jobs that were already loaded.
+			// Repository-wide inventory is not projected by these adapters;
+			// run-scoped artifacts above are observed independently.
 			respond.JSON(w, 200, map[string]any{"total_count": 0, "artifacts": []any{}})
 			return
 		default:
@@ -307,9 +327,9 @@ func ciRunJSON(v service.CIRun, base string) map[string]any {
 }
 func ciJobJSON(v service.CIJob, base string) map[string]any {
 	j := v.Job
-	steps := j.Steps
-	if steps == nil {
-		steps = []cibackend.Step{}
+	steps := make([]map[string]any, 0, len(j.Steps))
+	for _, step := range j.Steps {
+		steps = append(steps, map[string]any{"name": step.Name, "number": step.Number, "status": nilIfEmpty(step.Status), "conclusion": nilIfEmpty(step.Conclusion), "started_at": step.StartedAt, "completed_at": step.CompletedAt})
 	}
 	return map[string]any{"id": v.ID, "run_id": v.RunID, "name": j.Name, "head_sha": j.HeadSHA, "status": j.Status, "conclusion": nilIfEmpty(j.Conclusion), "html_url": j.URL, "url": fmt.Sprintf("%s/actions/jobs/%d", base, v.ID), "run_url": fmt.Sprintf("%s/actions/runs/%d", base, v.RunID), "started_at": j.StartedAt, "completed_at": j.CompletedAt, "steps": steps, "labels": []string{}, "ags_ci_backend": v.Backend}
 }

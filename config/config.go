@@ -156,6 +156,7 @@ type Config struct {
 	ForgejoProjectionWorkerMaxAttempts    int
 	ForgejoProjectionWorkerRetryDelay     time.Duration
 	ForgejoActionsLogDir                  string
+	ForgejoActionsArtifactDir             string
 	ProviderLogBridgeEnabled              bool
 	ProviderLogBridgeTokenFile            string
 	ProviderLogBridgeForgejoDBDSNFile     string
@@ -250,6 +251,7 @@ func New() (Config, error) {
 		ForgejoAuthorityPolicyTokenFile:         os.Getenv("FORGEJO_INTEGRATION_AUTHORITY_POLICY_TOKEN_FILE"),
 		ForgejoIntegrationBot:                   os.Getenv("FORGEJO_INTEGRATION_BOT"),
 		ForgejoActionsLogDir:                    os.Getenv("FORGEJO_ACTIONS_LOG_DIR"),
+		ForgejoActionsArtifactDir:               os.Getenv("FORGEJO_ACTIONS_ARTIFACT_DIR"),
 		ProviderLogBridgeEnabled:                envBool("PROVIDER_LOG_BRIDGE_ENABLED"),
 		ProviderLogBridgeTokenFile:              os.Getenv("PROVIDER_LOG_BRIDGE_TOKEN_FILE"),
 		ProviderLogBridgeForgejoDBDSNFile:       os.Getenv("PROVIDER_LOG_BRIDGE_FORGEJO_DB_DSN_FILE"),

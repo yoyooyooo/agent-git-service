@@ -187,6 +187,12 @@ func (s *Service) CIJobs(ctx context.Context, repository string, id uint64) ([]C
 		}
 		seen[j.Key] = true
 		j.HeadSHA = run.Run.HeadSHA
+		if backend, ok := sel.Backend.(cibackend.StepBackend); ok {
+			j.Steps, e = backend.JobSteps(ctx, sel.Binding.Repository, run.Run, j)
+			if e != nil {
+				return nil, ciError(e)
+			}
+		}
 		id, e := s.mapCI(ctx, repo, sel, "job", j.Key, j.Run)
 		if e != nil {
 			return nil, e
@@ -226,6 +232,12 @@ func (s *Service) CIJob(ctx context.Context, repository string, id uint64) (CIJo
 		return CIJob{}, e
 	}
 	job.HeadSHA = run.HeadSHA
+	if backend, ok := sel.Backend.(cibackend.StepBackend); ok {
+		job.Steps, e = backend.JobSteps(ctx, sel.Binding.Repository, run, job)
+		if e != nil {
+			return CIJob{}, ciError(e)
+		}
+	}
 	return CIJob{ID: id, RunID: mapped.ID, Job: job, Backend: sel.Name}, nil
 }
 func (s *Service) CILogs(ctx context.Context, repository string, id uint64, job bool) ([]byte, error) {

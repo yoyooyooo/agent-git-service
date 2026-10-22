@@ -46,7 +46,24 @@ func TestForgejoCollectionOnlyRunDetailsJobsLogsAndRerun(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "workflow_runs": []any{map[string]any{
 				"id": 41, "run_number": 9, "name": "check-linux", "workflow_id": "ci.yml", "head_sha": head, "status": "failure", "created_at": now, "updated_at": now, "url": "https://ci.example.test/ci/project/actions/runs/9",
 			}}})
+		case "/api/internal/provider-logs/repos/ci/project/runs/17/artifacts":
+			require.Equal(t, "Bearer bridge-only", r.Header.Get("Authorization"))
+			require.Equal(t, head, r.URL.Query().Get("head_sha"))
+			if r.URL.Query().Get("download") != "" {
+				require.Equal(t, "51", r.URL.Query().Get("download"))
+				archive := zip.NewWriter(w)
+				file, _ := archive.Create("report.txt")
+				_, _ = file.Write([]byte("result"))
+				require.NoError(t, archive.Close())
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"schema": "ags.internal-provider-artifacts.v1", "repo": "ci/project", "run": "17", "head_sha": head, "artifacts": []any{map[string]any{"key": "51", "run": "17", "name": "report", "size_in_bytes": 6, "expired": false}}})
 		case "/api/internal/provider-logs/repos/ci/project/tasks/41":
+			if r.URL.Query().Get("resource") == "steps" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"schema": "ags.internal-provider-steps.v1", "repo": "ci/project", "task_id": 41, "run_number": 9, "job_name": "check-linux", "head_sha": head, "provider_pr": 0, "provider_ref": "refs/heads/feature", "event": "push", "steps": []any{map[string]any{"name": "test", "number": 1, "status": "completed", "conclusion": "failure", "started_at": now, "completed_at": now}, map[string]any{"name": "not started", "number": 2, "status": "queued", "conclusion": nil}}})
+				return
+			}
+
 			require.Equal(t, "Bearer bridge-only", r.Header.Get("Authorization"))
 			require.Equal(t, head, r.URL.Query().Get("head_sha"))
 			require.Equal(t, "feature", r.URL.Query().Get("head_ref"))
@@ -74,6 +91,11 @@ func TestForgejoCollectionOnlyRunDetailsJobsLogsAndRerun(t *testing.T) {
 	require.Len(t, rows, 1)
 	job := rows[0].(map[string]any)
 	require.Equal(t, "check-linux", job["name"])
+	steps := job["steps"].([]any)
+	require.Len(t, steps, 2)
+	require.Equal(t, "failure", steps[0].(map[string]any)["conclusion"])
+	require.Nil(t, steps[1].(map[string]any)["conclusion"])
+	require.Nil(t, steps[1].(map[string]any)["started_at"])
 	logs := h.DoREST(t, "GET", path+"/logs", nil)
 	require.Equal(t, 200, logs.Code, logs.Body.String())
 	archive, err := zip.NewReader(bytes.NewReader(logs.Body.Bytes()), int64(logs.Body.Len()))
@@ -123,5 +145,17 @@ func TestForgejoCollectionOnlyRunDetailsJobsLogsAndRerun(t *testing.T) {
 	require.Equal(t, 404, unknownArtifacts.Code, "unknown runs cannot fabricate successful artifact collections")
 	validArtifacts := h.DoREST(t, "GET", path+"/artifacts", nil)
 	require.Equal(t, 200, validArtifacts.Code, validArtifacts.Body.String())
-	require.Equal(t, float64(0), testharness.DecodeJSON(t, validArtifacts)["total_count"])
+	require.Equal(t, float64(1), testharness.DecodeJSON(t, validArtifacts)["total_count"])
+	artifacts := testharness.DecodeJSON(t, validArtifacts)["artifacts"].([]any)
+	artifact := artifacts[0].(map[string]any)
+	require.Equal(t, "report", artifact["name"])
+	require.Equal(t, float64(6), artifact["size_in_bytes"])
+	downloadPath := fmt.Sprintf("/api/v3/repos/%s/actions/artifacts/%.0f/zip", repo.FullName, artifact["id"])
+	require.True(t, strings.HasSuffix(artifact["archive_download_url"].(string), downloadPath))
+	download := h.DoREST(t, "GET", downloadPath, nil)
+	require.Equal(t, 200, download.Code, download.Body.String())
+	_, err = zip.NewReader(bytes.NewReader(download.Body.Bytes()), int64(download.Body.Len()))
+	require.NoError(t, err)
+	rawDownload := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/artifacts/51/zip", repo.FullName), nil)
+	require.Equal(t, 404, rawDownload.Code)
 }
