@@ -415,6 +415,10 @@ func (f *Forgejo) JobLogs(ctx context.Context, repo, id string) ([]byte, error) 
 // Reuse already verified run/job facts when collecting a whole run. Repeating
 // the complete repository inventory for each job adds no binding evidence.
 func (f *Forgejo) boundJobLogs(ctx context.Context, repo string, run Run, job Job) ([]byte, error) {
+	return f.boundJobResource(ctx, repo, run, job, false)
+}
+
+func (f *Forgejo) boundJobResource(ctx context.Context, repo string, run Run, job Job, steps bool) ([]byte, error) {
 	if f.config.LogBridge == nil {
 		return nil, fmt.Errorf("%w: Forgejo log bridge is not configured", ErrUnsupported)
 	}
@@ -458,6 +462,9 @@ func (f *Forgejo) boundJobLogs(ctx context.Context, repo string, run Run, job Jo
 	} else {
 		query.Set("head_ref", run.Branch)
 	}
+	if steps {
+		query.Set("resource", "steps")
+	}
 	parts := strings.Split(repo, "/")
 	endpoint := strings.TrimRight(f.config.LogBridge.URL, "/") + "/api/internal/provider-logs/repos/" + url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1]) + "/tasks/" + taskID + "?" + query.Encode()
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -488,6 +495,7 @@ func (f *Forgejo) boundJobLogs(ctx context.Context, repo string, run Run, job Jo
 		ProviderRef string `json:"provider_ref"`
 		Event       string `json:"event"`
 		Text        string `json:"text"`
+		Steps       []Step `json:"steps"`
 	}
 	if e = decode(body, &log); e != nil {
 		return nil, e
@@ -499,8 +507,18 @@ func (f *Forgejo) boundJobLogs(ctx context.Context, repo string, run Run, job Jo
 		pr = run.PullRequests[0]
 		expectedRef = fmt.Sprintf("refs/pull/%d/head", pr)
 	}
-	if log.Schema != "ags.internal-provider-log.v1" || log.Repo != repo || log.TaskID != task || log.RunNumber != run.Number || log.Head != run.HeadSHA || log.JobName != job.Name || log.ProviderPR != pr || log.ProviderRef != expectedRef || log.Event != run.Event {
+	schema := "ags.internal-provider-log.v1"
+	if steps {
+		schema = "ags.internal-provider-steps.v1"
+	}
+	if log.Schema != schema || log.Repo != repo || log.TaskID != task || log.RunNumber != run.Number || log.Head != run.HeadSHA || log.JobName != job.Name || log.ProviderPR != pr || log.ProviderRef != expectedRef || log.Event != run.Event {
 		return nil, ErrInvalid
+	}
+	if steps {
+		if log.Steps == nil {
+			return nil, ErrInvalid
+		}
+		return json.Marshal(log.Steps)
 	}
 	return []byte(log.Text), nil
 }

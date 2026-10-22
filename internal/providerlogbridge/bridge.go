@@ -28,11 +28,12 @@ const (
 )
 
 type Config struct {
-	DB            *gorm.DB
-	ActionsLogDir string
-	ServiceToken  string
-	MaxBytes      int64
-	AllowedCIDRs  []string
+	DB                 *gorm.DB
+	ActionsLogDir      string
+	ActionsArtifactDir string
+	ServiceToken       string
+	MaxBytes           int64
+	AllowedCIDRs       []string
 }
 
 type socketPeerContextKey struct{}
@@ -48,12 +49,13 @@ func CaptureSocketPeer(next http.Handler) http.Handler {
 }
 
 type Handler struct {
-	db          *gorm.DB
-	root        string
-	tokenSum    [sha256.Size]byte
-	maxBytes    int64
-	allowed     []*net.IPNet
-	zstdCommand func(context.Context, string) *exec.Cmd
+	db           *gorm.DB
+	root         string
+	artifactRoot string
+	tokenSum     [sha256.Size]byte
+	maxBytes     int64
+	allowed      []*net.IPNet
+	zstdCommand  func(context.Context, string) *exec.Cmd
 }
 
 type logBinding struct {
@@ -127,11 +129,12 @@ func New(cfg Config) (*Handler, error) {
 		maxBytes = providerlogprotocol.DecodedTextMaxBytes
 	}
 	return &Handler{
-		db:       cfg.DB,
-		root:     root,
-		tokenSum: sha256.Sum256([]byte(strings.TrimSpace(cfg.ServiceToken))),
-		maxBytes: maxBytes,
-		allowed:  allowed,
+		db:           cfg.DB,
+		root:         root,
+		artifactRoot: cfg.ActionsArtifactDir,
+		tokenSum:     sha256.Sum256([]byte(strings.TrimSpace(cfg.ServiceToken))),
+		maxBytes:     maxBytes,
+		allowed:      allowed,
 		zstdCommand: func(ctx context.Context, path string) *exec.Cmd {
 			return exec.CommandContext(ctx, "zstd", "-dc", "--", path)
 		},
@@ -139,6 +142,10 @@ func New(cfg Config) (*Handler, error) {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if chi.URLParam(r, "run") != "" {
+		h.ServeArtifacts(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		h.fail(w, http.StatusNotFound, "not_found", "Provider log was not found")
 		return
@@ -163,6 +170,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	verified, err := verifyBinding(binding, expected)
 	if err != nil {
 		h.fail(w, http.StatusConflict, "binding_mismatch", providerMessage(http.StatusConflict))
+		return
+	}
+	if r.URL.Query().Get("resource") == "steps" {
+		h.serveSteps(w, r, owner, repo, taskID, binding)
+		return
+	}
+	if !binding.InStorage || binding.Expired || strings.TrimSpace(binding.LogFilename) == "" {
+		h.fail(w, http.StatusConflict, "log_unavailable", providerMessage(http.StatusConflict))
 		return
 	}
 	text, status, code, err := h.read(r.Context(), binding.LogFilename)
@@ -195,9 +210,6 @@ WHERE lower(r.owner_name) = lower(?) AND lower(r.lower_name) = lower(?) AND at.i
 	}
 	if err != nil {
 		return row, http.StatusBadGateway, "database_unavailable", err
-	}
-	if !row.InStorage || row.Expired || strings.TrimSpace(row.LogFilename) == "" {
-		return row, http.StatusConflict, "log_unavailable", errors.New("provider log unavailable")
 	}
 	return row, 0, "", nil
 }

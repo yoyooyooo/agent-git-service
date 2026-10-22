@@ -96,9 +96,16 @@ try {
     const url = new URL(req.url, "http://127.0.0.1:7000"), bridge = url.pathname.startsWith("/api/internal/provider-logs/");
     const auth = bridge ? "Bearer " + bridgeToken : (currentBackend === "forgejo" ? "token " : "Bearer ") + providerToken;
     if (req.headers.authorization !== auth) { json(res, { error: "wrong credential boundary" }, 401); return; }
+    if (bridge && url.pathname.endsWith("/runs/17/artifacts")) {
+      if (url.searchParams.get("head_sha") !== head) { json(res, {}, 409); return; }
+      json(res, {schema:"ags.internal-provider-artifacts.v1",repo:"ci/project",run:"17",head_sha:head,artifacts:[]});return;
+    }
     if (bridge) {
       const task = Number(url.pathname.split("/").at(-1)); const name = task === 41 ? "unit" : "lint";
       if (url.searchParams.get("head_sha") !== head || url.searchParams.get("head_ref") !== "feature") { json(res, {}, 409); return; }
+      if (url.searchParams.get("resource")==="steps") {
+        json(res, {schema:"ags.internal-provider-steps.v1",repo:"ci/project",task_id:task,run_number:9,job_name:name,head_sha:head,provider_pr:0,provider_ref:"refs/heads/feature",event:"push",steps:[]});return;
+      }
       json(res, { schema: "ags.internal-provider-log.v1", repo: "ci/project", task_id: task, run_number: 9, job_name: name, head_sha: head, provider_pr: 0, provider_ref: "refs/heads/feature", event: "push", text: `2026-01-01T00:00:00Z ${name} fixture log\n` }); return;
     }
     const path = url.pathname.replace(/^\/api\/v1/, "");

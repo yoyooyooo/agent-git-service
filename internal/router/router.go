@@ -86,6 +86,7 @@ func registerProviderLogBridgeRoutes(r chi.Router, handlers *rest.Deps) {
 		return
 	}
 	r.Get("/api/internal/provider-logs/repos/{owner}/{repo}/tasks/{task}", handlers.ProviderLogBridge.ServeHTTP)
+	r.Get("/api/internal/provider-logs/repos/{owner}/{repo}/runs/{run}/artifacts", handlers.ProviderLogBridge.ServeHTTP)
 }
 
 func corsMiddleware(consoleBaseURL string) func(http.Handler) http.Handler {
@@ -988,7 +989,7 @@ func registerWorkflowRunRoutes(r chi.Router, handlers *rest.Deps) {
 	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}", handlers.CI(handlers.GetWorkflowRunByAttempt, "run"))
 	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs", handlers.CI(handlers.ListWorkflowRunJobsByAttempt, "run-jobs"))
 	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/logs", handlers.CI(handlers.GetWorkflowRunLogsByAttempt, "run-logs"))
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip", handlers.CI(handlers.DownloadArtifact, "unsupported"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip", handlers.CI(handlers.DownloadArtifact, "artifact-download"))
 	r.Get("/api/v3/repos/{owner}/{repo}/actions/jobs/{job_id}", handlers.CI(handlers.GetWorkflowJob, "job"))
 	r.Get("/api/v3/repos/{owner}/{repo}/actions/jobs/{job_id}/logs", handlers.CI(handlers.GetWorkflowJobLogs, "job-logs"))
 	r.Post("/api/v3/repos/{owner}/{repo}/actions/jobs/{job_id}/rerun", handlers.CI(handlers.RerunWorkflowRunJob, "job-rerun"))

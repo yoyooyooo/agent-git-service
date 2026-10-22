@@ -263,9 +263,31 @@ are disposable in a loopback-only user/network namespace. Backend fixtures use t
 published API shapes; they are not evidence of running real hosted CI jobs.
 
 This is a standard-client slice, not complete GitHub Actions API equivalence.
-External adapters do not publish Actions artifacts. `GET` of the repository and
-run artifact collections returns `{total_count:0, artifacts:[]}` so stock `gh run
-view` can finish after jobs load. Artifact download stays unsupported. Commit
+Forgejo 12's public REST API does not expose step or artifact collections.
+When an explicit log bridge is configured, AGS also uses that authenticated,
+source-CIDR-restricted bridge for read-only metadata. Steps are bound to the
+same repository, task, run number, commit, ref and event as logs, but do not
+require retained log files. Names, statuses and timestamps come from
+`action_task_step`; the zero-based provider index becomes GitHub's one-based
+`number`. Unknown status, absent times and absent conclusions remain null;
+no setup/cleanup steps or successful outcomes are synthesized.
+
+Run artifacts are bound to the exact repository, provider run ID and commit.
+Following Forgejo's own artifact view, confirmed/expired rows are grouped by
+artifact name, summing file sizes. AGS allocates repository/backend-scoped
+artifact IDs and publishes its own `archive_download_url`. Downloads revalidate
+the original parent run and artifact, never redirect credentials, and use only
+an explicitly configured `FORGEJO_ACTIONS_ARTIFACT_DIR` at the bridge host.
+Local v4 ZIP and legacy plain/gzip files are supported with bounded reads,
+root-confined filesystem access and safe archive paths; expired, unavailable,
+oversize or unconfigured storage fails explicitly. External object storage is
+not supported by this bridge. No deployed database is migrated or written.
+
+A configured bridge returning a missing endpoint or provider error is not
+converted into an empty successful collection. Adapters without artifact support
+retain the partial-compatibility empty collection. Repository-wide artifact
+inventory is not projected; only run-scoped Forgejo artifacts are supported.
+No installed bridge activation is implied by source acceptance. Commit
 check-runs list the selected backend's jobs for that SHA, including a provider
 branch label that is not the AGS head ref. Caches, settings and other unsupported
 Actions operations still fail explicitly rather than using unrelated native state.
