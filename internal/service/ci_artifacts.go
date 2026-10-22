@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+
 	"github.com/ngaut/agent-git-service/internal/cibackend"
 )
 
@@ -25,6 +27,9 @@ func (s *Service) CIArtifacts(ctx context.Context, repository string, id uint64)
 		return []CIArtifact{}, nil
 	}
 	artifacts, err := backend.Artifacts(ctx, sel.Binding.Repository, run.Run)
+	if errors.Is(err, cibackend.ErrUnsupported) {
+		return []CIArtifact{}, nil
+	}
 	if err != nil {
 		return nil, ciError(err)
 	}

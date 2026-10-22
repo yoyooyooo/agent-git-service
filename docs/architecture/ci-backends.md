@@ -270,7 +270,10 @@ same repository, task, run number, commit, ref and event as logs, but do not
 require retained log files. Names, statuses and timestamps come from
 `action_task_step`; the zero-based provider index becomes GitHub's one-based
 `number`. Unknown status, absent times and absent conclusions remain null;
-no setup/cleanup steps or successful outcomes are synthesized.
+no setup/cleanup steps or successful outcomes are synthesized. Step metadata is
+optional: an unavailable, denied or invalid step response is discarded and jobs
+(and their check-run views) remain available with empty steps. This does not
+relax bridge access/binding checks or mandatory job/run identity checks.
 
 Run artifacts are bound to the exact repository, provider run ID and commit.
 Following Forgejo's own artifact view, confirmed/expired rows are grouped by
@@ -283,10 +286,12 @@ root-confined filesystem access and safe archive paths; expired, unavailable,
 oversize or unconfigured storage fails explicitly. External object storage is
 not supported by this bridge. No deployed database is migrated or written.
 
-A configured bridge returning a missing endpoint or provider error is not
-converted into an empty successful collection. Adapters without artifact support
-retain the partial-compatibility empty collection. Repository-wide artifact
-inventory is not projected; only run-scoped Forgejo artifacts are supported.
+For artifact lists, a configured bridge returning a missing endpoint or provider
+error is not converted into an empty successful collection, except for an explicit
+unsupported-capability response. Adapters without artifact support, including
+Forgejo without `log_bridge`, retain the partial-compatibility empty collection.
+Repository-wide artifact inventory is not projected; only run-scoped Forgejo
+artifacts are supported.
 No installed bridge activation is implied by source acceptance. Commit
 check-runs list the selected backend's jobs for that SHA, including a provider
 branch label that is not the AGS head ref. Caches, settings and other unsupported
