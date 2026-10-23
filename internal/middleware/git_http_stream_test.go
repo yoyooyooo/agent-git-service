@@ -42,6 +42,12 @@ func TestGitCGIHelperProcess(t *testing.T) {
 		os.Exit(2)
 	}
 	switch mode {
+	case "exit-7", "signal":
+		fmt.Print("Content-Type: application/x-git-upload-pack-result\r\n\r\n0008NAK\nPACKpartial")
+		if mode == "signal" {
+			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+		}
+		os.Exit(7)
 	case "headers":
 		fmt.Print("Status: secret-sentinel\r\n\r\n")
 	case "stream":
@@ -63,10 +69,13 @@ func TestGitCGIHelperProcess(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 		fmt.Print("Content-Type: text/plain\r\n\r\nok")
-	case "endless":
+	case "endless", "timeout-stream":
 		fmt.Print("Content-Type: application/x-git-upload-pack-result\r\n\r\n0008NAK\nPACK")
 		chunk := bytes.Repeat([]byte{'x'}, 32<<10)
 		for {
+			if mode == "timeout-stream" {
+				time.Sleep(5 * time.Millisecond)
+			}
 			if _, err := os.Stdout.Write(chunk); err != nil {
 				os.Exit(5)
 			}

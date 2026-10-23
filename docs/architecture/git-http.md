@@ -97,7 +97,7 @@ remains detectable for the next locked reconciliation attempt.
 ```
 serve(w, r, repoPath, serviceName, advertise)
   → set env: GIT_PROJECT_ROOT, GIT_HTTP_EXPORT_ALL, PATH_INFO, REMOTE_USER
-  → create net/http/cgi.Handler pointing to git-http-backend binary
+  → create a Go CGI host adapter pointing to git-http-backend binary
   → delegate full HTTP request/response to CGI
 ```
 
@@ -180,13 +180,20 @@ The primary's existing `RequestLogging` completion record recognizes GET
 `/{owner}/{repo}.git/info/refs` and POST upload-pack/receive-pack before route
 authentication runs, including the router's equivalent URLs without `.git` and
 quoted repository components. `internal/logging/git_http.go` holds bounded request-scoped
-transport facts; `gitbackend` feeds it fixed standard-library CGI error
-categories. CGI's interpolated diagnostic suffix and Git response/error bodies
+transport facts; `gitbackend` feeds it fixed CGI error categories and the
+direct child process exit status. Its internal CGI host is adapted from Go
+1.26.8 `net/http/cgi/host.go`, retaining HTTP/environment/streaming behavior
+while observing the `cmd.Wait` result that the standard handler discards.
+The original Go copyright and BSD license are retained alongside the adapter.
+CGI's interpolated diagnostic suffix and Git response/error bodies
 are never included in these records. Authorization, Cookie and Proxy-Authorization
 remain stripped from the CGI request.
 
 Each Git completion includes `request_id`, `repo`, `git_operation`, `status`,
 `git_outcome`, `response_bytes`, `duration_ms`, `first_byte_ms`, and `cgi_error`.
+`cgi_exit_code` is included only after a
+started CGI child has been waited for: zero is normal exit, a positive value is
+the process exit code, and -1 means signaled termination or unavailable status.
 `repo` starts as the requested name and is updated after successful canonical
 authorization (synthetic Wiki keeps its Git backing name). `response_bytes` counts
 only bytes accepted by the HTTP ResponseWriter, including protocol framing or an
@@ -200,13 +207,21 @@ includes authorization and synchronous post-push work, not only CGI copy time.
 | `authorization_failed` | Pre-backend challenge/forbidden/hidden-not-found, or delegated revalidation denial; hidden 404 does not assert repo existence |
 | `cgi_start_failed` | Standard-library CGI setup/start failed |
 | `failed_before_first_byte` | Backend discovery/header failure, or non-disconnect copy failure before any body byte |
+| `cgi_exit_failed` | Direct CGI child exited nonzero or was signaled, without a higher-priority transport/header failure |
+| `write_timeout` | ResponseWriter returned a deadline/timeout error, even if this also canceled the request context |
+| `request_timeout` | Request context deadline exceeded, without an observed write timeout |
 | `client_disconnected` | Response write observed broken pipe/reset/closed connection, or request context cancellation |
-| `cgi_copy_failed` | CGI copy/response sink failure after body bytes, without a disconnect signal |
+| `cgi_copy_failed` | CGI copy/response sink failure after body bytes, without a disconnect or timeout signal |
 | `completed` | No observed HTTP/CGI transport failure; **not** proof of Git ref-level success |
-| `request_rejected` / `request_cancelled` | Other HTTP rejection or deadline/cancellation not classified above |
+| `request_rejected` / `request_cancelled` | Other HTTP rejection or cancellation not classified above |
 
 `cgi_error` is empty or a fixed category (`start_failed`, `headers_failed`,
-`backend_unavailable`, `copy_failed`); no OS error text or child output is retained.
+`backend_unavailable`, `copy_failed`, `exit_failed`); no OS error text or child
+output is retained in the trace. CGI exit failures and timeouts log at ERROR.
+Observed write timeout takes precedence over request cancellation/disconnect;
+a context deadline is classified separately from generic cancellation. A child
+killed during copy-error cleanup retains the original copy/timeout/disconnect
+outcome and category, with its numeric exit code recorded as secondary evidence.
 `client_disconnected` is an observed signal, not proof of a network root cause:
 a server-originated `context.Canceled` cannot be distinguished from a peer abort
 by this observer alone. An HTTP 200 that has already been committed is not
@@ -221,8 +236,8 @@ Example (synthetic, abbreviated):
 
 ### Streaming and subprocess evidence
 
-`internal/middleware/git_http_stream_test.go` runs the actual standard-library
-CGI handler with a subprocess fixture and the production request-logging
+`internal/middleware/git_http_stream_test.go` runs the Go-derived
+CGI host with a subprocess fixture and the production request-logging
 middleware. A real 24 MiB Git pack is streamed to a paused/slow HTTP reader: the
 prefix arrives before producer EOF, the child cannot finish while the reader is
 paused, and a full stream hash checks framing/body integrity. A real HTTP client
@@ -231,8 +246,14 @@ outcome, successful byte counts, and direct CGI child PID reaping. Real Git
 protocol v0/v2 ls-remote/clone/fetch/push round trips cover unchanged transport
 semantics. Tests also exercise executable-start failure, malformed CGI headers,
 and pre-handler authorization denial on all three routes.
+`git_http_failure_test.go` covers exit 7 and signaled termination after partial
+protocol bytes, injected write deadlines with both active/canceled contexts,
+real HTTP server WriteTimeout with a continuously reading client (both RPCs),
+and context deadlines. `internal/gitbackend/cgi_test.go` compares the adapter
+against `net/http/cgi` for identical status, headers and body, including partial
+responses, failing children, malformed headers and redirects.
 
-The standard library kills and waits for its direct CGI child after an observed
+The Go-derived host kills and waits for its direct CGI child after an observed
 copy error. **Context cancellation alone is not a verified cleanup guarantee**:
 the idle-child test observes that the handler remains blocked until the fixture
 is explicitly released. These tests do not claim process-tree cleanup for Git
@@ -250,3 +271,12 @@ go test -race ./internal/middleware -run 'TestGitHTTPDiagnostics' -count=1 -time
 
 Primary authorization/storage integration tests continue to require isolated
 TiDB as documented in [Test Strategy](../test-strategy.md).
+
+### Follow-up: raw CGI stderr boundary
+
+The fixed-category CGI Logger and structured completion are not a global child
+stderr filter. As before, unset `cgi.Handler.Stderr` sends child stderr directly
+to the server process stderr, outside these records. Hardening that existing
+channel is a separate follow-up; this diagnostic fix neither changes it nor
+claims all service stdout/stderr is sanitized. Nonempty stderr alone is not a
+process failure signal.
