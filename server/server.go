@@ -512,6 +512,9 @@ func initForgejoIntegration(cfg config.Config, databases ...*gorm.DB) (*forgejoi
 		slog.Info("forgejo integration disabled", "reason", "not configured")
 		return nil, nil
 	}
+	if err := forgejointegration.ValidateWebBaseURL(integrationCfg.WebBaseURL); err != nil {
+		return nil, fmt.Errorf("invalid Forgejo web base URL: %w", err)
+	}
 	endpoint, endpointErr := url.Parse(integrationCfg.BaseURL)
 	if endpointErr != nil || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || (endpoint.Scheme != "https" && endpoint.Scheme != "http") {
 		return nil, fmt.Errorf("enabled Forgejo integration requires a credential-free HTTP(S) base URL")

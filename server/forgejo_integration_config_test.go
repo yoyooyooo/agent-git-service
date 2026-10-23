@@ -194,3 +194,12 @@ func TestForgejoIntegrationConfigAbsentWebBaseURLStaysEmpty(t *testing.T) {
 		t.Fatalf("web base url=%q, want empty so redirects stay off", got.WebBaseURL)
 	}
 }
+
+func TestForgejoIntegrationRejectsInvalidWebBaseURLAtStartup(t *testing.T) {
+	for _, base := range []string{"https://forgejo.example.test/%2e%2e", "https://forgejo.example.test/?token=fixture", "//forgejo.example.test"} {
+		_, err := initForgejoIntegration(config.Config{ForgejoIntegrationEnabled: true, ForgejoIntegrationBaseURL: "https://api.example.test", ForgejoIntegrationWebBaseURL: base})
+		if err == nil || !strings.Contains(err.Error(), "invalid Forgejo web base URL") {
+			t.Fatalf("base %q: %v", base, err)
+		}
+	}
+}
