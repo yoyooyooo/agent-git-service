@@ -19,7 +19,9 @@ import (
 
 func reopenIntentFixture(t *testing.T) (*Service, db.PullRequest, db.PullRequestProjection) {
 	t.Helper()
-	return seedReopenIntentFixture(t, setupProjectionStateService(t))
+	s := setupProjectionStateService(t)
+	require.NoError(t, s.DB.Exec("PRAGMA foreign_keys = ON").Error)
+	return seedReopenIntentFixture(t, s)
 }
 
 func seedReopenIntentFixture(t *testing.T, s *Service) (*Service, db.PullRequest, db.PullRequestProjection) {
@@ -28,7 +30,7 @@ func seedReopenIntentFixture(t *testing.T, s *Service) (*Service, db.PullRequest
 	require.NoError(t, s.DB.AutoMigrate(&db.Milestone{}, &db.PullRequestMulticaLink{}, &db.OutboundDelivery{}))
 	var repo db.Repository
 	require.NoError(t, s.DB.First(&repo).Error)
-	pr := db.PullRequest{Number: 901, RepositoryID: repo.ID, Repository: repo, State: db.StateOpen, HeadRef: "feature", BaseRef: "main", HeadSHA: "abc1234", LifecycleGeneration: 1, ForgejoReopenPending: true}
+	pr := db.PullRequest{Number: 901, RepositoryID: repo.ID, Repository: repo, HeadRepositoryID: repo.ID, AuthorID: repo.OwnerID, State: db.StateOpen, HeadRef: "feature", BaseRef: "main", HeadSHA: "abc1234", LifecycleGeneration: 1, ForgejoReopenPending: true}
 	require.NoError(t, s.DB.Create(&pr).Error)
 	binding := db.PullRequestProjection{PullRequestID: pr.ID, RepositoryID: repo.ID, Provider: ProjectionProviderForgejo, ExternalRepo: "forgejo/repo", ExternalNumber: 42, ExternalURL: "https://forgejo.example/forgejo/repo/pulls/42", State: ProjectionStateClosed}
 	require.NoError(t, s.DB.Create(&binding).Error)
