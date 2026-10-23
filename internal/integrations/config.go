@@ -116,6 +116,10 @@ type ForgejoConfig struct {
 	ActionsLogBridgeURL       string                              `yaml:"actions_log_bridge_url"`
 	ActionsLogBridgeTokenFile string                              `yaml:"actions_log_bridge_token_file"`
 	ActionsLogBridgeToken     string                              `yaml:"-"`
+	// WebBaseURL is the optional browser-reachable web origin used only by
+	// read-only browser redirects. Empty disables those redirects; it never
+	// falls back to base_url.
+	WebBaseURL string `yaml:"web_base_url"`
 }
 
 type ForgejoAuthorityPolicyConfig struct {
@@ -990,6 +994,7 @@ func (c ForgejoConfig) ToForgejoIntegrationConfig() forgejointegration.Config {
 		ManagedSSH:               c.ManagedSSH,
 		Enabled:                  c.Enabled,
 		BaseURL:                  c.BaseURL,
+		WebBaseURL:               strings.TrimSpace(c.WebBaseURL),
 		Token:                    c.Token,
 		TokenFile:                c.TokenFile,
 		WebhookSecret:            c.WebhookSecret,

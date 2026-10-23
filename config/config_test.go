@@ -424,6 +424,7 @@ func TestForgejoIntegrationConfigFromEnv(t *testing.T) {
 	t.Setenv("AGS_INTEGRATIONS_CONFIG", "/etc/ags/integrations.yaml")
 	t.Setenv("FORGEJO_INTEGRATION_ENABLED", "1")
 	t.Setenv("FORGEJO_INTEGRATION_BASE_URL", "http://forgejo.local:5555")
+	t.Setenv("FORGEJO_INTEGRATION_WEB_BASE_URL", "http://forgejo-web.local:5555")
 	t.Setenv("FORGEJO_INTEGRATION_TOKEN_FILE", "/run/secrets/forgejo-token")
 	t.Setenv("FORGEJO_INTEGRATION_DEFAULT_OWNER", "ci")
 	t.Setenv("FORGEJO_INTEGRATION_REPO_MAP", "/etc/ags/forgejo-map.json")
@@ -461,6 +462,9 @@ func TestForgejoIntegrationConfigFromEnv(t *testing.T) {
 	}
 	if cfg.ForgejoIntegrationBaseURL != "http://forgejo.local:5555" {
 		t.Fatalf("base URL=%q", cfg.ForgejoIntegrationBaseURL)
+	}
+	if cfg.ForgejoIntegrationWebBaseURL != "http://forgejo-web.local:5555" {
+		t.Fatalf("web base URL=%q", cfg.ForgejoIntegrationWebBaseURL)
 	}
 	if cfg.ForgejoIntegrationTokenFile != "/run/secrets/forgejo-token" {
 		t.Fatalf("token file=%q", cfg.ForgejoIntegrationTokenFile)
