@@ -702,7 +702,7 @@ func (s *Service) UpdatePR(ctx context.Context, repoFullName string, number int,
 		if err := s.DispatchPullRequestClosedIntegrations(ctx, pr); err != nil {
 			slog.WarnContext(ctx, "close PR projections failed", "repo", repoFullName, "pr_number", number, "error", err)
 		}
-	} else if pr.State == db.StateOpen && (pr.Title != origTitle || pr.Body != origBody || baseRetarget != "" || (in.State != nil && *in.State == db.StateOpen && origState == db.StateClosed)) {
+	} else if pr.State == db.StateOpen && (pr.Title != origTitle || pr.Body != origBody || baseRetarget != "" || (in.State != nil && *in.State == db.StateOpen && (origState == db.StateClosed || pr.ForgejoReopenPending))) {
 		if in.State != nil && *in.State == db.StateOpen && origState == db.StateClosed {
 			pr, err = s.refreshReopenedPRHead(ctx, pr)
 			if err != nil {
@@ -711,6 +711,11 @@ func (s *Service) UpdatePR(ctx context.Context, repoFullName string, number int,
 		}
 		if _, err := s.DispatchPullRequestIntegrations(ctx, pr); err != nil {
 			slog.WarnContext(ctx, "refresh PR projections failed", "repo", repoFullName, "pr_number", number, "error", err)
+		}
+	}
+	if pr.ForgejoReopenPending {
+		if err := s.ResumePendingForgejoProjectionJobs(ctx); err != nil {
+			slog.WarnContext(ctx, "resume reopen projection", "error", err)
 		}
 	}
 	return pr, nil
@@ -756,6 +761,7 @@ func (s *Service) UpdatePRByID(ctx context.Context, id uint, state *string, draf
 			}
 			orig.State = previousState
 			orig.LifecycleGeneration = current.LifecycleGeneration
+			orig.ForgejoReopenPending = current.ForgejoReopenPending
 			if state != nil && *state == db.StateClosed {
 				var closedPR db.PullRequest
 				if err := tx.First(&closedPR, id).Error; err != nil {
@@ -769,7 +775,7 @@ func (s *Service) UpdatePRByID(ctx context.Context, id uint, state *string, draf
 		}); err != nil {
 			return err
 		}
-		if state != nil && *state == db.StateOpen && orig.State == db.StateClosed {
+		if state != nil && *state == db.StateOpen && (orig.State == db.StateClosed || orig.ForgejoReopenPending) {
 			pr, err := s.GetPRByID(ctx, id)
 			if err != nil {
 				return err
@@ -792,6 +798,11 @@ func (s *Service) UpdatePRByID(ctx context.Context, id uint, state *string, draf
 					slog.WarnContext(ctx, "close PR projections failed", "pull_request_id", id, "error", err)
 				}
 			}
+		}
+	}
+	if orig.ForgejoReopenPending {
+		if err := s.ResumePendingForgejoProjectionJobs(ctx); err != nil {
+			slog.WarnContext(ctx, "resume reopen projection", "error", err)
 		}
 	}
 	return nil

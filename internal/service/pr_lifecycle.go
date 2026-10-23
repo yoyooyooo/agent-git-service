@@ -16,6 +16,8 @@ import (
 // separate from provider/readback errors, which must remain retryable failures.
 var ErrStaleProjectionClose = errors.New("stale projection close lifecycle")
 
+const forgejoProjectionRetiredClosed = "projection job retired because the authoritative AGS pull request is closed"
+
 func providerLifecycleTime(raw string) (time.Time, error) {
 	t, err := time.Parse(time.RFC3339Nano, raw)
 	if err != nil || t.IsZero() {
@@ -81,9 +83,10 @@ func (s *Service) readProjectionClose(ctx context.Context, provider, externalRep
 	if err != nil {
 		return pr, nil, err
 	}
-	// Strict equality binds the signed event to this exact readback. Future,
-	// older and ambiguous revisions cannot be promoted using the AGS clock.
-	if !eventAt.Equal(liveAt) {
+	// Metadata may advance updated_at after the signed close was emitted.
+	// The event must beat the reopen watermark and cannot be ahead of live
+	// provider state; a later closed readback does not invalidate that close.
+	if eventAt.After(liveAt) {
 		return pr, nil, ErrStaleProjectionClose
 	}
 	return pr, &eventAt, nil
@@ -99,6 +102,9 @@ func (s *Service) confirmForgejoReopen(ctx context.Context, pr db.PullRequest, p
 	}
 	return s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
 		var binding db.PullRequestProjection
+		if err := lockPRProjectionSet(tx, pr.ID); err != nil {
+			return err
+		}
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&binding, projection.ID).Error; err != nil {
 			return err
 		}
@@ -106,7 +112,13 @@ func (s *Service) confirmForgejoReopen(ctx context.Context, pr db.PullRequest, p
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, pr.ID).Error; err != nil {
 			return err
 		}
-		if current.Merged || current.State != db.StateOpen || current.LifecycleGeneration != pr.LifecycleGeneration || binding.ExternalRepo != projection.ExternalRepo || binding.ExternalNumber != projection.ExternalNumber {
+		if err := validateForgejoProjectionFact(current, pr, binding, projection.ExternalRepo, projection.ExternalNumber); err != nil {
+			return err
+		}
+		if snapshot.Number != binding.ExternalNumber || snapshot.State != db.StateOpen || snapshot.Merged || snapshot.HeadRef != current.HeadRef || snapshot.BaseRef != current.BaseRef {
+			return fmt.Errorf("Forgejo reopen open readback mismatch")
+		}
+		if binding.PullRequestID != pr.ID || binding.Provider != ProjectionProviderForgejo {
 			return ErrStaleProjectionClose
 		}
 		if current.ForgejoLifecycleAt != nil && at.Before(*current.ForgejoLifecycleAt) {
@@ -126,8 +138,7 @@ func (s *Service) confirmForgejoReopen(ctx context.Context, pr db.PullRequest, p
 func (s *Service) updatePRLifecycleTx(tx *gorm.DB, id uint, state *string, updates map[string]any) (db.PullRequest, string, error) {
 	// Match callback lock order even when native close enqueues via projection.
 	if state != nil {
-		var bindings []db.PullRequestProjection
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("pull_request_id = ?", id).Order("id").Find(&bindings).Error; err != nil {
+		if err := lockPRProjectionSet(tx, id); err != nil {
 			return db.PullRequest{}, "", err
 		}
 	}
@@ -164,5 +175,47 @@ func (s *Service) updatePRLifecycleTx(tx *gorm.DB, id uint, state *string, updat
 	if err := tx.First(&current, id).Error; err != nil {
 		return current, previous, err
 	}
+	if current.ForgejoReopenPending && current.State == db.StateOpen && !current.Merged && s.ForgejoIntegration != nil {
+		// Queue in the same transaction as intent. A crash before synchronous
+		// dispatch, or a failed confirmation GET, leaves restartable work.
+		if err := s.queueForgejoReopenTx(tx, current); err != nil {
+			return current, previous, err
+		}
+	}
 	return current, previous, nil
+}
+
+// Every lifecycle writer locks the complete projection set by primary key,
+// then the native PR. Locking only the callback's provider creates a cycle
+// when merge subsequently updates the other providers.
+func lockPRProjectionSet(tx *gorm.DB, id uint) error {
+	var bindings []db.PullRequestProjection
+	return tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("pull_request_id = ?", id).Order("id").Find(&bindings).Error
+}
+
+func validateForgejoProjectionFact(current, observed db.PullRequest, binding db.PullRequestProjection, externalRepo string, number int) error {
+	if current.Merged || current.State != db.StateOpen || current.LifecycleGeneration != observed.LifecycleGeneration ||
+		current.HeadRef != observed.HeadRef || current.BaseRef != observed.BaseRef || current.HeadSHA != observed.HeadSHA {
+		return ErrStaleProjectionClose
+	}
+	if binding.ID != 0 && (binding.PullRequestID != current.ID || binding.Provider != ProjectionProviderForgejo || binding.ExternalRepo != externalRepo || binding.ExternalNumber != number) {
+		return ErrStaleProjectionClose
+	}
+	return nil
+}
+
+// queueForgejoReopenTx revives completed generic work or a job retired solely
+// because native state was closed. Active claims keep their lease; unrelated
+// terminal failures and action authority retain their explicit repair path.
+func (s *Service) queueForgejoReopenTx(tx *gorm.DB, pr db.PullRequest) error {
+	now := time.Now().UTC()
+	job := db.PullRequestProjectionJob{PullRequestID: pr.ID, RepositoryID: pr.RepositoryID, Provider: ProjectionProviderForgejo,
+		Trigger: ForgejoProjectionTriggerPullRequest, RepoFullName: pr.Repository.FullName, AGSPRNumber: pr.Number,
+		HeadRef: pr.HeadRef, BaseRef: pr.BaseRef, HeadSHA: pr.HeadSHA, Phase: ForgejoProjectionPhaseQueued, NextRunAt: &now}
+	if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "pull_request_id"}, {Name: "provider"}}, DoNothing: true}).Create(&job).Error; err != nil {
+		return err
+	}
+	return tx.Model(&db.PullRequestProjectionJob{}).
+		Where("pull_request_id = ? AND provider = ? AND `trigger` = ? AND (phase = ? OR (phase = ? AND last_error_type = ? AND last_error = ?))", pr.ID, ProjectionProviderForgejo, ForgejoProjectionTriggerPullRequest, ForgejoProjectionPhaseProjected, ForgejoProjectionPhaseFailedTerminal, forgejointegration.ProjectionFailurePullRequestStateDrift, forgejoProjectionRetiredClosed).
+		Updates(map[string]any{"phase": ForgejoProjectionPhaseQueued, "attempt": gorm.Expr("attempt + 1"), "head_sha": pr.HeadSHA, "head_ref": pr.HeadRef, "base_ref": pr.BaseRef, "next_run_at": &now, "finished_at": nil, "last_error": "", "last_error_type": ""}).Error
 }
