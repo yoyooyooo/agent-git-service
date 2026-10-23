@@ -158,9 +158,13 @@ func (s *Service) MarkPullRequestClosedFromProjection(ctx context.Context, provi
 		terminalMerged = false
 		transactionErr = s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
 			var projection db.PullRequestProjection
-			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-				Where("provider = ? AND external_repo = ? AND external_number = ?", provider, externalRepo, externalNumber).
-				First(&projection).Error; err != nil {
+			if err := tx.Where("provider = ? AND external_repo = ? AND external_number = ?", provider, externalRepo, externalNumber).First(&projection).Error; err != nil {
+				return wrapErr(err)
+			}
+			if err := lockPRProjectionSet(tx, projection.PullRequestID); err != nil {
+				return err
+			}
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND pull_request_id = ? AND provider = ? AND external_repo = ? AND external_number = ?", projection.ID, projection.PullRequestID, provider, externalRepo, externalNumber).First(&projection).Error; err != nil {
 				return wrapErr(err)
 			}
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -276,9 +280,13 @@ func (s *Service) MarkPullRequestMergedFromProjection(ctx context.Context, provi
 		lockedPR = db.PullRequest{}
 		transactionErr = s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
 			var projection db.PullRequestProjection
-			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-				Where("provider = ? AND external_repo = ? AND external_number = ?", provider, externalRepo, externalNumber).
-				First(&projection).Error; err != nil {
+			if err := tx.Where("provider = ? AND external_repo = ? AND external_number = ?", provider, externalRepo, externalNumber).First(&projection).Error; err != nil {
+				return wrapErr(err)
+			}
+			if err := lockPRProjectionSet(tx, projection.PullRequestID); err != nil {
+				return err
+			}
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND pull_request_id = ? AND provider = ? AND external_repo = ? AND external_number = ?", projection.ID, projection.PullRequestID, provider, externalRepo, externalNumber).First(&projection).Error; err != nil {
 				return wrapErr(err)
 			}
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).

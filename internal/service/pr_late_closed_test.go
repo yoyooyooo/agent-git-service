@@ -32,6 +32,7 @@ type lateClosedClient struct {
 	readError                error
 	notFound                 bool
 	wrongNumber              bool
+	failAfterWrite           bool
 }
 
 func (c *lateClosedClient) GetPullRequest(ctx context.Context, _, _ string, number int) (forgejointegration.PullRequestSnapshot, bool, error) {
@@ -70,6 +71,9 @@ func (c *lateClosedClient) UpdatePullRequestState(_ context.Context, owner, repo
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.state = state
+	if c.failAfterWrite {
+		c.readError = errors.New("injected confirmation GET failure")
+	}
 	if state == db.StateOpen {
 		c.revision = "2001-01-01T00:00:02Z"
 	}
@@ -94,7 +98,7 @@ func lateCloseFixture(t *testing.T) (*service.Service, db.PullRequest, *lateClos
 	svc.DisableForgejoProjectionWorker = true
 	pr := createProjectedPRForLifecycleTest(t, svc, context.Background())
 	client := &lateClosedClient{projectionSyncForgejoClient: projectionSyncForgejoClient{headSHA: pr.HeadSHA}, state: db.StateClosed, revision: "2001-01-01T00:00:01Z", head: pr.HeadRef, base: pr.BaseRef}
-	svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{Enabled: true, WebhookSecret: "late-close-fixture", AutoPullRequest: true, BaseURL: "https://forgejo.example.test", Token: "fixture-only", MirrorBranchIncludes: []string{"*"}, PRBranchIncludes: []string{"*"}, RepoMap: map[string]forgejointegration.RepoMapping{pr.Repository.FullName: {Owner: "forgejo", Repo: "repo"}}}, client, func(context.Context, forgejointegration.PushRequest) error { return nil })
+	svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{Enabled: true, WebhookSecret: "late-close-fixture", AutoPullRequest: true, BaseURL: "https://forgejo.example.test", Token: "fixture-only", MirrorBranchIncludes: []string{"agent/*"}, PRBranchIncludes: []string{"agent/*"}, RepoMap: map[string]forgejointegration.RepoMapping{pr.Repository.FullName: {Owner: "forgejo", Repo: "repo"}}}, client, func(context.Context, forgejointegration.PushRequest) error { return nil })
 	return svc, pr, client
 }
 func reopenLateClose(t *testing.T, svc *service.Service, pr db.PullRequest, transport string) {
@@ -398,7 +402,7 @@ func TestLateClosedHTTPReopenEntrypoints(t *testing.T) {
 			ctx := context.Background()
 			pr := createProjectedPRForLifecycleTest(t, svc, ctx)
 			client := &lateClosedClient{projectionSyncForgejoClient: projectionSyncForgejoClient{headSHA: pr.HeadSHA}, state: db.StateClosed, revision: "2001-01-01T00:00:01Z", head: pr.HeadRef, base: pr.BaseRef}
-			svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{Enabled: true, WebhookSecret: "late-close-fixture", AutoPullRequest: true, BaseURL: "https://forgejo.example.test", Token: "fixture-only", MirrorBranchIncludes: []string{"*"}, PRBranchIncludes: []string{"*"}, RepoMap: map[string]forgejointegration.RepoMapping{pr.Repository.FullName: {Owner: "forgejo", Repo: "repo"}}}, client, func(context.Context, forgejointegration.PushRequest) error { return nil })
+			svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{Enabled: true, WebhookSecret: "late-close-fixture", AutoPullRequest: true, BaseURL: "https://forgejo.example.test", Token: "fixture-only", MirrorBranchIncludes: []string{"agent/*"}, PRBranchIncludes: []string{"agent/*"}, RepoMap: map[string]forgejointegration.RepoMapping{pr.Repository.FullName: {Owner: "forgejo", Repo: "repo"}}}, client, func(context.Context, forgejointegration.PushRequest) error { return nil })
 			headers, body := signedLateClose("2001-01-01T00:00:01Z")
 			_, err := svc.HandleForgejoWebhook(ctx, headers, body)
 			require.NoError(t, err)

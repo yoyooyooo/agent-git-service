@@ -203,7 +203,7 @@ func (s *Service) projectionPullRequestFact(ctx context.Context, pullRequestID u
 	if err := s.DBForCtx(ctx).Select(
 		"id", "number", "repository_id", "head_repository_id", "author_id", "agent_session_id",
 		"title", "body", "head_ref", "head_sha", "base_ref", "base_sha", "state", "merged",
-		"merge_commit_sha", "closed_at", "updated_at",
+		"merge_commit_sha", "closed_at", "updated_at", "lifecycle_generation", "forgejo_reopen_pending", "forgejo_lifecycle_at",
 	).First(&pr, pullRequestID).Error; err != nil {
 		return db.PullRequest{}, fmt.Errorf("load projection PR fact: %w", err)
 	}
@@ -307,6 +307,14 @@ func (s *Service) EnqueueForgejoPullRequestProjection(ctx context.Context, pr db
 	// Requeue when AGS head advanced, or when a legacy session-admission
 	// terminal is healed. Same-head duplicate enqueue keeps other terminal
 	// projected facts intact.
+	if pr.ForgejoReopenPending {
+		if err := dbCtx.Transaction(func(tx *gorm.DB) error { return s.queueForgejoReopenTx(tx, pr) }); err != nil {
+			return job, err
+		}
+		if err := dbCtx.First(&job, job.ID).Error; err != nil {
+			return job, err
+		}
+	}
 	headAdvanced := strings.TrimSpace(job.HeadSHA) != headSHA
 	admissionHeal := genericForgejoSessionAdmissionHeal(job)
 	if (headAdvanced && job.Phase != ForgejoProjectionPhaseFailedTerminal) || admissionHeal {
@@ -386,8 +394,16 @@ func (s *Service) RetryForgejoPullRequestProjection(ctx context.Context, repoFul
 	}
 	switch job.Phase {
 	case ForgejoProjectionPhaseProjected:
+		if pr.ForgejoReopenPending {
+			queued, err := s.EnqueueForgejoPullRequestProjection(ctx, pr)
+			return projectionJobStatus(queued), err
+		}
 		return projectionJobStatus(job), nil
 	case ForgejoProjectionPhaseFailedTerminal:
+		if pr.ForgejoReopenPending && job.Trigger == ForgejoProjectionTriggerPullRequest && job.LastErrorType == forgejointegration.ProjectionFailurePullRequestStateDrift && job.LastError == forgejoProjectionRetiredClosed {
+			queued, err := s.EnqueueForgejoPullRequestProjection(ctx, pr)
+			return projectionJobStatus(queued), err
+		}
 		return ProjectionJobStatus{}, fmt.Errorf("forgejo projection job is terminal failed; inspect drift, then POST projection authority repair: %w", ErrInvalidState)
 	}
 	now := time.Now().UTC()
@@ -549,6 +565,20 @@ func (s *Service) ResumePendingForgejoProjectionJobs(ctx context.Context) error 
 	if s == nil || s.DisableForgejoProjectionWorker {
 		return nil
 	}
+	// Recover committed intent even if the process died before dispatch or a
+	// same-head projection had already reached projected in an older lifecycle.
+	var pending []db.PullRequest
+	if err := s.DBForCtx(ctx).Where("forgejo_reopen_pending = ? AND state = ? AND merged = ?", true, db.StateOpen, false).Find(&pending).Error; err != nil {
+		return err
+	}
+	for _, pr := range pending {
+		if s.ForgejoIntegration == nil {
+			break
+		}
+		if err := s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error { return s.queueForgejoReopenTx(tx, pr) }); err != nil {
+			return err
+		}
+	}
 	if _, err := s.terminalizeClosedForgejoProjectionJobs(ctx, 0); err != nil {
 		return err
 	}
@@ -622,7 +652,7 @@ func (s *Service) terminalizeClosedForgejoProjectionJobs(ctx context.Context, re
 	result := query.Updates(map[string]any{
 		"phase":           ForgejoProjectionPhaseFailedTerminal,
 		"last_error_type": forgejointegration.ProjectionFailurePullRequestStateDrift,
-		"last_error":      "projection job retired because the authoritative AGS pull request is closed",
+		"last_error":      forgejoProjectionRetiredClosed,
 		"next_run_at":     nil,
 		"finished_at":     &now,
 		"updated_at":      now,
@@ -910,6 +940,11 @@ func (s *Service) processForgejoProjectionJobAttempt(ctx context.Context, job db
 		if err := s.updateForgejoProjectionJobPhase(ctx, job.ID, ForgejoProjectionPhasePushingRef, phaseUpdates); err != nil {
 			return newFailure(job.RemoteRef, headSHA, fmt.Errorf("persist Forgejo projection job phase: %w", err), true)
 		}
+		if err := s.reopenForgejoProjection(ctx, repoFullName, pr, func(checkCtx context.Context) error {
+			return s.revalidateGenericProjectionProviderWrite(checkCtx, job, pr)
+		}); err != nil {
+			return newFailure(job.RemoteRef, headSHA, err, true)
+		}
 		var result forgejointegration.PullRequestResult
 		var handled bool
 		var err error
@@ -1005,6 +1040,13 @@ func (s *Service) revalidateGenericProjectionProviderWrite(ctx context.Context, 
 	if err := s.revalidateGenericProjectionGeneration(ctx, job.ID, ForgejoProjectionPhasePushingRef); err != nil {
 		return err
 	}
+	var lifecycle db.PullRequest
+	if err := s.DBForCtx(ctx).First(&lifecycle, pr.ID).Error; err != nil {
+		return err
+	}
+	if err := validateForgejoProjectionFact(lifecycle, pr, db.PullRequestProjection{}, "", 0); err != nil {
+		return err
+	}
 	if hasAuthorityRepairConfirmation(job) {
 		// The durable marker is consumed when this attempt enters pushing_ref.
 		// Its claimed snapshot still binds every repair write to the confirmed
@@ -1045,17 +1087,17 @@ func (s *Service) requeueGenericForgejoSessionAdmissionJobs(ctx context.Context)
 }
 
 func (s *Service) completeGenericForgejoPullRequestProjection(ctx context.Context, jobID uint, repoFullName, headSHA string, pr db.PullRequest, res forgejointegration.PullRequestResult) error {
+	snapshot, err := s.prepareForgejoProjectionConfirmation(ctx, repoFullName, pr, res)
+	if err != nil {
+		return err
+	}
 	finished := time.Now().UTC()
-	err := s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
+	err = s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
 		txCtx := ContextWithDB(ctx, tx)
 		if err := s.revalidateGenericProjectionGeneration(txCtx, jobID, ForgejoProjectionPhaseRecordingProjection); err != nil {
 			return err
 		}
-		if err := s.UpsertPullRequestProjection(txCtx, db.PullRequestProjection{
-			PullRequestID: pr.ID, RepositoryID: pr.RepositoryID, Provider: ProjectionProviderForgejo,
-			ExternalRepo: res.ExternalRepo, ExternalNumber: res.Number, ExternalURL: res.URL,
-			SourceBranch: pr.HeadRef, TargetBranch: pr.BaseRef, State: ProjectionStateOpen, LastSyncedSHA: headSHA,
-		}); err != nil {
+		if err := s.recordForgejoProjectionTx(ctx, tx, headSHA, pr, res, snapshot); err != nil {
 			return fmt.Errorf("record Forgejo projection: %w", err)
 		}
 		if s.testGenericProjectionBeforeFinalCAS != nil {
