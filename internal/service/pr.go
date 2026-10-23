@@ -657,7 +657,23 @@ func (s *Service) UpdatePR(ctx context.Context, repoFullName string, number int,
 		pr.Draft = *in.Draft
 	}
 	if err := s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Save(&pr).Error; err != nil {
+		updates := map[string]any{}
+		if in.Title != nil {
+			updates["title"] = pr.Title
+		}
+		if in.Body != nil {
+			updates["body"] = pr.Body
+		}
+		if in.Draft != nil {
+			updates["draft"] = pr.Draft
+		}
+		if in.BaseRef != nil {
+			updates["base_ref"] = pr.BaseRef
+			updates["base_sha"] = pr.BaseSHA
+		}
+		var err error
+		pr, origState, err = s.updatePRLifecycleTx(tx, pr.ID, in.State, updates)
+		if err != nil {
 			return err
 		}
 		if in.State != nil && *in.State == db.StateClosed && !pr.Merged {
@@ -733,9 +749,13 @@ func (s *Service) UpdatePRByID(ctx context.Context, id uint, state *string, draf
 	}
 	if len(updates) > 0 {
 		if err := s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
-			if err := tx.Model(&db.PullRequest{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			var previousState string
+			current, previousState, err := s.updatePRLifecycleTx(tx, id, state, updates)
+			if err != nil {
 				return err
 			}
+			orig.State = previousState
+			orig.LifecycleGeneration = current.LifecycleGeneration
 			if state != nil && *state == db.StateClosed {
 				var closedPR db.PullRequest
 				if err := tx.First(&closedPR, id).Error; err != nil {

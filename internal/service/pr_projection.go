@@ -135,11 +135,16 @@ func (s *Service) FindPullRequestByProjection(ctx context.Context, provider, ext
 }
 
 // MarkPullRequestClosedFromProjection records a Forgejo-authoritative unmerged close into the AGS PR fact.
-func (s *Service) MarkPullRequestClosedFromProjection(ctx context.Context, provider, externalRepo string, externalNumber int, closedBy string) (db.PullRequest, error) {
+func (s *Service) MarkPullRequestClosedFromProjection(ctx context.Context, provider, externalRepo string, externalNumber int, closedBy string, eventRevision ...string) (db.PullRequest, error) {
 	provider = strings.TrimSpace(strings.ToLower(provider))
 	externalRepo = strings.TrimSpace(externalRepo)
 	if provider == "" || externalRepo == "" || externalNumber == 0 {
 		return db.PullRequest{}, fmt.Errorf("projection lookup requires provider, external repo, and external number")
+	}
+
+	observedPR, eventAt, err := s.readProjectionClose(ctx, provider, externalRepo, externalNumber, eventRevision)
+	if err != nil {
+		return db.PullRequest{}, err
 	}
 
 	// Resolve, lock, re-read, and enqueue in one transaction. Both projection
@@ -173,6 +178,20 @@ func (s *Service) MarkPullRequestClosedFromProjection(ctx context.Context, provi
 				return nil
 			}
 
+			if lockedPR.ID != observedPR.ID || lockedPR.LifecycleGeneration != observedPR.LifecycleGeneration || lockedPR.ForgejoReopenPending {
+				return ErrStaleProjectionClose
+			}
+			if eventAt != nil && lockedPR.ForgejoLifecycleAt != nil &&
+				(eventAt.Before(*lockedPR.ForgejoLifecycleAt) || (eventAt.Equal(*lockedPR.ForgejoLifecycleAt) && lockedPR.State != db.StateClosed)) {
+				return ErrStaleProjectionClose
+			}
+			if eventAt != nil && (lockedPR.ForgejoLifecycleAt == nil || eventAt.After(*lockedPR.ForgejoLifecycleAt)) {
+				if err := tx.Model(&lockedPR).UpdateColumn("forgejo_lifecycle_at", eventAt).Error; err != nil {
+					return err
+				}
+				lockedPR.ForgejoLifecycleAt = eventAt
+			}
+
 			observedAt := time.Now().UTC()
 			if lockedPR.ClosedAt != nil && !lockedPR.ClosedAt.IsZero() {
 				// Repeated close facts must reuse the first terminal timestamp so
@@ -181,7 +200,7 @@ func (s *Service) MarkPullRequestClosedFromProjection(ctx context.Context, provi
 			}
 			if lockedPR.State != db.StateClosed || lockedPR.ClosedAt == nil || lockedPR.ClosedAt.IsZero() {
 				result := tx.Model(&db.PullRequest{}).
-					Where("id = ? AND merged = ?", lockedPR.ID, false).
+					Where("id = ? AND merged = ? AND lifecycle_generation = ?", lockedPR.ID, false, observedPR.LifecycleGeneration).
 					Updates(map[string]any{
 						"state":      db.StateClosed,
 						"closed_at":  &observedAt,

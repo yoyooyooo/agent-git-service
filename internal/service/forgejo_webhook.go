@@ -44,6 +44,7 @@ type ForgejoWebhookResult struct {
 	WorkflowAction            string
 	WorkflowLabel             string
 	WorkflowStatus            string
+	IgnoredReason             string
 }
 
 // HandleForgejoWebhook validates and applies Forgejo merge-authority callbacks.
@@ -79,8 +80,12 @@ func (s *Service) HandleForgejoWebhook(ctx context.Context, headers http.Header,
 		return s.handleForgejoPullRequestActionLabel(ctx, actionEvent)
 	}
 	if !closedEvent.Merged {
-		agsPR, err := s.MarkPullRequestClosedFromProjection(ctx, ProjectionProviderForgejo, closedEvent.RepoFullName, closedEvent.PRNumber, s.ForgejoIntegration.AGSLoginForActor(closedEvent.SenderLogin))
+		agsPR, err := s.MarkPullRequestClosedFromProjection(ctx, ProjectionProviderForgejo, closedEvent.RepoFullName, closedEvent.PRNumber, s.ForgejoIntegration.AGSLoginForActor(closedEvent.SenderLogin), closedEvent.UpdatedAt)
 		if err != nil {
+			if errors.Is(err, ErrStaleProjectionClose) {
+				slog.InfoContext(ctx, "ignore stale closed Forgejo PR", "forgejo_repo", closedEvent.RepoFullName, "forgejo_pr", closedEvent.PRNumber)
+				return ForgejoWebhookResult{Handled: true, IgnoredReason: "stale_lifecycle", RepoFullName: closedEvent.RepoFullName, PRNumber: closedEvent.PRNumber}, nil
+			}
 			if errors.Is(err, ErrNotFound) {
 				slog.WarnContext(ctx, "ignore closed Forgejo PR without AGS projection", "forgejo_repo", closedEvent.RepoFullName, "forgejo_pr", closedEvent.PRNumber)
 				return ForgejoWebhookResult{Handled: false, RepoFullName: closedEvent.RepoFullName, PRNumber: closedEvent.PRNumber, BaseBranch: closedEvent.BaseBranch}, nil

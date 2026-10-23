@@ -461,6 +461,9 @@ func Migrate(database *gorm.DB) error {
 	if err := DropRetiredWikiDirIndex(database); err != nil {
 		return err
 	}
+	if err := MigratePRLifecycleColumns(database); err != nil {
+		return err
+	}
 	if err := MigrateIssueCommentPinningColumns(database); err != nil {
 		return err
 	}

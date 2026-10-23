@@ -33,6 +33,7 @@ type MergedPullRequestEvent struct {
 
 // ClosedPullRequestEvent is the minimal Forgejo PR-closed event used for lifecycle authority callbacks.
 type ClosedPullRequestEvent struct {
+	UpdatedAt    string
 	SenderLogin  string
 	RepoFullName string
 	PRNumber     int
@@ -219,10 +220,11 @@ func ParseClosedPullRequestWebhook(body []byte) (ClosedPullRequestEvent, bool, e
 			DefaultBranch string `json:"default_branch"`
 		} `json:"repository"`
 		PullRequest struct {
-			Number  int    `json:"number"`
-			Merged  bool   `json:"merged"`
-			HTMLURL string `json:"html_url"`
-			Head    struct {
+			UpdatedAt string `json:"updated_at"`
+			Number    int    `json:"number"`
+			Merged    bool   `json:"merged"`
+			HTMLURL   string `json:"html_url"`
+			Head      struct {
 				Ref string `json:"ref"`
 			} `json:"head"`
 			Base struct {
@@ -241,6 +243,7 @@ func ParseClosedPullRequestWebhook(body []byte) (ClosedPullRequestEvent, bool, e
 		base = payload.Repository.DefaultBranch
 	}
 	return ClosedPullRequestEvent{
+		UpdatedAt:    payload.PullRequest.UpdatedAt,
 		SenderLogin:  payload.Sender.Login,
 		RepoFullName: payload.Repository.FullName,
 		PRNumber:     payload.PullRequest.Number,
