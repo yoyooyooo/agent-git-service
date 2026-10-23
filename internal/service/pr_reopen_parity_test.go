@@ -39,6 +39,7 @@ func (c *reopenParityClient) EnsurePullRequest(ctx context.Context, request forg
 func TestUpdatePRByIDReopenRefreshesForgejoProjection(t *testing.T) {
 	svc, cleanup := setupTestService(t)
 	defer cleanup()
+	svc.DisableForgejoProjectionWorker = true
 	ctx := context.Background()
 	require.NoError(t, svc.DB.Create(&db.User{Login: "reopen-fixture", Type: db.TypeUser}).Error)
 	repo, err := svc.CreateRepo(ctx, service.CreateRepoInput{OwnerLogin: "reopen-fixture", Name: "project", DefaultBranch: "main", AddReadme: true})
