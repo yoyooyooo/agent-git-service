@@ -21,7 +21,7 @@ type reopenParityClient struct {
 }
 
 func (c *reopenParityClient) GetPullRequest(context.Context, string, string, int) (forgejointegration.PullRequestSnapshot, bool, error) {
-	return forgejointegration.PullRequestSnapshot{Number: 42, State: c.state, HeadRef: c.headRef, BaseRef: c.baseRef, HeadSHA: c.headSHA}, true, nil
+	return forgejointegration.PullRequestSnapshot{UpdatedAt: "2001-01-01T00:00:02Z", Number: 42, State: c.state, HeadRef: c.headRef, BaseRef: c.baseRef, HeadSHA: c.headSHA}, true, nil
 }
 
 func (c *reopenParityClient) UpdatePullRequestState(_ context.Context, owner, repo string, number int, state string) (forgejointegration.PullRequestResult, error) {

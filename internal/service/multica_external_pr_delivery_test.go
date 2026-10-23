@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ngaut/agent-git-service/internal/db"
+	"github.com/ngaut/agent-git-service/internal/forgejointegration"
 	"github.com/ngaut/agent-git-service/internal/multicaprojection"
 	"github.com/ngaut/agent-git-service/internal/service"
 	"github.com/ngaut/agent-git-service/internal/testharness"
@@ -148,13 +149,14 @@ func TestConcurrentForgejoClosesReuseOneObservedAtPayloadAndDelivery(t *testing.
 	ctx := context.Background()
 	pr := createProjectedPRForLifecycleTest(t, svc, ctx)
 	addAuthoritativeMulticaLink(t, svc, pr)
+	svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{Enabled: true, RepoMap: map[string]forgejointegration.RepoMapping{pr.Repository.FullName: {Owner: "forgejo", Repo: "repo"}}}, &lateClosedClient{state: db.StateClosed, revision: "2001-01-01T00:00:01Z", head: pr.HeadRef, base: pr.BaseRef}, nil)
 
 	start := make(chan struct{})
 	results := make(chan error, 2)
 	for range 2 {
 		go func() {
 			<-start
-			_, err := svc.MarkPullRequestClosedFromProjection(ctx, service.ProjectionProviderForgejo, "forgejo/repo", 42, "forgejo")
+			_, err := svc.MarkPullRequestClosedFromProjection(ctx, service.ProjectionProviderForgejo, "forgejo/repo", 42, "forgejo", "2001-01-01T00:00:01Z")
 			results <- err
 		}()
 	}
