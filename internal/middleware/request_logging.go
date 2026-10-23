@@ -80,7 +80,7 @@ func RequestLogging() func(http.Handler) http.Handler {
 			}
 
 			switch {
-			case outcome == "cgi_start_failed" || outcome == "failed_before_first_byte" || outcome == "cgi_copy_failed":
+			case outcome == "cgi_start_failed" || outcome == "failed_before_first_byte" || outcome == "cgi_copy_failed" || outcome == "cgi_exit_failed" || outcome == "write_timeout" || outcome == "request_timeout":
 				slog.ErrorContext(ctx, "http request completed", args...)
 			case outcome == "client_disconnected":
 				slog.WarnContext(ctx, "http request completed", args...)

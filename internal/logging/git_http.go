@@ -21,7 +21,9 @@ type GitHTTPTrace struct {
 	cgiError                                 string
 	bytes                                    int64
 	firstByte                                time.Duration
-	writeError, disconnected                 bool
+	writeError, disconnected, writeTimeout   bool
+	cgiExitCode                              int
+	cgiExited, cgiExitFailed                 bool
 }
 
 func WithGitHTTPTrace(ctx context.Context, repo, operation string) (context.Context, *GitHTTPTrace) {
@@ -73,6 +75,21 @@ func (t *GitHTTPTrace) CGIFailure(category string) {
 	t.cgiError = category
 }
 
+// CGIExited retains only a numeric exit code, never the OS error string.
+// -1 means signaled termination or no available exit status. A copy failure's
+// cleanup kill is secondary to the original transport failure.
+func (t *GitHTTPTrace) CGIExited(code int, failed bool) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cgiExited, t.cgiExitCode, t.cgiExitFailed = true, code, failed
+	if failed && t.cgiError == "" {
+		t.cgiError = "exit_failed"
+	}
+}
+
 func (t *GitHTTPTrace) Wrote(n int, err error) {
 	if t == nil {
 		return
@@ -87,7 +104,9 @@ func (t *GitHTTPTrace) Wrote(n int, err error) {
 	}
 	if err != nil {
 		t.writeError = true
-		t.disconnected = errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
+		t.disconnected = t.disconnected || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
+		var timeout net.Error
+		t.writeTimeout = t.writeTimeout || errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout())
 	}
 }
 
@@ -100,6 +119,10 @@ func (t *GitHTTPTrace) Completion(ctx context.Context, status int) (string, []an
 	switch {
 	case t.cgiError == "start_failed":
 		outcome = "cgi_start_failed"
+	case t.writeTimeout:
+		outcome = "write_timeout"
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		outcome = "request_timeout"
 	case t.disconnected || errors.Is(ctx.Err(), context.Canceled):
 		outcome = "client_disconnected"
 	case t.cgiError == "headers_failed" || t.cgiError == "backend_unavailable":
@@ -108,6 +131,8 @@ func (t *GitHTTPTrace) Completion(ctx context.Context, status int) (string, []an
 		outcome = "failed_before_first_byte"
 	case t.cgiError == "copy_failed" || t.writeError:
 		outcome = "cgi_copy_failed"
+	case t.cgiExitFailed:
+		outcome = "cgi_exit_failed"
 	case ctx.Err() != nil:
 		outcome = "request_cancelled"
 	case t.authorizationFailed || (!t.authorized && !t.backend && (status == 401 || status == 403 || status == 404)):
@@ -121,9 +146,13 @@ func (t *GitHTTPTrace) Completion(ctx context.Context, status int) (string, []an
 	if t.bytes > 0 {
 		first = float64(t.firstByte) / float64(time.Millisecond)
 	}
-	return outcome, []any{
+	fields := []any{
 		"repo", t.repo, "git_operation", t.operation, "git_outcome", outcome,
 		"response_bytes", t.bytes, "duration_ms", float64(time.Since(t.start)) / float64(time.Millisecond),
 		"first_byte_ms", first, "cgi_error", t.cgiError,
 	}
+	if t.cgiExited {
+		fields = append(fields, "cgi_exit_code", t.cgiExitCode)
+	}
+	return outcome, fields
 }

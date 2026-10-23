@@ -558,6 +558,13 @@ not by an absent local reader. The tests prove these distinct boundaries:
 
 - `internal/gitbackend`: explicit receive opt-in, query/service/method binding,
   CGI credential removal, protocol and primary policy environment preservation.
+  The Go-derived CGI host is compared with `net/http/cgi` for identical response
+  bytes, headers and status (including abnormal child exits). Git HTTP diagnostic
+  tests in `internal/middleware/git_http_{stream,failure}_test.go` cover streaming,
+  real Git v0/v2, direct-child exit 7/signal after partial output, actual server
+  WriteTimeout, injected deadlines with active/canceled contexts, and context
+  deadlines. These tests require no database; full primary authorization tests
+  still require isolated TiDB. See [Git HTTP diagnostics](architecture/git-http.md#request-diagnostics).
 - `internal/githttp`: all existing regressions plus storage-free authorization
   and real native Git v0/v2 clone/push/fetch (`access_boundary_test.go`).
 - `config/edge_test.go`: independent Edge environment/defaults and strict fixed

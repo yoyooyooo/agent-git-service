@@ -167,18 +167,29 @@ func Serve(w http.ResponseWriter, r *http.Request, req Request) error {
 		cgiReq.Header.Del("Transfer-Encoding")
 	}
 	dir, _ := os.Getwd()
-	handler := &cgi.Handler{
+	handler := &cgiHandler{Handler: cgi.Handler{
 		Path: backend, Dir: dir, Env: env,
 		InheritEnv: []string{"PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL"},
 		Logger:     log.New(&cgiDiagnosticWriter{ctx: r.Context(), repo: req.Repository}, "", 0),
-	}
+	}, onExit: func(state *os.ProcessState, err error) {
+		code := -1
+		if state != nil {
+			code = state.ExitCode()
+		}
+		if trace := applog.GitHTTPTraceFromContext(r.Context()); trace != nil {
+			trace.CGIExited(code, err != nil)
+		} else if err != nil {
+			slog.ErrorContext(r.Context(), "git CGI exited", "repo", req.Repository, "cgi_error", "exit_failed", "cgi_exit_code", code)
+		}
+	}}
 	applog.GitHTTPTraceFromContext(r.Context()).BackendStarted()
 	handler.ServeHTTP(w, cgiReq)
 	return nil
 }
 
-// net/http/cgi reports failures only through Logger, not ServeHTTP's return
-// value. Match its fixed prefixes, never retain/log the interpolated suffix:
+// The CGI host reports setup/header/copy failures through Logger, not
+// ServeHTTP's return value. Process exit is observed separately by onExit.
+// Match fixed prefixes, never retain/log the interpolated suffix:
 // malformed child headers and OS errors may contain untrusted/secret text.
 // Keep these categories covered by real CGI tests when upgrading Go.
 type cgiDiagnosticWriter struct {
