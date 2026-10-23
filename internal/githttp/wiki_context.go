@@ -46,6 +46,7 @@ func (h *Handler) resolveWikiRepoContext(w http.ResponseWriter, r *http.Request,
 		respond.NotFound(w)
 		return nil, false
 	}
+	applog.GitHTTPTraceFromContext(r.Context()).Authorized(requested)
 	applog.AddAttrs(r.Context(), slog.String("repo", parent.FullName), slog.String("git_repo", requested))
 	if !h.store.Exists(r.Context(), requested) {
 		if err := h.store.Init(r.Context(), requested, wikiv2.DefaultBranch, false); err != nil {

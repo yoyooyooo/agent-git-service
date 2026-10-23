@@ -173,3 +173,79 @@ For the phased test roadmap see [docs/test-strategy.md](../test-strategy.md).
 - [docs/module-contracts.md](../module-contracts.md) § githttp — dependency rules, accepted couplings
 - [Git Store](gitstore.md) — bare-repository operations used for transport
 - [Service Layer](service.md) — webhook dispatch, workflow sync, and repo lookup called post-push
+
+## Request diagnostics
+
+The primary's existing `RequestLogging` completion record recognizes GET
+`/{owner}/{repo}.git/info/refs` and POST upload-pack/receive-pack before route
+authentication runs. `internal/logging/git_http.go` holds bounded request-scoped
+transport facts; `gitbackend` feeds it fixed standard-library CGI error
+categories. CGI's interpolated diagnostic suffix and Git response/error bodies
+are never included in these records. Authorization, Cookie and Proxy-Authorization
+remain stripped from the CGI request.
+
+Each Git completion includes `request_id`, `repo`, `git_operation`, `status`,
+`git_outcome`, `response_bytes`, `duration_ms`, `first_byte_ms`, and `cgi_error`.
+`repo` starts as the requested name and is updated after successful canonical
+authorization (synthetic Wiki keeps its Git backing name). `response_bytes` counts
+only bytes accepted by the HTTP ResponseWriter, including protocol framing or an
+HTTP error body, not attempted writes or bytes acknowledged by the remote peer.
+`first_byte_ms` measures request entry to the first successful response-body write
+return; `-1` means no body byte was accepted. Headers alone do not count. Duration
+includes authorization and synchronous post-push work, not only CGI copy time.
+
+| `git_outcome` | Meaning |
+|---|---|
+| `authorization_failed` | Pre-backend challenge/forbidden/hidden-not-found, or delegated revalidation denial; hidden 404 does not assert repo existence |
+| `cgi_start_failed` | Standard-library CGI setup/start failed |
+| `failed_before_first_byte` | Backend discovery/header failure, or non-disconnect copy failure before any body byte |
+| `client_disconnected` | Response write observed broken pipe/reset/closed connection, or request context cancellation |
+| `cgi_copy_failed` | CGI copy/response sink failure after body bytes, without a disconnect signal |
+| `completed` | No observed HTTP/CGI transport failure; **not** proof of Git ref-level success |
+| `request_rejected` / `request_cancelled` | Other HTTP rejection or deadline/cancellation not classified above |
+
+`cgi_error` is empty or a fixed category (`start_failed`, `headers_failed`,
+`backend_unavailable`, `copy_failed`); no OS error text or child output is retained.
+`client_disconnected` is an observed signal, not proof of a network root cause:
+a server-originated `context.Canceled` cannot be distinguished from a peer abort
+by this observer alone. An HTTP 200 that has already been committed is not
+rewritten on failure, and no protocol error text is appended to a partial pack.
+CGI's existing return behavior and primary post-push semantics are unchanged.
+
+Example (synthetic, abbreviated):
+
+```json
+{"msg":"http request completed","request_id":"req-example","repo":"example/project","git_operation":"git-upload-pack","status":200,"git_outcome":"client_disconnected","response_bytes":65536,"duration_ms":1200.5,"first_byte_ms":12.4,"cgi_error":"copy_failed"}
+```
+
+### Streaming and subprocess evidence
+
+`internal/middleware/git_http_stream_test.go` runs the actual standard-library
+CGI handler with a subprocess fixture and the production request-logging
+middleware. A real 24 MiB Git pack is streamed to a paused/slow HTTP reader: the
+prefix arrives before producer EOF, the child cannot finish while the reader is
+paused, and a full stream hash checks framing/body integrity. A real HTTP client
+abort and a deterministic non-network failing response sink separately assert
+outcome, successful byte counts, and direct CGI child PID reaping. Real Git
+protocol v0/v2 ls-remote/clone/fetch/push round trips cover unchanged transport
+semantics. Tests also exercise executable-start failure, malformed CGI headers,
+and pre-handler authorization denial on all three routes.
+
+The standard library kills and waits for its direct CGI child after an observed
+copy error. **Context cancellation alone is not a verified cleanup guarantee**:
+the idle-child test observes that the handler remains blocked until the fixture
+is explicitly released. These tests do not claim process-tree cleanup for Git
+grandchildren, nor prompt cleanup of a silent CGI child on peer cancellation.
+They add no timeout, process supervisor, pack buffer, compression change, ref
+advertisement policy, or network configuration. The existing synthetic Wiki
+receive-pack response buffer remains a separate catalog-acknowledgment contract.
+
+Repeat without a database:
+
+```sh
+go test -race ./internal/logging ./internal/gitbackend -count=1
+go test -race ./internal/middleware -run 'TestGitHTTPDiagnostics' -count=1 -timeout=2m
+```
+
+Primary authorization/storage integration tests continue to require isolated
+TiDB as documented in [Test Strategy](../test-strategy.md).

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/cgi"
@@ -18,6 +19,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	applog "github.com/ngaut/agent-git-service/internal/logging"
 )
 
 const (
@@ -106,6 +109,7 @@ func Serve(w http.ResponseWriter, r *http.Request, req Request) error {
 	}
 	backend, err := findBackend()
 	if err != nil {
+		applog.GitHTTPTraceFromContext(r.Context()).CGIFailure("backend_unavailable")
 		return fmt.Errorf("git-http-backend not found: %w", err)
 	}
 	action := req.Service
@@ -166,9 +170,40 @@ func Serve(w http.ResponseWriter, r *http.Request, req Request) error {
 	handler := &cgi.Handler{
 		Path: backend, Dir: dir, Env: env,
 		InheritEnv: []string{"PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL"},
+		Logger:     log.New(&cgiDiagnosticWriter{ctx: r.Context(), repo: req.Repository}, "", 0),
 	}
+	applog.GitHTTPTraceFromContext(r.Context()).BackendStarted()
 	handler.ServeHTTP(w, cgiReq)
 	return nil
+}
+
+// net/http/cgi reports failures only through Logger, not ServeHTTP's return
+// value. Match its fixed prefixes, never retain/log the interpolated suffix:
+// malformed child headers and OS errors may contain untrusted/secret text.
+// Keep these categories covered by real CGI tests when upgrading Go.
+type cgiDiagnosticWriter struct {
+	ctx  context.Context
+	repo string
+}
+
+func (w *cgiDiagnosticWriter) Write(p []byte) (int, error) {
+	message := string(p)
+	category := "headers_failed"
+	switch {
+	case strings.HasPrefix(message, "CGI error:"):
+		category = "start_failed"
+	case strings.HasPrefix(message, "cgi: copy error:"):
+		category = "copy_failed"
+	case strings.HasPrefix(message, "cgi: bogus header line:"), strings.HasPrefix(message, "cgi: invalid header name:"):
+		// CGI ignores these lines and may still send a valid response.
+		return len(p), nil
+	}
+	if trace := applog.GitHTTPTraceFromContext(w.ctx); trace != nil {
+		trace.CGIFailure(category)
+	} else {
+		slog.ErrorContext(w.ctx, "git CGI failed", "repo", w.repo, "cgi_error", category)
+	}
+	return len(p), nil
 }
 
 func hasChunkedTransferEncoding(encodings []string) bool {

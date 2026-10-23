@@ -437,12 +437,16 @@ Assessment:
 ### `gitbackend`
 
 Shared native Git HTTP execution, extracted from the primary handler. Depends
-only on the standard library and installed Git, never DB/service/router or
-repository creation. Callers supply an already-authorized, trusted local view.
+on the standard library, installed Git and the shared `logging` request-trace
+contract, never DB/service/router or repository creation. Callers supply an
+already-authorized, trusted local view.
 Receive-pack requires explicit opt-in. Service/method/query binding is checked
 before CGI; original credentials are stripped from the child request. The
 primary's body-limit environment remains supported. A handled response is not
 proof of successful Git ref updates; effects and audits remain on the primary.
+CGI failures feed fixed, credential-free categories into the request completion
+record; raw child diagnostics and response bodies are not logged. See
+[Git Smart HTTP diagnostics](architecture/git-http.md#request-diagnostics).
 
 ### `edgeprotocol`
 

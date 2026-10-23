@@ -36,11 +36,16 @@ func RequestLogging() func(http.Handler) http.Handler {
 				slog.String("remote_ip", clientIP(r)),
 				slog.String("user_agent", r.UserAgent()),
 			)
+			var gitTrace *applog.GitHTTPTrace
+			if repo, operation, ok := gitHTTPRoute(r); ok {
+				ctx, gitTrace = applog.WithGitHTTPTrace(ctx, repo, operation)
+			}
 			r = r.WithContext(ctx)
 
 			start := time.Now()
 			ww := &captureResponseWriter{
 				WrapResponseWriter: chimiddleware.NewWrapResponseWriter(w, r.ProtoMajor),
+				gitTrace:           gitTrace,
 			}
 			next.ServeHTTP(ww, r)
 
@@ -63,11 +68,21 @@ func RequestLogging() func(http.Handler) http.Handler {
 				"duration_ms", time.Since(start).Milliseconds(),
 				"response_bytes", ww.BytesWritten(),
 			}
-			if msg := ww.errorSummary(); msg != "" {
+			outcome := ""
+			if gitTrace != nil {
+				var fields []any
+				outcome, fields = gitTrace.Completion(ctx, status)
+				// Git diagnostics never include the protocol/error body.
+				args = append([]any{"status", status, "route", route}, fields...)
+			} else if msg := ww.errorSummary(); msg != "" {
 				args = append(args, "error_message", msg)
 			}
 
 			switch {
+			case outcome == "cgi_start_failed" || outcome == "failed_before_first_byte" || outcome == "cgi_copy_failed":
+				slog.ErrorContext(ctx, "http request completed", args...)
+			case outcome == "client_disconnected":
+				slog.WarnContext(ctx, "http request completed", args...)
 			case status >= 500:
 				slog.ErrorContext(ctx, "http request completed", args...)
 			case status == statusClientClosedRequest:
@@ -83,18 +98,36 @@ func RequestLogging() func(http.Handler) http.Handler {
 
 type captureResponseWriter struct {
 	chimiddleware.WrapResponseWriter
-	body bytes.Buffer
+	body     bytes.Buffer
+	gitTrace *applog.GitHTTPTrace
 }
 
 func (w *captureResponseWriter) Write(p []byte) (int, error) {
-	if w.body.Len() < maxCapturedErrorBodyBytes {
+	if w.gitTrace == nil && w.body.Len() < maxCapturedErrorBodyBytes {
 		remaining := maxCapturedErrorBodyBytes - w.body.Len()
 		if remaining > len(p) {
 			remaining = len(p)
 		}
 		_, _ = w.body.Write(p[:remaining])
 	}
-	return w.WrapResponseWriter.Write(p)
+	n, err := w.WrapResponseWriter.Write(p)
+	w.gitTrace.Wrote(n, err)
+	return n, err
+}
+
+// Match only the Git transport surface, including requests rejected by route
+// auth before githttp runs. Query strings (and credentials) are never retained.
+func gitHTTPRoute(r *http.Request) (string, string, bool) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if len(parts) < 3 || parts[0] == "" || !strings.HasSuffix(parts[1], ".git") {
+		return "", "", false
+	}
+	action := strings.Join(parts[2:], "/")
+	if (r.Method == http.MethodPost && (action == "git-upload-pack" || action == "git-receive-pack")) ||
+		(r.Method == http.MethodGet && action == "info/refs") {
+		return parts[0] + "/" + strings.TrimSuffix(parts[1], ".git"), action, true
+	}
+	return "", "", false
 }
 
 func (w *captureResponseWriter) errorSummary() string {
