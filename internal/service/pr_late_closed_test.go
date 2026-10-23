@@ -91,6 +91,7 @@ func lateCloseFixture(t *testing.T) (*service.Service, db.PullRequest, *lateClos
 	t.Helper()
 	svc, cleanup := setupTestService(t)
 	t.Cleanup(cleanup)
+	svc.DisableForgejoProjectionWorker = true
 	pr := createProjectedPRForLifecycleTest(t, svc, context.Background())
 	client := &lateClosedClient{projectionSyncForgejoClient: projectionSyncForgejoClient{headSHA: pr.HeadSHA}, state: db.StateClosed, revision: "2001-01-01T00:00:01Z", head: pr.HeadRef, base: pr.BaseRef}
 	svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{Enabled: true, WebhookSecret: "late-close-fixture", AutoPullRequest: true, BaseURL: "https://forgejo.example.test", Token: "fixture-only", MirrorBranchIncludes: []string{"*"}, PRBranchIncludes: []string{"*"}, RepoMap: map[string]forgejointegration.RepoMapping{pr.Repository.FullName: {Owner: "forgejo", Repo: "repo"}}}, client, func(context.Context, forgejointegration.PushRequest) error { return nil })
@@ -393,6 +394,7 @@ func TestLateClosedHTTPReopenEntrypoints(t *testing.T) {
 		t.Run(transport, func(t *testing.T) {
 			h := testharness.New(t)
 			svc := h.Svc
+			svc.DisableForgejoProjectionWorker = true
 			ctx := context.Background()
 			pr := createProjectedPRForLifecycleTest(t, svc, ctx)
 			client := &lateClosedClient{projectionSyncForgejoClient: projectionSyncForgejoClient{headSHA: pr.HeadSHA}, state: db.StateClosed, revision: "2001-01-01T00:00:01Z", head: pr.HeadRef, base: pr.BaseRef}
