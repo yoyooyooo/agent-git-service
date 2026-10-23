@@ -71,12 +71,22 @@ func TestGitRequestLoggingRouteRecognition(t *testing.T) {
 		{"POST", "/fixture/repo.git/git-receive-pack", true},
 		{"GET", "/fixture/repo.git/unknown", false},
 		{"GET", "/api/v3/repos/fixture/repo.git/info/refs", false},
-		{"POST", "/fixture/repo/git-upload-pack", false},
+		{"POST", "/fixture/repo/git-upload-pack", true},
+		{"GET", "/fixture/repo/info/refs?service=git-upload-pack", true},
+		{"POST", "/fixture/percent%252Frepo.git/git-upload-pack", true},
 	} {
 		request := httptest.NewRequest(tc.method, tc.path, nil)
 		_, _, got := gitHTTPRoute(request)
 		if got != tc.git {
 			t.Errorf("%s %s: got %v", tc.method, tc.path, got)
 		}
+	}
+}
+
+func TestGitRequestLoggingEscapedRepository(t *testing.T) {
+	request := httptest.NewRequest("POST", "/fixture/percent%252Frepo.git/git-upload-pack", nil)
+	repo, _, ok := gitHTTPRoute(request)
+	if !ok || repo != "fixture/percent%2Frepo" {
+		t.Fatalf("repo=%q matched=%v", repo, ok)
 	}
 }

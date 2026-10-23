@@ -178,7 +178,8 @@ For the phased test roadmap see [docs/test-strategy.md](../test-strategy.md).
 
 The primary's existing `RequestLogging` completion record recognizes GET
 `/{owner}/{repo}.git/info/refs` and POST upload-pack/receive-pack before route
-authentication runs. `internal/logging/git_http.go` holds bounded request-scoped
+authentication runs, including the router's equivalent URLs without `.git` and
+quoted repository components. `internal/logging/git_http.go` holds bounded request-scoped
 transport facts; `gitbackend` feeds it fixed standard-library CGI error
 categories. CGI's interpolated diagnostic suffix and Git response/error bodies
 are never included in these records. Authorization, Cookie and Proxy-Authorization
