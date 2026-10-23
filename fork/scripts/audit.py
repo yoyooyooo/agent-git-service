@@ -114,10 +114,21 @@ def reviewed_fixtures(source: str) -> dict[tuple[str, str, str], str]:
     if not record:
         return {}
     configuration = json.loads(git("show", source + ":" + manifest_path))
-    if set(configuration) != {"version", "examples"} or configuration["version"] != 1:
+    if set(configuration) not in ({"version", "examples"}, {"version", "examples", "historical_examples"}) or configuration["version"] != 1:
         raise ValueError("invalid reviewed fixture manifest")
     approved = {}
-    for row in configuration["examples"]:
+    current_rows = [(row, source, False) for row in configuration["examples"]]
+    historical_rows = []
+    for item in configuration.get("historical_examples", []):
+        if set(item) != {"path", "object", "rule", "reason", "commit"}:
+            raise ValueError("invalid historical fixture entry")
+        commit = item["commit"]
+        if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+            raise ValueError("historical fixture requires an exact commit")
+        if resolve(commit) != commit or git("merge-base", commit, source).decode().strip() != commit:
+            raise ValueError("historical fixture commit must be an ancestor")
+        historical_rows.append(({k: v for k, v in item.items() if k != "commit"}, commit, True))
+    for row, revision, _ in current_rows + historical_rows:
         if set(row) != {"path", "object", "rule", "reason"}:
             raise ValueError("invalid reviewed fixture entry")
         path, oid, rule, reason = row["path"], row["object"], row["rule"], row["reason"]
@@ -128,7 +139,7 @@ def reviewed_fixtures(source: str) -> dict[tuple[str, str, str], str]:
             raise ValueError("only exact synthetic URL/key-shape fixtures may be reviewed; operator data cannot be suppressed")
         if not isinstance(reason, str) or not 20 <= len(reason) <= 500:
             raise ValueError("a bounded manual fixture-review reason is required")
-        current = git("ls-tree", source, "--", path).decode().strip().split()
+        current = git("ls-tree", revision, "--", path).decode().strip().split()
         if len(current) != 4 or current[1] != "blob" or current[2] != oid:
             raise ValueError("reviewed fixture content drift; re-review the changed fixture")
         key = (oid, path, rule)
