@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -118,14 +119,20 @@ func (w *captureResponseWriter) Write(p []byte) (int, error) {
 // Match only the Git transport surface, including requests rejected by route
 // auth before githttp runs. Query strings (and credentials) are never retained.
 func gitHTTPRoute(r *http.Request) (string, string, bool) {
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
-	if len(parts) < 3 || parts[0] == "" || !strings.HasSuffix(parts[1], ".git") {
+	// chi routes against RawPath when present. Split before unescaping so a
+	// quoted repository component cannot accidentally look like an API path.
+	parts := strings.Split(strings.TrimPrefix(r.URL.EscapedPath(), "/"), "/")
+	if len(parts) < 3 || parts[0] == "" || parts[1] == "" {
 		return "", "", false
 	}
 	action := strings.Join(parts[2:], "/")
 	if (r.Method == http.MethodPost && (action == "git-upload-pack" || action == "git-receive-pack")) ||
 		(r.Method == http.MethodGet && action == "info/refs") {
-		return parts[0] + "/" + strings.TrimSuffix(parts[1], ".git"), action, true
+		owner, ownerErr := url.PathUnescape(parts[0])
+		repo, repoErr := url.PathUnescape(parts[1])
+		if ownerErr == nil && repoErr == nil {
+			return owner + "/" + strings.TrimSuffix(repo, ".git"), action, true
+		}
 	}
 	return "", "", false
 }
