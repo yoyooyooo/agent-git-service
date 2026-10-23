@@ -115,20 +115,39 @@ func (s *Service) confirmForgejoReopen(ctx context.Context, pr db.PullRequest, p
 		if err := validateForgejoProjectionFact(current, pr, binding, projection.ExternalRepo, projection.ExternalNumber); err != nil {
 			return err
 		}
-		if snapshot.Number != binding.ExternalNumber || snapshot.State != db.StateOpen || snapshot.Merged || snapshot.HeadRef != current.HeadRef || snapshot.BaseRef != current.BaseRef {
-			return fmt.Errorf("Forgejo reopen open readback mismatch")
-		}
-		if binding.PullRequestID != pr.ID || binding.Provider != ProjectionProviderForgejo {
-			return ErrStaleProjectionClose
-		}
-		if current.ForgejoLifecycleAt != nil && at.Before(*current.ForgejoLifecycleAt) {
-			return fmt.Errorf("Forgejo reopen readback lifecycle regressed")
-		}
-		if err := tx.Model(&current).Updates(map[string]any{"forgejo_reopen_pending": false, "forgejo_lifecycle_at": at}).Error; err != nil {
-			return err
-		}
-		return tx.Model(&binding).Updates(map[string]any{"state": ProjectionStateOpen}).Error
+		return confirmForgejoReopenTx(tx, current, pr, binding, snapshot, at)
 	})
+}
+
+// A completed intent cannot authorize another reopen or advance its watermark.
+// The caller holds the complete projection set and PR locks through provider
+// write admission and consumption; generation alone does not fence completion.
+func validateForgejoReopenIntent(current, observed db.PullRequest) error {
+	if !current.ForgejoReopenPending || !observed.ForgejoReopenPending ||
+		(current.ForgejoLifecycleAt == nil) != (observed.ForgejoLifecycleAt == nil) ||
+		(current.ForgejoLifecycleAt != nil && !current.ForgejoLifecycleAt.Equal(*observed.ForgejoLifecycleAt)) {
+		return ErrStaleProjectionClose
+	}
+	return nil
+}
+
+func confirmForgejoReopenTx(tx *gorm.DB, current, observed db.PullRequest, binding db.PullRequestProjection, snapshot forgejointegration.PullRequestSnapshot, at time.Time) error {
+	if err := validateForgejoReopenIntent(current, observed); err != nil {
+		return err
+	}
+	if snapshot.Number != binding.ExternalNumber || snapshot.State != db.StateOpen || snapshot.Merged || snapshot.HeadRef != current.HeadRef || snapshot.BaseRef != current.BaseRef {
+		return fmt.Errorf("Forgejo reopen open readback mismatch")
+	}
+	if binding.PullRequestID != observed.ID || binding.Provider != ProjectionProviderForgejo {
+		return ErrStaleProjectionClose
+	}
+	if current.ForgejoLifecycleAt != nil && at.Before(*current.ForgejoLifecycleAt) {
+		return fmt.Errorf("Forgejo reopen readback lifecycle regressed")
+	}
+	if err := tx.Model(&current).Updates(map[string]any{"forgejo_reopen_pending": false, "forgejo_lifecycle_at": at}).Error; err != nil {
+		return err
+	}
+	return tx.Model(&binding).Updates(map[string]any{"state": ProjectionStateOpen}).Error
 }
 
 // updatePRLifecycleTx is shared by REST and GraphQL. Record reopen intent in

@@ -325,30 +325,57 @@ func (s *Service) reopenForgejoProjection(ctx context.Context, repoFullName stri
 	if !found || before.Number != projection.ExternalNumber || before.Merged || before.HeadRef != pr.HeadRef || before.BaseRef != pr.BaseRef || (before.State != db.StateClosed && before.State != db.StateOpen) {
 		return fmt.Errorf("mapped Forgejo pull request is not the unmerged head/base accepted for reopen")
 	}
-	confirmed := before
-	if before.State == db.StateClosed {
-		if beforeWrite != nil {
-			if err := beforeWrite(ctx); err != nil {
+	// Serialize admission, the provider write, and intent consumption with every
+	// synchronous/async confirmation. A fresh pending read alone leaves a race
+	// between admission and PATCH. The exact GET above remains outside the lock.
+	return s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockPRProjectionSet(tx, pr.ID); err != nil {
+			return err
+		}
+		var binding db.PullRequestProjection
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&binding, projection.ID).Error; err != nil {
+			return err
+		}
+		var current db.PullRequest
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, pr.ID).Error; err != nil {
+			return err
+		}
+		if err := validateForgejoProjectionFact(current, pr, binding, projection.ExternalRepo, projection.ExternalNumber); err != nil {
+			return err
+		}
+		if err := validateForgejoReopenIntent(current, pr); err != nil {
+			return err
+		}
+		txCtx := ContextWithDB(ctx, tx)
+		confirmed := before
+		if before.State == db.StateClosed {
+			if beforeWrite != nil {
+				if err := beforeWrite(txCtx); err != nil {
+					return err
+				}
+			}
+			res, err := s.ForgejoIntegration.UpdatePullRequestState(ctx, repoFullName, projection.ExternalNumber, db.StateOpen)
+			if err != nil {
 				return err
 			}
+			if res.Number != projection.ExternalNumber || res.ExternalRepo != projection.ExternalRepo {
+				return fmt.Errorf("Forgejo reopen returned a different mapped pull request")
+			}
+			after, found, err := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, repoFullName, projection.ExternalRepo, projection.ExternalNumber)
+			if err != nil {
+				return err
+			}
+			if !found || after.Number != projection.ExternalNumber || after.Merged || after.State != db.StateOpen || after.HeadRef != pr.HeadRef || after.BaseRef != pr.BaseRef {
+				return fmt.Errorf("Forgejo reopen did not confirm the mapped open pull request")
+			}
+			confirmed = after
 		}
-		res, err := s.ForgejoIntegration.UpdatePullRequestState(ctx, repoFullName, projection.ExternalNumber, db.StateOpen)
+		at, err := providerLifecycleTime(confirmed.UpdatedAt)
 		if err != nil {
 			return err
 		}
-		if res.Number != projection.ExternalNumber || res.ExternalRepo != projection.ExternalRepo {
-			return fmt.Errorf("Forgejo reopen returned a different mapped pull request")
-		}
-		after, found, err := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, repoFullName, projection.ExternalRepo, projection.ExternalNumber)
-		if err != nil {
-			return err
-		}
-		if !found || after.Number != projection.ExternalNumber || after.Merged || after.State != db.StateOpen || after.HeadRef != pr.HeadRef || after.BaseRef != pr.BaseRef {
-			return fmt.Errorf("Forgejo reopen did not confirm the mapped open pull request")
-		}
-		confirmed = after
-	}
-	return s.confirmForgejoReopen(ctx, pr, projection, confirmed)
+		return confirmForgejoReopenTx(tx, current, pr, binding, confirmed, at)
+	})
 }
 
 // retargetForgejoProjectionBase moves one open mapped Forgejo pull request
@@ -435,6 +462,9 @@ func (s *Service) recordForgejoProjectionTx(ctx context.Context, tx *gorm.DB, he
 		return err
 	}
 	if current.ForgejoReopenPending {
+		if err := validateForgejoReopenIntent(current, pr); err != nil {
+			return err
+		}
 		if snapshot == nil {
 			return fmt.Errorf("Forgejo reopen exact confirmation missing")
 		}
