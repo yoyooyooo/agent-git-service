@@ -197,6 +197,7 @@ func (h *Handler) resolveRepoContext(w http.ResponseWriter, r *http.Request, act
 		return nil, false
 	}
 	fullName := rep.FullName
+	applog.GitHTTPTraceFromContext(r.Context()).Authorized(fullName)
 	applog.AddAttrs(r.Context(), slog.String("repo", fullName))
 
 	if err := h.ensureRepo(r.Context(), fullName, rep.DefaultBranch); err != nil {
@@ -307,6 +308,7 @@ func (h *Handler) InfoRefs(w http.ResponseWriter, r *http.Request) {
 	defer releaseMaintenance()
 	if _, delegated := service.DelegatedSessionIDFromContext(r.Context()); delegated {
 		if err := h.revalidateDelegatedGit(r.Context(), repoCtx.repositoryID, svc); err != nil {
+			applog.GitHTTPTraceFromContext(r.Context()).AuthorizationFailed()
 			respond.Error(w, http.StatusForbidden, "Delegated session authority changed before Git operation")
 			return
 		}
@@ -336,6 +338,7 @@ func (h *Handler) UploadPack(w http.ResponseWriter, r *http.Request) {
 	defer releaseMaintenance()
 	if _, delegated := service.DelegatedSessionIDFromContext(r.Context()); delegated {
 		if err := h.revalidateDelegatedGit(r.Context(), repoCtx.repositoryID, "git-upload-pack"); err != nil {
+			applog.GitHTTPTraceFromContext(r.Context()).AuthorizationFailed()
 			respond.Error(w, http.StatusForbidden, "Delegated session authority changed before Git operation")
 			return
 		}
@@ -509,6 +512,7 @@ func (h *Handler) ReceivePack(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		if delegatedDenial != nil {
+			applog.GitHTTPTraceFromContext(r.Context()).AuthorizationFailed()
 			respond.Error(w, http.StatusForbidden, "Delegated session authority changed before Git operation")
 			return
 		}
