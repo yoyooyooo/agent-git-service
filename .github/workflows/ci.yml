@@ -60,6 +60,7 @@ jobs:
       - name: Test publication scanner and scoped operator routing
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_audit.py
+          PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_historical_fixtures.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_ci_database.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_generation.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_public_ranges.py
