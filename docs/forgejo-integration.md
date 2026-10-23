@@ -112,11 +112,19 @@ transport or the API, and it cannot be reached from them:
   User-Agent (`git/`, JGit, libgit2, go-git, git-lfs) or a git media type in Accept or
   Content-Type also keep their previous behavior. Ordinary source filenames
   ending in `.git` are not treated as transport endpoints.
-- The entire `/api/` namespace (including unregistered paths), `/api/graphql`,
-  `/graphql` and the gh-compatible endpoints never redirect to Forgejo.
-  This reserves the owner name `api`; a repository named `api` under another
-  owner is not excluded. Excluded requests retain the historical router
-  response, including any existing console redirect.
+- Explicit AGS routes take precedence over browser redirects. The middleware
+  checks the completed router for every registered HTTP method, including routes
+  added during server composition; there is no separate exclusion list. Device
+  login, connected login, avatars, readiness and metrics keep their original
+  handlers. `/login/device` remains `401` anonymously and serves the verification
+  form with authentication. GET/HEAD requests to POST-only AGS endpoints retain
+  their original method handling. Repository routes (`/{owner}/{repo}/...`) still
+  support the configured Forgejo redirect.
+- The entire `/api/` namespace, including unregistered paths, remains reserved.
+  `/graphql` keeps its registered handler; `/graphql/demo/pulls` can still name an
+  ordinary repository. A repository named `api` or `login` under an ordinary owner
+  is not excluded. Excluded requests retain the historical router response,
+  including any existing console redirect.
 - The AGS query string is deliberately **not** forwarded: an AGS URL can carry a
   credential, and a Forgejo page does not need it.
 - Non-mappable paths fall through to the historical router. Owner, repository

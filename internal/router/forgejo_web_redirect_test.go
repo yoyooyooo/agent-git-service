@@ -395,3 +395,98 @@ func TestForgejoWebRejectsPathInjection(t *testing.T) {
 		}
 	}
 }
+
+func TestForgejoWebDeviceVerificationPreservesAuthentication(t *testing.T) {
+	svc, gql, deps, git, oauth := setupTestDeps(t)
+	base := router.RegisterRoutes(chi.NewRouter(), deps, git, gql, oauth, "http://console.localhost")
+	svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{Enabled: true, WebBaseURL: forgejoWebTestBase}, nil, nil)
+	enabled := router.RegisterRoutes(chi.NewRouter(), deps, git, gql, oauth, "http://console.localhost")
+	for _, authenticated := range []bool{false, true} {
+		t.Run(fmt.Sprintf("authenticated=%t", authenticated), func(t *testing.T) {
+			call := func(mux http.Handler) *httptest.ResponseRecorder {
+				req := httptest.NewRequest(http.MethodGet, "/login/device", nil)
+				if authenticated {
+					req.Header.Set("Authorization", "token test-token")
+				}
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, req)
+				return w
+			}
+			before, after := call(base), call(enabled)
+			want := http.StatusUnauthorized
+			if authenticated {
+				want = http.StatusOK
+				if !strings.Contains(after.Body.String(), "Device Code Verification") {
+					t.Error("authenticated request lost the device verification form")
+				}
+			}
+			for _, w := range []*httptest.ResponseRecorder{before, after} {
+				if w.Code != want || w.Header().Get("Location") != "" {
+					t.Errorf("want %d without redirect, got %d %q", want, w.Code, w.Header().Get("Location"))
+				}
+			}
+			if !bytes.Equal(before.Body.Bytes(), after.Body.Bytes()) || before.Header().Get("Content-Type") != after.Header().Get("Content-Type") {
+				t.Error("device verification response changed when redirect was enabled")
+			}
+		})
+	}
+}
+
+func TestForgejoWebRegisteredRoutesTakePrecedence(t *testing.T) {
+	svc, gql, deps, git, oauth := setupTestDeps(t)
+	baseRouter, enabledRouter := chi.NewRouter(), chi.NewRouter()
+	base := router.RegisterRoutes(baseRouter, deps, git, gql, oauth, "http://console.localhost")
+	svc.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{Enabled: true, WebBaseURL: forgejoWebTestBase}, nil, nil)
+	enabled := router.RegisterRoutes(enabledRouter, deps, git, gql, oauth, "http://console.localhost")
+	// Server composition adds /readyz and /metrics after RegisterRoutes. Future
+	// feature routes, including POST-only routes, must retain their handlers too.
+	for _, raw := range []*chi.Mux{baseRouter, enabledRouter} {
+		for _, path := range []string{"/readyz", "/metrics", "/healthz", "/device/verify", "/admin/status"} {
+			raw.Get(path, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("AGS endpoint")) })
+		}
+		raw.Route("/future", func(r chi.Router) {
+			r.Post("/action", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+		})
+	}
+	// Discover every fixed namespace from the real router and add a browser-shaped
+	// endpoint under it. New namespaces automatically join the regression matrix.
+	namespaces := make(map[string]bool)
+	if err := chi.Walk(baseRouter, func(_ string, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		first := strings.Split(strings.TrimPrefix(route, "/"), "/")[0]
+		if first != "" && !strings.ContainsAny(first, "{*}") {
+			namespaces[first] = true
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for first := range namespaces {
+		for _, raw := range []*chi.Mux{baseRouter, enabledRouter} {
+			raw.Post("/"+first+"/redirect-probe", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+		}
+	}
+	for first := range namespaces {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			for _, path := range []string{"/" + first + "/redirect-probe", "/" + fmt.Sprintf("%%%02x", first[0]) + first[1:] + "/redirect-probe"} {
+				t.Run(method+path, func(t *testing.T) {
+					before, after := servedBy(t, base, method, path), servedBy(t, enabled, method, path)
+					if before.Code != after.Code || before.Header().Get("Location") != after.Header().Get("Location") || !bytes.Equal(before.Body.Bytes(), after.Body.Bytes()) {
+						t.Errorf("registered path changed: base %d %q %q; enabled %d %q %q", before.Code, before.Header().Get("Location"), before.Body.String(), after.Code, after.Header().Get("Location"), after.Body.String())
+					}
+				})
+			}
+		}
+	}
+	for _, path := range []string{"/avatars/alice", "/auth/connected/login", "/readyz", "/metrics", "/healthz", "/device/verify", "/admin/status", "/future/action"} {
+		t.Run(path, func(t *testing.T) {
+			before, after := servedBy(t, base, http.MethodGet, path), servedBy(t, enabled, http.MethodGet, path)
+			if before.Code != after.Code || before.Header().Get("Location") != after.Header().Get("Location") || !bytes.Equal(before.Body.Bytes(), after.Body.Bytes()) {
+				t.Errorf("explicit route changed: base %d %q; enabled %d %q", before.Code, before.Header().Get("Location"), after.Code, after.Header().Get("Location"))
+			}
+		})
+	}
+	// A registered fixed second segment must not reserve an ordinary owner.
+	if w := servedBy(t, enabled, http.MethodGet, "/alice/login/pulls"); w.Code != http.StatusFound || w.Header().Get("Location") != forgejoWebTestBase+"/alice/login/pulls" {
+		t.Fatalf("ordinary repo lost redirect: %d %q", w.Code, w.Header().Get("Location"))
+	}
+}
