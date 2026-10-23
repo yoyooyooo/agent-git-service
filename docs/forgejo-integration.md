@@ -87,8 +87,12 @@ responses use `Cache-Control: no-store`.
 User-Agent alone, absent Accept and `Accept: */*` retain the historical `404`.
 JSON media types (`application/json` or a `+json` suffix) in any Accept or
 Content-Type value also retain `404`, including mixed JSON/HTML and multiple
-Accept lines regardless of preference order. Git User-Agents and Git media types
-in Accept or Content-Type retain `404`, even when HTML is also accepted.
+Accept lines regardless of preference order. Accept list separators are commas
+outside quoted strings; quoted parameters such as `profile="a,b"` do not hide a
+JSON media type. Content-Type is parsed as one complete media type. Invalid media
+types in either header retain the original routing rather than enabling the
+HTML fallback. Git User-Agents and Git media types in Accept or Content-Type
+retain `404`, even when HTML is also accepted.
 
 Registered root routes take precedence, including routes added by server
 composition after router setup. A registered `GET /` runs its own handler; a

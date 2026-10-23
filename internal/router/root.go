@@ -53,10 +53,20 @@ func acceptsRootHTML(r *http.Request) bool {
 	acceptsHTML := false
 	for _, header := range []string{"Accept", "Content-Type"} {
 		for _, value := range r.Header.Values(header) {
-			for _, entry := range strings.Split(value, ",") {
-				mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(entry))
-				if err != nil {
+			// Content-Type is a single media type; only Accept is a list.
+			entries := []string{value}
+			if header == "Accept" {
+				entries = splitRootAccept(value)
+			}
+			for _, entry := range entries {
+				entry = strings.TrimSpace(entry)
+				// RFC 9110 list syntax permits empty elements in Accept.
+				if header == "Accept" && entry == "" {
 					continue
+				}
+				mediaType, params, err := mime.ParseMediaType(entry)
+				if err != nil {
+					return false
 				}
 				if mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") {
 					return false
@@ -75,4 +85,28 @@ func acceptsRootHTML(r *http.Request) bool {
 		}
 	}
 	return acceptsHTML
+}
+
+// RFC 9110 quoted strings can contain commas and backslash-escaped characters.
+// Leave syntax validation to mime.ParseMediaType, including unterminated quotes.
+func splitRootAccept(value string) []string {
+	var entries []string
+	start := 0
+	quoted := false
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
+		case '\\':
+			if quoted {
+				i++
+			}
+		case '"':
+			quoted = !quoted
+		case ',':
+			if !quoted {
+				entries = append(entries, value[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(entries, value[start:])
 }
