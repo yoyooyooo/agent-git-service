@@ -29,6 +29,7 @@ type Config struct {
 	TokenOwner           string
 	Enabled              bool
 	BaseURL              string
+	WebBaseURL           string // Optional browser-reachable web origin for read-only redirects; no fallback to BaseURL.
 	Token                string // Server-owned Forgejo admin credential.
 	TokenFile            string
 	WebhookSecret        string

@@ -153,3 +153,44 @@ func TestForgejoAdminTokenWiring(t *testing.T) {
 		})
 	}
 }
+
+func TestForgejoIntegrationConfigEnvOnlyWebBaseURLAppliesWithoutFile(t *testing.T) {
+	cfg := config.Config{
+		BaseURL:                      "http://ags.local",
+		ForgejoIntegrationWebBaseURL: "http://forgejo-web.local:5555",
+	}
+
+	got := forgejoIntegrationConfig(cfg, integrations.Config{})
+	if got.WebBaseURL != cfg.ForgejoIntegrationWebBaseURL {
+		t.Fatalf("web base url=%q, want env %q", got.WebBaseURL, cfg.ForgejoIntegrationWebBaseURL)
+	}
+}
+
+func TestForgejoIntegrationConfigFileOwnsWebBaseURL(t *testing.T) {
+	cfg := config.Config{
+		BaseURL:                      "http://ags.local",
+		IntegrationsConfigFile:       "/runtime/integrations.yaml",
+		ForgejoIntegrationWebBaseURL: "http://stale-env.local:5555",
+	}
+	fileCfg := integrations.Config{}
+	fileCfg.Forgejo.Enabled = true
+	fileCfg.Forgejo.BaseURL = "http://forgejo-api.internal:3000"
+	fileCfg.Forgejo.WebBaseURL = "http://file-owned.local:5555"
+
+	got := forgejoIntegrationConfig(cfg, fileCfg)
+	if got.WebBaseURL != fileCfg.Forgejo.WebBaseURL {
+		t.Fatalf("web base url=%q, want file-owned %q", got.WebBaseURL, fileCfg.Forgejo.WebBaseURL)
+	}
+}
+
+func TestForgejoIntegrationConfigAbsentWebBaseURLStaysEmpty(t *testing.T) {
+	cfg := config.Config{BaseURL: "http://ags.local", IntegrationsConfigFile: "/runtime/integrations.yaml"}
+	fileCfg := integrations.Config{}
+	fileCfg.Forgejo.Enabled = true
+	fileCfg.Forgejo.BaseURL = "http://forgejo-api.internal:3000"
+
+	got := forgejoIntegrationConfig(cfg, fileCfg)
+	if got.WebBaseURL != "" {
+		t.Fatalf("web base url=%q, want empty so redirects stay off", got.WebBaseURL)
+	}
+}

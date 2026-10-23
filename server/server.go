@@ -456,6 +456,7 @@ func forgejoIntegrationConfig(cfg config.Config, fileCfg integrations.Config) fo
 	integrationCfg := forgejointegration.Config{
 		Enabled:                  cfg.ForgejoIntegrationEnabled,
 		BaseURL:                  cfg.ForgejoIntegrationBaseURL,
+		WebBaseURL:               cfg.ForgejoIntegrationWebBaseURL,
 		Token:                    cfg.ForgejoIntegrationToken,
 		TokenFile:                cfg.ForgejoIntegrationTokenFile,
 		WebhookSecret:            cfg.ForgejoIntegrationWebhookSecret,
@@ -485,6 +486,8 @@ func forgejoIntegrationConfig(cfg config.Config, fileCfg integrations.Config) fo
 	}
 	integrationCfg = fileCfg.Forgejo.ToForgejoIntegrationConfig()
 	integrationCfg.Attribution = fileCfg.Attribution
+	// A selected integrations file owns the whole Forgejo section, including
+	// web_base_url; a stale environment-only value must not decide redirects.
 	if strings.TrimSpace(integrationCfg.WebhookURL) == "" {
 		integrationCfg.WebhookURL = strings.TrimRight(cfg.BaseURL, "/") + "/api/v3/integrations/forgejo/webhook"
 	}

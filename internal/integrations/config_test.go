@@ -63,6 +63,7 @@ projection_watch:
 forgejo:
   enabled: true
   base_url: http://forgejo.local:5555
+  web_base_url: http://forgejo-web.example.test:5555
   token_file: /run/secrets/forgejo-token
   webhook_secret_file: /run/secrets/forgejo-webhook
   default_owner: example-owner
@@ -176,6 +177,9 @@ multica:
 	if !cfg.Forgejo.Enabled || cfg.Forgejo.BaseURL != "http://forgejo.local:5555" {
 		t.Fatalf("forgejo config=%#v", cfg.Forgejo)
 	}
+	if cfg.Forgejo.WebBaseURL != "http://forgejo-web.example.test:5555" {
+		t.Fatalf("forgejo web base url=%q", cfg.Forgejo.WebBaseURL)
+	}
 	if cfg.Forgejo.WebhookSecretFile != "/run/secrets/forgejo-webhook" {
 		t.Fatalf("webhook secret file=%q", cfg.Forgejo.WebhookSecretFile)
 	}
@@ -191,6 +195,9 @@ multica:
 	}
 	if !forgejoCfg.AuthorityPolicyEnabled || forgejoCfg.WebhookURL != "https://ags.example/api/v3/integrations/forgejo/webhook" || forgejoCfg.IntegrationBot != "ags-bot" || forgejoCfg.AuthorityPolicyTokenFile != "/run/secrets/forgejo-operator-token" {
 		t.Fatalf("forgejo authority policy mismatch: enabled=%v webhook=%q bot=%q token_file=%q", forgejoCfg.AuthorityPolicyEnabled, forgejoCfg.WebhookURL, forgejoCfg.IntegrationBot, forgejoCfg.AuthorityPolicyTokenFile)
+	}
+	if forgejoCfg.WebBaseURL != "http://forgejo-web.example.test:5555" {
+		t.Fatalf("forgejo integration web base url=%q", forgejoCfg.WebBaseURL)
 	}
 	if forgejoCfg.ActionPrincipalBindings["example-human"] != 7 {
 		t.Fatalf("action principal bindings=%#v", forgejoCfg.ActionPrincipalBindings)

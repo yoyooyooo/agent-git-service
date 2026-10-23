@@ -131,6 +131,7 @@ type Config struct {
 	// Forgejo repository so Forgejo PRs and Actions can act as the CI control plane.
 	ForgejoIntegrationEnabled             bool
 	ForgejoIntegrationBaseURL             string
+	ForgejoIntegrationWebBaseURL          string // Optional browser-reachable web origin for read-only redirects; no fallback to the base URL.
 	ForgejoIntegrationToken               string
 	ForgejoIntegrationTokenFile           string
 	ForgejoIntegrationWebhookSecret       string
@@ -230,6 +231,7 @@ func New() (Config, error) {
 		WorkflowExecTmpfsSize:                   os.Getenv("WORKFLOW_EXEC_TMPFS_SIZE"),
 		ForgejoIntegrationEnabled:               envBool("FORGEJO_INTEGRATION_ENABLED"),
 		ForgejoIntegrationBaseURL:               os.Getenv("FORGEJO_INTEGRATION_BASE_URL"),
+		ForgejoIntegrationWebBaseURL:            os.Getenv("FORGEJO_INTEGRATION_WEB_BASE_URL"),
 		ForgejoIntegrationToken:                 os.Getenv("FORGEJO_INTEGRATION_TOKEN"),
 		ForgejoIntegrationTokenFile:             os.Getenv("FORGEJO_INTEGRATION_TOKEN_FILE"),
 		ForgejoIntegrationWebhookSecret:         os.Getenv("FORGEJO_INTEGRATION_WEBHOOK_SECRET"),

@@ -68,6 +68,57 @@ These repairs do not authorize pruning provider-only branches, rewriting old
 commits or suppressing genuine state/merge discrepancies. Historical data cleanup
 must establish ownership and preserve recoverability separately.
 
+## Browser redirects to the Forgejo web UI
+
+AGS serves no web UI, so a human-facing link such as
+`http://ags.example.test/example-team/project-one/pull/42` does not open in a
+browser. When the operator sets an explicit browser-reachable Forgejo web base
+URL, AGS answers **GET/HEAD** on the read-only web-shaped paths below with a
+`302` to the matching Forgejo page.
+
+| AGS path | Forgejo target |
+| --- | --- |
+| `/{owner}/{repo}` | `/{mapped-owner}/{mapped-repo}` |
+| `/{owner}/{repo}/pulls` | `.../pulls` |
+| `/{owner}/{repo}/pull/{n}` | `.../pulls/{n}` |
+| `/{owner}/{repo}/pulls/{n}` | `.../pulls/{n}` |
+| `/{owner}/{repo}/issues` | `.../issues` |
+| `/{owner}/{repo}/issues/{n}` | `.../issues/{n}` |
+| `/{owner}/{repo}/commit/{sha}` | `.../commit/{sha}` |
+| `/{owner}/{repo}/commits/{sha}` | `.../commit/{sha}` |
+| `/{owner}/{repo}/tree/{ref}/...` | `.../src/{ref}/...` |
+| `/{owner}/{repo}/blob/{ref}/...` | `.../src/{ref}/...` |
+
+`{mapped-owner}/{mapped-repo}` is the same `repos`/`default_owner` resolution
+the projection path uses; AGS and Forgejo repository names are never assumed to
+be identical. Forgejo has no `/tree` or `/blob` page, so those two map onto its
+canonical `/src/{ref}/{path}` form.
+
+This redirect is a browser convenience only. It is **not** part of the git
+transport or the API, and it cannot be reached from them:
+
+- Only `GET` and `HEAD` are registered on these paths. Every other method keeps
+  its previous behavior.
+- Git smart HTTP (`/info/refs`, `/git-upload-pack`, `/git-receive-pack`) and any
+  `*.git` repository segment never redirect.
+- `/api/...`, `/api/graphql`, `/graphql` and the gh-compatible endpoints never
+  redirect.
+- The AGS query string is deliberately **not** forwarded: an AGS URL can carry a
+  credential, and a Forgejo page does not need it.
+- A path that is not a positive number, a hex object ID, or a mappable
+  repository stays `404`, exactly as without the setting.
+
+Activation is explicit. `forgejo.web_base_url` (or
+`FORGEJO_INTEGRATION_WEB_BASE_URL`) must be set to a credential-free absolute
+HTTP(S) URL with no query or fragment. It has no fallback to `base_url`: the API
+base URL is often an address a browser cannot reach, and an implicit fallback
+would silently change the browser redirect of an existing deployment. When the
+setting is absent, every route behaves exactly as it did before this feature,
+including the historical console `/vault/...` redirect for the repo root.
+
+A selected integrations file owns the whole `forgejo` section, so
+`web_base_url` is read from the file when that file is configured.
+
 ## Native gh creation and projection links
 
 PR creation and provider projection have different completion times. AGS commits
@@ -199,6 +250,9 @@ projection_watch:
 forgejo:
   enabled: true
   base_url: "https://forgejo.example.test"
+  # Optional browser-reachable web origin used only by read-only redirects.
+  # Omit to leave every route exactly as it is without the setting.
+  # web_base_url: "https://forgejo.example.test"
   token_file: "/path/to/forgejo-admin-token"
   webhook_secret_file: "/path/to/forgejo-webhook-secret"
   default_owner: "example-team"
