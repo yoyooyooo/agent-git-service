@@ -55,7 +55,7 @@ func RegisterRoutes(r chi.Router, handlers *rest.Deps, gitHandler *githttp.Handl
 	}))
 	r.Use(corsMiddleware(consoleBaseURL))
 	if handlers.Svc != nil {
-		r.Use(serviceRootMiddleware(handlers.Svc.ForgejoIntegration))
+		r.Use(serviceRootMiddleware(handlers.Svc.ForgejoIntegration, r))
 	}
 	if handlers.Svc != nil && handlers.Svc.ForgejoIntegration.WebRedirectBaseURL() != "" {
 		r.Use(forgejoWebRedirectMiddleware(handlers.Svc, r))
