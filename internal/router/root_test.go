@@ -2,6 +2,7 @@ package router_test
 
 import (
 	"fmt"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -60,6 +61,18 @@ func TestServiceRootGET(t *testing.T) {
 		{name: "browser", headers: http.Header{"User-Agent": {"Mozilla/5.0"}, "Accept": {"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}}, browser: true},
 		{name: "HTML without UA", headers: http.Header{"Accept": {"text/html"}}, browser: true},
 		{name: "XHTML", headers: http.Header{"Accept": {"application/xhtml+xml;q=0.8"}}, browser: true},
+		{name: "HTML quoted comma", headers: http.Header{"Accept": {`text/html;profile="a,b"`}}, browser: true},
+		{name: "HTML escaped quote before comma", headers: http.Header{"Accept": {`text/html;profile="a\",b", application/xml`}}, browser: true},
+		{name: "HTML escaped backslash before closing quote", headers: http.Header{"Accept": {`application/xml;profile="a\\", text/html`}}, browser: true},
+		{name: "quoted HTML content type", headers: http.Header{"Accept": {"text/html"}, "Content-Type": {`text/plain;profile="a,b"`}}, browser: true},
+		{name: "empty Accept list elements", headers: http.Header{"Accept": {", text/html, ,"}}, browser: true},
+		{name: "malformed Accept before HTML", headers: http.Header{"Accept": {`application/json;profile=, text/html`}}},
+		{name: "malformed Accept after HTML", headers: http.Header{"Accept": {`text/html, application/json;profile=`}}},
+		{name: "unterminated quote", headers: http.Header{"Accept": {`text/html, application/json;profile="a,b`}}},
+		{name: "dangling quoted escape", headers: http.Header{"Accept": {`text/html, application/json;profile="a\`}}},
+		{name: "malformed separate Accept line", headers: http.Header{"Accept": {"text/html", `application/json;profile=`}}},
+		{name: "malformed content type", headers: http.Header{"Accept": {"text/html"}, "Content-Type": {`application/json;profile=`}}},
+		{name: "content type is not a list", headers: http.Header{"Accept": {"text/html"}, "Content-Type": {"text/plain, application/xml"}}},
 		{name: "multiple accept lines", headers: http.Header{"Accept": {"application/json", "text/html;q=0.5"}}},
 		{name: "no headers"},
 		{name: "curl", headers: http.Header{"User-Agent": {"curl/8.0"}, "Accept": {"*/*"}}},
@@ -182,6 +195,10 @@ func TestServiceRootPreservesJSONRequests(t *testing.T) {
 				{name: "HTML separate line", headers: http.Header{"Accept": {"application/vnd.github+json", "text/html"}}},
 				{name: "JSON content type", headers: http.Header{"Accept": {"text/html"}, "Content-Type": {"application/json"}}},
 				{name: "vendor JSON content type", headers: http.Header{"Accept": {"text/html"}, "Content-Type": {"application/vnd.github+json"}}},
+				{name: "JSON escaped quote and comma", headers: http.Header{"Accept": {`application/json;profile="a\",b", text/html`}}},
+				{name: "JSON escaped backslash", headers: http.Header{"Accept": {`application/json;profile="a\\", text/html`}}},
+				{name: "JSON after quoted non-JSON", headers: http.Header{"Accept": {`text/html;profile="a,b", application/json`}}},
+				{name: "quoted JSON separate line", headers: http.Header{"Accept": {"text/html", `application/vnd.github+json;profile="a,b"`}}},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -195,6 +212,35 @@ func TestServiceRootPreservesJSONRequests(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// Quoted commas are media-type parameter data, not Accept list separators.
+func TestServiceRootPreservesQuotedJSONRequests(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		for _, header := range []string{"Accept", "Content-Type"} {
+			for _, mediaType := range []string{"application/json", "application/vnd.github+json"} {
+				t.Run(fmt.Sprintf("configured=%t/%s/%s", enabled, header, mediaType), func(t *testing.T) {
+					value := mediaType + `;profile="a,b"`
+					parsed, params, err := mime.ParseMediaType(value)
+					if err != nil || parsed != mediaType || params["profile"] != "a,b" {
+						t.Fatalf("invalid media-type fixture: %q %v %v", parsed, params, err)
+					}
+					mux := rootMux(forgejointegration.New(forgejointegration.Config{Enabled: enabled, WebBaseURL: forgejoWebTestBase}, nil, nil))
+					req := httptest.NewRequest(http.MethodGet, "/", nil)
+					req.Header.Set("Accept", "text/html")
+					if header == "Accept" {
+						value += ", text/html"
+					}
+					req.Header.Set(header, value)
+					w := httptest.NewRecorder()
+					mux.ServeHTTP(w, req)
+					if w.Code != http.StatusNotFound || w.Body.String() != "404 page not found\n" || w.Header().Get("Location") != "" || w.Header().Get("Cache-Control") != "" {
+						t.Fatalf("quoted JSON root response changed: %d %v %q", w.Code, w.Header(), w.Body.String())
+					}
+				})
+			}
+		}
 	}
 }
 
