@@ -10,10 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mattn/go-sqlite3"
 	"github.com/ngaut/agent-git-service/internal/db"
 	"github.com/ngaut/agent-git-service/internal/forgejointegration"
 	"github.com/ngaut/agent-git-service/internal/multicaprojection"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -250,4 +252,237 @@ func TestLifecycleReviewReopenAdmissionHoldsIntentUntilConsumption(t *testing.T)
 	require.NoError(t, gdb.First(&current, pr.ID).Error)
 	require.False(t, current.ForgejoReopenPending)
 	require.Equal(t, "2001-01-01T00:00:02Z", current.ForgejoLifecycleAt.UTC().Format(time.RFC3339))
+}
+
+func TestLifecycleReviewSQLiteWALTwoHelpers(t *testing.T) {
+	s, pr, binding := reopenIntentFixture(t)
+	var journal string
+	require.NoError(t, s.DB.Raw("PRAGMA journal_mode=WAL").Scan(&journal).Error)
+	require.Equal(t, "wal", journal)
+	// Independent pool: no process-local or single-connection serialization can
+	// satisfy this test. Fail lock contention immediately so the barrier needs no
+	// sleeps or lock-timeout races.
+	var databases []struct {
+		Name string
+		File string
+	}
+	require.NoError(t, s.DB.Raw("PRAGMA database_list").Scan(&databases).Error)
+	var path string
+	for _, database := range databases {
+		if database.Name == "main" {
+			path = database.File
+		}
+	}
+	require.NotEmpty(t, path)
+	contenderDB, err := gorm.Open(sqlite.Open(path+"?_busy_timeout=0&_foreign_keys=on"), &gorm.Config{})
+	require.NoError(t, err)
+	pool, err := contenderDB.DB()
+	require.NoError(t, err)
+	defer pool.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	job := seedGenericProjectionJob(t, s, pr, ForgejoProjectionPhaseQueued)
+	claim, err := s.claimGenericForgejoProjectionJob(ctx, job)
+	require.NoError(t, err)
+	workerCtx := contextWithGenericProjectionClaim(ctx, claim)
+	require.NoError(t, s.updateForgejoProjectionJobPhase(workerCtx, job.ID, ForgejoProjectionPhasePushingRef, nil))
+	var mu sync.Mutex
+	state, revision, patches := db.StateClosed, "2001-01-01T00:00:01Z", 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Path != "/api/v1/repos/forgejo/repo/pulls/42" {
+			t.Errorf("unexpected URL %s", r.URL.Path)
+			http.Error(w, "unexpected", 400)
+			return
+		}
+		if r.Method == http.MethodPatch {
+			patches++
+			state = db.StateOpen
+			revision = "2001-01-01T00:00:02Z"
+			if patches > 1 {
+				revision = "2001-01-01T00:00:04Z"
+			}
+		} else if r.Method != http.MethodGet {
+			t.Errorf("unexpected method %s", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"number":42,"state":%q,"merged":false,"updated_at":%q,"head":{"ref":"feature","sha":"abc1234"},"base":{"ref":"main"}}`, state, revision)
+	}))
+	defer server.Close()
+	s.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{Enabled: true, Token: "fixture-only", BaseURL: server.URL, RepoMap: map[string]forgejointegration.RepoMapping{pr.Repository.FullName: {Owner: "forgejo", Repo: "repo"}}}, forgejointegration.NewHTTPClient(server.URL, "fixture-only"), nil)
+	admitted, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	done := make(chan error, 1)
+	go func() {
+		done <- s.reopenForgejoProjection(workerCtx, pr.Repository.FullName, pr, func(c context.Context) error {
+			if err := s.revalidateGenericProjectionProviderWrite(c, claim, pr); err != nil {
+				return err
+			}
+			close(admitted)
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	}()
+	select {
+	case <-admitted:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	// Replay the review's second complete helper while A is paused after
+	// admission. Old code lets B consume intent; fixed code rejects B's write
+	// admission, then lets A complete before the legitimate T3 close.
+	contender := &Service{DB: contenderDB, ForgejoIntegration: s.ForgejoIntegration}
+	contenderErr := contender.reopenForgejoProjection(ctx, pr.Repository.FullName, pr, nil)
+	if contenderErr != nil {
+		var busy sqlite3.Error
+		require.ErrorAs(t, contenderErr, &busy)
+		require.Equal(t, sqlite3.ErrBusy, busy.Code, "contender must fail before provider PATCH")
+		// Even the standalone confirmation entry cannot consume A's intent.
+		confirmErr := contender.confirmForgejoReopen(ctx, pr, binding, reopenIntentSnapshot(pr, "2001-01-01T00:00:02Z"))
+		require.ErrorAs(t, confirmErr, &busy)
+		require.Equal(t, sqlite3.ErrBusy, busy.Code)
+		releaseOnce.Do(func() { close(release) })
+		require.NoError(t, <-done)
+	}
+	// The user legally closes at T3 after durable confirmation. Webhook is queued.
+	mu.Lock()
+	state = db.StateClosed
+	revision = "2001-01-01T00:00:03Z"
+	mu.Unlock()
+	releaseOnce.Do(func() { close(release) })
+	var workerErr error
+	if contenderErr == nil {
+		workerErr = <-done
+	}
+	var current db.PullRequest
+	require.NoError(t, s.DB.First(&current, pr.ID).Error)
+	_, _, closeErr := s.readProjectionClose(ctx, ProjectionProviderForgejo, "forgejo/repo", 42, []string{"2001-01-01T00:00:03Z"})
+	mu.Lock()
+	gotPatches, gotState := patches, state
+	mu.Unlock()
+	t.Logf("journal=%s workerErr=%v PATCH=%d provider=%s pending=%v watermark=%v T3 admission=%v", journal, workerErr, gotPatches, gotState, current.ForgejoReopenPending, current.ForgejoLifecycleAt, closeErr)
+	require.Equal(t, 1, gotPatches, "only the winning executor may PATCH; consumed intent must fence old worker")
+	require.Equal(t, db.StateClosed, gotState)
+	require.NoError(t, closeErr)
+	require.NoError(t, workerErr)
+	require.Error(t, contenderErr)
+	require.False(t, current.ForgejoReopenPending)
+	require.Equal(t, "2001-01-01T00:00:02Z", current.ForgejoLifecycleAt.UTC().Format(time.RFC3339))
+	// A worker holding the old pending=true snapshot must remain fenced after
+	// release, including after the provider has legally closed again.
+	require.ErrorIs(t, contender.reopenForgejoProjection(ctx, pr.Repository.FullName, pr, nil), ErrStaleProjectionClose)
+	for range 2 {
+		closed, err := s.MarkPullRequestClosedFromProjection(ctx, ProjectionProviderForgejo, "forgejo/repo", 42, "fixture", "2001-01-01T00:00:03Z")
+		require.NoError(t, err)
+		require.Equal(t, db.StateClosed, closed.State)
+		require.NotNil(t, closed.ClosedAt)
+	}
+	var deliveries []db.OutboundDelivery
+	require.NoError(t, s.DB.Find(&deliveries).Error)
+	require.Len(t, deliveries, 1)
+	require.Equal(t, OutboundDeliveryStatusPending, deliveries[0].Status)
+}
+
+func TestLifecycleReviewSQLiteWALConfirmationFailureRetry(t *testing.T) {
+	s, pr, binding := reopenIntentFixture(t)
+	var journal string
+	require.NoError(t, s.DB.Raw("PRAGMA journal_mode=WAL").Scan(&journal).Error)
+	require.Equal(t, "wal", journal)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var mu sync.Mutex
+	state, revision, patches, failConfirmation := db.StateClosed, "2001-01-01T00:00:01Z", 0, true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Path != "/api/v1/repos/forgejo/repo/pulls/42" {
+			http.Error(w, "unexpected path", 400)
+			return
+		}
+		switch r.Method {
+		case http.MethodPatch:
+			patches++
+			state = db.StateOpen
+			revision = "2001-01-01T00:00:02Z"
+			if patches == 2 {
+				revision = "2001-01-01T00:00:04Z"
+			}
+		case http.MethodGet:
+			if patches == 1 && failConfirmation {
+				http.Error(w, "fixture confirmation unavailable", 503)
+				return
+			}
+		default:
+			http.Error(w, "unexpected method", 400)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"number":42,"state":%q,"merged":false,"updated_at":%q,"head":{"ref":"feature","sha":"abc1234"},"base":{"ref":"main"}}`, state, revision)
+	}))
+	defer server.Close()
+	s.ForgejoIntegration = forgejointegration.New(forgejointegration.Config{Enabled: true, Token: "fixture-only", BaseURL: server.URL, RepoMap: map[string]forgejointegration.RepoMapping{pr.Repository.FullName: {Owner: "forgejo", Repo: "repo"}}}, forgejointegration.NewHTTPClient(server.URL, "fixture-only"), nil)
+	// The provider PATCH succeeds but exact confirmation fails: rollback must
+	// release the SQLite writer and retain the entire pending intent for retry.
+	require.Error(t, s.reopenForgejoProjection(ctx, pr.Repository.FullName, pr, nil))
+	var current db.PullRequest
+	require.NoError(t, s.DB.First(&current, pr.ID).Error)
+	require.True(t, current.ForgejoReopenPending)
+	require.Nil(t, current.ForgejoLifecycleAt)
+	require.NoError(t, s.DB.First(&binding, binding.ID).Error)
+	require.Equal(t, ProjectionStateClosed, binding.State)
+	mu.Lock()
+	require.Equal(t, 1, patches)
+	require.Equal(t, db.StateOpen, state)
+	failConfirmation = false
+	mu.Unlock()
+	require.NoError(t, s.reopenForgejoProjection(ctx, pr.Repository.FullName, pr, nil))
+	require.NoError(t, s.DB.First(&current, pr.ID).Error)
+	require.False(t, current.ForgejoReopenPending)
+	require.Equal(t, "2001-01-01T00:00:02Z", current.ForgejoLifecycleAt.UTC().Format(time.RFC3339))
+	mu.Lock()
+	require.Equal(t, 1, patches, "retry confirms the existing open PR without another PATCH")
+	mu.Unlock()
+	// Two legitimate closes in distinct native generations each get one outbox
+	// entry. Replays preserve timestamps and cannot duplicate either delivery.
+	for cycle, closeRevision := range []string{"2001-01-01T00:00:03Z", "2001-01-01T00:00:05Z"} {
+		mu.Lock()
+		state, revision = db.StateClosed, closeRevision
+		mu.Unlock()
+		for range 2 {
+			closed, err := s.MarkPullRequestClosedFromProjection(ctx, ProjectionProviderForgejo, "forgejo/repo", 42, "fixture", closeRevision)
+			require.NoError(t, err)
+			require.Equal(t, db.StateClosed, closed.State)
+			require.NotNil(t, closed.ClosedAt)
+		}
+		var deliveries []db.OutboundDelivery
+		require.NoError(t, s.DB.Order("id").Find(&deliveries).Error)
+		require.Len(t, deliveries, cycle+1)
+		for _, delivery := range deliveries {
+			require.Equal(t, OutboundDeliveryStatusPending, delivery.Status)
+		}
+		if cycle == 0 {
+			open := db.StateOpen
+			require.NoError(t, s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+				var err error
+				pr, _, err = s.updatePRLifecycleTx(tx, pr.ID, &open, map[string]any{})
+				return err
+			}))
+			require.EqualValues(t, 2, pr.LifecycleGeneration)
+			require.True(t, pr.ForgejoReopenPending)
+			var repo db.Repository
+			require.NoError(t, s.DB.First(&repo, pr.RepositoryID).Error)
+			pr.Repository = repo
+			require.NoError(t, s.reopenForgejoProjection(ctx, repo.FullName, pr, nil))
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 2, patches, "exactly one PATCH per native reopen generation")
+	require.Equal(t, db.StateClosed, state)
 }
