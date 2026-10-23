@@ -208,6 +208,16 @@ func (s *Service) updatePRLifecycleTx(tx *gorm.DB, id uint, state *string, updat
 // then the native PR. Locking only the callback's provider creates a cycle
 // when merge subsequently updates the other providers.
 func lockPRProjectionSet(tx *gorm.DB, id uint) error {
+	if tx.Dialector.Name() == "sqlite" {
+		// SQLite drops FOR UPDATE, including in WAL mode. Promote this transaction
+		// to a writer BEFORE reading intent: even a no-op UPDATE reserves the
+		// database writer across connections/processes until commit or rollback.
+		// Contention (or an older read snapshot) must fail here, before provider
+		// side effects. Use raw SQL to leave values and updated_at untouched.
+		if err := tx.Exec("UPDATE pull_request_projections SET id = id WHERE pull_request_id = ?", id).Error; err != nil {
+			return err
+		}
+	}
 	var bindings []db.PullRequestProjection
 	return tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("pull_request_id = ?", id).Order("id").Find(&bindings).Error
 }
