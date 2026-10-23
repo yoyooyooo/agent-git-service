@@ -21,7 +21,7 @@ import (
 
 // Root discovery has no storage or provider dependencies. Wire the complete
 // production router so method handling and API-host rewriting remain covered.
-func rootMux(integration *forgejointegration.Integration) http.Handler {
+func rootMux(integration *forgejointegration.Integration, compose ...func(chi.Router)) http.Handler {
 	svc := &service.Service{ForgejoIntegration: integration}
 	r := chi.NewRouter()
 	mux := router.RegisterRoutes(r, &rest.Deps{Svc: svc}, &githttp.Handler{}, graphql.NewServer(svc), &oauth.Handler{Svc: svc}, "")
@@ -33,6 +33,9 @@ func rootMux(integration *forgejointegration.Integration) http.Handler {
 	r.Get("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("metrics unchanged\n"))
 	})
+	for _, register := range compose {
+		register(r)
+	}
 	return mux
 }
 
@@ -57,7 +60,7 @@ func TestServiceRootGET(t *testing.T) {
 		{name: "browser", headers: http.Header{"User-Agent": {"Mozilla/5.0"}, "Accept": {"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}}, browser: true},
 		{name: "HTML without UA", headers: http.Header{"Accept": {"text/html"}}, browser: true},
 		{name: "XHTML", headers: http.Header{"Accept": {"application/xhtml+xml;q=0.8"}}, browser: true},
-		{name: "multiple accept lines", headers: http.Header{"Accept": {"application/json", "text/html;q=0.5"}}, browser: true},
+		{name: "multiple accept lines", headers: http.Header{"Accept": {"application/json", "text/html;q=0.5"}}},
 		{name: "no headers"},
 		{name: "curl", headers: http.Header{"User-Agent": {"curl/8.0"}, "Accept": {"*/*"}}},
 		{name: "API", headers: http.Header{"User-Agent": {"gh/2.0"}, "Accept": {"application/vnd.github+json"}}},
@@ -84,9 +87,9 @@ func TestServiceRootGET(t *testing.T) {
 					req.Header = tc.headers.Clone()
 					w := httptest.NewRecorder()
 					mux.ServeHTTP(w, req)
-					if tc.git {
+					if tc.git || !tc.browser {
 						if w.Code != http.StatusNotFound || w.Header().Get("Location") != "" || w.Body.String() != "404 page not found\n" {
-							t.Fatalf("Git root response changed: %d %v %q", w.Code, w.Header(), w.Body.String())
+							t.Fatalf("non-browser root response changed: %d %v %q", w.Code, w.Header(), w.Body.String())
 						}
 						return
 					}
@@ -154,6 +157,77 @@ func TestServiceRootPreservesOtherRequests(t *testing.T) {
 				if tc.body == "" && !strings.Contains(w.Body.String(), `"current_user_url"`) {
 					t.Errorf("GET %s host=%s lost API discovery: %q", tc.path, tc.host, w.Body.String())
 				}
+			}
+		})
+	}
+}
+
+// JSON remains an API request even when the caller also accepts HTML.
+func TestServiceRootPreservesJSONRequests(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("configured=%t", enabled), func(t *testing.T) {
+			mux := rootMux(forgejointegration.New(forgejointegration.Config{Enabled: enabled, WebBaseURL: forgejoWebTestBase}, nil, nil))
+			for _, tc := range []struct {
+				name    string
+				headers http.Header
+			}{
+				{name: "JSON", headers: http.Header{"Accept": {"application/json"}}},
+				{name: "vendor JSON", headers: http.Header{"Accept": {"application/vnd.github+json"}}},
+				{name: "JSON then HTML", headers: http.Header{"Accept": {"application/json, text/html"}}},
+				{name: "HTML then JSON", headers: http.Header{"Accept": {"text/html, application/json"}}},
+				{name: "JSON preferred", headers: http.Header{"Accept": {"application/json;q=1, text/html;q=0.1"}}},
+				{name: "HTML preferred", headers: http.Header{"Accept": {"text/html;q=1, application/json;q=0.1"}}},
+				{name: "vendor JSON and XHTML", headers: http.Header{"Accept": {"application/xhtml+xml, application/vnd.github+json"}}},
+				{name: "JSON separate line", headers: http.Header{"Accept": {"text/html", "application/json"}}},
+				{name: "HTML separate line", headers: http.Header{"Accept": {"application/vnd.github+json", "text/html"}}},
+				{name: "JSON content type", headers: http.Header{"Accept": {"text/html"}, "Content-Type": {"application/json"}}},
+				{name: "vendor JSON content type", headers: http.Header{"Accept": {"text/html"}, "Content-Type": {"application/vnd.github+json"}}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					req := httptest.NewRequest(http.MethodGet, "/", nil)
+					req.Header = tc.headers.Clone()
+					req.Header.Set("User-Agent", "Mozilla/5.0")
+					w := httptest.NewRecorder()
+					mux.ServeHTTP(w, req)
+					if w.Code != http.StatusNotFound || w.Body.String() != "404 page not found\n" || w.Header().Get("Location") != "" || w.Header().Get("Cache-Control") != "" {
+						t.Fatalf("JSON root response changed: %d %v %q", w.Code, w.Header(), w.Body.String())
+					}
+				})
+			}
+		})
+	}
+}
+
+// Composition registers routes after RegisterRoutes; they own all methods at /.
+func TestServiceRootPreservesRegisteredRoutes(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("configured=%t", enabled), func(t *testing.T) {
+			for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions, http.MethodHead, http.MethodConnect, http.MethodTrace} {
+				t.Run(method, func(t *testing.T) {
+					mux := rootMux(forgejointegration.New(forgejointegration.Config{Enabled: enabled, WebBaseURL: forgejoWebTestBase}, nil, nil), func(r chi.Router) {
+						r.MethodFunc(method, "/", func(w http.ResponseWriter, _ *http.Request) {
+							w.Header().Set("X-Registered-Root", "yes")
+							w.WriteHeader(http.StatusCreated)
+							_, _ = w.Write([]byte("registered root\n"))
+						})
+					})
+					for _, requestMethod := range []string{http.MethodGet, method} {
+						req := httptest.NewRequest(requestMethod, "/", nil)
+						req.Header.Set("Accept", "text/html")
+						w := httptest.NewRecorder()
+						mux.ServeHTTP(w, req)
+						if requestMethod == method {
+							if w.Code != http.StatusCreated || w.Header().Get("X-Registered-Root") != "yes" || w.Body.String() != "registered root\n" {
+								t.Errorf("%s registered handler bypassed: %d %v %q", requestMethod, w.Code, w.Header(), w.Body.String())
+							}
+						} else if w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != method {
+							t.Errorf("GET / must retain 405 Allow: %s; got %d %v", method, w.Code, w.Header())
+						}
+						if w.Header().Get("Location") != "" || w.Header().Get("Cache-Control") != "" {
+							t.Errorf("root fallback modified a registered route: %v", w.Header())
+						}
+					}
+				})
 			}
 		})
 	}

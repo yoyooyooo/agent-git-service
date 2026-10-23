@@ -72,25 +72,31 @@ must establish ownership and preserve recoverability separately.
 
 ### Service root
 
-`GET /` returns a `200` plain-text description with the service name
-(`agent-git-service`), build version (`development` for development builds), and
-health-check path (`/readyz`). This description does not check backing stores;
-use `/readyz` for readiness.
+When no registered route matches `/` for any method, browser `GET /` requests
+whose `Accept` explicitly includes `text/html` or `application/xhtml+xml` with a
+positive quality value receive a `200` plain-text description with the service
+name (`agent-git-service`), build version (`development` for development builds),
+and health-check path (`/readyz`). This description does not check backing
+stores; use `/readyz` for readiness.
 
-When the enabled Forgejo integration has an explicit `web_base_url`, root
-requests whose `Accept` explicitly includes `text/html` or
-`application/xhtml+xml` with a positive quality value receive a `302` to the
-Forgejo homepage instead. The configured URL's path prefix is preserved and the
-AGS query string is dropped. User-Agent alone and `Accept: */*` do not request
-this redirect; ordinary CLI and JSON requests receive the service description.
-Both root responses use `Cache-Control: no-store`.
+When the enabled Forgejo integration has an explicit `web_base_url`, these
+browser requests receive a `302` to the Forgejo homepage instead. The configured
+URL's path prefix is preserved and the AGS query string is dropped. Both root
+responses use `Cache-Control: no-store`.
 
-Git User-Agents and Git media types in Accept or Content-Type retain the
-historical root response (`404`), even when HTML is also accepted. `HEAD /` and
-all other non-GET methods retain their previous behavior (`404`). The root
-handler does not change Git transport, API discovery (including `/` on
-`api.github.localhost`), readiness, metrics or other routes. It never falls back
-to Forgejo's API `base_url` when `web_base_url` is absent.
+User-Agent alone, absent Accept and `Accept: */*` retain the historical `404`.
+JSON media types (`application/json` or a `+json` suffix) in any Accept or
+Content-Type value also retain `404`, including mixed JSON/HTML and multiple
+Accept lines regardless of preference order. Git User-Agents and Git media types
+in Accept or Content-Type retain `404`, even when HTML is also accepted.
+
+Registered root routes take precedence, including routes added by server
+composition after router setup. A registered `GET /` runs its own handler; a
+root registered only for another method retains `405` for `GET /`. Without a
+registered root route, `HEAD /` and all other non-GET methods retain `404`.
+The root fallback does not change Git transport, API discovery (including `/`
+on `api.github.localhost`), readiness, metrics or other routes. It never falls
+back to Forgejo's API `base_url` when `web_base_url` is absent.
 
 ### Repository web paths
 
