@@ -114,14 +114,14 @@ func TestBrowserURLEscapesOwnerAndRepo(t *testing.T) {
 		BaseURL:    "http://forgejo.example.test",
 		WebBaseURL: "http://forgejo.example.test",
 		RepoMap: map[string]RepoMapping{
-			"example-owner/weird": {Owner: "mirror team", Repo: "demo/ci"},
+			"example-owner/weird": {Owner: "mirror team", Repo: "demo ci"},
 		},
 	})
 	got, ok := integration.BrowserURL("example-owner/weird", "/pulls/1")
 	if !ok {
 		t.Fatal("expected a redirect target")
 	}
-	want := "http://forgejo.example.test/mirror%20team/demo%2Fci/pulls/1"
+	want := "http://forgejo.example.test/mirror%20team/demo%20ci/pulls/1"
 	if got != want {
 		t.Fatalf("BrowserURL = %q, want %q", got, want)
 	}
@@ -136,6 +136,40 @@ func TestValidateWebBaseURL(t *testing.T) {
 	for _, raw := range []string{"forgejo.example.test", "ftp://forgejo.example.test", credentialedWebBaseURL(), "http://forgejo.example.test/?a=1", "http://forgejo.example.test/#f"} {
 		if err := ValidateWebBaseURL(raw); err == nil {
 			t.Fatalf("ValidateWebBaseURL(%q) = nil, want error", raw)
+		}
+	}
+}
+
+func TestBrowserURLRejectsUnsafeCoordinatesAndPaths(t *testing.T) {
+	integration := webRedirectIntegration(t, Config{Enabled: true, WebBaseURL: "https://forgejo.example.test/prefix"})
+	for _, repo := range []string{"../demo", "alice/..", "alice/%2e%2e", "alice/demo/extra", "alice/de\\mo", "alice/de\x00mo"} {
+		if got, ok := integration.BrowserURL(repo, "/pulls"); ok || got != "" {
+			t.Errorf("unsafe repo %q: %q", repo, got)
+		}
+	}
+	for _, path := range []string{"//evil.example", "/../user/login", "/src/%2e%2e", "/src/%252e%252e", "/src/%2fsecret", "/src/%5csecret", "/src/%0a", "/src//secret", "/src/%zz"} {
+		if got, ok := integration.BrowserURL("alice/demo", path); ok || got != "" {
+			t.Errorf("unsafe path %q: %q", path, got)
+		}
+	}
+	got, ok := integration.BrowserURL("alice/demo", "/src/main/a%20b/%E4%B8%AD.txt")
+	if !ok || got != "https://forgejo.example.test/prefix/alice/demo/src/main/a%20b/%E4%B8%AD.txt" {
+		t.Fatalf("escaped path: %v %q", ok, got)
+	}
+	for _, repo := range []string{"../demo", "alice/..", "alice/demo/extra", "//evil.example", "alice/%252e%252e"} {
+		if got, ok := integration.PullRequestBrowserURL("alice/demo", repo, 178); ok || got != "" {
+			t.Errorf("unsafe projection %q: %q", repo, got)
+		}
+	}
+	for _, target := range []RepoMapping{{Owner: "..", Repo: "demo"}, {Owner: "alice", Repo: "../escape"}, {Owner: "alice", Repo: "de%2fmo"}} {
+		mapped := webRedirectIntegration(t, Config{Enabled: true, WebBaseURL: "https://forgejo.example.test", RepoMap: map[string]RepoMapping{"alice/demo": target}})
+		if got, ok := mapped.BrowserURL("alice/demo", "/pulls"); ok || got != "" {
+			t.Errorf("unsafe configured target %v: %q", target, got)
+		}
+	}
+	for _, base := range []string{"https://forgejo.example.test/prefix/..", "https://forgejo.example.test/%2e%2e", "https://forgejo.example.test/%252e%252e", "https://forgejo.example.test/prefix//escape", "https://forgejo.example.test/?"} {
+		if err := ValidateWebBaseURL(base); err == nil {
+			t.Errorf("unsafe base %q accepted", base)
 		}
 	}
 }

@@ -80,8 +80,8 @@ URL, AGS answers **GET/HEAD** on the read-only web-shaped paths below with a
 | --- | --- |
 | `/{owner}/{repo}` | `/{mapped-owner}/{mapped-repo}` |
 | `/{owner}/{repo}/pulls` | `.../pulls` |
-| `/{owner}/{repo}/pull/{n}` | `.../pulls/{n}` |
-| `/{owner}/{repo}/pulls/{n}` | `.../pulls/{n}` |
+| `/{owner}/{repo}/pull/{n}` | `/{projection-owner}/{projection-repo}/pulls/{external-number}` |
+| `/{owner}/{repo}/pulls/{n}` | `/{projection-owner}/{projection-repo}/pulls/{external-number}` |
 | `/{owner}/{repo}/issues` | `.../issues` |
 | `/{owner}/{repo}/issues/{n}` | `.../issues/{n}` |
 | `/{owner}/{repo}/commit/{sha}` | `.../commit/{sha}` |
@@ -92,25 +92,42 @@ URL, AGS answers **GET/HEAD** on the read-only web-shaped paths below with a
 `{mapped-owner}/{mapped-repo}` is the same `repos`/`default_owner` resolution
 the projection path uses; AGS and Forgejo repository names are never assumed to
 be identical. Forgejo has no `/tree` or `/blob` page, so those two map onto its
-canonical `/src/{ref}/{path}` form.
+canonical `/src/{ref}/{path}` form. Actions are parsed at fixed path positions,
+including when an owner or repository is named `tree` or `blob`.
+
+PR details use the existing AGS PR projection record (provider `forgejo`),
+including its `external_repo` and `external_number`; AGS and Forgejo numbers
+are not interchangeable. Missing, pending, inaccessible, invalid or ambiguous
+mappings fall back to the configured repository's `/pulls` list, never a guessed
+number. The stored `external_url` is not used: every target stays on the
+configured Forgejo web host.
 
 This redirect is a browser convenience only. It is **not** part of the git
 transport or the API, and it cannot be reached from them:
 
-- Only `GET` and `HEAD` are registered on these paths. Every other method keeps
-  its previous behavior.
+- Only `GET` and `HEAD` are intercepted before route matching. Every other
+  method keeps its previous behavior, including `404` for POST to new web paths.
 - Git smart HTTP (`/info/refs`, `/git-upload-pack`, `/git-receive-pack`) and any
-  `*.git` repository segment never redirect.
-- `/api/...`, `/api/graphql`, `/graphql` and the gh-compatible endpoints never
-  redirect.
+  `*.git` repository segment never redirect to Forgejo. Requests carrying a git
+  User-Agent (`git/`, JGit, libgit2, go-git, git-lfs) or a git media type in Accept or
+  Content-Type also keep their previous behavior. Ordinary source filenames
+  ending in `.git` are not treated as transport endpoints.
+- The entire `/api/` namespace (including unregistered paths), `/api/graphql`,
+  `/graphql` and the gh-compatible endpoints never redirect to Forgejo.
+  This reserves the owner name `api`; a repository named `api` under another
+  owner is not excluded. Excluded requests retain the historical router
+  response, including any existing console redirect.
 - The AGS query string is deliberately **not** forwarded: an AGS URL can carry a
   credential, and a Forgejo page does not need it.
-- A path that is not a positive number, a hex object ID, or a mappable
-  repository stays `404`, exactly as without the setting.
+- Non-mappable paths fall through to the historical router. Owner, repository
+  and source path segments are decoded, validated and canonically escaped.
+  Dot segments, encoded separators, nested percent escapes, control bytes and
+  backslashes are rejected; AGS query strings and fragments never reach Forgejo.
 
 Activation is explicit. `forgejo.web_base_url` (or
 `FORGEJO_INTEGRATION_WEB_BASE_URL`) must be set to a credential-free absolute
-HTTP(S) URL with no query or fragment. It has no fallback to `base_url`: the API
+HTTP(S) URL with no query, fragment or unsafe path segments. An invalid setting
+fails startup with a configuration error. It has no fallback to `base_url`: the API
 base URL is often an address a browser cannot reach, and an implicit fallback
 would silently change the browser redirect of an existing deployment. When the
 setting is absent, every route behaves exactly as it did before this feature,

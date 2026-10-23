@@ -13,6 +13,7 @@ package forgejointegration
 import (
 	"errors"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -37,11 +38,14 @@ func normalizeBrowserBaseURL(raw string) (string, error) {
 		return "", errEmptyBrowserBaseURL
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return "", errors.New("browser base URL must be a credential-free absolute HTTP(S) URL without query or fragment")
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return "", errors.New("browser base URL must use http or https")
+	}
+	if _, ok := escapedBrowserPath(parsed.EscapedPath()); !ok {
+		return "", errors.New("browser base URL contains unsafe path segments")
 	}
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
@@ -77,24 +81,72 @@ func (i *Integration) BrowserURL(repoFullName, webPath string) (string, bool) {
 		return "", false
 	}
 	repoFullName = strings.TrimSpace(repoFullName)
-	if owner, repo, ok := splitRepoFullName(repoFullName); !ok || owner == "" || repo == "" {
+	if owner, repo, ok := splitRepoFullName(repoFullName); !ok || !ValidBrowserPathSegment(owner) || !ValidBrowserPathSegment(repo) {
 		return "", false
 	}
 	target, ok, err := i.cfg.resolveTarget(repoFullName)
 	if err != nil || !ok || !target.Enabled {
 		return "", false
 	}
-	owner := strings.TrimSpace(target.Owner)
-	repo := strings.TrimSpace(target.Repo)
-	if owner == "" || repo == "" {
+	return i.browserURLForTarget(target.Owner, target.Repo, webPath)
+}
+
+// PullRequestBrowserURL uses the recorded provider coordinates rather than
+// remapping them as AGS coordinates. ExternalURL is intentionally never trusted.
+func (i *Integration) PullRequestBrowserURL(repoFullName, externalRepo string, number int) (string, bool) {
+	if _, ok := i.BrowserURL(repoFullName, ""); !ok || number <= 0 {
 		return "", false
 	}
-	webPath = strings.TrimSpace(webPath)
-	if webPath != "" && !strings.HasPrefix(webPath, "/") {
+	parts := strings.Split(externalRepo, "/")
+	if len(parts) != 2 {
 		return "", false
 	}
-	if strings.ContainsAny(webPath, "\r\n\x00?#") {
+	return i.browserURLForTarget(parts[0], parts[1], "/pulls/"+strconv.Itoa(number))
+}
+
+func (i *Integration) browserURLForTarget(owner, repo, webPath string) (string, bool) {
+	if !ValidBrowserPathSegment(owner) || !ValidBrowserPathSegment(repo) {
 		return "", false
 	}
-	return base + "/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + webPath, true
+	escaped, ok := escapedBrowserPath(webPath)
+	if !ok {
+		return "", false
+	}
+	base := i.WebRedirectBaseURL()
+	if base == "" {
+		return "", false
+	}
+	return base + "/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + escaped, true
+}
+
+// ValidBrowserPathSegment accepts one decoded segment. Reject percent signs to
+// prevent nested escapes being reinterpreted by a downstream proxy or browser.
+func ValidBrowserPathSegment(value string) bool {
+	if value == "" || value == "." || value == ".." || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, char := range value {
+		if char < 0x20 || char == 0x7f || strings.ContainsRune("/\\%?#", char) {
+			return false
+		}
+	}
+	return true
+}
+
+func escapedBrowserPath(value string) (string, bool) {
+	if value == "" {
+		return "", true
+	}
+	if !strings.HasPrefix(value, "/") {
+		return "", false
+	}
+	parts := strings.Split(value[1:], "/")
+	for j, part := range parts {
+		decoded, err := url.PathUnescape(part)
+		if err != nil || (decoded == "" && j != len(parts)-1) || (decoded != "" && !ValidBrowserPathSegment(decoded)) {
+			return "", false
+		}
+		parts[j] = url.PathEscape(decoded)
+	}
+	return "/" + strings.Join(parts, "/"), true
 }

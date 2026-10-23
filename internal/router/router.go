@@ -54,6 +54,9 @@ func RegisterRoutes(r chi.Router, handlers *rest.Deps, gitHandler *githttp.Handl
 		return r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git-receive-pack")
 	}))
 	r.Use(corsMiddleware(consoleBaseURL))
+	if handlers.Svc != nil && handlers.Svc.ForgejoIntegration.WebRedirectBaseURL() != "" {
+		r.Use(forgejoWebRedirectMiddleware(handlers.Svc))
+	}
 	r.Use(srvmiddleware.CompressJSON(gzip.BestSpeed))
 	r.Use(srvmiddleware.ConditionalETag())
 
@@ -218,18 +221,11 @@ func registerAgentPublicRoutes(r chi.Router, handlers *rest.Deps, rateLimitMw fu
 func registerGitHTTPRoutes(r chi.Router, gitHandler *githttp.Handler, handlers *rest.Deps, consoleBaseURL string, embeddedAuth srvmiddleware.EmbeddedAuthConfig) {
 	// Git Smart HTTP
 	r.Route("/{owner}/{repo}", func(r chi.Router) {
-		// Read-only web pages redirect to the optional Forgejo web UI when it is
-		// configured. Git smart HTTP, API and write paths are separate routes and
-		// are never reached by this handler.
-		forgejoWeb := forgejoWebRedirectorFor(handlers)
-		if strings.TrimSpace(consoleBaseURL) != "" || forgejoWeb != nil {
-			r.Get("/", repoWebRootHandler(forgejoWeb, consoleBaseURL))
-			r.Head("/", repoWebRootHandler(forgejoWeb, consoleBaseURL))
-			r.Get("/issues/{issue_id}", issueWebRootHandler(forgejoWeb, consoleBaseURL))
-			r.Head("/issues/{issue_id}", issueWebRootHandler(forgejoWeb, consoleBaseURL))
-		}
-		if forgejoWeb != nil {
-			registerForgejoWebRoutes(r, forgejoWeb)
+		if strings.TrimSpace(consoleBaseURL) != "" {
+			r.Get("/", consoleRedirectHandler(consoleBaseURL, false))
+			r.Head("/", consoleRedirectHandler(consoleBaseURL, false))
+			r.Get("/issues/{issue_id}", consoleRedirectHandler(consoleBaseURL, true))
+			r.Head("/issues/{issue_id}", consoleRedirectHandler(consoleBaseURL, true))
 		}
 
 		authMw := srvmiddleware.OptionalTokenAuthWithEmbeddedIdentity(handlers.Svc, embeddedAuth)
@@ -237,197 +233,6 @@ func registerGitHTTPRoutes(r chi.Router, gitHandler *githttp.Handler, handlers *
 		r.With(authMw).Post("/git-upload-pack", gitHandler.UploadPack)
 		r.With(authMw).Post("/git-receive-pack", gitHandler.ReceivePack)
 	})
-}
-
-// forgejoWebRoute is one read-only AGS web path mapped onto a Forgejo web path.
-// The target path is derived from the request only; it never carries a query,
-// fragment or credential.
-type forgejoWebRoute struct {
-	pattern string
-	target  func(*http.Request) (string, bool)
-}
-
-// forgejoWebRoutes lists the AGS-to-Forgejo web page mapping. Only paths that
-// exist as read-only pages on both surfaces are listed; Forgejo has no /tree or
-// /blob page, so those map onto its canonical /src/{ref}/{path} form.
-var forgejoWebRoutes = []forgejoWebRoute{
-	{pattern: "/pulls", target: staticWebPath("/pulls")},
-	{pattern: "/pulls/{number}", target: numberedWebPath("/pulls/")},
-	{pattern: "/pull/{number}", target: numberedWebPath("/pulls/")},
-	{pattern: "/issues", target: staticWebPath("/issues")},
-	{pattern: "/commit/{sha}", target: commitWebPath()},
-	{pattern: "/commits/{sha}", target: commitWebPath()},
-	{pattern: "/tree/*", target: sourceWebPath("/tree/")},
-	{pattern: "/blob/*", target: sourceWebPath("/blob/")},
-}
-
-func registerForgejoWebRoutes(r chi.Router, redirect forgejoWebRedirector) {
-	for _, route := range forgejoWebRoutes {
-		for _, method := range []string{http.MethodGet, http.MethodHead} {
-			r.Method(method, route.pattern, forgejoWebRedirectHandler(redirect, route.target))
-		}
-	}
-}
-
-func staticWebPath(webPath string) func(*http.Request) (string, bool) {
-	return func(*http.Request) (string, bool) { return webPath, true }
-}
-
-// numberedWebPath accepts only a positive decimal number so an AGS path that is
-// not a Forgejo number never becomes a redirect.
-func numberedWebPath(prefix string) func(*http.Request) (string, bool) {
-	return numberedWebPathFor("number", prefix)
-}
-
-func numberedWebPathFor(param, prefix string) func(*http.Request) (string, bool) {
-	return func(r *http.Request) (string, bool) {
-		number := strings.TrimSpace(pathParam(r, param))
-		if !isPositiveDecimal(number) {
-			return "", false
-		}
-		return prefix + number, true
-	}
-}
-
-func commitWebPath() func(*http.Request) (string, bool) {
-	return func(r *http.Request) (string, bool) {
-		sha := strings.TrimSpace(pathParam(r, "sha"))
-		if !isHexObjectIDPrefix(sha) {
-			return "", false
-		}
-		return "/commit/" + sha, true
-	}
-}
-
-// sourceWebPath maps GitHub-style /tree|/blob tails onto Forgejo's /src form.
-// The tail is taken from the escaped path so the original ref/path encoding is
-// preserved byte for byte; Forgejo resolves the ref boundary itself.
-func sourceWebPath(agsPrefix string) func(*http.Request) (string, bool) {
-	return func(r *http.Request) (string, bool) {
-		escaped := r.URL.EscapedPath()
-		index := strings.Index(escaped, agsPrefix)
-		if index < 0 {
-			return "", false
-		}
-		tail := escaped[index+len(agsPrefix):]
-		if tail == "" || strings.HasPrefix(tail, "/") || hasUnsafePathBytes(tail) {
-			return "", false
-		}
-		return "/src/" + tail, true
-	}
-}
-
-func isPositiveDecimal(value string) bool {
-	if value == "" || len(value) > 18 {
-		return false
-	}
-	for _, char := range value {
-		if char < '0' || char > '9' {
-			return false
-		}
-	}
-	return value != "0"
-}
-
-func isHexObjectIDPrefix(value string) bool {
-	if len(value) < 4 || len(value) > 40 {
-		return false
-	}
-	for _, char := range value {
-		if (char < '0' || char > '9') && (char < 'a' || char > 'f') && (char < 'A' || char > 'F') {
-			return false
-		}
-	}
-	return true
-}
-
-func hasUnsafePathBytes(value string) bool {
-	for _, char := range value {
-		if char < 0x20 || char == 0x7f || char == '?' || char == '#' || char == '\\' {
-			return true
-		}
-	}
-	return false
-}
-
-// repoWebRootHandler serves the repo root: Forgejo when configured, otherwise
-// the historical console redirect.
-//
-// A `*.git` repository segment keeps whatever behavior it had before this
-// feature: it is a git transport URL and must never be sent to Forgejo.
-func repoWebRootHandler(forgejo forgejoWebRedirector, consoleBaseURL string) http.HandlerFunc {
-	if forgejo == nil {
-		return consoleRedirectHandler(consoleBaseURL, false)
-	}
-	forgejoHandler := forgejoWebRedirectHandler(forgejo, staticWebPath(""))
-	if strings.TrimSpace(consoleBaseURL) == "" {
-		return forgejoHandler
-	}
-	consoleHandler := consoleRedirectHandler(consoleBaseURL, false)
-	return func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(pathParam(r, "repo"), ".git") {
-			consoleHandler(w, r)
-			return
-		}
-		forgejoHandler(w, r)
-	}
-}
-
-// issueWebRootHandler serves one issue: Forgejo when configured, otherwise the
-// historical console memory redirect.
-func issueWebRootHandler(forgejo forgejoWebRedirector, consoleBaseURL string) http.HandlerFunc {
-	if forgejo != nil {
-		return forgejoWebRedirectHandler(forgejo, numberedWebPathFor("issue_id", "/issues/"))
-	}
-	return consoleRedirectHandler(consoleBaseURL, true)
-}
-
-// forgejoWebRedirector resolves one AGS repository to its Forgejo web target.
-type forgejoWebRedirector interface {
-	BrowserURL(repoFullName, webPath string) (string, bool)
-}
-
-// forgejoWebRedirectorFor returns the configured redirector, or nil when the
-// optional Forgejo integration or its browser base URL is absent. A nil result
-// leaves every route exactly as it is without the setting.
-func forgejoWebRedirectorFor(handlers *rest.Deps) forgejoWebRedirector {
-	if handlers == nil || handlers.Svc == nil {
-		return nil
-	}
-	integration := handlers.Svc.ForgejoIntegration
-	if integration == nil || integration.WebRedirectBaseURL() == "" {
-		return nil
-	}
-	return integration
-}
-
-func forgejoWebRedirectHandler(redirect forgejoWebRedirector, target func(*http.Request) (string, bool)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.NotFound(w, r)
-			return
-		}
-		owner := pathParam(r, "owner")
-		repo := pathParam(r, "repo")
-		// *.git never redirects: the git transport keeps its own behavior.
-		if owner == "" || repo == "" || strings.HasSuffix(repo, ".git") {
-			http.NotFound(w, r)
-			return
-		}
-		webPath, ok := target(r)
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		location, ok := redirect.BrowserURL(owner+"/"+repo, webPath)
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		// The AGS query string is intentionally not forwarded: it can carry an
-		// AGS credential, and a Forgejo page does not need it.
-		http.Redirect(w, r, location, http.StatusFound)
-	}
 }
 
 func consoleRedirectHandler(consoleBaseURL string, isIssue bool) http.HandlerFunc {
