@@ -5,6 +5,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/ngaut/agent-git-service/internal/forgejointegration"
 	"github.com/ngaut/agent-git-service/internal/service"
@@ -12,7 +15,21 @@ import (
 
 // Intercept browser reads without registering new routes: chi must retain the
 // historical 404/405 distinction for every other method and excluded request.
-func forgejoWebRedirectMiddleware(svc *service.Service) func(http.Handler) http.Handler {
+func forgejoWebRedirectMiddleware(svc *service.Service, routes chi.Router) func(http.Handler) http.Handler {
+	// Collect methods from the completed route table, including routes added by
+	// server composition. chi routes are immutable once serving starts.
+	registeredMethods := sync.OnceValue(func() []string {
+		methods := make(map[string]bool)
+		_ = chi.Walk(routes, func(method, _ string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+			methods[method] = true
+			return nil
+		})
+		result := make([]string, 0, len(methods))
+		for method := range methods {
+			result = append(result, method)
+		}
+		return result
+	})
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if (r.Method != http.MethodGet && r.Method != http.MethodHead) || isGitWebRequest(r) {
@@ -34,10 +51,21 @@ func forgejoWebRedirectMiddleware(svc *service.Service) func(http.Handler) http.
 				}
 				parts[j] = decoded
 			}
-			// The entire /api namespace is reserved, irrespective of registration.
+			// The entire API namespace stays reserved, including unknown endpoints.
 			if parts[0] == "api" || parts[0] == "" || parts[1] == "" || strings.HasSuffix(parts[1], ".git") {
 				next.ServeHTTP(w, r)
 				return
+			}
+			// Check every registered method: GET must retain 405 for POST-only
+			// endpoints, and HEAD must not shadow a GET-only AGS handler. Use a
+			// fresh context so probing cannot alter request routing or URL params.
+			for _, method := range registeredMethods() {
+				pattern := routes.Find(chi.NewRouteContext(), method, r.URL.Path)
+				first := strings.Split(strings.TrimPrefix(pattern, "/"), "/")[0]
+				if first != "" && !strings.ContainsAny(first, "{*}") {
+					next.ServeHTTP(w, r)
+					return
+				}
 			}
 			repoFullName := parts[0] + "/" + parts[1]
 			webPath, prNumber, ok := forgejoBrowserPath(parts[2:])
