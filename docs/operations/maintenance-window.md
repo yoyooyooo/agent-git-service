@@ -151,7 +151,17 @@ Required tables/fields must exist; unknown schema blocks. Old databases may
 lack the three additive PR lifecycle columns. Linked PR facts and referenced
 immutable boundary receipts are included in per-object fingerprints; missing
 links block. Whole rows are hashed without exporting payloads, endpoints,
-receipt bodies, labels or free-form errors. The output contains only object
+receipt bodies, labels or free-form errors. Historical SQLite TEXT is decoded
+with UTF-8 `surrogateescape`, never replacement or ignored bytes. Its private
+canonical JSON uses ASCII escapes (`ensure_ascii=True`); parsing that JSON and
+encoding each text value with `encode('utf-8', 'surrogateescape')` recovers the
+original TEXT bytes, including invalid UTF-8 and NUL. This representation is
+not a database repair and must never be written back to production SQLite.
+Valid UTF-8 fingerprints are unchanged; changing any retained byte in an
+in-scope row or linked fact invalidates its review fingerprint. Terminal rows
+are still scanned before filtering, even when they need no recovery admission.
+No error text or reversible rendering is added to inventory output.
+The output contains only object
 keys, reason, a facts digest and an unknown-result flag. It is still private.
 The source predicates are in `pr_projection_jobs.go`, `github_projection_jobs.go`
 and `forgejo_action_intent.go`; a scheduler change requires a new adapter review.

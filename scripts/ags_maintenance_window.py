@@ -78,6 +78,11 @@ def readonly(path):
     require(path.is_absolute() and path.is_file() and not path.is_symlink(), 'unsafe_database')
     db = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5)
     db.row_factory = sqlite3.Row
+    # Historical SQLite TEXT may contain arbitrary bytes. Preserve them rather
+    # than replacing/ignoring errors: ensure_ascii JSON escapes these surrogates,
+    # and encode('utf-8', 'surrogateescape') recovers the original bytes exactly.
+    # Valid UTF-8 retains its existing representation and review fingerprints.
+    db.text_factory = lambda raw: raw.decode('utf-8', 'surrogateescape')
     try:
         db.execute('PRAGMA query_only=ON')
         db.execute('BEGIN')
