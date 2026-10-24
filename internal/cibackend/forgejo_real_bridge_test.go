@@ -20,14 +20,18 @@ import (
 )
 
 func TestForgejoSyncJobAndRunLogsThroughRealBridge(t *testing.T) {
-	testForgejoDiagnosticBridge(t, false)
+	testForgejoDiagnosticBridge(t, false, false)
 }
 
 func TestForgejoDiagnosticGapsThroughRealBridge(t *testing.T) {
-	testForgejoDiagnosticBridge(t, true)
+	testForgejoDiagnosticBridge(t, true, false)
 }
 
-func testForgejoDiagnosticBridge(t *testing.T, gaps bool) {
+func TestForgejoInvalidJobRepositoryFailsInventoryAndRunLogsThroughRealBridge(t *testing.T) {
+	testForgejoDiagnosticBridge(t, true, true)
+}
+
+func testForgejoDiagnosticBridge(t *testing.T, gaps, corruptJobRepo bool) {
 	t.Helper()
 	head := strings.Repeat("a", 40)
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "forgejo.db")), &gorm.Config{})
@@ -58,6 +62,11 @@ func testForgejoDiagnosticBridge(t *testing.T, gaps bool) {
 			if err := db.Exec(sql).Error; err != nil {
 				t.Fatal(err)
 			}
+		}
+	}
+	if corruptJobRepo {
+		if err := db.Exec(`UPDATE action_run_job SET repo_id=2 WHERE id=32`).Error; err != nil {
+			t.Fatal(err)
 		}
 	}
 	logs := t.TempDir()
@@ -121,6 +130,17 @@ func testForgejoDiagnosticBridge(t *testing.T, gaps bool) {
 	}, "provider-only", "logs-only")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if corruptJobRepo {
+		jobs, err := backend.Jobs(t.Context(), "ci/project", "17")
+		if !errors.Is(err, ErrUnavailable) || jobs.Complete || jobs.Total != 0 || len(jobs.Items) != 0 {
+			t.Errorf("invalid inventory must fail without partial jobs: %+v %v", jobs, err)
+		}
+		body, err := backend.RunLogs(t.Context(), "ci/project", "17")
+		if !errors.Is(err, ErrUnavailable) || len(body) != 0 {
+			t.Errorf("invalid inventory must fail without a partial ZIP: bytes=%d err=%v", len(body), err)
+		}
+		return
 	}
 	if gaps {
 		jobs, err := backend.Jobs(t.Context(), "ci/project", "17")
