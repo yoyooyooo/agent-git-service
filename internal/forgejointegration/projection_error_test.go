@@ -29,8 +29,11 @@ func TestClassifyProjectionErrorDetectsExistingRefLockConflict(t *testing.T) {
 	if classified.Type != ProjectionFailureNonFastForward {
 		t.Fatalf("Type=%q, want %q", classified.Type, ProjectionFailureNonFastForward)
 	}
-	if !strings.Contains(classified.ErrorSummary, "git push: signal: killed") || !strings.Contains(classified.ErrorSummary, "reference already exists") {
-		t.Fatalf("classified error lost retry evidence: %q", classified.ErrorSummary)
+	if classified.Diagnostic == nil || classified.Diagnostic.Category != "cas_conflict" || classified.Diagnostic.ReasonCode != "expected_absent_mismatch" {
+		t.Fatalf("classified error lost typed CAS evidence: %+v", classified.Diagnostic)
+	}
+	if strings.Contains(classified.ErrorSummary, "signal: killed") {
+		t.Fatal("raw legacy response escaped safe summary")
 	}
 }
 

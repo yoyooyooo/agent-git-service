@@ -1,0 +1,590 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.test/ags/ref-operations.v1.schema.json",
+  "title": "S0 draft ref-operation request contract (not an installed API)",
+  "$comment": "No endpoints or executors in S0/S1. Idempotency-Key is a required HTTP header, 1-128 ASCII [A-Za-z0-9._:-], fixed instance/repo/key scope. Duplicate JSON keys/ref items, full Git ref-format, OID format consistency, canonical manifest content schema/digests, signature/TTL/identity/live permissions and all capabilities require semantic checks. Canonical manifest schemas must be finalized in S2. Unknown capability=false. Client booleans never grant execute.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/execute"
+    },
+    {
+      "$ref": "#/$defs/review"
+    }
+  ],
+  "$defs": {
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "instance_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "repository_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          "required": [
+            "instance_id",
+            "repository_id"
+          ]
+        },
+        "provider": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "instance_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "repository_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          "required": [
+            "instance_id",
+            "repository_id"
+          ]
+        },
+        "revisions": {
+          "$ref": "#/$defs/revision_vector"
+        },
+        "inventory_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "selection_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "source",
+        "provider",
+        "revisions",
+        "inventory_digest",
+        "selection_digest"
+      ]
+    },
+    "revision_vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_repo": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_repo": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reverse_pr_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mapping": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "policy": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "credential": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "authority": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "revocation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ref": {
+                "type": "string",
+                "minLength": 12,
+                "maxLength": 512,
+                "pattern": "^refs/heads/[^\\s]+$"
+              },
+              "oid": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+                  }
+                ]
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "ref",
+              "oid",
+              "revision"
+            ]
+          }
+        },
+        "provider_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ref": {
+                "type": "string",
+                "minLength": 12,
+                "maxLength": 512,
+                "pattern": "^refs/heads/[^\\s]+$"
+              },
+              "oid": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+                  }
+                ]
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "ref",
+              "oid",
+              "revision"
+            ]
+          }
+        },
+        "reverse_pr_domain": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "history_watermark": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "source_repo",
+        "provider_repo",
+        "reverse_pr_revision",
+        "mapping",
+        "policy",
+        "credential",
+        "authority",
+        "revocation",
+        "source_refs",
+        "provider_refs",
+        "reverse_pr_domain",
+        "history_watermark"
+      ]
+    },
+    "signed_envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "ref_operations.v1"
+        },
+        "planner_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "source_code_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "plan_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "server_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "issued_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "object_format": {
+          "enum": [
+            "sha1",
+            "sha256"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "converge",
+            "retire"
+          ]
+        },
+        "selected_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 12,
+            "maxLength": 512,
+            "pattern": "^refs/heads/[^\\s]+$"
+          }
+        },
+        "baseline": {
+          "$ref": "#/$defs/baseline"
+        },
+        "entries_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "schema_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "content": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1048576
+            }
+          },
+          "required": [
+            "digest",
+            "schema_version",
+            "content"
+          ]
+        },
+        "allowed_effects_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "schema_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "content": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1048576
+            }
+          },
+          "required": [
+            "digest",
+            "schema_version",
+            "content"
+          ]
+        },
+        "review_bindings_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "schema_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "content": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1048576
+            }
+          },
+          "required": [
+            "digest",
+            "schema_version",
+            "content"
+          ]
+        },
+        "canonical_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "signing_key_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "schema_version",
+        "planner_version",
+        "source_code_version",
+        "plan_id",
+        "server_instance_id",
+        "issued_at",
+        "expires_at",
+        "object_format",
+        "mode",
+        "selected_refs",
+        "baseline",
+        "entries_manifest",
+        "allowed_effects_manifest",
+        "review_bindings_manifest",
+        "canonical_digest",
+        "signing_key_id",
+        "signature"
+      ]
+    },
+    "execute": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "plan": {
+          "$ref": "#/$defs/signed_envelope"
+        },
+        "plan_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "selection_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "confirmations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ref": {
+                "type": "string",
+                "minLength": 12,
+                "maxLength": 512,
+                "pattern": "^refs/heads/[^\\s]+$"
+              },
+              "expected_old_oid": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+                  }
+                ]
+              },
+              "expected_new_oid": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+                  }
+                ]
+              },
+              "subject_digest": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "ref",
+              "expected_old_oid",
+              "expected_new_oid",
+              "subject_digest"
+            ]
+          }
+        }
+      },
+      "required": [
+        "plan",
+        "plan_digest",
+        "selection_digest",
+        "confirmations"
+      ]
+    },
+    "review": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "stage_ownership_evidence"
+            },
+            "signed_evidence": {
+              "$ref": "#/$defs/signed_envelope"
+            },
+            "candidate_evidence_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "candidate_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "action",
+            "signed_evidence",
+            "candidate_evidence_id",
+            "candidate_digest"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "approve"
+            },
+            "signed_evidence": {
+              "$ref": "#/$defs/signed_envelope"
+            },
+            "expected_subject_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decisions": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "attest_ownership": {
+                  "type": "boolean"
+                },
+                "confirm_closed_merged_pr_impact": {
+                  "type": "boolean"
+                },
+                "approve_unique_set": {
+                  "type": "boolean"
+                },
+                "accept_archive_recovery_and_retention": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "attest_ownership",
+                "confirm_closed_merged_pr_impact",
+                "approve_unique_set",
+                "accept_archive_recovery_and_retention"
+              ]
+            },
+            "requested_expires_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "action",
+            "signed_evidence",
+            "expected_subject_digest",
+            "decisions",
+            "requested_expires_at"
+          ]
+        }
+      ]
+    },
+    "plan_query": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "converge",
+            "retire"
+          ]
+        },
+        "refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 12,
+            "maxLength": 512,
+            "pattern": "^refs/heads/[^\\s]+$"
+          }
+        },
+        "review_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      },
+      "required": [
+        "mode"
+      ]
+    }
+  }
+}

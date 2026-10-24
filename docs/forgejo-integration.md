@@ -2,6 +2,8 @@
 
 AGS can optionally mirror selected post-push branch updates into Forgejo so Forgejo Pull Requests and Forgejo Actions can act as a configured deployment's CI surface while AGS remains its agent-facing Git remote. This is an optional product integration, not this fork's source workflow: this source repository uses GitHub and hosted CI. The examples below are synthetic and are never applied automatically.
 
+For the separate future ref-operation protocol, see [ref convergence contracts](design/ref-projection-convergence.md) and [safe diagnostics](operations/ref-projection-operations.md). Only S0/S1 contracts and immediate diagnostics are implemented; no ref execute/retire API or enablement path exists. Existing projection and cleanup paths below are not strict-fenced by those contracts.
+
 ## Responsibility split
 
 - AGS is the source for agent/human branch ingress and commit authorship.

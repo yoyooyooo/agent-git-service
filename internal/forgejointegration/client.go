@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/ngaut/agent-git-service/internal/attribution"
+	"github.com/ngaut/agent-git-service/internal/gittransport"
 	"io"
 	"net/http"
 	"net/url"
@@ -58,7 +59,7 @@ func (c *HTTPClient) GetRepository(ctx context.Context, owner, repo string) (Rep
 		return RepositorySnapshot{}, false, nil
 	}
 	if status < 200 || status >= 300 {
-		return RepositorySnapshot{}, false, fmt.Errorf("get repository returned status %d: %s", status, string(response))
+		return RepositorySnapshot{}, false, providerHTTPError("get repository", status)
 	}
 	var payload struct {
 		ID            int64  `json:"id"`
@@ -68,7 +69,7 @@ func (c *HTTPClient) GetRepository(ctx context.Context, owner, repo string) (Rep
 		DefaultBranch string `json:"default_branch"`
 	}
 	if err := json.Unmarshal(response, &payload); err != nil {
-		return RepositorySnapshot{}, false, fmt.Errorf("decode repository: %w", err)
+		return RepositorySnapshot{}, false, fmt.Errorf("decode repository: invalid provider response")
 	}
 	want := owner + "/" + repo
 	if payload.ID <= 0 || payload.FullName != want {
@@ -91,7 +92,7 @@ func (c *HTTPClient) GetRepository(ctx context.Context, owner, repo string) (Rep
 		return RepositorySnapshot{}, false, err
 	}
 	if branchStatus < 200 || branchStatus >= 300 {
-		return RepositorySnapshot{}, false, fmt.Errorf("get default branch returned status %d: %s", branchStatus, string(branchResponse))
+		return RepositorySnapshot{}, false, providerHTTPError("get default branch", branchStatus)
 	}
 	var branch struct {
 		Name   string `json:"name"`
@@ -101,7 +102,7 @@ func (c *HTTPClient) GetRepository(ctx context.Context, owner, repo string) (Rep
 		} `json:"commit"`
 	}
 	if err := json.Unmarshal(branchResponse, &branch); err != nil {
-		return RepositorySnapshot{}, false, fmt.Errorf("decode default branch: %w", err)
+		return RepositorySnapshot{}, false, fmt.Errorf("decode default branch: invalid provider response")
 	}
 	defaultBranchSHA := firstNonEmpty(branch.Commit.ID, branch.Commit.SHA)
 	if branch.Name != defaultBranch || !isFullGitObjectID(defaultBranchSHA) {
@@ -133,7 +134,7 @@ func (c *HTTPClient) EnsureRepository(ctx context.Context, owner, repo string, p
 		return verifyRepositoryFullName(response, owner, repo)
 	}
 	if status != http.StatusNotFound {
-		return fmt.Errorf("lookup repository returned status %d", status)
+		return providerHTTPError("lookup repository", status)
 	}
 	createPath, err := c.repositoryCreatePath(ctx, owner)
 	if err != nil {
@@ -149,14 +150,14 @@ func (c *HTTPClient) EnsureRepository(ctx context.Context, owner, repo string, p
 		return err
 	}
 	if status != http.StatusCreated && status != http.StatusOK && status != http.StatusConflict {
-		return fmt.Errorf("create repository returned status %d: %s", status, string(response))
+		return providerHTTPError("create repository", status)
 	}
 	status, response, err = c.request(ctx, http.MethodGet, repoPath, nil)
 	if err != nil {
 		return err
 	}
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("verify repository returned status %d: %s", status, string(response))
+		return providerHTTPError("verify repository", status)
 	}
 	return verifyRepositoryFullName(response, owner, repo)
 }
@@ -169,20 +170,20 @@ func (c *HTTPClient) repositoryCreatePath(ctx context.Context, owner string) (st
 		return apiPath("/api/v1/orgs/%s/repos", owner), nil
 	}
 	if status != http.StatusNotFound {
-		return "", fmt.Errorf("lookup organization returned status %d: %s", status, string(response))
+		return "", providerHTTPError("lookup organization", status)
 	}
 	status, response, err = c.request(ctx, http.MethodGet, "/api/v1/user", nil)
 	if err != nil {
 		return "", err
 	}
 	if status < 200 || status >= 300 {
-		return "", fmt.Errorf("lookup authenticated user returned status %d: %s", status, string(response))
+		return "", providerHTTPError("lookup authenticated user", status)
 	}
 	var user struct {
 		Login string `json:"login"`
 	}
 	if err := json.Unmarshal(response, &user); err != nil {
-		return "", fmt.Errorf("decode authenticated user: %w", err)
+		return "", fmt.Errorf("decode authenticated user: invalid provider response")
 	}
 	if user.Login == owner {
 		return "/api/v1/user/repos", nil
@@ -198,7 +199,7 @@ func verifyRepositoryFullName(raw []byte, owner, repo string) error {
 		Name string `json:"name"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return fmt.Errorf("decode repository: %w", err)
+		return fmt.Errorf("decode repository: invalid provider response")
 	}
 	fullName := payload.FullName
 	if fullName == "" && payload.Owner.Login != "" && payload.Name != "" {
@@ -231,7 +232,7 @@ func (c *HTTPClient) ListPullRequests(ctx context.Context, owner, repo, state st
 			return nil, err
 		}
 		if status < 200 || status >= 300 {
-			return nil, fmt.Errorf("list pull requests returned status %d: %s", status, string(response))
+			return nil, providerHTTPError("list pull requests", status)
 		}
 		rows, err := decodePullRequestSnapshots(response)
 		if err != nil {
@@ -257,11 +258,11 @@ func (c *HTTPClient) GetPullRequest(ctx context.Context, owner, repo string, num
 		return PullRequestSnapshot{}, false, nil
 	}
 	if status < 200 || status >= 300 {
-		return PullRequestSnapshot{}, false, fmt.Errorf("get pull request returned status %d: %s", status, string(response))
+		return PullRequestSnapshot{}, false, providerHTTPError("get pull request", status)
 	}
 	var payload pullRequestPayload
 	if err := json.Unmarshal(response, &payload); err != nil {
-		return PullRequestSnapshot{}, false, fmt.Errorf("decode pull request: %w", err)
+		return PullRequestSnapshot{}, false, fmt.Errorf("decode pull request: invalid provider response")
 	}
 	return pullRequestSnapshotFromPayload(payload), true, nil
 }
@@ -290,7 +291,7 @@ func (c *HTTPClient) EnsurePullRequest(ctx context.Context, in PullRequestReques
 			return c.reconcilePullRequestMetadata(ctx, in, pr)
 		}
 	} else if status != http.StatusNotFound {
-		return PullRequestResult{}, fmt.Errorf("list pull requests returned status %d: %s", status, string(response))
+		return PullRequestResult{}, providerHTTPError("list pull requests", status)
 	}
 	body := map[string]any{
 		"head":  in.Head,
@@ -323,7 +324,7 @@ func (c *HTTPClient) EnsurePullRequest(ctx context.Context, in PullRequestReques
 			return c.reconcilePullRequestMetadata(ctx, in, refetched)
 		}
 	}
-	return PullRequestResult{}, fmt.Errorf("create pull request returned status %d: %s", status, string(response))
+	return PullRequestResult{}, providerHTTPError("create pull request", status)
 }
 
 func (c *HTTPClient) findExistingPullRequest(ctx context.Context, in PullRequestRequest) (pullRequestSnapshot, bool, error) {
@@ -333,7 +334,7 @@ func (c *HTTPClient) findExistingPullRequest(ctx context.Context, in PullRequest
 		return pullRequestSnapshot{}, false, err
 	}
 	if status < 200 || status >= 300 {
-		return pullRequestSnapshot{}, false, fmt.Errorf("list pull requests returned status %d: %s", status, string(response))
+		return pullRequestSnapshot{}, false, providerHTTPError("list pull requests", status)
 	}
 	pr, ok, err := findPullRequestSnapshot(response, in.Head, in.Base)
 	return pr, ok, err
@@ -360,7 +361,7 @@ func (c *HTTPClient) reconcilePullRequestMetadata(ctx context.Context, in PullRe
 		return PullRequestResult{}, err
 	}
 	if status < 200 || status >= 300 {
-		return PullRequestResult{}, fmt.Errorf("update pull request returned status %d: %s", status, string(response))
+		return PullRequestResult{}, providerHTTPError("update pull request", status)
 	}
 	if pr, ok := decodePullRequestResult(response); ok {
 		if pr.HeadSHA == "" {
@@ -383,7 +384,7 @@ func (c *HTTPClient) EditPullRequestBase(ctx context.Context, owner, repo string
 		return PullRequestResult{}, err
 	}
 	if status < 200 || status >= 300 {
-		return PullRequestResult{}, fmt.Errorf("edit pull request base returned status %d: %s", status, strings.TrimSpace(string(response)))
+		return PullRequestResult{}, providerHTTPError("edit pull request base", status)
 	}
 	if pr, ok := decodePullRequestResult(response); ok {
 		return pr, nil
@@ -398,7 +399,7 @@ func (c *HTTPClient) UpdatePullRequestState(ctx context.Context, owner, repo str
 		return PullRequestResult{}, err
 	}
 	if status < 200 || status >= 300 {
-		return PullRequestResult{}, fmt.Errorf("update pull request state returned status %d: %s", status, string(response))
+		return PullRequestResult{}, providerHTTPError("update pull request state", status)
 	}
 	if pr, ok := decodePullRequestResult(response); ok {
 		return pr, nil
@@ -422,12 +423,12 @@ func (c *HTTPClient) MergePullRequest(ctx context.Context, owner, repo string, n
 	if request.Message != "" {
 		body["MergeMessageField"] = request.Message
 	}
-	status, response, err := c.request(ctx, http.MethodPost, apiPath("/api/v1/repos/%s/%s/pulls/"+strconv.Itoa(number)+"/merge", owner, repo), body)
+	status, _, err := c.request(ctx, http.MethodPost, apiPath("/api/v1/repos/%s/%s/pulls/"+strconv.Itoa(number)+"/merge", owner, repo), body)
 	if err != nil {
 		return err
 	}
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("merge pull request returned status %d: %s", status, strings.TrimSpace(string(response)))
+		return providerHTTPError("merge pull request", status)
 	}
 	return nil
 }
@@ -438,13 +439,13 @@ func (c *HTTPClient) ListIssueLabels(ctx context.Context, owner, repo string, is
 		return nil, err
 	}
 	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("list issue labels returned status %d: %s", status, string(response))
+		return nil, providerHTTPError("list issue labels", status)
 	}
 	var payload []struct {
 		Name string `json:"name"`
 	}
 	if err := json.Unmarshal(response, &payload); err != nil {
-		return nil, fmt.Errorf("decode issue labels: %w", err)
+		return nil, fmt.Errorf("decode issue labels: invalid provider response")
 	}
 	labels := make([]string, 0, len(payload))
 	for _, item := range payload {
@@ -458,12 +459,12 @@ func (c *HTTPClient) ListIssueLabels(ctx context.Context, owner, repo string, is
 // AddIssueLabels adds labels to a Forgejo issue or PR.
 func (c *HTTPClient) AddIssueLabels(ctx context.Context, owner, repo string, issueNumber int, labels []string) error {
 	body := map[string]any{"labels": labels}
-	status, response, err := c.request(ctx, http.MethodPost, apiPath("/api/v1/repos/%s/%s/issues/%s/labels", owner, repo, fmt.Sprint(issueNumber)), body)
+	status, _, err := c.request(ctx, http.MethodPost, apiPath("/api/v1/repos/%s/%s/issues/%s/labels", owner, repo, fmt.Sprint(issueNumber)), body)
 	if err != nil {
 		return err
 	}
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("add issue labels returned status %d: %s", status, string(response))
+		return providerHTTPError("add issue labels", status)
 	}
 	return nil
 }
@@ -477,7 +478,7 @@ func (c *HTTPClient) RemoveIssueLabel(ctx context.Context, owner, repo string, i
 	if !ok {
 		return nil
 	}
-	status, response, err := c.request(ctx, http.MethodDelete, apiPath("/api/v1/repos/%s/%s/issues/%s/labels/%s", owner, repo, fmt.Sprint(issueNumber), fmt.Sprint(labelID)), nil)
+	status, _, err := c.request(ctx, http.MethodDelete, apiPath("/api/v1/repos/%s/%s/issues/%s/labels/%s", owner, repo, fmt.Sprint(issueNumber), fmt.Sprint(labelID)), nil)
 	if err != nil {
 		return err
 	}
@@ -485,7 +486,7 @@ func (c *HTTPClient) RemoveIssueLabel(ctx context.Context, owner, repo string, i
 		return nil
 	}
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("remove issue label returned status %d: %s", status, string(response))
+		return providerHTTPError("remove issue label", status)
 	}
 	return nil
 }
@@ -496,14 +497,14 @@ func (c *HTTPClient) repoLabelID(ctx context.Context, owner, repo, label string)
 		return 0, false, err
 	}
 	if status < 200 || status >= 300 {
-		return 0, false, fmt.Errorf("list labels returned status %d: %s", status, string(response))
+		return 0, false, providerHTTPError("list labels", status)
 	}
 	var labels []struct {
 		ID   int64  `json:"id"`
 		Name string `json:"name"`
 	}
 	if err := json.Unmarshal(response, &labels); err != nil {
-		return 0, false, fmt.Errorf("decode labels: %w", err)
+		return 0, false, fmt.Errorf("decode labels: invalid provider response")
 	}
 	for _, item := range labels {
 		if strings.TrimSpace(item.Name) == strings.TrimSpace(label) && item.ID > 0 {
@@ -523,14 +524,14 @@ func (c *HTTPClient) CollaboratorPermission(ctx context.Context, owner, repo, us
 		return "none", nil
 	}
 	if status < 200 || status >= 300 {
-		return "", fmt.Errorf("lookup collaborator permission returned status %d: %s", status, string(response))
+		return "", providerHTTPError("lookup collaborator permission", status)
 	}
 	var payload struct {
 		Permission string `json:"permission"`
 		RoleName   string `json:"role_name"`
 	}
 	if err := json.Unmarshal(response, &payload); err != nil {
-		return "", fmt.Errorf("decode collaborator permission: %w", err)
+		return "", fmt.Errorf("decode collaborator permission: invalid provider response")
 	}
 	permission := strings.TrimSpace(payload.Permission)
 	if permission == "" {
@@ -542,12 +543,12 @@ func (c *HTTPClient) CollaboratorPermission(ctx context.Context, owner, repo, us
 // CreateIssueComment creates a comment on a Forgejo issue or PR.
 func (c *HTTPClient) CreateIssueComment(ctx context.Context, owner, repo string, issueNumber int, bodyText string) error {
 	body := map[string]any{"body": bodyText}
-	status, response, err := c.request(ctx, http.MethodPost, apiPath("/api/v1/repos/%s/%s/issues/%s/comments", owner, repo, fmt.Sprint(issueNumber)), body)
+	status, _, err := c.request(ctx, http.MethodPost, apiPath("/api/v1/repos/%s/%s/issues/%s/comments", owner, repo, fmt.Sprint(issueNumber)), body)
 	if err != nil {
 		return err
 	}
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("create issue comment returned status %d: %s", status, string(response))
+		return providerHTTPError("create issue comment", status)
 	}
 	return nil
 }
@@ -566,11 +567,11 @@ func (c *HTTPClient) ListIssueComments(ctx context.Context, owner, repo string, 
 		return nil, err
 	}
 	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("list issue comments returned status %d: %s", status, string(response))
+		return nil, providerHTTPError("list issue comments", status)
 	}
 	var comments []PullRequestComment
 	if err := json.Unmarshal(response, &comments); err != nil {
-		return nil, fmt.Errorf("decode issue comments: %w", err)
+		return nil, fmt.Errorf("decode issue comments: invalid provider response")
 	}
 	return comments, nil
 }
@@ -594,14 +595,14 @@ func (c *HTTPClient) ListWorkflowRunsPage(ctx context.Context, owner, repo strin
 		return nil, false, err
 	}
 	if status < 200 || status >= 300 {
-		return nil, false, fmt.Errorf("list workflow runs returned status %d: %s", status, string(response))
+		return nil, false, providerHTTPError("list workflow runs", status)
 	}
 	var payload struct {
 		TotalCount   int           `json:"total_count"`
 		WorkflowRuns []WorkflowRun `json:"workflow_runs"`
 	}
 	if err := json.Unmarshal(response, &payload); err != nil {
-		return nil, false, fmt.Errorf("decode workflow runs: %w", err)
+		return nil, false, fmt.Errorf("decode workflow runs: invalid provider response")
 	}
 	hasMore := len(payload.WorkflowRuns) == limit
 	if payload.TotalCount > 0 {
@@ -627,7 +628,7 @@ func (c *HTTPClient) GetWorkflowRunLogs(ctx context.Context, owner, repo string,
 		}
 	}
 	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("get workflow run logs returned status %d: %s", status, string(response))
+		return nil, providerHTTPError("get workflow run logs", status)
 	}
 	return response, nil
 }
@@ -647,7 +648,7 @@ func (c *HTTPClient) rawRequest(ctx context.Context, method, apiPath string, bod
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+apiPath, reader)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, gittransport.SafeError(err)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -660,12 +661,12 @@ func (c *HTTPClient) rawRequest(ctx context.Context, method, apiPath string, bod
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, gittransport.SafeError(err)
 	}
 	defer resp.Body.Close()
 	data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes+1))
 	if readErr != nil {
-		return resp.StatusCode, nil, readErr
+		return resp.StatusCode, nil, gittransport.SafeError(readErr)
 	}
 	if len(data) > maxResponseBodyBytes {
 		return resp.StatusCode, nil, fmt.Errorf("response body exceeds %d bytes", maxResponseBodyBytes)
@@ -719,7 +720,7 @@ type pullRequestPayload struct {
 func decodePullRequestSnapshots(raw []byte) ([]PullRequestSnapshot, error) {
 	var pulls []pullRequestPayload
 	if err := json.Unmarshal(raw, &pulls); err != nil {
-		return nil, fmt.Errorf("decode pull request list: %w", err)
+		return nil, fmt.Errorf("decode pull request list: invalid provider response")
 	}
 	out := make([]PullRequestSnapshot, 0, len(pulls))
 	for _, pr := range pulls {
@@ -758,7 +759,7 @@ func findPullRequest(raw []byte, head, base string) (PullRequestResult, bool, er
 func findPullRequestSnapshot(raw []byte, head, base string) (pullRequestSnapshot, bool, error) {
 	var pulls []pullRequestPayload
 	if err := json.Unmarshal(raw, &pulls); err != nil {
-		return pullRequestSnapshot{}, false, fmt.Errorf("decode pull request list: %w", err)
+		return pullRequestSnapshot{}, false, fmt.Errorf("decode pull request list: invalid provider response")
 	}
 	for _, pr := range pulls {
 		if pr.Head.Ref == head && pr.Base.Ref == base {
