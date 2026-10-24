@@ -47,6 +47,7 @@ accepted direction, or incremental work that has not fully landed yet.
 
 - [Fork Governance](../fork/README.md) - GitHub source workflow, upstream generations, capability review and publication gates.
 - [Production Deployment](production-deployment.md)
+- [Reviewed Maintenance Windows](operations/maintenance-window.md) - opt-in executor admission, exact candidate import, complete startup recovery review and default forward repair.
 - [Single-root User Runtime](operations/user-runtime.md) - one installation under `~/.ags`, durable startup inputs, bounded logs and explicit migration.
 - [Automatic Git Maintenance](operations/git-maintenance.md) - primary-owned storage housekeeping, application object protection and explicit history-retirement boundaries.
 - [Official gh and Task Runs](operations/official-gh.md) - origin-based official clients, native run identity and association without command shims.
