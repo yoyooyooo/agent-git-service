@@ -99,6 +99,63 @@ class Fixture(unittest.TestCase):
             with self.assertRaises(sqlite3.OperationalError):
                 db.execute('INSERT INTO pull_requests(id) VALUES(2)')
 
+    def test_non_utf8_text_is_lossless_private_and_read_only(self):
+        self.job(1, 'projected')
+        self.job(2)
+        self.sql('ALTER TABLE pull_request_projection_jobs ADD COLUMN last_error TEXT')
+        raw = (b'synthetic-private-error\x00\xff\xc3(\xed\xa0\x80' + bytes(range(256)) * 4)[:1000]
+        self.assertEqual(len(raw), 1000)
+        for number in (1, 2):
+            self.sql('UPDATE pull_request_projection_jobs SET last_error=CAST(? AS TEXT) WHERE id=?',
+                     (raw, number))
+        before = w.sha(self.db)
+        # The old reader fails even on the terminal row excluded from recovery.
+        with w.readonly(self.db) as db:
+            row = dict(db.execute('SELECT * FROM pull_request_projection_jobs WHERE id=1').fetchone())
+            self.assertEqual(row['last_error'].encode('utf-8', 'surrogateescape'), raw)
+            rendered = json.dumps(row, ensure_ascii=True)
+            self.assertEqual(json.loads(rendered)['last_error'].encode('utf-8', 'surrogateescape'), raw)
+            rendered.encode('ascii')
+            self.assertEqual(db.execute('PRAGMA query_only').fetchone()[0], 1)
+            with self.assertRaises(sqlite3.OperationalError):
+                db.execute("UPDATE pull_request_projection_jobs SET last_error='cleaned'")
+        entries = w.recovery_inventory(self.db)
+        self.assertEqual([e['key'] for e in entries], ['pull_request_projection_jobs:2'])
+        self.assertNotIn('synthetic-private-error', json.dumps(entries))
+        self.assertNotIn('\\\\udcff', json.dumps(entries))
+        self.assertEqual(w.sha(self.db), before)
+        review = self.review(entries)
+        self.sql('UPDATE pull_request_projection_jobs SET last_error=CAST(? AS TEXT) WHERE id=2',
+                 (raw[:-1] + bytes([raw[-1] ^ 1]),))
+        with self.assertRaisesRegex(w.Blocked, 'recovery_facts_drift'):
+            w.recovery_gate(w.recovery_inventory(self.db), review)
+        with w.readonly(self.db) as db:
+            self.assertEqual(bytes(db.execute('SELECT CAST(last_error AS BLOB) FROM pull_request_projection_jobs WHERE id=1').fetchone()[0]), raw)
+
+    def test_utf8_text_fingerprint_stays_compatible(self):
+        self.job(1)
+        self.sql('ALTER TABLE pull_request_projection_jobs ADD COLUMN last_error TEXT')
+        self.sql('UPDATE pull_request_projection_jobs SET last_error=?', ('synthetic café 中文 \\udcff',))
+        with sqlite3.connect(self.db) as db:
+            db.row_factory = sqlite3.Row
+            row = dict(db.execute('SELECT * FROM pull_request_projection_jobs').fetchone())
+            pr = dict(db.execute('SELECT * FROM pull_requests').fetchone())
+        self.assertEqual(w.recovery_inventory(self.db)[0]['facts_sha256'],
+                         w.fingerprint({'row': row, 'pr': pr}))
+        # Invalid text in linked PR/receipt facts is also read without loss.
+        self.sql('ALTER TABLE pull_requests ADD COLUMN description TEXT')
+        self.sql('UPDATE pull_requests SET description=CAST(? AS TEXT)', (b'private\xff',))
+        self.assertEqual(len(w.recovery_inventory(self.db)), 1)
+        self.sql('INSERT INTO authority_boundary_receipts VALUES(?,CAST(? AS TEXT))', ('r1', b'private\xfe'))
+        self.sql('INSERT INTO pull_request_action_intents VALUES(?,?,?,?,?,?)',
+                 ('i1', 'pr.rebase', 'completed', 'verified_completed', 'completed', 'r1'))
+        entries = w.recovery_inventory(self.db)
+        self.assertEqual(len(entries), 2)
+        review = self.review(entries)
+        self.sql('UPDATE authority_boundary_receipts SET payload=CAST(? AS TEXT)', (b'private\xff',))
+        with self.assertRaisesRegex(w.Blocked, 'recovery_facts_drift'):
+            w.recovery_gate(w.recovery_inventory(self.db), review)
+
     def test_sixth_terminal_requeue_requires_review(self):
         for number in (109, 1355, 1356, 1358, 1361):
             self.job(number)
