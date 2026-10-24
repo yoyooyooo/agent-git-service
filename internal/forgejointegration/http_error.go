@@ -71,7 +71,9 @@ func httpFailure(e *ProviderHTTPError) gittransport.Failure {
 	case 404:
 		category, reason = "target_missing_or_inaccessible", "http_404"
 	case 409:
-		category, reason = "cas_conflict", "http_conflict"
+		// A status alone does not prove a ref expected-old/revision mismatch.
+		// Leave legacy recovery policy to the caller for ordinary API conflicts.
+		category, reason = "http_conflict", "http_conflict"
 	}
 	status := e.Status
 	return gittransport.Failure{Category: category, ReasonCode: reason, EvidenceSource: "http_status", HTTPStatus: &status, RetryAdvice: "inspect_before_new_plan"}

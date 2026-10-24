@@ -19,13 +19,48 @@ import (
 // Principal is evidence for the selected credential, never an authority grant.
 // Unknown is null, not the actor, TokenOwner or IntegrationBot.
 type Principal struct {
-	ID     *int64  `json:"authenticated_principal_id"`
-	Login  *string `json:"authenticated_login"`
-	Status string  `json:"identity_status"`
-	Source string  `json:"identity_source"`
+	ID     *int64          `json:"authenticated_principal_id"`
+	Login  *string         `json:"authenticated_login"`
+	Status string          `json:"identity_status"`
+	Source string          `json:"identity_source"`
+	Probe  *PrincipalProbe `json:"identity_probe,omitempty"`
 }
 
-func unknownPrincipal() Principal { return Principal{Status: "unknown", Source: "none"} }
+// PrincipalProbe describes identity discovery independently of the push result.
+// It retains only fixed reasons and measured status, never a response or URL.
+type PrincipalProbe struct {
+	ReasonCode     string `json:"reason_code"`
+	EvidenceSource string `json:"evidence_source"`
+	HTTPStatus     *int   `json:"http_status"`
+}
+
+func unknownPrincipal() Principal {
+	return principalProbeFailure("not_applicable", "none", nil)
+}
+
+func principalProbeFailure(reason, source string, status *int) Principal {
+	return Principal{Status: "unknown", Source: "none", Probe: &PrincipalProbe{ReasonCode: reason, EvidenceSource: source, HTTPStatus: status}}
+}
+
+func principalProbeError(err error) Principal {
+	var h *ProviderHTTPError
+	if errors.As(err, &h) {
+		f := httpFailure(h)
+		return principalProbeFailure(f.ReasonCode, f.EvidenceSource, f.HTTPStatus)
+	}
+	if errors.Is(err, errManagedKeyInvalidResponse) {
+		return principalProbeFailure("invalid_response", "response_validation", nil)
+	}
+	if errors.Is(err, errManagedKeyInventoryBound) {
+		return principalProbeFailure("inventory_bound_exceeded", "response_validation", nil)
+	}
+	f := gittransport.Describe(err)
+	reason := "transport_failed"
+	if f.EvidenceSource == "context" {
+		reason = f.ReasonCode
+	}
+	return principalProbeFailure(reason, "transport", nil)
+}
 
 var diagnosticLogin = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$`)
 
@@ -54,10 +89,24 @@ func (c *HTTPClient) readPrincipal(ctx context.Context, login string) Principal 
 		ID    int64  `json:"id"`
 		Login string `json:"login"`
 	}
-	if err != nil || status != 200 || json.Unmarshal(data, &user) != nil || login != "" && user.Login != login {
-		return unknownPrincipal()
+	if err != nil {
+		return principalProbeError(err)
 	}
-	return principal(user.ID, user.Login, source)
+	if status != http.StatusOK {
+		return principalProbeError(&ProviderHTTPError{Status: status, Method: http.MethodGet, RouteKind: "principal"})
+	}
+	if json.Unmarshal(data, &user) != nil {
+		return principalProbeFailure("invalid_response", "response_validation", &status)
+	}
+	if login != "" && user.Login != login {
+		return principalProbeFailure("owner_mismatch", "response_validation", &status)
+	}
+	p := principal(user.ID, user.Login, source)
+	if p.Status != "verified" {
+		return principalProbeFailure("invalid_identity", "response_validation", &status)
+	}
+	p.Probe = &PrincipalProbe{ReasonCode: "verified", EvidenceSource: source, HTTPStatus: &status}
+	return p
 }
 func (i *Integration) pushPrincipal(ctx context.Context, req PushRequest) Principal {
 	// An injected pusher or non-HTTP transport cannot be attested by HTTP /user.
@@ -84,20 +133,21 @@ func noRedirectClient(c *http.Client) *http.Client {
 func selectedSSHPrincipal(ctx context.Context, c *HTTPClient, k managedKey) Principal {
 	probe := *c
 	probe.client = noRedirectClient(c.client)
-	keys, err := listManagedKeys(ctx, &probe, k.Login)
+	keys, err := listManagedKeysEvidence(ctx, &probe, k.Login)
 	if err != nil {
-		return unknownPrincipal()
+		return principalProbeError(err)
 	}
 	for _, key := range keys {
 		if samePublic(key.Key, k.Public) && key.Title == managedTitle(k) {
 			p := c.readPrincipal(ctx, k.Login)
 			if p.Status == "verified" {
 				p.Source = "selected_key_binding"
+				p.Probe.EvidenceSource = "selected_key_binding"
 			}
 			return p
 		}
 	}
-	return unknownPrincipal()
+	return principalProbeFailure("key_binding_not_found", "key_inventory", nil)
 }
 
 type diagnosticContextKey struct{}
