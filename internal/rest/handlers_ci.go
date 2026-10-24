@@ -290,9 +290,7 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 				respond.JSON(w, 200, map[string]any{"total_count": len(rows), "artifacts": rows})
 				return
 			}
-			// Repository-wide inventory is not projected by these adapters;
-			// run-scoped artifacts above are observed independently.
-			respond.JSON(w, 200, map[string]any{"total_count": 0, "artifacts": []any{}})
+			ciHTTPError(w, cibackend.ErrUnsupported)
 			return
 		default:
 			respond.Error(w, 501, "Selected CI backend does not expose this Actions operation")
@@ -331,7 +329,7 @@ func ciJobJSON(v service.CIJob, base string) map[string]any {
 	for _, step := range j.Steps {
 		steps = append(steps, map[string]any{"name": step.Name, "number": step.Number, "status": nilIfEmpty(step.Status), "conclusion": nilIfEmpty(step.Conclusion), "started_at": step.StartedAt, "completed_at": step.CompletedAt})
 	}
-	return map[string]any{"id": v.ID, "run_id": v.RunID, "name": j.Name, "head_sha": j.HeadSHA, "status": j.Status, "conclusion": nilIfEmpty(j.Conclusion), "html_url": j.URL, "url": fmt.Sprintf("%s/actions/jobs/%d", base, v.ID), "run_url": fmt.Sprintf("%s/actions/runs/%d", base, v.RunID), "started_at": j.StartedAt, "completed_at": j.CompletedAt, "steps": steps, "labels": []string{}, "ags_ci_backend": v.Backend}
+	return map[string]any{"id": v.ID, "run_id": v.RunID, "name": j.Name, "head_sha": j.HeadSHA, "status": j.Status, "conclusion": nilIfEmpty(j.Conclusion), "html_url": j.URL, "url": fmt.Sprintf("%s/actions/jobs/%d", base, v.ID), "run_url": fmt.Sprintf("%s/actions/runs/%d", base, v.RunID), "started_at": j.StartedAt, "completed_at": j.CompletedAt, "steps": steps, "ags_steps_status": v.StepsStatus, "labels": []string{}, "ags_ci_backend": v.Backend}
 }
 func ciCheckRunJSON(value service.CIJob, base string) map[string]any {
 	j := value.Job

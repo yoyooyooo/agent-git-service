@@ -26,10 +26,11 @@ type CIRun struct {
 	Backend    string
 }
 type CIJob struct {
-	ID      uint64
-	RunID   uint64
-	Job     cibackend.Job
-	Backend string
+	ID          uint64
+	RunID       uint64
+	Job         cibackend.Job
+	Backend     string
+	StepsStatus string
 }
 type CIRuns struct {
 	Runs     []CIRun
@@ -187,12 +188,13 @@ func (s *Service) CIJobs(ctx context.Context, repository string, id uint64) ([]C
 		}
 		seen[j.Key] = true
 		j.HeadSHA = run.Run.HeadSHA
-		j.Steps = ciJobSteps(ctx, sel.Backend, sel.Binding.Repository, run.Run, j)
+		steps, status := ciJobSteps(ctx, sel.Backend, sel.Binding.Repository, run.Run, j)
+		j.Steps = steps
 		id, e := s.mapCI(ctx, repo, sel, "job", j.Key, j.Run)
 		if e != nil {
 			return nil, e
 		}
-		out = append(out, CIJob{ID: id, RunID: run.ID, Job: j, Backend: sel.Name})
+		out = append(out, CIJob{ID: id, RunID: run.ID, Job: j, Backend: sel.Name, StepsStatus: status})
 	}
 	return out, nil
 }
@@ -227,21 +229,28 @@ func (s *Service) CIJob(ctx context.Context, repository string, id uint64) (CIJo
 		return CIJob{}, e
 	}
 	job.HeadSHA = run.HeadSHA
-	job.Steps = ciJobSteps(ctx, sel.Backend, sel.Binding.Repository, run, job)
-	return CIJob{ID: id, RunID: mapped.ID, Job: job, Backend: sel.Name}, nil
+	steps, status := ciJobSteps(ctx, sel.Backend, sel.Binding.Repository, run, job)
+	job.Steps = steps
+	return CIJob{ID: id, RunID: mapped.ID, Job: job, Backend: sel.Name, StepsStatus: status}, nil
 }
 
-func ciJobSteps(ctx context.Context, backend cibackend.Backend, repo string, run cibackend.Run, job cibackend.Job) []cibackend.Step {
+func ciJobSteps(ctx context.Context, backend cibackend.Backend, repo string, run cibackend.Run, job cibackend.Job) ([]cibackend.Step, string) {
 	if steps, ok := backend.(cibackend.StepBackend); ok {
 		result, err := steps.JobSteps(ctx, repo, run, job)
 		if err != nil {
 			// Steps are optional metadata. Keep all access/binding checks in the
 			// adapter and discard even partial data on failure, not the job itself.
-			return nil
+			return nil, cibackend.DiagnosticStatus(err)
 		}
-		return result
+		if len(result) == 0 && job.Status == "completed" {
+			return result, "missing"
+		}
+		return result, "available"
 	}
-	return job.Steps
+	if job.Steps == nil {
+		return nil, "not-projected"
+	}
+	return job.Steps, "available"
 }
 func (s *Service) CILogs(ctx context.Context, repository string, id uint64, job bool) ([]byte, error) {
 	_, sel, e := s.ciScope(ctx, repository)

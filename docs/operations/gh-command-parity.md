@@ -19,7 +19,7 @@ API origin and, for older Forgejo logs, the typed provider-log bridge described 
 | `gh pr checks` | Current-head evidence from the selected backend. |
 | `gh issue list`, `gh release list`, `gh label list` | Native read surfaces; an empty repository collection is valid. |
 | `gh run list`, `view`, `view --exit-status` | Supported mapped run IDs; older Forgejo collection-only APIs have a bounded detail lookup. `--exit-status` preserves a failed run's exit status. |
-| `gh run view --log`, `--log-failed`, `--job ID --log` | Supported with the configured log bridge. Missing step metadata is shown as `UNKNOWN STEP`. |
+| `gh run view --log`, `--log-failed`, `--job ID --log` | Supported with a compatible configured bridge (including current-job inventory). Missing steps show `UNKNOWN STEP`; a failed job log read leaves `AGS_LOG_UNAVAILABLE` in a run ZIP while healthy logs remain available. Direct job log failures retain their HTTP status. |
 | `gh run watch --exit-status` | Official-gh tests cover pending → success and pending → failure. Optional unprojected annotations do not hide the CI result. |
 | `gh api actions/runs/ID[/jobs\|/logs]` | Supported; select the AGS hostname explicitly and use AGS `databaseId`, not a provider number. |
 | `gh api actions/runs/ID/attempts/1` | The exact observed Forgejo run is attempt 1; unobserved attempts are not invented. |
@@ -28,7 +28,7 @@ API origin and, for older Forgejo logs, the typed provider-log bridge described 
 | `gh run cancel ID` | GitHub Actions forwards cancel; Forgejo remains 501 with no provider write. |
 | `gh workflow run FILE --ref REF` | External dispatch requires native repository write permission, resolves branch/tag/commit to an immutable SHA, and forwards one provider request. Success is 204; list exact-head runs to observe it. See [dispatch semantics](../architecture/ci-backends.md#dispatching-workflows-with-official-gh). |
 | `gh run delete`, `gh workflow enable/disable` | External adapter management remains explicitly unsupported. |
-| `gh run download` | External adapters do not publish artifacts; an empty artifact collection is not a claim that provider artifacts were inspected. Run-scoped artifact reads first validate the repository/backend/run identity; unknown or retired runs return 404. |
+| `gh run download ID` | Forgejo supports run-scoped artifact lists and downloads through a configured bridge and owned artifact storage. Confirmed zero artifacts is 200; missing support is 501. Unknown or retired runs return 404. Repository-wide inventory (`gh run download` without an ID) remains 501. |
 
 A closed mapped Forgejo PR is reopened by its exact existing number before a
 metadata ensure can search open PRs; the readback must confirm the same unmerged
@@ -57,7 +57,8 @@ provider. Keep these capabilities in the companion surface.
    the authorization and immutable-ref contract above.
 3. **Provider artifacts, retention and deletion**: add provider-specific operations
    only with validated public APIs and explicit identity/authorization contracts.
-   Until then, preserve empty/unprojected semantics and unsupported mutations.
+   Run-scoped Forgejo reads use the bridge contract above; repository-wide inventory
+   and unsupported mutations fail explicitly.
 4. **Observation diagnostics**: a scoped AGSX diagnostic can explain provider
    outages, bounded inventory exhaustion, missing bridge configuration and host
    selection. It must not install an alternate gh executable or print credentials.

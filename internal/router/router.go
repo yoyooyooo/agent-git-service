@@ -93,6 +93,7 @@ func registerProviderLogBridgeRoutes(r chi.Router, handlers *rest.Deps) {
 	}
 	r.Get("/api/internal/provider-logs/repos/{owner}/{repo}/tasks/{task}", handlers.ProviderLogBridge.ServeHTTP)
 	r.Get("/api/internal/provider-logs/repos/{owner}/{repo}/runs/{run}/artifacts", handlers.ProviderLogBridge.ServeHTTP)
+	r.Get("/api/internal/provider-logs/repos/{owner}/{repo}/runs/{run}/jobs", handlers.ProviderLogBridge.ServeHTTP)
 }
 
 func corsMiddleware(consoleBaseURL string) func(http.Handler) http.Handler {
