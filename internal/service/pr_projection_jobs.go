@@ -843,6 +843,7 @@ func (s *Service) loadForgejoProjectionJob(ctx context.Context, jobID uint) (db.
 }
 
 func (s *Service) processForgejoProjectionJobAttempt(ctx context.Context, job db.PullRequestProjectionJob) *projectionJobFailure {
+	ctx = forgejointegration.WithProjectionDiagnosticLink(ctx, forgejointegration.DiagnosticLink{JobID: job.ID, Attempt: job.Attempt, Phase: "push", SourceRepositoryID: job.RepositoryID, ExpectedNewOID: job.HeadSHA})
 	if job.Trigger == ForgejoProjectionTriggerActionRebase {
 		if job.AgentSessionID != nil {
 			delegatedCtx, err := s.ContextForDelegatedSessionID(ctx, *job.AgentSessionID)
@@ -1396,6 +1397,9 @@ func newProjectionJobFailure(ref, expectedSHA string, err error, defaultRetryabl
 		}
 		switch classified.Type {
 		case forgejointegration.ProjectionFailureNonFastForward,
+			forgejointegration.ProjectionFailureProtectedBranch,
+			forgejointegration.ProjectionFailurePermissionDenied,
+			forgejointegration.ProjectionFailureHookRejected,
 			forgejointegration.ProjectionFailureSHADrift,
 			forgejointegration.ProjectionFailureAuthFailed,
 			forgejointegration.ProjectionFailureRepoMissing:

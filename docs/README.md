@@ -42,6 +42,8 @@ accepted direction, or incremental work that has not fully landed yet.
 - [Authorization Layer](design/authz-layer.md)
 - [Wiki Storage Re-Architecture](design/wiki-storage-rearchitecture.md)
 - [Forgejo Rebase Execution Lifetime](design/forgejo-rebase-execution-lifetime.md) - proposed handoff to the existing worker; not implemented or approved.
+- [Ref Projection Convergence](design/ref-projection-convergence.md) - S0 contracts and S1 immediate safe diagnostics; no execute/retire enablement.
+- [Ref Projection Writer Inventory](design/ref-projection-writers.md) - source/provider coverage and negative strict-adapter assessment.
 
 ## Testing And Operations
 
@@ -56,6 +58,7 @@ accepted direction, or incremental work that has not fully landed yet.
 - [Edge Client Routing](operations/ags-edge-client-routing.md) - exact per-user configuration ownership, drift checks and rollback.
 - [AGS Edge Primary Listener](operations/ags-edge-primary-listener.md) - explicit mTLS startup, filesystem preflight, shutdown and remaining rollout gates.
 - [AGS Edge Enrollment](operations/ags-edge-enrollment.md) - native-admin registration CLI, exact repository receipts and unapplied certificate-based peer plans.
+- [Ref Projection Diagnostics](operations/ref-projection-operations.md) - typed evidence, actual transport identity, test and future enablement boundaries.
 - [CI](ci.md)
 - [Hosted-runner Network Probe](operations/ags-network-probe.md) - optional default-branch-only, read-only deployment connectivity check, independent from CI and production handoff.
 - [Wiki Storage V2 Cutover Checklist](operations/wiki-storage-v2-cutover.md)
