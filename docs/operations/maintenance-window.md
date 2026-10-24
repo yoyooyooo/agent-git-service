@@ -95,7 +95,10 @@ A candidate review has schema `ags.maintenance-candidate.v1`, `host`, `reviewer`
 native OS/architecture and the executor-admitted revision/tree must match. The
 build/smoke reviewer must bind these exact binary bytes and reject overlays or
 migration probes; a version label alone is insufficient. Copy and installed
-bytes are rechecked. This adapter does not rerun a production smoke test.
+bytes are rechecked. Every maintenance install/resume also verifies the staged
+file is private, owned and regular and matches the admitted binary hash **before**
+delegating any candidate `--version` or installation code. This adapter does not
+rerun a production smoke test.
 
 `gate-prestop` requires `callers_paused`, `no_direct_file_writers`, a
 `startup_dependencies` proof and `dependency_files: [{path, sha256}]`. The review
@@ -108,8 +111,17 @@ Pending retirement or an operation that would rewrite history is not admitted.
 No configuration/provider disabling, SQL cleanup or token substitution is used
 to manufacture a clean gate.
 
-`gate-drain` additionally requires `normal_exit_no_timeout_no_sigkill`,
-`no_direct_file_writers`, `autostart_suppressed` and an `offline_record` proof.
+`gate-drain` and every `resume-new` require
+`normal_exit_no_timeout_no_sigkill`, `callers_paused`, `no_direct_file_writers`,
+`autostart_suppressed` and an `offline_record` proof. The private JSON offline
+record repeats the enclosing evidence's `run`, `host`, `mode`, `phase`, `nonce`,
+`kind` and `observed_ns` exactly, and includes `runtime_sha256` for the current
+private `state/runtime.json`. It may also contain inspection details or references
+to them. Hash verification, normal exit (integer `exit_code: 0`, `stopped_at`),
+record binding and quiescence are checked under both exclusion locks. After any
+new start attempt, `stopped_at` must be a timezone-aware ISO timestamp no earlier
+than the latest `start_attempted_ns` and no later than the evidence observation.
+An old clean runtime receipt cannot authorize recovery from a later attempt.
 Inspect all configured listener paths, holders and manager jobs; built-in checks
 cover the executor's primary port, replication port, runtime PIDs and data tree.
 Unknown inspection results block. `validate` requires `business_reads` and
@@ -178,9 +190,25 @@ An exception leaves a private failure record and preserves the phase, partial
 backups and scene. No automatic stop, retry, downgrade or restore occurs.
 `resume-new` repairs installation of the **same admitted candidate** only after
 separately proving normal stop/quiescence and revalidating the backup/recovery
-set. It then requires a separate `start-new`. A still-running or ambiguous
-migration must not be restarted; first use readback and inspect the manager.
-A later candidate needs a separate compatibility review and adapter update.
+set with fresh `resume` evidence and the bound offline record above. This entry
+is allowed from `install-allowed`, `installing-new`, `installed-new`,
+`start-attempted`, `new-ready` and `observing`; it never stops or starts a service.
+It then requires a separate `start-new`. A still-running or ambiguous migration
+must not be restarted; first use readback and inspect the manager.
+
+If health or provider acceptance fails during `observing`, preserve the failed
+scene and arrange a separately authorized normal stop and external reconciliation.
+Only then use `resume-new`, `start-new`, `validate`, `observe`. Resume invalidates
+the previous observation start before any install mutation. Fresh validation
+starts the entire observation budget again; failed-window time is never reused.
+Provider facts/attempts/receipts must be reviewed again at recovery and start.
+
+A crash, nonzero/missing exit status, timeout or SIGKILL is **not** a normal stop.
+This adapter deliberately has no abnormal-exit waiver, even when no process is
+left. Such cases stay blocked pending a separate, independently reviewed abnormal
+recovery protocol; neither a generic `resume` proof nor an edited runtime/phase
+record can manufacture normal-exit evidence. A later candidate likewise needs a
+separate compatibility review and adapter update.
 
 Maintenance mode refuses `restore-old`, `start-old-isolated`,
 `abort-before-install` and successor staging. In particular, a start timeout

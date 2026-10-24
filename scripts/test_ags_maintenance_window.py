@@ -5,6 +5,7 @@ All files stay under a newly created private directory. The directory is retaine
 for inspection; this harness never deletes or connects to any external service.
 """
 import contextlib
+import datetime as dt
 import fcntl
 import hashlib
 import importlib.util
@@ -285,6 +286,11 @@ class BaseEngine:
     def offline(self):
         return contextlib.nullcontext()
 
+    def run(self):
+        assert self.a.action == "validate"
+        self.host.health("a" * 40)
+        self.mark("new-ready")
+
 
 class Stages(unittest.TestCase):
     sql = Fixture.sql
@@ -316,6 +322,199 @@ class Stages(unittest.TestCase):
         _, Engine = w.adapter_types(self.module)
         self.engine = Engine(self.host, self.args)
         self.engine.mark('installed-new', manifest_sha256=w.sha(self.host.backup / 'manifest.json'))
+        self.install_calls = 0
+        self.host.install = self.install
+        self.module.fsck = lambda *args: None
+        self.module.repository_inventory = lambda *args: []
+        self.module.c = types.SimpleNamespace(verify_sqlite=lambda *args: None)
+
+    def install(self):
+        self.install_calls += 1
+
+    def stopped_evidence(self, kind='resume', exit_code=0):
+        runtime = self.root / 'state/runtime.json'
+        save(runtime, {'exit_code': exit_code, 'started_at': 'synthetic',
+                       'stopped_at': dt.datetime.now(dt.timezone.utc).isoformat()})
+        e = self.evidence(kind)
+        e.update(normal_exit_no_timeout_no_sigkill=True, no_direct_file_writers=True,
+                 callers_paused=True, autostart_suppressed=True)
+        e['offline_record'] = self.bound_offline_record(e)
+        save(self.args.evidence, e)
+        return e
+
+    def bound_offline_record(self, e):
+        path = self.root / ('offline-' + str(time.time_ns()))
+        record = {key: e[key] for key in ('run', 'host', 'mode', 'phase', 'nonce', 'kind', 'observed_ns')}
+        record['runtime_sha256'] = w.sha(self.root / 'state/runtime.json')
+        save(path, record)
+        return {'path': str(path), 'sha256': w.sha(path), 'passed': True}
+
+    def assert_resume_blocked(self, pattern):
+        before = self.engine.state()
+        with self.assertRaisesRegex((w.Blocked, KeyError), pattern):
+            self.engine.run()
+        self.assertEqual(self.engine.state(), before)
+        self.assertEqual(self.install_calls, 0)
+        self.assertEqual(self.start_calls, 0)
+
+    def test_resume_requires_clean_exit_and_fresh_bound_offline_proof(self):
+        self.engine.mark('start-attempted', started_new=True, start_attempted_ns=time.time_ns())
+        self.args.action = 'resume-new'
+        for code in (137, -9, 1, None, False):
+            with self.subTest(exit_code=code):
+                self.stopped_evidence(exit_code=code)
+                self.assert_resume_blocked('runtime_exit_not_clean')
+        for field in ('normal_exit_no_timeout_no_sigkill', 'no_direct_file_writers',
+                      'autostart_suppressed', 'offline_record', 'callers_paused'):
+            with self.subTest(missing=field):
+                e = self.stopped_evidence()
+                e.pop(field)
+                save(self.args.evidence, e)
+                self.assert_resume_blocked('stop_not_proven|offline_record|writers_not_reviewed')
+        for field in ('normal_exit_no_timeout_no_sigkill', 'autostart_suppressed'):
+            with self.subTest(false=field):
+                e = self.stopped_evidence()
+                e[field] = False
+                save(self.args.evidence, e)
+                self.assert_resume_blocked('stop_not_proven')
+        e = self.stopped_evidence()
+        Path(e['offline_record']['path']).write_text('changed')
+        self.assert_resume_blocked('proof_drift')
+        e = self.stopped_evidence()
+        e['observed_ns'] -= 301 * 10**9
+        save(self.args.evidence, e)
+        self.assert_resume_blocked('evidence_time_invalid')
+        self.stopped_evidence()
+        with patch.object(self.host, 'quiescent', side_effect=w.Blocked('holder_present')):
+            self.assert_resume_blocked('holder_present')
+        e = self.stopped_evidence()
+        runtime = self.root / 'state/runtime.json'
+        for field in ('exit_code', 'stopped_at'):
+            with self.subTest(runtime_missing=field):
+                self.stopped_evidence()
+                value = json.loads(runtime.read_text())
+                value.pop(field)
+                save(runtime, value)
+                self.assert_resume_blocked('runtime_exit_not_clean|offline_runtime_drift')
+        for field, value in (('nonce', 'old'), ('phase', 'new-ready'), ('run', 'ags-other'),
+                             ('runtime_sha256', '0' * 64), ('observed_ns', 0)):
+            with self.subTest(offline_drift=field):
+                e = self.stopped_evidence()
+                path = Path(e['offline_record']['path'])
+                record = json.loads(path.read_text())
+                record[field] = value
+                save(path, record)
+                e['offline_record']['sha256'] = w.sha(path)
+                save(self.args.evidence, e)
+                self.assert_resume_blocked('offline_record_binding|offline_runtime_drift')
+        e = self.stopped_evidence()
+        value = json.loads(runtime.read_text())
+        value['stopped_at'] = '2000-01-01T00:00:00+00:00'
+        save(runtime, value)
+        e['offline_record'] = self.bound_offline_record(e)
+        save(self.args.evidence, e)
+        self.assert_resume_blocked('runtime_stop_predates_start')
+        self.stopped_evidence()
+        self.engine.run()
+        self.assertEqual(self.engine.state()['phase'], 'installed-new')
+        self.assertEqual(self.install_calls, 1)
+        self.assertEqual(self.start_calls, 0)
+        self.args.action = 'start-new'
+        self.evidence('start')
+        self.engine.run()
+        self.assertEqual(self.start_calls, 1)
+
+    def test_resume_stop_gate_applies_to_every_admitted_phase(self):
+        for phase in ('install-allowed', 'installing-new', 'installed-new',
+                      'start-attempted', 'new-ready', 'observing'):
+            with self.subTest(phase=phase):
+                self.start_calls = self.install_calls = 0
+                self.engine.mark(phase, started_new=True, start_attempted_ns=time.time_ns())
+                self.args.action = 'resume-new'
+                self.stopped_evidence(exit_code=137)
+                self.assert_resume_blocked('runtime_exit_not_clean')
+                self.stopped_evidence()
+                self.engine.run()
+                self.assertEqual(self.engine.state()['phase'], 'installed-new')
+                self.assertEqual(self.install_calls, 1)
+                self.assertEqual(self.start_calls, 0)
+
+    def test_observing_recovery_requires_stop_readback_and_restarts_observation(self):
+        for failure in ('crash', 'health', 'provider'):
+            with self.subTest(failure=failure):
+                self.start_calls = self.install_calls = 0
+                self.engine.mark('observing', started_new=True, start_attempted_ns=time.time_ns(),
+                                 observation_started_ns=time.time_ns() - 700 * 10**9)
+                old_observation = self.engine.state()['observation_started_ns']
+                self.args.action = 'observe'
+                e = self.evidence('observe')
+                e.update(required_observation_seconds=600, all_actual_leases_covered=True,
+                         unknown_external_results=0, observation_record=self.evidence_proof(),
+                         provider_readback=self.evidence_proof())
+                self.health_failure = failure in ('crash', 'health')
+                if failure == 'provider':
+                    Path(e['provider_readback']['path']).write_text('changed')
+                save(self.args.evidence, e)
+                with self.assertRaises(w.Blocked):
+                    self.engine.run()
+                self.assertEqual(self.engine.state()['phase'], 'observing')
+                self.args.action = 'resume-new'
+                self.stopped_evidence(exit_code=137 if failure == 'crash' else 0)
+                if failure == 'crash':
+                    self.assert_resume_blocked('runtime_exit_not_clean')
+                    # A crash has no normal-stop positive path in this protocol.
+                    # Do not rewrite its runtime result to manufacture recovery.
+                    self.assertEqual(self.engine.state()['phase'], 'observing')
+                    continue
+                e = json.loads(self.args.evidence.read_text())
+                self.job(8384, 'failed_terminal', error='provider_admission_denied')
+                self.assert_resume_blocked('coverage')
+                self.stopped_evidence()
+                self.engine.run()
+                self.assertEqual(self.start_calls, 0)
+                self.assertEqual(self.engine.state()['phase'], 'installed-new')
+                self.assertIsNone(self.engine.state()['observation_started_ns'])
+                self.health_failure = False
+                self.args.action = 'start-new'
+                self.evidence('start')
+                self.engine.run()
+                self.args.action = 'validate'
+                e = self.evidence('validate')
+                e.update(business_reads=self.evidence_proof(), provider_readback=self.evidence_proof())
+                save(self.args.evidence, e)
+                self.engine.run()
+                self.assertGreater(self.engine.state()['observation_started_ns'], old_observation)
+                self.args.action = 'observe'
+                e = self.evidence('observe')
+                e.update(required_observation_seconds=600, all_actual_leases_covered=True,
+                         unknown_external_results=0, observation_record=self.evidence_proof(),
+                         provider_readback=self.evidence_proof())
+                save(self.args.evidence, e)
+                with self.assertRaisesRegex(w.Blocked, 'observation_incomplete'):
+                    self.engine.run()
+                self.assertEqual(self.start_calls, 1)
+                self.sql('DELETE FROM pull_request_projection_jobs')
+
+    def test_candidate_install_drift_rejected_before_identity(self):
+        candidate = self.root / 'staged-candidate'
+        candidate.write_bytes(b'exact fixture')
+        candidate.chmod(0o700)
+        self.host.candidate = candidate
+        self.host.identity = lambda *args: self.fail('candidate identity executed before hash check')
+        Host, _ = w.adapter_types(self.module)
+        for kind in ('hash', 'permissions', 'symlink'):
+            with self.subTest(kind=kind):
+                if kind == 'hash':
+                    candidate.write_bytes(b'changed')
+                elif kind == 'permissions':
+                    candidate.write_bytes(b'exact fixture')
+                    candidate.chmod(0o755)
+                else:
+                    candidate.rename(self.root / 'saved-candidate')
+                    candidate.symlink_to(self.root / 'saved-candidate')
+                with self.assertRaisesRegex(w.Blocked, 'candidate_drift|unsafe_private_file'):
+                    Host.install(self.host)
+
 
     def start(self):
         self.start_calls += 1
@@ -489,7 +688,8 @@ class ReviewedExecutor(unittest.TestCase):
 
             def stop(self):
                 self.stopped = True
-                save(self.root / 'state/runtime.json', {'exit_code': 0, 'stopped_at': 'fixture'})
+                save(self.root / 'state/runtime.json', {'exit_code': 0,
+                     'stopped_at': dt.datetime.now(dt.timezone.utc).isoformat()})
                 if self.fault == 'stop':
                     raise w.Blocked('fixture_stop_reply_lost')
 
@@ -555,7 +755,31 @@ class ReviewedExecutor(unittest.TestCase):
                      dependency_files=[{'path': str(dependency), 'sha256': w.sha(dependency)}],
                      normal_exit_no_timeout_no_sigkill=True, autostart_suppressed=True,
                      offline_record=self.evidence_proof(), recovery_review=self.review(w.recovery_inventory(self.db)))
+            def bind_offline():
+                record = {key: e[key] for key in ('run', 'host', 'mode', 'phase', 'nonce', 'kind', 'observed_ns')}
+                record['runtime_sha256'] = w.sha(host.root / 'state/runtime.json')
+                path = self.root / ('offline-' + str(time.time_ns()))
+                save(path, record)
+                e['offline_record'] = {'path': str(path), 'sha256': w.sha(path), 'passed': True}
+
+            if action == 'gate-drain':
+                bind_offline()
             save(args.evidence, e)
+            if action == 'install':
+                original = host.candidate.read_bytes()
+                host.candidate.write_bytes(original + b' ')
+                with patch.object(host, 'identity', side_effect=AssertionError('unverified candidate executed')):
+                    with self.assertRaisesRegex(w.Blocked, 'candidate_drift'):
+                        engine.run()
+                host.candidate.write_bytes(original)
+                current = engine.state()
+                e.update(nonce=current['nonce'], phase=current['phase'], observed_ns=time.time_ns())
+                save(args.evidence, e)
+                # A pre-install rejection is preserved at installing-new; recover
+                # through the same reviewed offline path, not a phase edit.
+                args.action, e['kind'] = 'resume-new', 'resume'
+                bind_offline()
+                save(args.evidence, e)
             if action in ('stop', 'install'):
                 host.fault = action
                 with self.assertRaisesRegex(w.Blocked, 'reply_lost'):
@@ -566,12 +790,34 @@ class ReviewedExecutor(unittest.TestCase):
                     args.action, e['kind'] = 'resume-new', 'resume'
                 current = engine.state()
                 e.update(nonce=current['nonce'], phase=current['phase'], observed_ns=time.time_ns())
+                if action == 'install':
+                    bind_offline()
                 save(args.evidence, e)
             engine.run()
         self.assertEqual(engine.state()['phase'], 'new-ready')
         self.assertEqual(host.start_count, 1)
         self.assertEqual(w.sha(host.backup / 'startup-dependencies/0'), w.sha(dependency))
         self.assertTrue((host.backup / 'gitrepos/.ags-artifact-retirement/operation.lock').is_file())
+        # Resume checks run against the actual pinned Engine, Host installation,
+        # SQLite verifier and backup/Git path, not only the persistence seam.
+        args.action = 'resume-new'
+        for code in (137, None, 0):
+            host.stopped = True
+            save(host.root / 'state/runtime.json', {'exit_code': code,
+                 'stopped_at': dt.datetime.now(dt.timezone.utc).isoformat()})
+            state = engine.state()
+            e.update(kind='resume', phase=state['phase'], nonce=state['nonce'], observed_ns=time.time_ns())
+            bind_offline()
+            save(args.evidence, e)
+            before = host.start_count
+            if code != 0:
+                with self.assertRaisesRegex(w.Blocked, 'runtime_exit_not_clean'):
+                    engine.run()
+                self.assertEqual(engine.state()['phase'], 'new-ready')
+            else:
+                engine.run()
+                self.assertEqual(engine.state()['phase'], 'installed-new')
+            self.assertEqual(host.start_count, before)
         # Original isolated evidence still rejects missing fences; R2 implementation
         # is inherited unchanged and is never invoked by maintenance recovery.
         isolated = m.Engine(host, args)
