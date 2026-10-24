@@ -174,23 +174,45 @@ func samePublic(a, b string) bool {
 	return len(aa) >= 2 && len(bb) >= 2 && aa[0] == bb[0] && aa[1] == bb[1]
 }
 func managedTitle(k managedKey) string { return "ags-managed:" + k.Instance + ":" + k.Identity }
+
+var (
+	errManagedKeyInvalidResponse = errors.New("managed SSH public key readback invalid response")
+	errManagedKeyInventoryBound  = errors.New("managed SSH key inventory exceeded bound")
+)
+
 func listManagedKeys(ctx context.Context, c *HTTPClient, login string) ([]providerKey, error) {
+	keys, err := listManagedKeysEvidence(ctx, c, login)
+	// Provisioning retains its prior failure contract. Typed probe evidence must
+	// not silently change its callers' classification or recovery policy.
+	if err != nil && !errors.Is(err, errManagedKeyInventoryBound) {
+		return nil, errors.New("managed SSH public key readback failed")
+	}
+	return keys, err
+}
+
+func listManagedKeysEvidence(ctx context.Context, c *HTTPClient, login string) ([]providerKey, error) {
 	var all []providerKey
 	for page := 1; page <= 100; page++ {
 		status, data, err := c.rawRequest(ctx, http.MethodGet, apiPath("/api/v1/users/%s/keys", login)+fmt.Sprintf("?limit=50&page=%d", page), nil, "")
 		if status == 404 && err == nil {
 			return nil, nil
 		}
+		if err != nil {
+			return nil, gittransport.SafeError(err)
+		}
+		if status != http.StatusOK {
+			return nil, &ProviderHTTPError{Status: status, Method: http.MethodGet, RouteKind: "user_keys"}
+		}
 		var keys []providerKey
-		if err != nil || status != 200 || json.Unmarshal(data, &keys) != nil {
-			return nil, errors.New("managed SSH public key readback failed")
+		if json.Unmarshal(data, &keys) != nil {
+			return nil, errManagedKeyInvalidResponse
 		}
 		all = append(all, keys...)
 		if len(keys) < 50 {
 			return all, nil
 		}
 	}
-	return nil, errors.New("managed SSH key inventory exceeded bound")
+	return nil, errManagedKeyInventoryBound
 }
 func ensureManagedKey(ctx context.Context, c *HTTPClient, k managedKey) error {
 	keys, err := listManagedKeys(ctx, c, k.Login)

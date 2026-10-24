@@ -18,11 +18,21 @@ Native HTTPS probes `/api/v1/user` once per push using the same selected token.
 Managed SSH diagnostics read the already-selected public-key binding and owner;
 they do not register keys or change ACLs. Legacy managed key/ACL provisioning
 remains its own existing path, not something enabled by this diagnostic probe.
+The independent `identity_probe` result retains a fixed `reason_code`,
+`evidence_source` and nullable measured `http_status`, including when the push
+succeeds. It distinguishes HTTP denial/outage, transport failure, invalid
+response/identity, owner mismatch, missing selected-key binding and an inapplicable
+probe. It never includes provider bodies, URLs or credentials, and does not fill
+an unknown identity from the actor or configuration.
 
 Use category/reason/evidence_source together. HTTP status is numeric only when
 measured from HTTP; a Git stderr 403 pattern has null status. A generic hook
 refusal does not prove branch protection. A missing/inaccessible repository is
 not proven absent. Ref-lock contention is different from expected-old conflict.
+HTTP 409 alone is `http_conflict`, not `cas_conflict` or a non-fast-forward
+rejection. Only ref-specific evidence such as an expected-old mismatch supports
+CAS classification. Generic API conflicts retain the caller's existing recovery
+policy: PR creation still uses bounded readback without blindly replaying POST.
 `stderr_truncated=true` is explicit; fixed-pattern scanning continues after the
 capture bound. Unknown retains no raw provider response.
 
