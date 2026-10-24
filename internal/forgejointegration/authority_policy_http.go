@@ -15,13 +15,13 @@ func (c *HTTPClient) InspectRepositoryAuthority(ctx context.Context, owner, repo
 		return state, err
 	}
 	if status < 200 || status >= 300 {
-		return state, fmt.Errorf("lookup repository authority returned status %d: %s", status, string(response))
+		return state, providerHTTPError("lookup repository authority", status)
 	}
 	var repository struct {
 		AllowRebaseUpdate bool `json:"allow_rebase_update"`
 	}
 	if err := json.Unmarshal(response, &repository); err != nil {
-		return state, fmt.Errorf("decode repository authority: %w", err)
+		return state, fmt.Errorf("decode repository authority: invalid provider response")
 	}
 	state.AllowRebaseUpdate = repository.AllowRebaseUpdate
 
@@ -39,7 +39,7 @@ func (c *HTTPClient) InspectRepositoryAuthority(ctx context.Context, owner, repo
 				RoleName   string `json:"role_name"`
 			}
 			if err := json.Unmarshal(response, &permission); err != nil {
-				return state, fmt.Errorf("decode integration bot permission: %w", err)
+				return state, fmt.Errorf("decode integration bot permission: invalid provider response")
 			}
 			effective := strings.ToLower(strings.TrimSpace(permission.Permission))
 			if effective == "" {
@@ -47,7 +47,7 @@ func (c *HTTPClient) InspectRepositoryAuthority(ctx context.Context, owner, repo
 			}
 			state.IntegrationBotCollaborator = effective == "write" || effective == "admin" || effective == "owner"
 		} else if status != http.StatusNotFound {
-			return state, fmt.Errorf("lookup integration bot permission returned status %d: %s", status, string(response))
+			return state, providerHTTPError("lookup integration bot permission", status)
 		}
 	}
 
@@ -67,7 +67,7 @@ func (c *HTTPClient) InspectRepositoryAuthority(ctx context.Context, owner, repo
 			ApplyToAdmins           bool     `json:"apply_to_admins"`
 		}
 		if err := json.Unmarshal(response, &protection); err != nil {
-			return state, fmt.Errorf("decode branch protection: %w", err)
+			return state, fmt.Errorf("decode branch protection: invalid provider response")
 		}
 		state.BaseBranchProtected = true
 		state.DirectPushBlocked = protection.EnablePush && protection.EnablePushWhitelist
@@ -97,7 +97,7 @@ func (c *HTTPClient) InspectRepositoryAuthority(ctx context.Context, owner, repo
 		// collaborator. A closed whitelist still has to include the bot.
 		state.IntegrationBotMergeAuthorized = !protection.EnableMergeWhitelist || mergeBotMatched
 	} else if status != http.StatusNotFound {
-		return state, fmt.Errorf("lookup branch protection returned status %d: %s", status, string(response))
+		return state, providerHTTPError("lookup branch protection", status)
 	}
 
 	const pageSize = 50
@@ -108,13 +108,13 @@ func (c *HTTPClient) InspectRepositoryAuthority(ctx context.Context, owner, repo
 			return state, err
 		}
 		if status < 200 || status >= 300 {
-			return state, fmt.Errorf("list authority labels returned status %d: %s", status, string(response))
+			return state, providerHTTPError("list authority labels", status)
 		}
 		var labels []struct {
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(response, &labels); err != nil {
-			return state, fmt.Errorf("decode authority labels: %w", err)
+			return state, fmt.Errorf("decode authority labels: invalid provider response")
 		}
 		for _, label := range labels {
 			state.Labels[strings.TrimSpace(label.Name)] = true
@@ -129,7 +129,7 @@ func (c *HTTPClient) InspectRepositoryAuthority(ctx context.Context, owner, repo
 		return state, err
 	}
 	if status < 200 || status >= 300 {
-		return state, fmt.Errorf("list authority webhooks returned status %d: %s", status, string(response))
+		return state, providerHTTPError("list authority webhooks", status)
 	}
 	var hooks []struct {
 		ID     int64             `json:"id"`
@@ -138,7 +138,7 @@ func (c *HTTPClient) InspectRepositoryAuthority(ctx context.Context, owner, repo
 		Config map[string]string `json:"config"`
 	}
 	if err := json.Unmarshal(response, &hooks); err != nil {
-		return state, fmt.Errorf("decode authority webhooks: %w", err)
+		return state, fmt.Errorf("decode authority webhooks: invalid provider response")
 	}
 	for _, hook := range hooks {
 		if strings.TrimSpace(hook.Config["url"]) != strings.TrimSpace(webhookURL) {
@@ -243,12 +243,12 @@ func mergeWhitelistWithIntegrationBot(existing []string, integrationBot string) 
 }
 
 func (c *HTTPClient) authorityRequest(ctx context.Context, method, requestPath string, body any) error {
-	status, response, err := c.request(ctx, method, requestPath, body)
+	status, _, err := c.request(ctx, method, requestPath, body)
 	if err != nil {
 		return err
 	}
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("Forgejo authority %s %s returned status %d: %s", method, requestPath, status, string(response))
+		return authorityHTTPError(method, status)
 	}
 	return nil
 }

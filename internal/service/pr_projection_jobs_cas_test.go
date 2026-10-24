@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -377,7 +376,7 @@ func TestGenericProjectionSuccessRetainsAttemptHistory(t *testing.T) {
 	if got.Phase != ForgejoProjectionPhaseProjected {
 		t.Fatalf("phase=%s, want projected", got.Phase)
 	}
-	if got.LastError == "" || !strings.Contains(got.LastError, "attempt 1 timeout") {
+	if got.LastError == "" || got.LastError != afterFail.LastError {
 		t.Fatalf("success erased attempt 1 last_error: %#v", got)
 	}
 	if len(got.Attempts) != 2 {
@@ -387,7 +386,7 @@ func TestGenericProjectionSuccessRetainsAttemptHistory(t *testing.T) {
 	if first.Attempt > second.Attempt {
 		first, second = second, first
 	}
-	if first.Attempt != 1 || first.ErrorSummary == "" || !strings.Contains(first.ErrorSummary, "attempt 1 timeout") {
+	if first.Attempt != 1 || first.ErrorSummary == "" || first.ErrorSummary != afterFail.LastError {
 		t.Fatalf("attempt 1 history missing error: %#v", first)
 	}
 	if second.Attempt != 2 || second.Status != projectionJobAttemptProjected {
