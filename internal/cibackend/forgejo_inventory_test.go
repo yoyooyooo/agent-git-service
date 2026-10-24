@@ -17,7 +17,7 @@ func TestForgejoJobsStopWhenALowerRunNumberIsPassed(t *testing.T) {
 	pages := 0
 	run := forgejoFixtureRun()
 	run["index_in_repo"] = target
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	provider := httptest.NewServer(withCurrentJobFixture(fixtureCurrentJobs(7422-8, 4, "job-", 4), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/runs/17"):
 			_ = json.NewEncoder(w).Encode(run)
@@ -48,9 +48,9 @@ func TestForgejoJobsStopWhenALowerRunNumberIsPassed(t *testing.T) {
 			t.Errorf("unexpected path %s", r.URL.Path)
 			http.NotFound(w, r)
 		}
-	}))
+	})))
 	defer provider.Close()
-	backend, err := NewHTTP(BackendConfig{Kind: "forgejo", URL: provider.URL, TokenFile: "fixture", AllowHTTP: true}, "fixture-only")
+	backend, err := NewHTTP(BackendConfig{Kind: "forgejo", URL: provider.URL, TokenFile: "fixture", AllowHTTP: true, LogBridge: &LogBridgeConfig{URL: provider.URL, TokenFile: "fixture", AllowHTTP: true}}, "fixture-only", "bridge-only")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestForgejoJobsStopWhenALowerRunNumberIsPassed(t *testing.T) {
 func TestForgejoJobsKeepScanningUntilTheRunNumberIsPassed(t *testing.T) {
 	const total = 1359
 	pages := 0
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	provider := httptest.NewServer(withCurrentJobFixture(map[int64]string{1: "late-job"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/runs/17") {
 			_ = json.NewEncoder(w).Encode(forgejoFixtureRun())
 			return
@@ -90,10 +90,10 @@ func TestForgejoJobsKeepScanningUntilTheRunNumberIsPassed(t *testing.T) {
 			items = append(items, value)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": total, "workflow_runs": items})
-	}))
+	})))
 	defer provider.Close()
-	config := BackendConfig{Kind: "forgejo", URL: provider.URL, TokenFile: "fixture", AllowHTTP: true}
-	backend, err := NewHTTP(config, "fixture-only")
+	config := BackendConfig{Kind: "forgejo", URL: provider.URL, TokenFile: "fixture", AllowHTTP: true, LogBridge: &LogBridgeConfig{URL: provider.URL, TokenFile: "fixture", AllowHTTP: true}}
+	backend, err := NewHTTP(config, "fixture-only", "bridge-only")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestForgejoJobsKeepScanningUntilTheRunNumberIsPassed(t *testing.T) {
 
 func TestForgejoJobsDoNotStopOnAPartialPageOfTheSameRun(t *testing.T) {
 	pages := 0
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	provider := httptest.NewServer(withCurrentJobFixture(fixtureCurrentJobs(500-40, 50, "job-", 40), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/runs/17") {
 			_ = json.NewEncoder(w).Encode(forgejoFixtureRun())
 			return
@@ -137,9 +137,9 @@ func TestForgejoJobsDoNotStopOnAPartialPageOfTheSameRun(t *testing.T) {
 			items[slot] = task
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 900, "workflow_runs": items})
-	}))
+	})))
 	defer provider.Close()
-	backend, err := NewHTTP(BackendConfig{Kind: "forgejo", URL: provider.URL, TokenFile: "fixture", AllowHTTP: true}, "fixture-only")
+	backend, err := NewHTTP(BackendConfig{Kind: "forgejo", URL: provider.URL, TokenFile: "fixture", AllowHTTP: true, LogBridge: &LogBridgeConfig{URL: provider.URL, TokenFile: "fixture", AllowHTTP: true}}, "fixture-only", "bridge-only")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestForgejoJobsDoNotStopOnAPartialPageOfTheSameRun(t *testing.T) {
 func TestForgejoJobInventoryRejectsBudgetAndUnstablePages(t *testing.T) {
 	const total = 1359
 	mode := "complete"
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	provider := httptest.NewServer(withCurrentJobFixture(map[int64]string{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/runs/17") {
 			_ = json.NewEncoder(w).Encode(forgejoFixtureRun())
 			return
@@ -176,10 +176,10 @@ func TestForgejoJobInventoryRejectsBudgetAndUnstablePages(t *testing.T) {
 			count++
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": count, "workflow_runs": items})
-	}))
+	})))
 	defer provider.Close()
-	config := BackendConfig{Kind: "forgejo", URL: provider.URL, TokenFile: "fixture", AllowHTTP: true, TaskPageLimit: 20}
-	limited, err := NewHTTP(config, "fixture-only")
+	config := BackendConfig{Kind: "forgejo", URL: provider.URL, TokenFile: "fixture", AllowHTTP: true, LogBridge: &LogBridgeConfig{URL: provider.URL, TokenFile: "fixture", AllowHTTP: true}, TaskPageLimit: 20}
+	limited, err := NewHTTP(config, "fixture-only", "bridge-only")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestForgejoJobInventoryRejectsBudgetAndUnstablePages(t *testing.T) {
 		t.Fatal("exhausted explicit budget became success", err)
 	}
 	config.TaskPageLimit = 0
-	backend, err := NewHTTP(config, "fixture-only")
+	backend, err := NewHTTP(config, "fixture-only", "bridge-only")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestForgejoJobInventoryRejectsBudgetAndUnstablePages(t *testing.T) {
 
 func TestForgejoJobsRejectAnUnindexedRunBeforeReadingTasks(t *testing.T) {
 	tasks := 0
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	provider := httptest.NewServer(withCurrentJobFixture(map[int64]string{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/runs/17") {
 			_ = json.NewEncoder(w).Encode(forgejoFixtureRun())
 			return
@@ -212,9 +212,9 @@ func TestForgejoJobsRejectAnUnindexedRunBeforeReadingTasks(t *testing.T) {
 		}
 		tasks++
 		http.NotFound(w, r)
-	}))
+	})))
 	defer provider.Close()
-	backend, err := NewHTTP(BackendConfig{Kind: "forgejo", URL: provider.URL, TokenFile: "fixture", AllowHTTP: true}, "fixture-only")
+	backend, err := NewHTTP(BackendConfig{Kind: "forgejo", URL: provider.URL, TokenFile: "fixture", AllowHTTP: true, LogBridge: &LogBridgeConfig{URL: provider.URL, TokenFile: "fixture", AllowHTTP: true}}, "fixture-only", "bridge-only")
 	if err != nil {
 		t.Fatal(err)
 	}

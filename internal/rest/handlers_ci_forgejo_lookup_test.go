@@ -46,6 +46,9 @@ func TestForgejoCollectionOnlyRunDetailsJobsLogsAndRerun(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "workflow_runs": []any{map[string]any{
 				"id": 41, "run_number": 9, "name": "check-linux", "workflow_id": "ci.yml", "head_sha": head, "status": "failure", "created_at": now, "updated_at": now, "url": "https://ci.example.test/ci/project/actions/runs/9",
 			}}})
+		case "/api/internal/provider-logs/repos/ci/project/runs/17/jobs":
+			require.Equal(t, "Bearer bridge-only", r.Header.Get("Authorization"))
+			_ = json.NewEncoder(w).Encode(map[string]any{"schema": "ags.internal-provider-jobs.v1", "repo": "ci/project", "run": "17", "run_number": 9, "head_sha": head, "jobs": []any{map[string]any{"task_id": 41, "name": "check-linux"}}})
 		case "/api/internal/provider-logs/repos/ci/project/runs/17/artifacts":
 			require.Equal(t, "Bearer bridge-only", r.Header.Get("Authorization"))
 			require.Equal(t, head, r.URL.Query().Get("head_sha"))

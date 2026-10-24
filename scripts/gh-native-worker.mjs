@@ -18,7 +18,7 @@ const clean = value => secrets.reduce((s, secret) => s.split(secret).join("[REDA
 const env = { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: work, LANG: "C.UTF-8", NO_PROXY: "*", GH_CONFIG_DIR: ghHome, GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1", GH_NO_EXTENSION_UPDATE_NOTIFIER: "1", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.test", SSL_CERT_FILE: join(work, "cert.pem") };
 const repo = "fixture/gh-native", base = "http://127.0.0.1:6666";
 const report = { schema: "ags.official-gh-acceptance.v1", network: "isolated loopback-only user+network namespace", productionData: false, productionCredentials: false, shim: false, routingOverrides: false, checks: [], startedAt: new Date().toISOString() };
-let primary, front, provider, stage = "start", serverLog = "", head = "a".repeat(40), outcome = "failure", currentBackend = "native", effects = 0, annotationReads = 0;
+let primary, front, provider, stage = "start", serverLog = "", head = "a".repeat(40), outcome = "failure", currentBackend = "native", effects = 0, annotationReads = 0, diagnosticGaps = false;
 const assertions = (value, message) => { if (!value) throw new Error(message); };
 async function cmd(executable, args, cwd = work, extra = {}) {
   return new Promise((resolve, reject) => {
@@ -96,13 +96,19 @@ try {
     const url = new URL(req.url, "http://127.0.0.1:7000"), bridge = url.pathname.startsWith("/api/internal/provider-logs/");
     const auth = bridge ? "Bearer " + bridgeToken : (currentBackend === "forgejo" ? "token " : "Bearer ") + providerToken;
     if (req.headers.authorization !== auth) { json(res, { error: "wrong credential boundary" }, 401); return; }
+    if (bridge && url.pathname.endsWith("/runs/17/jobs")) {
+      if (url.searchParams.get("head_sha") !== head) { json(res, {}, 409); return; }
+      json(res, {schema:"ags.internal-provider-jobs.v1",repo:"ci/project",run:"17",run_number:9,head_sha:head,jobs:jobs().map(j=>({task_id:j.id,name:j.name}))});return;
+    }
     if (bridge && url.pathname.endsWith("/runs/17/artifacts")) {
       if (url.searchParams.get("head_sha") !== head) { json(res, {}, 409); return; }
-      json(res, {schema:"ags.internal-provider-artifacts.v1",repo:"ci/project",run:"17",head_sha:head,artifacts:[]});return;
+      if (url.searchParams.get("download") === "51") { res.writeHead(200, {"Content-Type":"application/zip"}); res.end(zip([["report.txt","diagnostic artifact fixture\n"]])); return; }
+      json(res, {schema:"ags.internal-provider-artifacts.v1",repo:"ci/project",run:"17",head_sha:head,artifacts:[{key:"51",run:"17",name:"report",size_in_bytes:28,expired:false}]});return;
     }
     if (bridge) {
       const task = Number(url.pathname.split("/").at(-1)); const name = task === 41 ? "unit" : "lint";
       if (url.searchParams.get("head_sha") !== head || url.searchParams.get("head_ref") !== "feature") { json(res, {}, 409); return; }
+      if (diagnosticGaps && task === 42) { json(res, {error:"fixture metadata missing"}, 404);return; }
       if (url.searchParams.get("resource")==="steps") {
         json(res, {schema:"ags.internal-provider-steps.v1",repo:"ci/project",task_id:task,run_number:9,job_name:name,head_sha:head,provider_pr:0,provider_ref:"refs/heads/feature",event:"push",steps:[]});return;
       }
@@ -127,7 +133,7 @@ try {
     // Forgejo versions with only the collection endpoint used to make every
     // official-gh detail/jobs/log request fail after a successful run list.
     if (path.endsWith("/actions/runs/17")) { if (currentBackend === "forgejo") { json(res, {}, 404); return; } json(res, runObject()); return; }
-    if (path.endsWith("/actions/tasks")) { json(res, { total_count: 2, workflow_runs: jobs().map(j => ({ id: j.id, run_number: 9, workflow_id: "ci.yml", name: j.name, head_sha: head, head_branch: "feature", status: j.status === "in_progress" ? "running" : j.conclusion, url: j.html_url, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:01:00Z", run_started_at: j.started_at })) }); return; }
+    if (path.endsWith("/actions/tasks")) { const tasks = diagnosticGaps ? [...jobs(),{...jobs()[0],id:40}] : jobs(); json(res, { total_count: tasks.length, workflow_runs: tasks.map(j => ({ id: j.id, run_number: 9, workflow_id: "ci.yml", name: j.name, head_sha: head, head_branch: "feature", status: j.status === "in_progress" ? "running" : j.conclusion, url: j.html_url, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:01:00Z", run_started_at: j.started_at })) }); return; }
     if (path.endsWith("/actions/runs/17/jobs")) { json(res, { total_count: 2, jobs: jobs() }); return; }
     if (/\/actions\/jobs\/(41|42)$/.test(path)) { json(res, jobs().find(j => j.id === Number(path.split("/").at(-1)))); return; }
     if (/\/actions\/jobs\/(41|42)\/logs$/.test(path)) { res.writeHead(200, { "Content-Type": "text/plain" }); res.end("2026-01-01T00:00:00Z exact job fixture log\n"); return; }
@@ -177,6 +183,20 @@ try {
   const forgejoListed = await ghCheck("Forgejo native run shape", ["run", "list", "--json", "databaseId,workflowName,status,conclusion,headSha"]); const forgejoRun = JSON.parse(forgejoListed.stdout)[0].databaseId; assertions(forgejoRun !== githubRun, "backend switch aliased a historical ID");
   response = await api(`/api/v3/repos/${repo}/actions/runs/${githubRun}`); assertions(response.status === 404, "old backend run remains addressable as new backend");
   const forgejoLogs = await ghCheck("Forgejo exact bridge logs", ["run", "view", String(forgejoRun), "--log"]); assertions(forgejoLogs.stdout.includes("unit fixture log") && forgejoLogs.stdout.includes("lint fixture log"), "Forgejo job logs missing");
+  diagnosticGaps = true;
+  const gapDetails = JSON.parse((await ghCheck("Forgejo orphan task filtering", ["run", "view", String(forgejoRun), "--json", "jobs"])).stdout);
+  assertions(gapDetails.jobs.length === 2, "historical orphan task leaked into jobs");
+  const gapJobs = await api(`/api/v3/repos/${repo}/actions/runs/${forgejoRun}/jobs`);
+  assertions(gapJobs.data.jobs.find(j=>j.name==="lint").ags_steps_status === "not-found", "missing steps lost diagnostic status");
+  const gapLogs = await ghCheck("Forgejo partial logs preserve healthy output", ["run", "view", String(forgejoRun), "--log"]);
+  assertions(gapLogs.stdout.includes("unit fixture log") && gapLogs.stdout.includes("AGS_LOG_UNAVAILABLE") && !gapLogs.stdout.includes("lint fixture log"), "partial log archive lost content or diagnosis");
+  const artifactList = await api(`/api/v3/repos/${repo}/actions/runs/${forgejoRun}/artifacts`);
+  assertions(artifactList.status===200 && artifactList.data.artifacts.length===1,"nonempty artifact missing");
+  await ghCheck("Forgejo bound artifact download", ["run","download",String(forgejoRun),"--name","report","--dir",join(work,"download")]);
+  assertions(readFileSync(join(work,"download","report.txt"),"utf8")==="diagnostic artifact fixture\n","artifact content changed");
+  const repoArtifacts = await api(`/api/v3/repos/${repo}/actions/artifacts`);
+  assertions(repoArtifacts.status===501,"repository artifact inventory fabricated empty success");
+  diagnosticGaps = false;
   outcome = "pending";
   const beforeAnnotations = annotationReads;
   const successTimer = setTimeout(() => { outcome = "success"; }, 1800);

@@ -82,7 +82,17 @@ observed workflow identities is available, with state `unknown`; this is not a
 list of enabled workflows.
 
 Forgejo runs are selected with the public `head_sha` filter. Forgejo jobs are then
-selected by exact repository run number, workflow and head. The public task list
+selected by exact repository run number, workflow and head, and intersected with
+the current `action_run_job.task_id` associations from the explicit bridge's
+`GET /api/internal/provider-logs/repos/{owner}/{repo}/runs/{run}/jobs` resource
+(`ags.internal-provider-jobs.v1`). The inventory binds repository, provider run ID,
+run number and commit; all job/task commits must agree. Historical retry tasks
+without a current job association are excluded, and previously mapped orphan job
+IDs return 404. Names are not deduplicated: matrix jobs may share a display name.
+Missing tasks, changed inventories and incomplete public task observations fail
+explicitly rather than dropping current jobs. Without a configured bridge, job
+inventory is unsupported (501); an older bridge lacking the resource returns 404.
+The bridge and adapter therefore need compatible source versions before activation. The public task list
 ignores `head_sha` and `run_number`, so the adapter reads that list from the newest
 task. Forgejo 12 returns it `id DESC`, and repository run numbers increase with
 those IDs, including retries of one run. After this run's tasks have been seen, the
@@ -183,7 +193,12 @@ host actually serving the log bridge as well as any affected CI adapter; updatin
 only the AGS client-facing primary cannot repair an older remote bridge.
 
 Run ZIPs contain actual whole-job logs where step metadata is unavailable; no
-successful steps are fabricated. Signed download redirects require an exact
+successful steps are fabricated. If one verified job's log read fails, its
+whole-job segment contains `AGS_LOG_UNAVAILABLE`, the provider job key and a safe
+status category. Other jobs retain their original output; no provider error body
+or partial unverified log is included. Direct job log requests retain HTTP
+404/403/409/501 semantics. Inventory/binding failures before log collection,
+cancellation, archive size limits and malformed archives remain errors. Signed download redirects require an exact
 configured HTTPS hostname and receive no provider authorization, cookies or AGS
 credentials. Only one explicit GET is allowed. Archives are checked for path
 traversal, file type, entry count and total expanded bytes (8 MiB), not merely
@@ -272,7 +287,12 @@ require retained log files. Names, statuses and timestamps come from
 `number`. Unknown status, absent times and absent conclusions remain null;
 no setup/cleanup steps or successful outcomes are synthesized. Step metadata is
 optional: an unavailable, denied or invalid step response is discarded and jobs
-(and their check-run views) remain available with empty steps. This does not
+(and their check-run views) remain available with empty steps. Job list and detail
+JSON include `ags_steps_status`: `available`, `missing` (a completed job with no
+stored steps), `not-projected`, `unsupported`, `not-found`, `forbidden`, `conflict`,
+`invalid`, `unavailable`, `timeout` or `cancelled`. This is an observation status,
+not a CI outcome; official gh's standard jobs view may omit the extension, so use
+`gh api` for diagnosis. This does not
 relax bridge access/binding checks or mandatory job/run identity checks.
 
 Run artifacts are bound to the exact repository, provider run ID and commit.
@@ -286,12 +306,12 @@ root-confined filesystem access and safe archive paths; expired, unavailable,
 oversize or unconfigured storage fails explicitly. External object storage is
 not supported by this bridge. No deployed database is migrated or written.
 
-For artifact lists, a configured bridge returning a missing endpoint or provider
-error is not converted into an empty successful collection, except for an explicit
-unsupported-capability response. Adapters without artifact support, including
-Forgejo without `log_bridge`, retain the partial-compatibility empty collection.
-Repository-wide artifact inventory is not projected; only run-scoped Forgejo
-artifacts are supported.
+For artifact lists, a confirmed empty bridge result remains HTTP 200 with an
+empty collection. Missing support (including Forgejo without `log_bridge` or a
+bridge returning 501) returns 501; missing resources, denial and provider errors
+remain explicit errors. Repository-wide artifact inventory is not projected and
+returns 501. Run-scoped list/download remains the supported `gh run download ID`
+path; a missing list cannot masquerade as “no artifacts”.
 No installed bridge activation is implied by source acceptance. Commit
 check-runs list the selected backend's jobs for that SHA, including a provider
 branch label that is not the AGS head ref. Caches, settings and other unsupported
