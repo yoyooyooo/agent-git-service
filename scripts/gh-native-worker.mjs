@@ -188,7 +188,9 @@ try {
   assertions(gapDetails.jobs.length === 2, "historical orphan task leaked into jobs");
   const gapJobs = await api(`/api/v3/repos/${repo}/actions/runs/${forgejoRun}/jobs`);
   assertions(gapJobs.data.jobs.find(j=>j.name==="lint").ags_steps_status === "not-found", "missing steps lost diagnostic status");
-  const gapLogs = await ghCheck("Forgejo partial logs preserve healthy output", ["run", "view", String(forgejoRun), "--log"]);
+  // gh caches completed-run ZIPs; this changed provider observation must read
+  // a fresh archive instead of reusing the earlier healthy-run response.
+  const gapLogs = await ghCheck("Forgejo partial logs preserve healthy output", ["run", "view", String(forgejoRun), "--log"], [0], { XDG_CACHE_HOME: join(work, "diagnostic-gap-cache") });
   assertions(gapLogs.stdout.includes("unit fixture log") && gapLogs.stdout.includes("AGS_LOG_UNAVAILABLE") && !gapLogs.stdout.includes("lint fixture log"), "partial log archive lost content or diagnosis");
   const artifactList = await api(`/api/v3/repos/${repo}/actions/runs/${forgejoRun}/artifacts`);
   assertions(artifactList.status===200 && artifactList.data.artifacts.length===1,"nonempty artifact missing");
