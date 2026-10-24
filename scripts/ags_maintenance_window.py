@@ -6,6 +6,7 @@ unchanged. This module never contains a production host, path or credential.
 """
 import argparse
 import contextlib
+import datetime as dt
 import fcntl
 import hashlib
 import importlib.util
@@ -287,6 +288,15 @@ def adapter_types(module):
                 require(sha(source) == sha(backup) == item['sha256'], 'startup_dependency_backup_drift')
             return manifest
 
+        def install(self):
+            # The pinned implementation invokes candidate --version before its
+            # own hash check. Admit staged bytes before delegating any execution.
+            private_file(self.candidate)
+            private_file(self.build_receipt)
+            receipt = module.read(self.build_receipt)
+            require(sha(self.candidate) == receipt['binary_sha256'], 'candidate_drift')
+            return super().install()
+
         def build(self):
             require(self.args.candidate_review is not None, 'candidate_review_required')
             import_candidate(module, self, self.args.candidate_review)
@@ -327,6 +337,39 @@ def adapter_types(module):
             # No fence booleans are read or synthesized in this mode.
             module.save(self.host.work / ('accepted-' + kind + '-' + str(time.time_ns()) + '.json'), e)
             return e
+
+        def stopped(self, evidence, state):
+            """Called under both exclusion locks, for drain and every resume."""
+            require(0 <= time.time_ns() - evidence['observed_ns'] <= 300 * 10**9,
+                    'evidence_time_invalid')
+            require(evidence.get('normal_exit_no_timeout_no_sigkill') is True
+                    and evidence.get('no_direct_file_writers') is True
+                    and evidence.get('autostart_suppressed') is True, 'stop_not_proven')
+            require(evidence.get('callers_paused') is True, 'writers_not_reviewed')
+            proof(evidence['offline_record'])
+            record = module.read(Path(evidence['offline_record']['path']))
+            for key in ('run', 'host', 'mode', 'phase', 'nonce', 'kind', 'observed_ns'):
+                require(record.get(key) == evidence[key], 'offline_record_binding')
+            self.host.quiescent()
+            path = self.host.root / 'state/runtime.json'
+            private_file(path)
+            runtime = module.read(path)
+            require(type(runtime.get('exit_code')) is int and runtime['exit_code'] == 0
+                    and runtime.get('stopped_at'), 'runtime_exit_not_clean')
+            require(record.get('runtime_sha256') == sha(path), 'offline_runtime_drift')
+            if state.get('started_new'):
+                # An old clean stop cannot prove that a later attempted startup
+                # (including one with an unknown manager result) is stopped.
+                try:
+                    stopped = dt.datetime.fromisoformat(runtime['stopped_at'])
+                    require(stopped.tzinfo is not None, 'runtime_stop_time_invalid')
+                    stopped_ns = int(stopped.timestamp() * 10**9)
+                except (TypeError, ValueError, OverflowError):
+                    raise Blocked('runtime_stop_time_invalid') from None
+                attempted = state.get('start_attempted_ns')
+                require(type(attempted) is int and stopped_ns >= attempted,
+                        'runtime_stop_predates_start')
+                require(stopped_ns <= evidence['observed_ns'], 'runtime_stop_time_invalid')
 
         def convergence(self, evidence):
             entries = recovery_inventory(self.host.production_db())
@@ -391,14 +434,8 @@ def adapter_types(module):
             if action == 'gate-drain':
                 require(phase in ('await-drain', 'stop-requested'), 'wrong_phase')
                 e = self.evidence('drain')
-                require(e.get('normal_exit_no_timeout_no_sigkill') is True
-                        and e.get('no_direct_file_writers') is True and e.get('autostart_suppressed') is True,
-                        'stop_not_proven')
-                proof(e['offline_record'])  # Includes both listener ports and store holders.
                 with self.offline():
-                    host.quiescent()
-                    runtime = module.read(host.root / 'state/runtime.json')
-                    require(runtime.get('exit_code') == 0 and runtime.get('stopped_at'), 'runtime_exit_not_clean')
+                    self.stopped(e, state)
                     self.mark('drain-passed', recovery_sha256=self.convergence(e))
                 return
             if action in ('snapshot', 'gate-backup', 'gate-git'):
@@ -406,11 +443,14 @@ def adapter_types(module):
                 return super().run()
             if action in ('install', 'resume-new'):
                 allowed = ('install-allowed',) if action == 'install' else (
-                    'install-allowed', 'installing-new', 'installed-new', 'start-attempted', 'new-ready')
+                    'install-allowed', 'installing-new', 'installed-new', 'start-attempted', 'new-ready', 'observing')
                 require(phase in allowed, 'wrong_phase')
                 e = self.evidence('install' if action == 'install' else 'resume')
                 with self.offline():
-                    host.quiescent()
+                    if action == 'resume-new':
+                        self.stopped(e, state)
+                    else:
+                        host.quiescent()
                     manifest = host.verify_backup()
                     require(module.digest(host.backup / 'manifest.json') == state['manifest_sha256'], 'approved_backup_drift')
                     module.fsck(host.backup / 'gitrepos', module.repository_inventory(host.backup / 'db/ags.sqlite'))
@@ -418,7 +458,7 @@ def adapter_types(module):
                     if not state['started_new']:
                         require(module.h.hashes(host.root / 'data/gitrepos') == manifest['git_store'], 'live_store_drift')
                     self.convergence(e)
-                    self.mark('installing-new')
+                    self.mark('installing-new', observation_started_ns=None)
                     host.install()
                     self.mark('installed-new')
                 return
