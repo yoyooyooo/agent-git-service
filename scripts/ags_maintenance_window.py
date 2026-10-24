@@ -383,6 +383,7 @@ def adapter_types(module):
                     host.verify_backup()
                     host.idle()
                     self.convergence(e)
+                require(time.time_ns() - e['observed_ns'] <= 300 * 10**9, 'stop_evidence_expired')
                 self.mark('stop-requested')
                 host.stop()
                 self.mark('await-drain')
@@ -428,6 +429,7 @@ def adapter_types(module):
                 with self.offline():
                     host.quiescent()
                     host.verify_backup()
+                    require(module.digest(host.backup / 'manifest.json') == state['manifest_sha256'], 'approved_backup_drift')
                     host.doctor()
                     receipt = module.read(host.build_receipt)
                     require(sha(host.root / 'bin/gh-server') == receipt['binary_sha256']
@@ -461,7 +463,7 @@ def adapter_types(module):
                 require(type(duration) is int and duration >= 600, 'observation_budget_invalid')
                 require(time.time_ns() - state['observation_started_ns'] >= duration * 10**9,
                         'observation_incomplete')
-                require(e.get('all_actual_leases_covered') is True and e.get('unknown_external_results') == 0,
+                require(e.get('all_actual_leases_covered') is True and type(e.get('unknown_external_results')) is int and e['unknown_external_results'] == 0,
                         'observation_recovery_incomplete')
                 proof(e['observation_record'])
                 proof(e['provider_readback'])

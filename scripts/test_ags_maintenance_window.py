@@ -307,13 +307,15 @@ class Stages(unittest.TestCase):
         identity = {'revision': 'a' * 40, 'tree': 'b' * 40}
         self.host.identity = lambda *args: identity
         save(self.host.build_receipt, {'identity': identity, 'binary_sha256': w.sha(binary)})
-        self.module = types.SimpleNamespace(Host=object, Engine=BaseEngine, NEW=identity['revision'],
+        self.host.backup.mkdir()
+        save(self.host.backup / 'manifest.json', {'synthetic': True})
+        self.module = types.SimpleNamespace(Host=object, Engine=BaseEngine, NEW=identity['revision'], digest=w.sha,
                                             read=lambda p: json.loads(p.read_text()), save=save)
         self.args = types.SimpleNamespace(run='ags-fixture', host='fixture', evidence=self.root / 'evidence',
                                           service_url='https://example.ts.net', action='start-new')
         _, Engine = w.adapter_types(self.module)
         self.engine = Engine(self.host, self.args)
-        self.engine.mark('installed-new')
+        self.engine.mark('installed-new', manifest_sha256=w.sha(self.host.backup / 'manifest.json'))
 
     def start(self):
         self.start_calls += 1
@@ -372,6 +374,13 @@ class Stages(unittest.TestCase):
         with self.assertRaisesRegex(w.Blocked, 'holder_present'):
             self.engine.run()
         self.assertEqual(self.engine.state()['phase'], 'installed-new')
+        self.assertEqual(self.start_calls, 0)
+
+    def test_start_rejects_changed_approved_manifest(self):
+        self.evidence('start')
+        save(self.host.backup / 'manifest.json', {'changed': True})
+        with self.assertRaisesRegex(w.Blocked, 'approved_backup_drift'):
+            self.engine.run()
         self.assertEqual(self.start_calls, 0)
 
     def test_changed_recovery_blocks_before_start(self):
