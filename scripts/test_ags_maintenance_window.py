@@ -122,7 +122,7 @@ class Fixture(unittest.TestCase):
         entries = w.recovery_inventory(self.db)
         self.assertEqual([e['key'] for e in entries], ['pull_request_projection_jobs:2'])
         self.assertNotIn('synthetic-private-error', json.dumps(entries))
-        self.assertNotIn('\\\\udcff', json.dumps(entries))
+        self.assertNotIn('\\udcff', json.dumps(entries))
         self.assertEqual(w.sha(self.db), before)
         review = self.review(entries)
         self.sql('UPDATE pull_request_projection_jobs SET last_error=CAST(? AS TEXT) WHERE id=2',
