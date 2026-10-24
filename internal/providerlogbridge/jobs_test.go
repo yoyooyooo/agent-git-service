@@ -12,7 +12,7 @@ import (
 )
 
 func TestCIBridgeCurrentJobsRequireRepositoryRunTaskAndCommit(t *testing.T) {
-	for _, mode := range []string{"valid", "orphan", "duplicate_name", "foreign_repo", "foreign_run", "wrong_sha", "wrong_token", "wrong_peer", "duplicate_task", "task_sha", "job_sha", "missing_task", "pending_task"} {
+	for _, mode := range []string{"valid", "orphan", "duplicate_name", "foreign_repo", "foreign_run", "wrong_sha", "wrong_token", "wrong_peer", "duplicate_task", "task_sha", "job_sha", "missing_task", "pending_task", "job_repo", "task_repo", "job_and_task_repo"} {
 		t.Run(mode, func(t *testing.T) {
 			h, _ := setupBridge(t, 1024)
 			owner, repo, run, sha, token, peer := fixtureOwner, fixtureRepo, "4001", fixtureSHA, "bridge-secret", fixturePeer
@@ -44,6 +44,13 @@ func TestCIBridgeCurrentJobsRequireRepositoryRunTaskAndCommit(t *testing.T) {
 				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET task_id=9999 WHERE id=6763`).Error)
 			case "pending_task":
 				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET task_id=0 WHERE id=6763`).Error)
+			case "job_repo":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET repo_id=25 WHERE id=6763`).Error)
+			case "task_repo":
+				require.NoError(t, h.db.Exec(`UPDATE action_task SET repo_id=25 WHERE id=6949`).Error)
+			case "job_and_task_repo":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET repo_id=25 WHERE id=6763`).Error)
+				require.NoError(t, h.db.Exec(`UPDATE action_task SET repo_id=25 WHERE id=6949`).Error)
 			}
 			router := chi.NewRouter()
 			router.Use(CaptureSocketPeer)
@@ -70,6 +77,12 @@ func TestCIBridgeCurrentJobsRequireRepositoryRunTaskAndCommit(t *testing.T) {
 				require.Equal(t, 401, res.Code, res.Body.String())
 			case "foreign_repo", "foreign_run", "wrong_sha":
 				require.Equal(t, 404, res.Code, res.Body.String())
+			case "job_repo", "task_repo", "job_and_task_repo":
+				require.Equal(t, http.StatusBadGateway, res.Code, res.Body.String())
+				var body map[string]any
+				require.NoError(t, json.Unmarshal(res.Body.Bytes(), &body))
+				require.Equal(t, "metadata_invalid", body["code"])
+				require.NotContains(t, body, "jobs", "invalid inventory must not return partial jobs")
 			default:
 				require.Equal(t, 502, res.Code, res.Body.String())
 			}

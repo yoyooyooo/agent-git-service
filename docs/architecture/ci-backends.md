@@ -86,7 +86,11 @@ selected by exact repository run number, workflow and head, and intersected with
 the current `action_run_job.task_id` associations from the explicit bridge's
 `GET /api/internal/provider-logs/repos/{owner}/{repo}/runs/{run}/jobs` resource
 (`ags.internal-provider-jobs.v1`). The inventory binds repository, provider run ID,
-run number and commit; all job/task commits must agree. Historical retry tasks
+run number and commit; all job/task commits must agree. The bridge enumerates all
+jobs by the verified run ID before validating each job and task repository against
+the run repository. A mismatched repository fails the entire inventory with
+`metadata_invalid` (502), so the adapter cannot report a complete job list or
+return a partial run-log ZIP for that inventory. Historical retry tasks
 without a current job association are excluded, and previously mapped orphan job
 IDs return 404. Names are not deduplicated: matrix jobs may share a display name.
 Missing tasks, changed inventories and incomplete public task observations fail
