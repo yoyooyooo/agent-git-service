@@ -51,7 +51,12 @@ func durableActionTestAuthority(t *testing.T, principalID uint, policyRevision s
 
 func setupIntentTestServiceWithClient(t *testing.T) (*Service, db.PullRequest, db.PullRequestProjection, *minimalForgejoClient) {
 	t.Helper()
-	svc := setupProjectionStateService(t)
+	return setupIntentTestServiceWithClientAt(t, t.TempDir()+"/projection.db")
+}
+
+func setupIntentTestServiceWithClientAt(t *testing.T, databasePath string) (*Service, db.PullRequest, db.PullRequestProjection, *minimalForgejoClient) {
+	t.Helper()
+	svc := setupProjectionStateServiceAt(t, databasePath)
 	svc.SourceRevision = strings.Repeat("a", 40)
 	// Durable action snapshot fixtures exercise the agent policy path. Human
 	// operators intentionally ignore PrincipalSession policy and use native
