@@ -182,6 +182,12 @@ var (
 
 func listManagedKeys(ctx context.Context, c *HTTPClient, login string) ([]providerKey, error) {
 	keys, err := listManagedKeysEvidence(ctx, c, login)
+	// Provisioning historically treats any page's 404 as an empty inventory.
+	// Diagnostics retain that status without changing registration or sync.
+	var providerErr *ProviderHTTPError
+	if errors.As(err, &providerErr) && providerErr.Status == http.StatusNotFound {
+		return nil, nil
+	}
 	// Provisioning retains its prior failure contract. Typed probe evidence must
 	// not silently change its callers' classification or recovery policy.
 	if err != nil && !errors.Is(err, errManagedKeyInventoryBound) {
@@ -194,9 +200,6 @@ func listManagedKeysEvidence(ctx context.Context, c *HTTPClient, login string) (
 	var all []providerKey
 	for page := 1; page <= 100; page++ {
 		status, data, err := c.rawRequest(ctx, http.MethodGet, apiPath("/api/v1/users/%s/keys", login)+fmt.Sprintf("?limit=50&page=%d", page), nil, "")
-		if status == 404 && err == nil {
-			return nil, nil
-		}
 		if err != nil {
 			return nil, gittransport.SafeError(err)
 		}
