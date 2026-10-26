@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ngaut/agent-git-service/internal/gittransport"
 )
@@ -159,11 +160,22 @@ func redactURLCredential(raw string) string {
 }
 
 func truncateProjectionError(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	// Summaries are display text: replace each run of invalid UTF-8 bytes
+	// before measuring the byte budget, since U+FFFD can expand the input.
+	s = strings.ToValidUTF8(s, "\ufffd")
 	if len(s) <= max {
 		return s
 	}
-	if max <= 3 {
-		return s[:max]
+	end, suffix := max, ""
+	if max > 3 {
+		end, suffix = max-3, "..."
 	}
-	return fmt.Sprintf("%s...", s[:max-3])
+	// s is valid UTF-8 and end < len(s); back up to a complete rune boundary.
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + suffix
 }
