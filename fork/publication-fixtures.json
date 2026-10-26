@@ -38,6 +38,12 @@
       "reason": "The fake pusher and argument builder use a literal secret-token to verify in-memory compatibility inputs; the real process credential boundary has separate native Git tests."
     },
     {
+      "path": "internal/forgejointegration/projection_error_test.go",
+      "object": "a6025b66d5a55a9d60204e25717c0f0b5c67eb02",
+      "rule": "credential-in-url",
+      "reason": "Synthetic fixture-user/fixture-password on example.invalid exercises in-memory URL redaction before UTF-8 truncation; no network request or real credential is used."
+    },
+    {
       "path": "internal/forgejointegration/webhook_integration_test.go",
       "object": "ec8cb14d6d71e7e3a13df800ecab9040640994c1",
       "rule": "credential-in-url",
