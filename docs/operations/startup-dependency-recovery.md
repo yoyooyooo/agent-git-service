@@ -22,18 +22,23 @@ Both scenarios use a temporary SQLite database and an empty Git repository root:
 
 `internal/service/startup_dependency_recovery_test.go` uses the existing
 synthetic repository, PR, authority and Git fixture. Provider traffic stays on
-a loopback test server. Each process incarnation reopens the same SQLite file
+a loopback test server. Each service incarnation reopens the same SQLite file
 and uses the production recovery and pending-job entries:
 
 - Forgejo label dispatch receives one `503` before any provider effect, or one
   timeout after exactly one effect. Startup records the dispatch as unknown
   rather than success. The next startup makes one request, reaches exactly one
-  durable effect, and a further startup makes no request;
+  durable effect, and a further startup makes no request. The fixture validates
+  the exact repository/PR coordinate and label payload before applying an effect,
+  and asserts the final label set. This retry relies on the fixture's idempotent
+  label-set semantics; it is not generic unknown-write recovery by readback;
 - one success comment is committed by the provider and then its response is
   lost. The durable claim remains incomplete. Startup recovery reads the exact
   marker back, writes no second comment, preserves the attempt count, and
   completes the exact intent and job. A second restart does not repeat either
-  provider operation.
+  provider operation: each recovery cycle asserts zero label writes, the complete
+  HTTP request sequence, and its exact per-cycle increment. All provider request
+  counts remain unchanged on the second restart.
 
 Both provider scenarios compare the PR row and `git show-ref` before and after
 recovery. Neither changes.
@@ -45,6 +50,11 @@ production provider recovery, credentials, certificates, or a consistent
 database-plus-Git snapshot. Those checks belong to a reviewed maintenance window
 after writers are stopped. They also do not prove Forgejo authority readiness:
 that diagnostic is warning-only and is covered separately from request recovery.
+
+The service fixtures reopen the database and reconstruct service and worker
+state, but retain the Git, provider integration and principal-session objects.
+They do not exercise a full standalone `Run` with provider faults, or interactions
+between recovery, retirement and other startup workers.
 
 The suite does not cover every startup worker. In particular, it does not prove
 Wiki recovery, generic projection repair, outbound delivery, or recovery of an

@@ -122,20 +122,38 @@ func TestStartupDependencyForgejoDispatchRecovery(t *testing.T) {
 			}
 			refs := startupRefs(t, svc)
 			var mu sync.Mutex
-			requests, effects := 0, 0
-			labelPresent := false
+			requests := []string{}
+			effects := 0
+			labels := map[string]bool{}
+			labelRequest := "POST /api/v1/repos/forgejo/repo/issues/42/labels"
 			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != "/api/v1/repos/forgejo/repo/issues/42/labels" {
+				mu.Lock()
+				requests = append(requests, r.Method+" "+r.URL.RequestURI())
+				first := len(requests) == 1
+				mu.Unlock()
+				if r.Method+" "+r.URL.RequestURI() != labelRequest {
 					t.Errorf("unexpected provider request: %s %s", r.Method, r.URL.Path)
 					http.Error(w, "unexpected request", 500)
 					return
 				}
-				_, _ = io.Copy(io.Discard, r.Body)
+				var body struct {
+					Labels []string `json:"labels"`
+				}
+				decoder := json.NewDecoder(r.Body)
+				decoder.DisallowUnknownFields()
+				if err := decoder.Decode(&body); err != nil {
+					t.Errorf("decode label request: %v", err)
+					http.Error(w, "invalid labels", http.StatusBadRequest)
+					return
+				}
+				if err := decoder.Decode(new(any)); err != io.EOF || !reflect.DeepEqual(body.Labels, []string{forgejointegration.AGSActionRebaseLabel}) {
+					t.Errorf("unexpected label payload: labels=%v trailing JSON error=%v", body.Labels, err)
+					http.Error(w, "unexpected labels", http.StatusBadRequest)
+					return
+				}
 				mu.Lock()
-				requests++
-				first := requests == 1
-				if !(first && fault == "503") && !labelPresent {
-					labelPresent = true
+				if !(first && fault == "503") && !labels[body.Labels[0]] {
+					labels[body.Labels[0]] = true
 					effects++
 				}
 				mu.Unlock()
@@ -167,15 +185,16 @@ func TestStartupDependencyForgejoDispatchRecovery(t *testing.T) {
 				t.Fatalf("fault lost durable uncertainty: state=%s code=%s", uncertain.State, uncertain.FailureCode)
 			}
 			mu.Lock()
-			firstRequests, firstEffects := requests, effects
+			firstRequests, firstEffects, firstLabels := append([]string{}, requests...), effects, len(labels)
 			mu.Unlock()
 			wantEffects := 0
 			if fault == "timeout_after_apply" {
 				wantEffects = 1
 			}
-			if firstRequests != 1 || firstEffects != wantEffects {
-				t.Fatalf("fault requests/effects=%d/%d want 1/%d", firstRequests, firstEffects, wantEffects)
+			if !reflect.DeepEqual(firstRequests, []string{labelRequest}) || firstEffects != wantEffects || firstLabels != wantEffects {
+				t.Fatalf("fault requests/effects/labels=%v/%d/%d want [%s]/%d/%d", firstRequests, firstEffects, firstLabels, labelRequest, wantEffects, wantEffects)
 			}
+			previousRequests := len(firstRequests)
 			for cycle := 0; cycle < 2; cycle++ {
 				svc = restartStartupService(t, svc)
 				if err := svc.RecoverDurableActionIntents(context.Background()); err != nil {
@@ -193,11 +212,23 @@ func TestStartupDependencyForgejoDispatchRecovery(t *testing.T) {
 					t.Fatalf("restart did not converge: state=%s code=%s", recovered.State, recovered.FailureCode)
 				}
 				mu.Lock()
-				gotRequests, gotEffects := requests, effects
-				mu.Unlock()
-				if gotRequests != 2 || gotEffects != 1 {
-					t.Fatalf("restart requests/effects=%d/%d want 2/1", gotRequests, gotEffects)
+				gotRequests, gotEffects := append([]string{}, requests...), effects
+				gotLabels := make(map[string]bool, len(labels))
+				for label, present := range labels {
+					gotLabels[label] = present
 				}
+				mu.Unlock()
+				wantDelta := []string{}
+				if cycle == 0 {
+					wantDelta = []string{labelRequest}
+				}
+				if !reflect.DeepEqual(gotRequests, []string{labelRequest, labelRequest}) || gotEffects != 1 || !reflect.DeepEqual(gotLabels, map[string]bool{forgejointegration.AGSActionRebaseLabel: true}) {
+					t.Fatalf("restart requests/effects/labels=%v/%d/%v", gotRequests, gotEffects, gotLabels)
+				}
+				if !reflect.DeepEqual(gotRequests[previousRequests:], wantDelta) {
+					t.Fatalf("restart cycle=%d requests delta=%v want %v", cycle, gotRequests[previousRequests:], wantDelta)
+				}
+				previousRequests = len(gotRequests)
 				assertStartupUnchangedPRAndRefs(t, svc, before, refs)
 			}
 		})
@@ -228,8 +259,14 @@ func TestStartupDependencyUnknownCommentRecoveredByWorker(t *testing.T) {
 	refs := startupRefs(t, svc)
 	var mu sync.Mutex
 	writes, reads, labelWrites := 0, 0, 0
+	requests := []string{}
+	commentRead := "GET /api/v1/repos/forgejo/repo/issues/42/comments?page=1&limit=50"
+	commentWrite := "POST /api/v1/repos/forgejo/repo/issues/42/comments"
 	comments := []forgejointegration.PullRequestComment{}
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		mu.Unlock()
 		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/forgejo/repo/issues/42/labels" {
 			mu.Lock()
 			labelWrites++
@@ -283,6 +320,14 @@ func TestStartupDependencyUnknownCommentRecoveredByWorker(t *testing.T) {
 	if uncertain.SuccessCommentedAt != nil || uncertain.SuccessCommentClaimToken == "" || uncertain.SuccessCommentDispatchID == "" {
 		t.Fatal("unknown write lost durable claim")
 	}
+	mu.Lock()
+	initialRequests := append([]string{}, requests...)
+	initialWrites, initialReads, initialLabels, initialComments := writes, reads, labelWrites, len(comments)
+	mu.Unlock()
+	if !reflect.DeepEqual(initialRequests, []string{commentRead, commentWrite}) || initialWrites != 1 || initialReads != 1 || initialLabels != 0 || initialComments != 1 {
+		t.Fatalf("fault requests=%v writes/reads/labels/comments=%d/%d/%d/%d", initialRequests, initialWrites, initialReads, initialLabels, initialComments)
+	}
+	previousRequests := len(initialRequests)
 	for cycle := 0; cycle < 2; cycle++ {
 		svc = restartStartupService(t, svc)
 		if err := svc.RecoverDurableActionIntents(context.Background()); err != nil {
@@ -308,10 +353,22 @@ func TestStartupDependencyUnknownCommentRecoveredByWorker(t *testing.T) {
 		}
 		mu.Lock()
 		gotWrites, gotReads, gotComments, gotLabels := writes, reads, len(comments), labelWrites
+		gotRequests := append([]string{}, requests...)
 		mu.Unlock()
-		if gotWrites != 1 || gotComments != 1 || gotReads != 2 {
-			t.Fatalf("provider writes/comments/reads=%d/%d/%d want 1/1/2", gotWrites, gotComments, gotReads)
+		if gotWrites != 1 || gotComments != 1 || gotReads != 2 || gotLabels != 0 {
+			t.Fatalf("provider writes/comments/reads/labels=%d/%d/%d/%d want 1/1/2/0", gotWrites, gotComments, gotReads, gotLabels)
 		}
+		if !reflect.DeepEqual(gotRequests, []string{commentRead, commentWrite, commentRead}) {
+			t.Fatalf("provider requests=%v want exact read/write/read sequence", gotRequests)
+		}
+		wantDelta := []string{}
+		if cycle == 0 {
+			wantDelta = []string{commentRead}
+		}
+		if !reflect.DeepEqual(gotRequests[previousRequests:], wantDelta) {
+			t.Fatalf("restart cycle=%d requests delta=%v want %v", cycle, gotRequests[previousRequests:], wantDelta)
+		}
+		previousRequests = len(gotRequests)
 		t.Logf("recovery cycle=%d provider comment writes=%d reads=%d label writes=%d", cycle, gotWrites, gotReads, gotLabels)
 		assertStartupUnchangedPRAndRefs(t, svc, before, refs)
 	}
