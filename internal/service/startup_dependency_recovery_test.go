@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -110,7 +111,7 @@ func assertStartupUnchangedPRAndRefs(t *testing.T, svc *Service, before db.PullR
 func TestStartupDependencyForgejoDispatchRecovery(t *testing.T) {
 	for _, fault := range []string{"503", "timeout_after_apply"} {
 		t.Run(fault, func(t *testing.T) {
-			svc, pr, projection, minimal := setupIntentTestServiceWithClient(t)
+			svc, pr, projection, minimal := setupIntentTestServiceWithClientAt(t, filepath.Join(t.TempDir(), "recovery.sqlite"))
 			intent := seedDispatchedIntent(t, svc, pr, projection)
 			if err := svc.DB.Model(&intent).Updates(map[string]any{"state": ForgejoActionIntentPlanned, "dispatched_at": nil}).Error; err != nil {
 				t.Fatal(err)
@@ -204,7 +205,7 @@ func TestStartupDependencyForgejoDispatchRecovery(t *testing.T) {
 }
 
 func TestStartupDependencyUnknownCommentRecoveredByWorker(t *testing.T) {
-	svc, pr, projection, minimal := setupIntentTestServiceWithClient(t)
+	svc, pr, projection, minimal := setupIntentTestServiceWithClientAt(t, filepath.Join(t.TempDir(), "recovery.sqlite"))
 	intent := seedDispatchedIntent(t, svc, pr, projection)
 	if err := svc.DB.Model(&intent).Update("state", ForgejoActionIntentRecovery).Error; err != nil {
 		t.Fatal(err)

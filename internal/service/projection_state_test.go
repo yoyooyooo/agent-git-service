@@ -21,7 +21,12 @@ import (
 
 func setupProjectionStateService(t *testing.T) *Service {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(t.TempDir()+"/projection.db"), &gorm.Config{})
+	return setupProjectionStateServiceAt(t, t.TempDir()+"/projection.db")
+}
+
+func setupProjectionStateServiceAt(t *testing.T, databasePath string) *Service {
+	t.Helper()
+	gdb, err := gorm.Open(sqlite.Open(databasePath), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
