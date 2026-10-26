@@ -54,7 +54,7 @@ class Fixture(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(dir=ROOT))
         self.db = self.root / 'fixture.sqlite'
-        with sqlite3.connect(self.db) as db:
+        with contextlib.closing(sqlite3.connect(self.db)) as db, db:
             db.executescript('''
                 CREATE TABLE pull_requests(id INTEGER PRIMARY KEY, state TEXT, merged INTEGER,
                     forgejo_reopen_pending INTEGER, lifecycle_generation INTEGER);
@@ -66,12 +66,26 @@ class Fixture(unittest.TestCase):
                 CREATE TABLE authority_boundary_receipts(receipt_id TEXT PRIMARY KEY, payload TEXT);
                 CREATE TABLE access_grant_invocations(id TEXT PRIMARY KEY, state TEXT, provider_attempt TEXT, provider_outcome TEXT);
                 CREATE TABLE outbound_deliveries(id INTEGER PRIMARY KEY, status TEXT,
-                    lease_expires_at TEXT, lease_owner TEXT, payload_json TEXT);
+                    lease_expires_at TEXT, lease_owner TEXT, payload_json TEXT, target_type TEXT);
+                CREATE TABLE repositories(id INTEGER PRIMARY KEY, full_name TEXT);
+                CREATE TABLE wiki_pages(page_id INTEGER PRIMARY KEY, repository_id INTEGER, slug TEXT,
+                    head_blob_sha TEXT, deleted_at TEXT, body_inline BLOB);
+                CREATE TABLE wiki_search_documents(id INTEGER PRIMARY KEY, repository_id INTEGER,
+                    slug TEXT, revision_sha TEXT, body TEXT);
+                CREATE TABLE wiki_search_projection_tasks(id INTEGER PRIMARY KEY, repository_id INTEGER,
+                    slug TEXT, kind TEXT, generation INTEGER, revision_sha TEXT, label_digest TEXT,
+                    lease_token TEXT, lease_expires_at TEXT);
+                CREATE TABLE wiki_repo_heads(repository_id INTEGER PRIMARY KEY,
+                    reference_effects_through_changeset_id INTEGER);
+                CREATE TABLE wiki_page_labels(repository_id INTEGER, slug TEXT, label_id INTEGER,
+                    PRIMARY KEY(repository_id, slug, label_id));
+                CREATE TABLE labels(id INTEGER PRIMARY KEY, name TEXT);
+                INSERT INTO repositories VALUES(1,'sample/project');
                 INSERT INTO pull_requests VALUES(1,'open',0,0,7);
             ''')
 
     def sql(self, query, args=()):
-        with sqlite3.connect(self.db) as db:
+        with contextlib.closing(sqlite3.connect(self.db)) as db, db:
             db.execute(query, args)
 
     def job(self, number, phase='failed_retryable', provider='forgejo', trigger='pull_request_projection', error=''):
@@ -85,7 +99,7 @@ class Fixture(unittest.TestCase):
 
     def review(self, entries):
         return {'items': [dict(key=e['key'], facts_sha256=e['facts_sha256'], decision='allow_exact_resume',
-                               reviewer='fixture-reviewer', expected_effect_sha256='a' * 64,
+                               reviewer='fixture-reviewer', recovery_class=e['recovery_class'], expected_effect_sha256='a' * 64,
                                unknown_external_results=0, readback=self.evidence_proof(),
                                exact_resume_test=self.evidence_proof()) for e in entries]}
 
@@ -136,7 +150,7 @@ class Fixture(unittest.TestCase):
         self.job(1)
         self.sql('ALTER TABLE pull_request_projection_jobs ADD COLUMN last_error TEXT')
         self.sql('UPDATE pull_request_projection_jobs SET last_error=?', ('synthetic café 中文 \\udcff',))
-        with sqlite3.connect(self.db) as db:
+        with contextlib.closing(sqlite3.connect(self.db)) as db, db:
             db.row_factory = sqlite3.Row
             row = dict(db.execute('SELECT * FROM pull_request_projection_jobs').fetchone())
             pr = dict(db.execute('SELECT * FROM pull_requests').fetchone())
@@ -171,17 +185,24 @@ class Fixture(unittest.TestCase):
 
     def test_all_future_retries_providers_and_reopen(self):
         for number in range(1, 151):
-            self.job(number, 'queued', provider='github', trigger='github_ensure')
+            self.job(number, 'queued', provider='github', trigger='github_shadow_ensure')
         self.sql("UPDATE pull_request_projection_jobs SET next_run_at='2099-01-01'")
         self.sql('UPDATE pull_requests SET forgejo_reopen_pending=1')
-        self.assertEqual(len(w.recovery_inventory(self.db)), 151)
+        entries = w.recovery_inventory(self.db)
+        self.assertEqual(len(entries), 151)
+        self.assertEqual({e['recovery_class'] for e in entries}, {'startup_execute'})
+        review = self.review(entries)
+        w.recovery_gate(entries, review)
+        review['items'].pop()
+        with self.assertRaisesRegex(w.Blocked, 'coverage'):
+            w.recovery_gate(entries, review)
 
     def test_intents_receipts_leases_and_private_output(self):
         secret = 'SYNTHETIC_PRIVATE_PAYLOAD_DO_NOT_EXPORT'
         self.sql('INSERT INTO authority_boundary_receipts VALUES(?,?)', ('r1', secret))
         self.sql('INSERT INTO pull_request_action_intents VALUES(?,?,?,?,?,?)',
                  ('i1', 'pr.rebase', 'denied', 'outcome_unknown', '', 'r1'))
-        self.sql('INSERT INTO outbound_deliveries VALUES(?,?,?,?,?)', (1, 'delivered', None, 'lease', secret))
+        self.sql('INSERT INTO outbound_deliveries(id,status,lease_expires_at,lease_owner,payload_json) VALUES(?,?,?,?,?)', (1, 'delivered', None, 'lease', secret))
         entries = w.recovery_inventory(self.db)
         self.assertEqual(len(entries), 2)
         self.assertNotIn(secret, json.dumps(entries))
@@ -223,6 +244,207 @@ class Fixture(unittest.TestCase):
         self.sql('ALTER TABLE pull_requests DROP COLUMN forgejo_reopen_pending')
         self.assertEqual(w.recovery_inventory(self.db), [])
         self.sql('ALTER TABLE pull_request_projection_jobs DROP COLUMN last_error_type')
+        with self.assertRaisesRegex(w.Blocked, 'schema_unknown'):
+            w.recovery_inventory(self.db)
+
+    def wiki_page(self, number=1, revision='current', deleted=None):
+        self.sql('INSERT INTO wiki_pages VALUES(?,1,?,?,?,?)',
+                 (number, 'page-' + str(number), revision, deleted, b'synthetic private body'))
+
+    def wiki_task(self, number=1, kind='lexical', expiry=None):
+        self.sql('INSERT INTO wiki_search_projection_tasks VALUES(?,1,?,?,1,?,?,?,?)',
+                 (number, 'page-' + str(number), kind, 'current', 'labels', 'private-lease', expiry))
+
+    def test_recovery_classes_match_startup_selectors_without_narrowing_audit(self):
+        for number, action, state, outcome in (
+                ('active', 'pr.rebase', 'planned', 'not_attempted'),
+                ('terminal', 'pr.rebase', 'completed', None),
+                ('other', 'pr.merge', 'planned', 'not_attempted'),
+                ('unrecognized', 'pr.rebase', 'new_state', 'not_attempted')):
+            self.sql('INSERT INTO pull_request_action_intents VALUES(?,?,?,?,?,NULL)',
+                     (number, action, state, 'not_attempted', outcome))
+        self.sql('INSERT INTO access_grant_invocations VALUES(?,?,?,NULL)',
+                 ('null-outcome', 'completed', 'attempted'))
+        self.job(1, 'failed_terminal', error='provider_admission_denied')
+        self.job(2, 'failed_terminal')  # retired: must not be resurrected
+        self.job(3, 'new_phase', provider='unknown')
+        self.sql('UPDATE pull_requests SET forgejo_reopen_pending=1,state="closed"')
+        self.sql('INSERT INTO outbound_deliveries VALUES(1,"delivered",NULL,"retained",NULL,NULL)')
+        self.sql('INSERT INTO outbound_deliveries VALUES(2,"pending",NULL,"",NULL,NULL)')
+        entries = {e['key']: e for e in w.recovery_inventory(self.db)}
+        executing = {'pull_request_action_intents:active', 'pull_request_projection_jobs:1',
+                     'outbound_deliveries:2'}
+        self.assertNotIn('pull_request_projection_jobs:2', entries)
+        for key, entry in entries.items():
+            self.assertEqual(entry['recovery_class'], 'startup_execute' if key in executing else 'audit_only', key)
+        self.assertTrue(entries['pull_request_action_intents:terminal']['unknown_result'])
+        self.assertTrue(entries['access_grant_invocations:null-outcome']['unknown_result'])
+        review = self.review(list(entries.values()))
+        review['items'][0]['recovery_class'] = 'wrong'
+        with self.assertRaisesRegex(w.Blocked, 'class_drift'):
+            w.recovery_gate(list(entries.values()), review)
+
+    def test_projection_phase_retirement_and_claim_classification(self):
+        phases = ('queued', 'preflight', 'rebasing', 'projection_resume', 'pushing_ref',
+                  'verifying_ref', 'verifying_pr', 'ensuring_pr', 'recording_projection', 'failed_retryable')
+        for number, phase in enumerate(phases, 1):
+            self.job(number, phase)
+        self.job(11, 'new_phase')
+        self.job(12, 'new_phase', provider='unknown', trigger='forgejo_action_rebase')
+        self.job(13, 'projected')
+        self.sql('ALTER TABLE pull_request_projection_jobs ADD COLUMN success_comment_claim_token TEXT')
+        self.sql('UPDATE pull_request_projection_jobs SET success_comment_claim_token="retained" WHERE id=13')
+        entries = {e['key']: e for e in w.recovery_inventory(self.db)}
+        self.assertEqual(len(entries), 13)
+        self.assertEqual(entries['pull_request_projection_jobs:11']['recovery_class'], 'audit_only')
+        self.assertEqual(entries['pull_request_projection_jobs:13']['recovery_class'], 'audit_only')
+        for number in list(range(1, 11)) + [12]:
+            self.assertEqual(entries['pull_request_projection_jobs:' + str(number)]['recovery_class'], 'startup_execute')
+        self.sql('UPDATE pull_requests SET state="closed"')
+        entries = {e['key']: e for e in w.recovery_inventory(self.db)}
+        self.assertEqual(entries['pull_request_projection_jobs:11']['recovery_class'], 'startup_execute')
+
+    def test_outbound_recovery_classes_preserve_terminal_and_unknown_audit(self):
+        for number, status, target in ((1, 'pending', 'any'), (2, 'retry_wait', 'any'),
+                (3, 'delivering', 'multica_external_pr'), (4, 'delivering', 'legacy'),
+                (5, 'dead_letter', 'multica_external_pr'), (6, 'new_status', 'any'),
+                (7, 'delivered', 'any')):
+            self.sql('INSERT INTO outbound_deliveries VALUES(?,?,?,"owner",NULL,?)',
+                     (number, status, '2099-01-01', target))
+        entries = w.recovery_inventory(self.db)
+        self.assertEqual(len(entries), 7)
+        for entry in entries:
+            number = int(entry['key'].split(':')[1])
+            self.assertEqual(entry['recovery_class'], 'startup_execute' if number <= 3 else 'audit_only')
+
+    def test_wiki_leases_marker_and_repair_inputs_require_exact_coverage(self):
+        self.wiki_page()
+        self.wiki_task(expiry='2099-01-01')
+        self.wiki_task(2, 'embedding')  # no page/document: worker still consumes it
+        self.wiki_task(3, 'unknown-kind')  # no startup drain for this kind
+        self.sql('INSERT INTO wiki_search_documents VALUES(1,1,"page-1","old","private")')
+        self.sql('INSERT INTO wiki_search_documents VALUES(2,1,"orphan","old","private")')
+        self.wiki_task(4, 'embedding', expiry='2000-01-01')
+        self.sql('INSERT INTO wiki_repo_heads VALUES(1,0)')  # IS NOT NULL, not truthiness
+        entries = w.recovery_inventory(self.db)
+        expected = {
+            'wiki_search_projection_tasks:1': 'startup_execute',
+            'wiki_search_projection_tasks:2': 'startup_execute',
+            'wiki_search_projection_tasks:3': 'audit_only',
+            'wiki_search_projection_tasks:4': 'startup_execute',
+            'wiki_pages:1': 'startup_execute',
+            'wiki_search_documents:1': 'audit_only',
+            'wiki_search_documents:2': 'startup_execute',
+            'wiki_repo_heads:1': 'startup_execute',
+        }
+        self.assertEqual({e['key']: e['recovery_class'] for e in entries}, expected)
+        w.recovery_gate(entries, self.review(entries))
+        for entry in entries:
+            with self.subTest(missing=entry['key']):
+                review = self.review(entries)
+                review['items'] = [i for i in review['items'] if i['key'] != entry['key']]
+                with self.assertRaisesRegex(w.Blocked, 'coverage'):
+                    w.recovery_gate(entries, review)
+        self.assertNotIn('private', json.dumps(entries))
+        before = w.sha(self.db)
+        w.recovery_inventory(self.db)
+        self.assertEqual(w.sha(self.db), before)
+        review = self.review(entries)
+        self.sql('UPDATE wiki_search_projection_tasks SET lease_token="changed" WHERE id=1')
+        with self.assertRaisesRegex(w.Blocked, 'facts_drift'):
+            w.recovery_gate(w.recovery_inventory(self.db), review)
+
+    def test_wiki_repair_sql_null_deleted_and_matching_controls(self):
+        for number, revision, deleted in ((1, 'same', None), (2, 'new', None),
+                                          (3, 'new', '2000-01-01'), (4, 'new', None)):
+            self.wiki_page(number, revision, deleted)
+        for number, revision in ((1, 'same'), (2, None), (3, 'old')):
+            self.sql('INSERT INTO wiki_search_documents VALUES(?,1,?,?,NULL)',
+                     (number, 'page-' + str(number), revision))
+        self.sql('INSERT INTO wiki_repo_heads VALUES(1,NULL)')
+        entries = {e['key']: e for e in w.recovery_inventory(self.db)}
+        executing = {'wiki_pages:4', 'wiki_search_documents:3'}
+        self.assertEqual(len(entries), 8)
+        for key, entry in entries.items():
+            self.assertEqual(entry['recovery_class'], 'startup_execute' if key in executing else 'audit_only', key)
+
+    def test_wiki_full_scan_over_100_and_linked_fact_drift(self):
+        for number in range(1, 152):
+            self.wiki_page(number)
+            self.wiki_task(number, expiry='2099-01-01')
+        entries = w.recovery_inventory(self.db)
+        self.assertEqual(len(entries), 302)
+        task_key = 'wiki_search_projection_tasks:151'
+        original = next(e for e in entries if e['key'] == task_key)
+        self.sql('UPDATE wiki_pages SET body_inline=? WHERE page_id=151', (b'changed body',))
+        current = next(e for e in w.recovery_inventory(self.db) if e['key'] == task_key)
+        self.assertNotEqual(original['facts_sha256'], current['facts_sha256'])
+        review = self.review(w.recovery_inventory(self.db))
+        self.sql('UPDATE repositories SET full_name="sample/renamed"')
+        with self.assertRaisesRegex(w.Blocked, 'facts_drift'):
+            w.recovery_gate(w.recovery_inventory(self.db), review)
+        review = self.review(w.recovery_inventory(self.db))
+        self.sql('INSERT INTO labels VALUES(1,"private label")')
+        self.sql('INSERT INTO wiki_page_labels VALUES(1,"page-151",1)')
+        with self.assertRaisesRegex(w.Blocked, 'facts_drift'):
+            w.recovery_gate(w.recovery_inventory(self.db), review)
+
+    def test_wiki_marker_binds_all_pages_and_marker_drift(self):
+        self.wiki_page()
+        self.wiki_page(2)
+        self.sql('INSERT INTO wiki_repo_heads VALUES(1,42)')
+        entries = w.recovery_inventory(self.db)
+        marker = next(e for e in entries if e['key'] == 'wiki_repo_heads:1')
+        review = self.review(entries)
+        self.sql('UPDATE wiki_pages SET body_inline=? WHERE page_id=2', (b'changed',))
+        changed = w.recovery_inventory(self.db)
+        self.assertNotEqual(marker['facts_sha256'], next(
+            e['facts_sha256'] for e in changed if e['key'] == marker['key']))
+        with self.assertRaisesRegex(w.Blocked, 'facts_drift'):
+            w.recovery_gate(changed, review)
+        review = self.review(changed)
+        self.sql('UPDATE wiki_repo_heads SET reference_effects_through_changeset_id=43')
+        with self.assertRaisesRegex(w.Blocked, 'facts_drift'):
+            w.recovery_gate(w.recovery_inventory(self.db), review)
+        review = self.review(w.recovery_inventory(self.db))
+        self.sql('UPDATE wiki_repo_heads SET reference_effects_through_changeset_id=NULL')
+        with self.assertRaisesRegex(w.Blocked, 'class_drift|facts_drift'):
+            w.recovery_gate(w.recovery_inventory(self.db), review)
+
+    def test_active_intent_states_and_terminal_receipt_are_not_replayed(self):
+        states = ('planned', 'dispatching', 'dispatched', 'accepted', 'running', 'recovery_needed')
+        for state in states:
+            self.sql('INSERT INTO pull_request_action_intents VALUES(?,?,?,?,?,NULL)',
+                     (state, 'pr.rebase', state, 'not_attempted', 'not_attempted'))
+        self.sql('INSERT INTO authority_boundary_receipts VALUES("r1","private")')
+        self.sql('INSERT INTO pull_request_action_intents VALUES(?,?,?,?,?,?)',
+                 ('terminal', 'pr.rebase', 'denied', 'verified_completed', 'completed', 'r1'))
+        entries = w.recovery_inventory(self.db)
+        self.assertEqual(len(entries), 7)
+        for entry in entries:
+            self.assertEqual(entry['recovery_class'], 'audit_only' if entry['key'].endswith(':terminal')
+                             else 'startup_execute')
+        review = self.review(entries)
+        review['items'][-1].pop('recovery_class')
+        with self.assertRaisesRegex(w.Blocked, 'class_drift'):
+            w.recovery_gate(entries, review)
+        review = self.review(entries)
+        review['items'].append(dict(review['items'][0], key='wiki_pages:unreviewed-extra'))
+        with self.assertRaisesRegex(w.Blocked, 'coverage'):
+            w.recovery_gate(entries, review)
+
+    def test_wiki_missing_repository_or_label_blocks(self):
+        self.wiki_page()
+        self.sql('INSERT INTO wiki_page_labels VALUES(1,"page-1",1)')
+        with self.assertRaisesRegex(w.Blocked, 'label_missing'):
+            w.recovery_inventory(self.db)
+        self.sql('INSERT INTO labels VALUES(1,"synthetic")')
+        self.sql('DELETE FROM repositories WHERE id=1')
+        with self.assertRaisesRegex(w.Blocked, 'repository_missing'):
+            w.recovery_inventory(self.db)
+
+    def test_new_wiki_schema_missing_blocks_even_empty(self):
+        self.sql('DROP TABLE wiki_search_projection_tasks')
         with self.assertRaisesRegex(w.Blocked, 'schema_unknown'):
             w.recovery_inventory(self.db)
 
@@ -705,8 +927,6 @@ class ReviewedExecutor(unittest.TestCase):
             original_fsck(store, ['sample/project.git'])
         m.fsck = lambda store, expected=None: w.store_fsck(m, store, expected)
         m.fsck(store, ['sample/project.git'])
-        self.sql('CREATE TABLE repositories(id INTEGER PRIMARY KEY, full_name TEXT)')
-        self.sql("INSERT INTO repositories VALUES(1,'sample/project')")
         # Exact schema validation is exercised by the upstream executor tests;
         # this fixture uses the already-migrated synthetic schema.
         WindowHost, Engine = w.adapter_types(m)
@@ -768,7 +988,7 @@ class ReviewedExecutor(unittest.TestCase):
             def snapshot_db(self):
                 (self.backup / 'db').mkdir()
                 destination = self.backup / 'db/ags.sqlite'
-                with sqlite3.connect(outer.db) as src, sqlite3.connect(destination) as dst:
+                with contextlib.closing(sqlite3.connect(outer.db)) as src, contextlib.closing(sqlite3.connect(destination)) as dst:
                     src.backup(dst)
                 return {'ags.sqlite': {'sha256': w.sha(destination), 'size': destination.stat().st_size}}
 

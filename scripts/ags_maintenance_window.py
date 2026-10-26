@@ -44,9 +44,17 @@ def sha(path):
     return result.hexdigest()
 
 
+def sqlite_json(value):
+    # Wiki inline bodies are SQLite BLOBs. Preserve bytes privately, just as
+    # surrogateescape preserves historical invalid TEXT; never export this form.
+    if isinstance(value, bytes):
+        return {'sqlite_blob_hex': value.hex()}
+    raise TypeError('unsupported fingerprint value')
+
+
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
-                                     ensure_ascii=True).encode()).hexdigest()
+                                     ensure_ascii=True, default=sqlite_json).encode()).hexdigest()
 
 
 def private_file(path):
@@ -99,10 +107,24 @@ TABLE_KEYS = {
     'pull_request_action_intents': ('id', {'action', 'state', 'provider_effect_status', 'provider_outcome', 'boundary_receipt_id'}),
     'authority_boundary_receipts': ('receipt_id', {'payload'}),
     'access_grant_invocations': ('id', {'state', 'provider_attempt', 'provider_outcome'}),
-    'outbound_deliveries': ('id', {'status', 'lease_expires_at', 'lease_owner'}),
+    'outbound_deliveries': ('id', {'status', 'lease_expires_at', 'lease_owner', 'target_type'}),
+    'repositories': ('id', {'full_name'}),
+    'wiki_search_projection_tasks': ('id', {'repository_id', 'slug', 'kind', 'generation', 'revision_sha', 'label_digest', 'lease_token', 'lease_expires_at'}),
+    'wiki_pages': ('page_id', {'repository_id', 'slug', 'head_blob_sha', 'deleted_at', 'body_inline'}),
+    'wiki_search_documents': ('id', {'repository_id', 'slug', 'revision_sha'}),
+    'wiki_repo_heads': ('repository_id', {'reference_effects_through_changeset_id'}),
+    'wiki_page_labels': ('repository_id', {'slug', 'label_id'}),
+    'labels': ('id', {'name'}),
 }
 JOB_TERMINAL = {'projected', 'failed_terminal'}
 INTENT_TERMINAL = {'completed', 'denied', 'conflict', 'projection_failed'}
+# forgejo_action_intent.go: forgejoActionActiveStates + RecoverDurableActionIntents.
+INTENT_STARTUP = {'planned', 'dispatching', 'dispatched', 'accepted', 'running', 'recovery_needed'}
+# pr_projection_jobs.go: ResumePendingForgejoProjectionJobs (before Limit(100)).
+FORGEJO_STARTUP = {'queued', 'preflight', 'rebasing', 'projection_resume', 'pushing_ref',
+                   'verifying_ref', 'verifying_pr', 'ensuring_pr', 'recording_projection', 'failed_retryable'}
+STARTUP_EXECUTE = 'startup_execute'
+AUDIT_ONLY = 'audit_only'
 
 
 def recovery_inventory(path):
@@ -112,22 +134,51 @@ def recovery_inventory(path):
         for table, (key, fields) in TABLE_KEYS.items():
             columns = {row[1] for row in db.execute('PRAGMA table_info(' + table + ')')}
             require(fields | {key} <= columns, 'recovery_schema_unknown')
-            tables[table] = [dict(row) for row in db.execute('SELECT * FROM ' + table + ' ORDER BY ' + key)]
+            order = 'repository_id, slug, label_id' if table == 'wiki_page_labels' else key
+            tables[table] = [dict(row) for row in db.execute('SELECT * FROM ' + table + ' ORDER BY ' + order)]
 
-        def add(table, row, reason, unknown=False):
+        prs = {row['id']: row for row in tables['pull_requests']}
+        receipts = {row['receipt_id']: row for row in tables['authority_boundary_receipts']}
+        repos = {row['id']: row for row in tables['repositories']}
+        labels = {row['id']: row for row in tables['labels']}
+        wiki_by_repo, wiki_by_page = {}, {}
+        for table in ('wiki_pages', 'wiki_search_documents', 'wiki_repo_heads', 'wiki_page_labels'):
+            for row in tables[table]:
+                wiki_by_repo.setdefault((table, row['repository_id']), []).append(row)
+                if 'slug' in row:
+                    wiki_by_page.setdefault((table, row['repository_id'], row['slug']), []).append(row)
+
+        def add(table, row, reason, unknown=False, recovery_class=STARTUP_EXECUTE):
             key = TABLE_KEYS[table][0]
             # Bind linked PR facts and immutable receipt lineage as well as job facts.
             bound = {'row': row}
             if row.get('pull_request_id') is not None:
-                linked = [pr for pr in tables['pull_requests'] if pr['id'] == row['pull_request_id']]
-                require(len(linked) == 1, 'recovery_pr_missing')
-                bound['pr'] = linked[0]
+                linked = prs.get(row['pull_request_id'])
+                require(linked is not None, 'recovery_pr_missing')
+                bound['pr'] = linked
             receipt = row.get('boundary_receipt_id')
             if receipt:
-                linked = [r for r in tables['authority_boundary_receipts'] if r['receipt_id'] == receipt]
-                require(len(linked) == 1, 'boundary_receipt_missing')
-                bound['receipt'] = linked[0]
+                linked = receipts.get(receipt)
+                require(linked is not None, 'boundary_receipt_missing')
+                bound['receipt'] = linked
+            if table.startswith('wiki_'):
+                repo_id = row['repository_id']
+                require(repo_id in repos, 'recovery_wiki_repository_missing')
+                bound['repository'] = repos[repo_id]
+                # Repair decisions bind both sides, including absent/deleted rows.
+                # Reference recovery rebuilds the whole repo, not just one page.
+                for related in ('wiki_pages', 'wiki_search_documents', 'wiki_page_labels'):
+                    if table == 'wiki_repo_heads':
+                        bound[related] = wiki_by_repo.get((related, repo_id), [])
+                    else:
+                        bound[related] = wiki_by_page.get((related, repo_id, row['slug']), [])
+                bound['wiki_repo_heads'] = wiki_by_repo.get(('wiki_repo_heads', repo_id), [])
+                bound['labels'] = []
+                for link in bound['wiki_page_labels']:
+                    require(link['label_id'] in labels, 'recovery_wiki_label_missing')
+                    bound['labels'].append(labels[link['label_id']])
             entries.append({'key': table + ':' + str(row[key]), 'reason': reason,
+                            'recovery_class': recovery_class,
                             'facts_sha256': fingerprint(bound), 'unknown_result': unknown})
 
         for row in tables['pull_request_projection_jobs']:
@@ -136,25 +187,75 @@ def recovery_inventory(path):
             # All nonterminal providers/triggers are conservative admission candidates;
             # disabled integrations and future retry times cannot hide queued work.
             if row['phase'] not in JOB_TERMINAL or heal or row.get('success_comment_claim_token') or (row.get('success_comment_claimed_at') and not row.get('success_commented_at')):
-                add('pull_request_projection_jobs', row, 'terminal_requeue' if heal else 'projection_resume')
+                startup = (heal or (row['provider'] == 'forgejo' and row['phase'] in FORGEJO_STARTUP)
+                           or (row['provider'] == 'github' and row['trigger'] in ('github_shadow_ensure', 'github_shadow_close')
+                               and row['phase'] not in JOB_TERMINAL))
+                # The closed-PR retirement query runs before the phase-limited
+                # scheduler and can terminalize even an unrecognized phase.
+                linked_pr = prs.get(row['pull_request_id'], {})
+                startup = startup or (row['provider'] == 'forgejo' and row['trigger'] == 'pull_request_projection'
+                                      and row['phase'] not in JOB_TERMINAL
+                                      and (linked_pr.get('state') == 'closed' or linked_pr.get('merged') == 1))
+                # Durable recovery also terminalizes historical unbound action jobs.
+                startup = startup or (row['trigger'] == 'forgejo_action_rebase'
+                                      and not row.get('action_intent_id') and row['phase'] not in JOB_TERMINAL)
+                add('pull_request_projection_jobs', row, 'terminal_requeue' if heal else 'projection_resume',
+                    recovery_class=STARTUP_EXECUTE if startup else AUDIT_ONLY)
         for row in tables['pull_requests']:
             # Old schema legitimately lacks these three additive lifecycle columns.
             if row.get('forgejo_reopen_pending'):
-                add('pull_requests', row, 'reopen_pending')
+                add('pull_requests', row, 'reopen_pending', recovery_class=STARTUP_EXECUTE
+                    if row['state'] == 'open' and row['merged'] == 0 else AUDIT_ONLY)
         for row in tables['pull_request_action_intents']:
             unknown = (row['provider_effect_status'] not in ('', 'not_attempted', 'verified_completed')
                        or row['provider_outcome'] not in ('', 'not_attempted', 'verified_completed', 'completed', 'confirmed', 'reconciled_after_error', 'source_success', 'not_applicable'))
             if row['state'] not in INTENT_TERMINAL or unknown or row.get('boundary_receipt_id'):
-                add('pull_request_action_intents', row, 'intent_recovery', unknown)
+                add('pull_request_action_intents', row, 'intent_recovery', unknown,
+                    STARTUP_EXECUTE if row['action'] == 'pr.rebase' and row['state'] in INTENT_STARTUP else AUDIT_ONLY)
         for row in tables['access_grant_invocations']:
             known = row['provider_outcome'] in ('not_attempted', 'not_applicable', 'confirmed',
                                                'reconciled_after_error', 'source_success')
             if row['state'] not in INTENT_TERMINAL or not known:
-                add('access_grant_invocations', row, 'invocation_outcome', not known)
+                add('access_grant_invocations', row, 'invocation_outcome', not known, AUDIT_ONLY)
         for row in tables['outbound_deliveries']:
             leased = bool(row['lease_owner']) or row['lease_expires_at'] is not None
             if row['status'] != 'delivered' or leased:
-                add('outbound_deliveries', row, 'delivery_or_lease', leased or row['status'] == 'delivering')
+                startup = (row['status'] in ('pending', 'retry_wait')
+                           or (row['status'] == 'delivering' and row['target_type'] == 'multica_external_pr'))
+                add('outbound_deliveries', row, 'delivery_or_lease', leased or row['status'] == 'delivering',
+                    STARTUP_EXECUTE if startup else AUDIT_ONLY)
+
+        # Match repairWikiSearchProjectionTasks SQL exactly, notably SQL NULL
+        # semantics for <>. These reads share the same transaction as all facts.
+        repair_pages = {row[0] for row in db.execute('''
+            SELECT pages.page_id FROM wiki_pages AS pages
+            LEFT JOIN wiki_search_documents AS docs
+              ON docs.repository_id = pages.repository_id AND docs.slug = pages.slug
+            WHERE pages.deleted_at IS NULL
+              AND (docs.id IS NULL OR docs.revision_sha <> pages.head_blob_sha)
+        ''')}
+        stale_docs = {row[0] for row in db.execute('''
+            SELECT docs.id FROM wiki_search_documents AS docs
+            LEFT JOIN wiki_pages AS pages
+              ON pages.repository_id = docs.repository_id AND pages.slug = docs.slug
+              AND pages.deleted_at IS NULL
+            WHERE pages.page_id IS NULL
+        ''')}
+        for row in tables['wiki_search_projection_tasks']:
+            # Both drains reclaim expired leases. A future lease delays work;
+            # it does not exempt it from window admission. Unknown kinds have
+            # no drain but must remain visible for audit.
+            add('wiki_search_projection_tasks', row, 'wiki_search_task_or_lease',
+                recovery_class=STARTUP_EXECUTE if row['kind'] in ('lexical', 'embedding') else AUDIT_ONLY)
+        for row in tables['wiki_pages']:
+            add('wiki_pages', row, 'wiki_search_repair_input',
+                recovery_class=STARTUP_EXECUTE if row['page_id'] in repair_pages else AUDIT_ONLY)
+        for row in tables['wiki_search_documents']:
+            add('wiki_search_documents', row, 'wiki_search_stale_document' if row['id'] in stale_docs else 'wiki_search_repair_input',
+                recovery_class=STARTUP_EXECUTE if row['id'] in stale_docs else AUDIT_ONLY)
+        for row in tables['wiki_repo_heads']:
+            add('wiki_repo_heads', row, 'wiki_reference_marker', recovery_class=STARTUP_EXECUTE
+                if row['reference_effects_through_changeset_id'] is not None else AUDIT_ONLY)
     return sorted(entries, key=lambda entry: entry['key'])
 
 
@@ -166,6 +267,8 @@ def recovery_gate(entries, review):
     by_key = {item['key']: item for item in items}
     for entry in entries:
         item = by_key[entry['key']]
+        require(entry.get('recovery_class') in (STARTUP_EXECUTE, AUDIT_ONLY)
+                and item.get('recovery_class') == entry['recovery_class'], 'recovery_class_drift')
         require(item.get('facts_sha256') == entry['facts_sha256'], 'recovery_facts_drift')
         require(item.get('decision') == 'allow_exact_resume' and item.get('reviewer')
                 and re.fullmatch(r'[0-9a-f]{64}', item.get('expected_effect_sha256', ''))

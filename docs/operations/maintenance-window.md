@@ -146,11 +146,71 @@ startup scheduler's batch/time limits:
   and unknown invocation outcomes remain in scope even when marked completed.
 - Every unfinished/unknown delivery status and every delivery lease, including a
   delivered row with a retained lease owner or expiry.
+- All Wiki lexical/embedding projection tasks, including active, expired and
+  future leases, unknown task kinds, generations and revision/label inputs.
+- All Wiki pages and search documents used by startup search repair, including
+  matching/deleted controls and missing-page documents. Repair can create a new
+  task even when the task table was empty before startup.
+- Wiki repository heads, including every non-NULL reference-effects marker
+  (zero is not NULL). Reference recovery rebuilds all live pages for that repo.
+
+Each entry has a required `recovery_class`:
+
+| Class | Meaning and source predicate |
+| --- | --- |
+| `startup_execute` | Startup recovery/its recurring worker can select this object, including local terminalization, repair and deferred retry/lease reclaim. It is not a promise that the first batch immediately executes an external write. |
+| `audit_only` | No corresponding startup recovery selector executes this object in the pinned source, but its retained outcome, receipt, lease or repair input still requires review. This is not permission to discard it or skip the gate. |
+
+Classification follows these source selectors, independently of whether a
+particular deployment enabled an integration, dispatcher or embedding provider:
+
+- `ResumePendingForgejoProjectionJobs` selects the ten listed nonterminal phases,
+  heals only generic Forgejo `failed_terminal / provider_admission_denied`, and
+  can terminalize closed generic jobs. Future retries and work beyond its first
+  100 rows remain admitted. GitHub resume selects nonterminal
+  `github_shadow_ensure` / `github_shadow_close` jobs. Other nonterminal jobs and
+  terminal success-comment claims remain `audit_only`, not silently omitted.
+- A reopen marker executes only for an open, unmerged PR. Other pending markers
+  remain audit-only.
+- `RecoverDurableActionIntents` selects only `action = pr.rebase` in `planned`,
+  `dispatching`, `dispatched`, `accepted`, `running`, `recovery_needed`. It may
+  deny expired/ambiguous intents rather than replay them; it also terminalizes
+  nonterminal historical rebase jobs with no intent binding. Terminal intents,
+  other actions/states, and Access Grant invocations are audit-only. Unknown or
+  NULL provider outcomes and boundary receipt lineage retain the existing full
+  review scope; unknown is not a startup replay instruction.
+- Outbound `pending`, `retry_wait`, and `delivering / multica_external_pr` are
+  worker candidates, including deferred retry/lease expiry. Other statuses and
+  retained terminal leases are audit-only for delivery recovery.
+- `server/wiki_gc.go` starts both Wiki recovery workers.
+  `repairWikiSearchProjectionTasks` queues lexical repair for live pages with no
+  document or SQL `docs.revision_sha <> pages.head_blob_sha`, and documents with
+  no live page. SQL NULL comparison semantics are preserved, not replaced with
+  Python inequality. Other page/document inputs remain audit-only.
+  `claimWikiSearchProjectionTask` drains only `lexical` and `embedding`, with
+  `lease_expires_at IS NULL OR lease_expires_at < now`; unexpired leases remain
+  startup-executable deferred work, while unknown kinds are audit-only.
+  `recoverPendingWikiReferenceEffects` selects heads with a non-NULL marker,
+  joined to repositories; a missing repository blocks inventory. NULL-marker
+  heads remain audit-only inputs, not fabricated reference work.
+
+This is the durable recovery/admission set, not a complete list of every startup
+side effect. Seed, migrations, retirement, catalog/outbound GC, Git maintenance,
+provider watchers, configuration and Git/blob-store restore consistency retain
+separate preflight/backup/observation requirements. In particular, `audit_only`
+does not assert that an unrelated retention worker can never delete a row.
 
 Required tables/fields must exist; unknown schema blocks. Old databases may
 lack the three additive PR lifecycle columns. Linked PR facts and referenced
 immutable boundary receipts are included in per-object fingerprints; missing
-links block. Whole rows are hashed without exporting payloads, endpoints,
+links block. Wiki fingerprints bind the repository, head, both sides of the
+page/document join (including absence/deletion), page-label links and referenced
+labels. Reference-marker fingerprints bind all pages/documents/labels in that
+repository so body or membership drift cannot reuse its approval. Wiki inline
+BLOB bodies are privately encoded as hexadecimal for hashing; no body bytes or
+lease tokens are exported. Git-backed body hashes remain references: inventory
+does not replace independent blob/Git restore validation. Whole rows are hashed
+without exporting payloads, endpoints,
 receipt bodies, labels or free-form errors. Historical SQLite TEXT is decoded
 with UTF-8 `surrogateescape`, never replacement or ignored bytes. Its private
 canonical JSON uses ASCII escapes (`ensure_ascii=True`); parsing that JSON and
@@ -162,18 +222,27 @@ in-scope row or linked fact invalidates its review fingerprint. Terminal rows
 are still scanned before filtering, even when they need no recovery admission.
 No error text or reversible rendering is added to inventory output.
 The output contains only object
-keys, reason, a facts digest and an unknown-result flag. It is still private.
-The source predicates are in `pr_projection_jobs.go`, `github_projection_jobs.go`
-and `forgejo_action_intent.go`; a scheduler change requires a new adapter review.
+keys, reason, recovery class, a facts digest and an unknown-result flag. It is
+still private.
+The source predicates are in `pr_projection_jobs.go`, `github_projection_jobs.go`,
+`forgejo_action_intent.go`, `outbound_delivery.go`,
+`wiki_search_projection.go` and `wiki_reference_recovery.go`; a scheduler change
+requires a new adapter review.
 
 Each convergence gate requires `recovery_review: {items: [...]}`. Empty inventory
 requires an empty list. A nonempty list must match every current object key
-exactly once. Each item binds `facts_sha256`, `reviewer`,
+exactly once, including audit-only rows and every Wiki category. Old six-table
+reviews are insufficient. Each item binds the matching `recovery_class`,
+`facts_sha256`, `reviewer`,
 `decision: allow_exact_resume`, an `expected_effect_sha256`, integer
 `unknown_external_results: 0`, and `readback` plus `exact_resume_test` proofs.
 The reviewer must establish exact permission/generation/ref/PR, expected effect,
 idempotency and external acceptance readback, including resolved unknown DB
-flags. Boolean risk acceptance alone does not pass. Changed attempt, head,
+flags. For audit-only rows the expected effect and exact-resume proof must
+establish a no-op for that object, not authorize a new provider write. Class
+changes, missing categories, extra keys and duplicate keys block; neither class
+weakens the required proofs. Boolean risk acceptance alone does not pass.
+Changed attempt, head,
 linked PR, lease or receipt invalidates the fingerprint and requires review.
 An object disposed by another authorized procedure disappears from the inventory;
 do not retain a stale approval or use this tool to perform that disposition.
