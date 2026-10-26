@@ -64,9 +64,10 @@ func (l startupDDLInterruption) Trace(ctx context.Context, begin time.Time, fc f
 }
 
 type startupProcess struct {
-	cmd  *exec.Cmd
-	done chan error
-	log  string
+	cmd    *exec.Cmd
+	done   chan error
+	exited chan struct{}
+	log    string
 }
 
 func startDependencyProcess(t *testing.T, root, dsn, port, mode string) *startupProcess {
@@ -79,7 +80,7 @@ func startDependencyProcess(t *testing.T, root, dsn, port, mode string) *startup
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &startupProcess{cmd: exec.Command(executable, "-test.run=^TestStartupDependencyProcess$", "-test.v"), done: make(chan error, 1), log: logFile.Name()}
+	p := &startupProcess{cmd: exec.Command(executable, "-test.run=^TestStartupDependencyProcess$", "-test.v"), done: make(chan error, 1), exited: make(chan struct{}), log: logFile.Name()}
 	p.cmd.Dir = root
 	p.cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"), "HOME=" + root, "TMPDIR=" + root,
@@ -95,10 +96,15 @@ func startDependencyProcess(t *testing.T, root, dsn, port, mode string) *startup
 		_ = logFile.Close()
 		t.Fatal(err)
 	}
-	go func() { p.done <- p.cmd.Wait(); _ = logFile.Close() }()
+	go func() { p.done <- p.cmd.Wait(); _ = logFile.Close(); close(p.exited) }()
 	t.Cleanup(func() {
 		// Kill is only a cleanup fallback for this test-owned subprocess.
 		_ = p.cmd.Process.Kill()
+		select {
+		case <-p.exited:
+		case <-time.After(5 * time.Second):
+			t.Error("cleanup did not reap startup subprocess within 5 seconds")
+		}
 	})
 	return p
 }
@@ -209,7 +215,7 @@ func runHealthyStartupCycles(t *testing.T, root, dsn string) {
 				t.Fatal(err)
 			}
 		}
-		if users == 0 || tokens == 0 || pending != 0 {
+		if users != 2 || tokens != 1 || pending != 0 {
 			t.Fatalf("unexpected startup facts users=%d tokens=%d jobs=%d", users, tokens, pending)
 		}
 		if cycle > 0 && (users != previousUsers || tokens != previousTokens) {
