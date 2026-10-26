@@ -62,6 +62,7 @@ func TestProjectionDiagnosticSSHInventoryFailureEvidence(t *testing.T) {
 	}{
 		{401, "sentinel-body", "http_401", "http_status", 401},
 		{403, "sentinel-body", "http_403", "http_status", 403},
+		{404, "sentinel-body", "http_404", "http_status", 404},
 		{503, "sentinel-body", "http_status", "http_status", 503},
 		{200, "invalid sentinel-body", "invalid_response", "response_validation", 0},
 		{200, "[]", "key_binding_not_found", "key_inventory", 0},
@@ -70,18 +71,24 @@ func TestProjectionDiagnosticSSHInventoryFailureEvidence(t *testing.T) {
 			var reads atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				reads.Add(1)
-				if r.Method != http.MethodGet || r.URL.Path != "/api/v1/users/selected-owner/keys" {
-					t.Errorf("unexpected probe: %s %s", r.Method, r.URL.Path)
+				if r.Method != http.MethodGet || r.URL.Path != "/sentinel-private-url/api/v1/users/selected-owner/keys" || r.URL.Query().Get("limit") != "50" || r.URL.Query().Get("page") != "1" || r.Header.Get("Sudo") != "" {
+					t.Error("unexpected inventory probe")
 				}
 				w.WriteHeader(tc.status)
 				fmt.Fprint(w, tc.body)
 			}))
 			defer server.Close()
-			p := selectedSSHPrincipal(context.Background(), NewHTTPClient(server.URL, ""), managedKey{Login: "selected-owner"})
+			p := selectedSSHPrincipal(context.Background(), NewHTTPClient(server.URL+"/sentinel-private-url", "sentinel-token"), managedKey{Login: "selected-owner"})
 			assertPrincipalProbeFailure(t, p, tc.reason, tc.source, tc.measured)
-			b, _ := json.Marshal(p)
-			if strings.Contains(string(b), "sentinel-body") || reads.Load() != 1 {
-				t.Fatal("unsafe evidence or fallback probe")
+			d := projectionDiagnostic(context.Background(), PushRequest{}, p, nil)
+			b, err := json.Marshal(d)
+			if err != nil || d.Category != "none" || d.Principal.Probe != p.Probe || reads.Load() != 1 {
+				t.Fatal("lost evidence or fallback probe")
+			}
+			for _, secret := range []string{"sentinel-body", "sentinel-private-url", "sentinel-token", server.URL} {
+				if strings.Contains(string(b), secret) {
+					t.Fatal("diagnostic disclosed private provider data")
+				}
 			}
 		})
 	}
