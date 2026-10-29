@@ -2,8 +2,8 @@
 /**
  * Maintainer release entry for the downstream AGS fork.
  *
- * Tag mutation is disabled while the v2 tag destination and real runtime-binding
- * evidence remain unapproved. Status and pure version-decision helpers remain.
+ * Tag mutation stays disabled. A future tag may name only a control commit whose
+ * release.yml is the reject-only workflow. Status and version helpers remain.
  *
  * Usage:
  *   bun scripts/release.ts status
@@ -64,7 +64,7 @@ async function main(): Promise<void> {
 
   console.log(formatPlan(plan, options));
   verifyExactCI(plan.sha);
-  ensureTagDrivenWorkflow(plan.sha);
+  ensureControlTagTarget(plan.sha);
   ensureTagAvailable(plan.tag);
   if (plan.fromRc !== null) verifyPromotableRc(plan.fromRc, plan.sha);
 
@@ -137,7 +137,8 @@ stable:
   -rcN. The RC remains immutable.
 
 rc and stable currently refuse before repository/network access or tag mutation.
-The v2 tag destination and real separated-control evidence require separate
+A future tag may name only a control commit whose release.yml is the reject-only
+workflow. It must not name a runtime commit. Publication still requires separate
 approval. Status is read-only. release-control.yml builds candidates only.`;
 }
 
@@ -292,11 +293,30 @@ function verifyExactCI(sha: string): void {
   }
 }
 
-function ensureTagDrivenWorkflow(sha: string): void {
-  const text = run("git", ["show", `${sha}:${RELEASE_WORKFLOW}`], { quiet: true });
-  if (!text.includes("tags:") || !text.includes("fork-*") || text.includes("workflow_dispatch:")) {
-    fail(`Source ${sha} does not contain the accepted tag-driven Release workflow.`);
+export function legacyTagWorkflowRejection(workflowText: string): string | null {
+  const trigger = workflowText.match(/^on:\n(?:(?:[ \t]+.*|\s*)\n)*/m)?.[0] ?? "";
+  const jobs = workflowText.split(/^jobs:\n/m)[1] ?? "";
+  const jobNames = [...jobs.matchAll(/^  ([a-z_]+):/gm)].map((match) => match[1]);
+  const retired = workflowText.includes("ubuntu-24.04")
+    || workflowText.includes("contents: write")
+    || workflowText.includes("attestations: write")
+    || workflowText.includes("release.py publish")
+    || workflowText.includes("release.py build");
+  const rejectOnly = /^on:\n  push:\n    tags:\n      - 'fork-\*'\n/.test(trigger)
+    && !/^\s+workflow_dispatch:/m.test(workflowText)
+    && jobNames.length === 1 && jobNames[0] === "reject"
+    && jobs.includes("exit 65")
+    && !retired;
+  if (!rejectOnly) {
+    return "release_legacy_tag_refused: tag target is not a control commit with the reject-only release workflow";
   }
+  return null;
+}
+
+function ensureControlTagTarget(sha: string): void {
+  const text = run("git", ["show", `${sha}:${RELEASE_WORKFLOW}`], { quiet: true });
+  const rejection = legacyTagWorkflowRejection(text);
+  if (rejection !== null) fail(rejection);
 }
 
 function ensureTagAvailable(tag: string): void {

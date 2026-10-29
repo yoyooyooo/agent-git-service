@@ -39,7 +39,9 @@ part of the default public CI set.
 It builds exact runtime candidates on Ubuntu 22.04 and macOS 15 using Go 1.26.8,
 then retains a custom runtime-binding attestation under the control SHA. It does
 not publish a Release. `release.yml` now rejects tag publication on this control
-line; historical tags still select their historical workflow files.
+line. `scripts/release.ts` also refuses a future tag whose target commit does not
+contain that reject-only workflow. Historical tags still select their historical
+workflow files; this repository cannot stop those tags from being created.
 
 Fork CI runs `fork/scripts/test_release.py` and
 `fork/scripts/test_release_binding.py` for manifest v2, ABI v2, disabled tag
