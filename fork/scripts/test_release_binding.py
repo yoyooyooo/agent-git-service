@@ -228,6 +228,12 @@ class BindingTests(unittest.TestCase):
         finally:
             os.umask(previous_umask)
 
+    def test_macho_minimum_is_checked_not_just_declared(self):
+        release.darwin_minimum('cmd LC_BUILD_VERSION\n minos 15.0\n sdk 15.5\n')
+        for text in ('minos 14.0', 'minos 16.0', 'sdk 15.0', ''):
+            with self.subTest(text=text),self.assertRaises(ValueError):
+                release.darwin_minimum(text)
+
     def test_runtime_build_rejects_wrong_revision_tree_before_tools_or_staging(self):
         for revision, tree in ((verify.RUNTIME_REVISION[:8], verify.RUNTIME_TREE),
                                (verify.RUNTIME_REVISION, 'f'*40),
