@@ -1,0 +1,94 @@
+name: Release control (candidate only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_revision:
+        description: Full lowercase 40-hex runtime commit
+        required: true
+        type: string
+      runtime_tree:
+        description: Expected full lowercase 40-hex runtime tree
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-control-${{ github.run_id }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOTOOLCHAIN: local
+  GOENV: 'off'
+  GOWORK: 'off'
+  PYTHONDONTWRITEBYTECODE: '1'
+  RUNTIME_REVISION: ${{ inputs.runtime_revision }}
+  RUNTIME_TREE: ${{ inputs.runtime_tree }}
+
+jobs:
+  build:
+    if: github.repository_id == '1384519373' && github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: linux_amd64
+          - runner: macos-15
+            target: darwin_arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate and fetch exact runtime without checking it out
+        run: |
+          [[ "$RUNTIME_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RUNTIME_TREE" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_SHA" != "$RUNTIME_REVISION" ]]
+          git -c core.hooksPath=/dev/null fetch --no-tags origin "$RUNTIME_REVISION"
+          [[ "$(git --no-replace-objects rev-parse "$RUNTIME_REVISION^{commit}")" == "$RUNTIME_REVISION" ]]
+          [[ "$(git --no-replace-objects rev-parse "$RUNTIME_REVISION^{tree}")" == "$RUNTIME_TREE" ]]
+          [[ "$(cat .go-version)" == '1.26.8' ]]
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: .go-version
+          cache-dependency-path: go.sum
+      - name: Build exact runtime using only the control builder
+        run: |
+          python3 fork/scripts/release.py build-runtime \
+            --runtime-revision "$RUNTIME_REVISION" --runtime-tree "$RUNTIME_TREE" \
+            --output "$RUNNER_TEMP/ags-release-output"
+      - name: Attest runtime binding under this invocation's control identity
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ runner.temp }}/ags-release-output/*.tar.gz
+          predicate-type: https://github.com/yoyooyooo/agent-git-service/attestations/runtime-binding/v1
+          predicate-path: ${{ runner.temp }}/ags-release-output/runtime-predicate.json
+      - name: Retain real bundle produced by the action
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "$BUNDLE_PATH" "$RUNNER_TEMP/ags-release-output/attestation.sigstore.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-candidate-${{ matrix.target }}
+          path: ${{ runner.temp }}/ags-release-output/*
+          if-no-files-found: error
+          retention-days: 7
+
+# No tag allocation or Release publication: tag destination and real evidence
+# require separate approval. separated-control-v1 remains disabled in consumers.

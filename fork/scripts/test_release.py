@@ -54,12 +54,13 @@ class ReleaseTests(unittest.TestCase):
             raise AssertionError(path)
         return api
 
-    def test_release_gate_requires_preexisting_exact_tag_complete_ci_and_unused_release(self):
-        def fake_git(*args): return TREE if '^{tree}' in args[-1] else SOURCE
-        with mock.patch.object(release,'git',side_effect=fake_git),mock.patch.dict(os.environ,{},clear=True):
-            with mock.patch.object(release,'api',side_effect=self.gate_api()): self.assertEqual(release.gate(VER,SOURCE)['source'],SOURCE)
-            for options in ({'bad_sha':True},{'skipped':True},{'incomplete':True},{'existing_release':True},{'tag_missing':True},{'tag_wrong':True}):
-                with mock.patch.object(release,'api',side_effect=self.gate_api(**options)),self.assertRaises(ValueError): release.gate(VER,SOURCE)
+    def test_tag_paths_fail_before_any_network_or_write(self):
+        with mock.patch.object(release,'api',side_effect=AssertionError('no network')),mock.patch.object(release,'run',side_effect=AssertionError('no write')):
+            for action in (lambda:release.gate(VER,SOURCE),lambda:release.publish(VER,SOURCE,'/unused'),
+                           lambda:release.recover_draft(VER,SOURCE,'/unused',123),
+                           lambda:release.finish_draft(VER,SOURCE,123,[]),lambda:release.build(VER,'/unused')):
+                with self.assertRaisesRegex(ValueError,'release_source_binding_unverified'):
+                    action()
 
     def make_bundle(self,root,target='darwin_arm64',extra=None,go_version=PINNED_GO,diagnostics_verified=True):
         binaries={};contents={}
@@ -68,9 +69,9 @@ class ReleaseTests(unittest.TestCase):
             raw=('synthetic-'+command).encode();contents['bin/'+command]=raw
             identity={'schema':'ags.build.v1','command':command,'version':VER,'revision':SOURCE,'tree':TREE,'goos':os_name,'goarch':arch,'go_version':go_version}
             binaries[command]={'sha256':hashlib.sha256(raw).hexdigest(),'size':len(raw),'identity':identity,'cgo_enabled':command=='gh-server'}
-        info={'schema':'ags.release.v1','repository':release.REPOSITORY,'repository_id':release.REPOSITORY_ID,'revision':SOURCE,'tree':TREE,'version':VER,'target':target,'binaries':binaries,'smoke':{'primary_readiness':True,'sqlite':True,'edge_liveness':True,'edge_build_identity':True,'clean_shutdown':True}}
+        info={'schema':installer.MANIFEST_SCHEMA,'abi':installer.abi_for(target),'toolchain':{'go_version':'go1.26.8','pin_path':'.go-version'},'repository':release.REPOSITORY,'repository_id':release.REPOSITORY_ID,'revision':SOURCE,'tree':TREE,'version':VER,'target':target,'binaries':binaries,'smoke':{'primary_readiness':True,'sqlite':True,'edge_liveness':True,'edge_build_identity':True,'clean_shutdown':True}}
         if not diagnostics_verified: info['smoke'].pop('edge_build_identity')
-        contents['LICENSE']=b'Synthetic fixture license';contents['build-info.json']=json.dumps(info).encode()
+        contents['LICENSE']=b'Synthetic fixture license';contents['NOTICE']=b'Synthetic attribution';contents['build-info.json']=json.dumps(info).encode()
         bundle=root/('ags-'+VER+'-'+target+'.tar.gz')
         with tarfile.open(bundle,'w:gz') as tf:
             for name,data in contents.items():
@@ -85,7 +86,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_all_assets_are_exact_and_no_archive_path_escape_or_links(self):
         with tempfile.TemporaryDirectory() as directory,mock.patch.object(release,'git',side_effect=asset_git):
-            root=Path(directory)
+            root=Path(directory)/'private';root.mkdir()
             self.make_bundle(root);self.make_bundle(root,'linux_amd64')
             assets,lines=release.check_assets(root,VER,SOURCE)
             self.assertEqual((len(assets),len(lines)),(4,2))
@@ -97,33 +98,48 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaises(ValueError): installer.inspect_bundle(archive,VER,SOURCE,'darwin_arm64')
                 self.assertFalse((root.parent/'outside').exists())
 
-    def test_verified_assets_include_exact_source_installer_bootstrap(self):
-        bootstrap=b'#!/usr/bin/env bash\necho synthetic-bootstrap\n'
-        def fake_git(*args):
-            if args[0]=='show' and args[-1].endswith(':.go-version'): return PINNED_GO.removeprefix('go')
-            if args[0]=='ls-tree': return '100755 blob deadbeef\tscripts/install.sh'
-            return TREE
-        def fake_run(args,**kwargs):
-            if args[:3]==['git','--no-replace-objects','show'] and args[-1]==SOURCE+':scripts/install.sh':
-                return bootstrap
-            if args[:3]==['gh','attestation','verify']:
-                return b''
-            raise AssertionError(args)
-        with tempfile.TemporaryDirectory() as directory,mock.patch.object(release,'git',side_effect=fake_git),mock.patch.object(release,'run',side_effect=fake_run):
-            root=Path(directory)
-            self.make_bundle(root); self.make_bundle(root,'linux_amd64')
-            assets=release.verified_assets(root,VER,SOURCE)
-            self.assertIn('install.sh',{p.name for p in assets})
-            self.assertEqual((root/'install.sh').read_bytes(),bootstrap)
-            self.assertEqual((root/'install.sh').stat().st_mode & 0o777,0o755)
-            sums=(root/'SHA256SUMS').read_text().splitlines()
-            self.assertIn(hashlib.sha256(bootstrap).hexdigest()+'  install.sh',sums)
+    def test_legacy_asset_verification_does_not_reuse_v1_signer_for_v2(self):
+        with mock.patch.object(release,'run',side_effect=AssertionError('no legacy signer')):
+            with self.assertRaisesRegex(ValueError,'binding_unverified'):
+                release.verified_assets('/unused',VER,SOURCE)
 
     def test_download_manifest_source_and_platform_are_not_just_labels(self):
         with tempfile.TemporaryDirectory() as directory:
             archive=self.make_bundle(Path(directory))
             for version,source,target in ((VER,'c'*40,'darwin_arm64'),(VER,SOURCE,'linux_amd64'),('fork-20260924.2',SOURCE,'darwin_arm64')):
                 with self.assertRaises(ValueError):installer.inspect_bundle(archive,version,source,target)
+
+    def test_legacy_v1_is_read_only_history_not_a_v2_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            archive=self.make_bundle(root)
+            info=json.loads((root/'build-info-darwin_arm64.json').read_text())
+            installer.validate_manifest_contract(info,'darwin_arm64')
+            with self.assertRaisesRegex(installer.SourceBindingUnverified,'binding_unverified'):
+                installer.require_installable_manifest(info)
+            old={**info,'schema':installer.LEGACY_MANIFEST_SCHEMA}
+            with self.assertRaisesRegex(ValueError,'manifest_invalid'):
+                installer.validate_manifest_contract(old,'darwin_arm64',allow_legacy=True)
+            old.pop('abi');old.pop('toolchain')
+            installer.validate_manifest_contract(old,'darwin_arm64',allow_legacy=True)
+            installer.require_installable_manifest(old)
+            with self.assertRaisesRegex(ValueError,'manifest_invalid'):
+                installer.validate_manifest_contract(old,'darwin_arm64')
+
+    def test_v2_consumer_rejects_incompatible_linux_and_cgo_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);self.make_bundle(root,'linux_amd64')
+            info=json.loads((root/'build-info-linux_amd64.json').read_text())
+            installer.validate_manifest_contract(info,'linux_amd64')
+            import copy
+            for change in ('24.04','2.39','cgo','schema'):
+                bad=copy.deepcopy(info)
+                if change=='24.04': bad['abi']['build_distribution_version']=change
+                elif change=='2.39': bad['abi']['minimum_libc']=change
+                elif change=='cgo': bad['binaries']['gh-server']['cgo_enabled']=False
+                else: bad['abi']['schema']='ags.abi.v1'
+                with self.subTest(change=change),self.assertRaises(ValueError):
+                    installer.validate_manifest_contract(bad,'linux_amd64')
 
     def test_draft_lookup_covers_unpublished_version_without_tag(self):
         draft={'id':123,'tag_name':VER,'target_commitish':SOURCE,'draft':True,'immutable':False}
@@ -136,48 +152,6 @@ class ReleaseTests(unittest.TestCase):
         for drift in ({'target_commitish':'main'},{'id':124},{'draft':False},{'tag_name':'other'}):
             with self.assertRaises(ValueError):release.require_draft({**draft,**drift},VER,SOURCE,123)
 
-    def test_numeric_draft_finish_requires_preexisting_exact_tag_and_never_reuploads(self):
-        with tempfile.TemporaryDirectory() as directory:
-            asset=Path(directory)/'fixture';asset.write_bytes(b'release-fixture')
-            row={'name':asset.name,'size':asset.stat().st_size,'digest':'sha256:'+release.digest(asset),'state':'uploaded'}
-            for case in ('missing-tag','existing-exact-tag','wrong-tag','asset-drift'):
-                state={'published':False,'writes':[]}
-                def api(path,method='GET',fields=(),missing=False,**kwargs):
-                    if '/git/ref/tags/' in path:
-                        if case=='missing-tag': return None
-                        return {'object':{'type':'commit','sha':'c'*40 if case=='wrong-tag' else SOURCE}}
-                    if path.endswith('/releases/123'):
-                        if method=='PATCH':
-                            self.assertEqual(dict(fields),{'draft':False,'make_latest':'false'})
-                            state['published']=True;state['writes'].append('publish')
-                        changed={**row,'digest':'sha256:'+'0'*64} if case=='asset-drift' else row
-                        return {'id':123,'tag_name':VER,'target_commitish':SOURCE,'draft':not state['published'],'immutable':state['published'],'assets':[changed],'html_url':'https://example.test/release'}
-                    raise AssertionError(path)
-                with mock.patch.object(release,'api',side_effect=api),mock.patch.object(release,'run',side_effect=AssertionError('no upload or command replay during finish')):
-                    if case in ('missing-tag','wrong-tag','asset-drift'):
-                        with self.assertRaises(ValueError):release.finish_draft(VER,SOURCE,123,[asset])
-                        self.assertNotIn('publish',state['writes'])
-                    else:
-                        self.assertTrue(release.finish_draft(VER,SOURCE,123,[asset])['immutable'])
-                        self.assertEqual(state['writes'],['publish'])
-
-    def test_stable_publication_marks_release_latest(self):
-        stable='fork-20260924.1'
-        with tempfile.TemporaryDirectory() as directory:
-            asset=Path(directory)/'fixture';asset.write_bytes(b'release-fixture')
-            row={'name':asset.name,'size':asset.stat().st_size,'digest':'sha256:'+release.digest(asset),'state':'uploaded'}
-            state={'published':False,'make_latest':None}
-            def api(path,method='GET',fields=(),**kwargs):
-                if '/git/ref/tags/' in path:return {'object':{'type':'commit','sha':SOURCE}}
-                if path.endswith('/releases/123'):
-                    if method=='PATCH':
-                        state['make_latest']=dict(fields)['make_latest'];state['published']=True
-                    return {'id':123,'tag_name':stable,'target_commitish':SOURCE,'draft':not state['published'],'immutable':state['published'],'assets':[row],'html_url':'https://example.test/stable'}
-                raise AssertionError(path)
-            with mock.patch.object(release,'api',side_effect=api),mock.patch.object(release,'run',side_effect=AssertionError('no command replay during finish')):
-                release.finish_draft(stable,SOURCE,123,[asset])
-            self.assertEqual(state['make_latest'],'true')
-
     def test_toolchain_pin_is_exact_and_does_not_accept_aliases(self):
         for raw in ('1.26.8', '1.27.1'):
             with mock.patch.object(release,'git',return_value=raw):
@@ -189,11 +163,11 @@ class ReleaseTests(unittest.TestCase):
     def test_build_rejects_wrong_toolchain_before_staging_or_building(self):
         def source_git(*args):
             if args[0]=='show': return PINNED_GO.removeprefix('go')
-            return TREE if args[-1].endswith('^{tree}') else SOURCE
-        with tempfile.TemporaryDirectory() as directory,mock.patch.object(release,'git',side_effect=source_git),mock.patch.object(release.platform,'system',return_value='Darwin'),mock.patch.object(release.platform,'machine',return_value='arm64'),mock.patch.object(release,'run',return_value=b'go1.25.0\n') as runner:
+            return TREE if args[-1].endswith('^{tree}') else ('c'*40 if args==('rev-parse','HEAD') else SOURCE)
+        with tempfile.TemporaryDirectory() as directory,mock.patch.object(release,'git',side_effect=source_git),mock.patch.object(release.platform,'system',return_value='Darwin'),mock.patch.object(release.platform,'machine',return_value='arm64'),mock.patch.object(release.platform,'mac_ver',return_value=('15.0','','')),mock.patch.object(release,'run',return_value=b'go1.25.0\n') as runner:
             output=Path(directory)/'output'
             with self.assertRaisesRegex(ValueError,'toolchain'):
-                release.build(VER,output)
+                release.build('source-'+SOURCE,output,runtime_revision=SOURCE,runtime_tree=TREE)
             self.assertFalse(output.exists())
             runner.assert_called_once()
             self.assertEqual(runner.call_args.args[0],['go','env','GOVERSION'])
@@ -205,7 +179,7 @@ class ReleaseTests(unittest.TestCase):
             root=Path(directory)
             self.make_bundle(root,go_version='go1.25.0')
             self.make_bundle(root,'linux_amd64')
-            with self.assertRaisesRegex(ValueError,'toolchain'):
+            with self.assertRaisesRegex(ValueError,'toolchain|abi_incompatible'):
                 release.check_assets(root,VER,SOURCE)
 
     def test_release_requires_actual_edge_diagnostic_identity_smoke(self):
@@ -230,16 +204,12 @@ class ReleaseTests(unittest.TestCase):
             pins.extend(found)
         self.assertGreaterEqual(len(pins),7)
 
-    def test_release_is_tag_driven_and_uses_attested_native_targets(self):
+    def test_old_tag_workflow_cannot_build_sign_or_publish(self):
         text=(ROOT/'.github/workflows/release.yml').read_text()
         self.assertIn("tags:\n      - 'fork-*'",text)
         self.assertNotIn('workflow_dispatch:',text)
-        for trigger in ('pull_request:', 'pull_request_target:', 'workflow_run:'):
-            self.assertNotIn(trigger,text)
-        self.assertIn('RELEASE_VERSION: ${{ github.ref_name }}',text)
-        self.assertIn("github.ref_type == 'tag'",text)
-        self.assertIn('macos-15',text);self.assertIn('ubuntu-24.04',text)
-        self.assertIn('persist-credentials: false',text);self.assertIn('attestations: write',text)
-        self.assertIn('cancel-in-progress: false',text)
+        self.assertIn('exit 65',text)
+        for forbidden in ('contents: write','attestations: write','release.py publish','runner: ubuntu-24.04'):
+            self.assertNotIn(forbidden,text)
 
 if __name__=='__main__':unittest.main()
