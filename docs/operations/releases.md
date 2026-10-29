@@ -144,19 +144,26 @@ checks. Removing `--source-digest` is not an equivalent verification policy.
 `.github/workflows/release.yml` retains its tag trigger only to reject publication
 with exit 65. It has no build, signing, or publication job. The Python `gate`,
 legacy `build`, `publish`, and `recover-draft` entries also refuse before network
-or publication effects. The old version-selection commands in `scripts/release.ts`
-are not an enabled v2 publication path. Do not use them to create a tag.
+or publication effects. `scripts/release.ts` is not an enabled v2 publication
+path. Its `rc` and `stable` commands still exit before any tag mutation. If that
+refusal is later removed, the same entry refuses a target whose
+`.github/workflows/release.yml` is not the reject-only workflow on this control
+line. That check reads the workflow stored in the tag target, so a runtime commit
+such as `0b2c036604911858c9dae05d81056af44d6eb7d8` cannot be selected. It does not
+create a tag, and it does not stop someone from creating one outside this script.
 
 A new control commit cannot change a workflow stored in a historical commit.
-Tagging the old runtime SHA would still select its old Ubuntu 24.04 workflow.
-The repository changes do not claim to fence historical tag creation at GitHub.
-No old tag, Release, or asset is moved or overwritten.
+Tagging the old runtime SHA would still select its old Ubuntu 24.04 workflow,
+including its `contents: write` publication job. This repository change does not
+fence historical tag creation at GitHub. No old tag, Release, or asset is moved
+or overwritten.
 
-Whether a future tag points to control or runtime remains undecided. Tag identity,
-control ref, and runtime revision must eventually be pinned separately. Until that
-decision and real bundle evidence are approved, neither tag publication nor the
-separated-control production mode is enabled. Existing deployment handoff and
-operator automation are outside this change and are not disabled by it.
+The approved tag destination is a control commit, not a runtime commit. Tag
+identity, control ref, and runtime revision remain three separate pin fields.
+Until a tag is separately approved and real bundle evidence enables
+`separated-control-v1`, neither tag publication nor the production verification
+mode is enabled. Existing deployment handoff and operator automation are outside
+this change and are not disabled by it.
 
 ## Historical v1 install and upgrade
 
