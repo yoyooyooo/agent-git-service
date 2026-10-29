@@ -51,10 +51,13 @@ operator setup; merging the workflow does not grant network or deployment access
 
 [Release operations](../docs/operations/releases.md) owns exact-source native builds,
 artifact provenance, immutable assets, opt-in installation and data-safe rollback.
-Maintainers choose releases only through `bun scripts/release.ts rc|stable`;
-the resulting exact `fork-*` tag is the normal publication trigger. Stable
-promotion creates a new immutable tag at the accepted RC's exact source SHA; it
-does not rename or mutate the RC.
+New candidates use the manual `release-control.yml` workflow and the v2
+Ubuntu 22.04/glibc 2.35 contract. This workflow does not create tags or Releases.
+Tag publication on this control line is disabled while the tag destination and
+real separated-control evidence remain unapproved. The previous
+`bun scripts/release.ts rc|stable` path is not an enabled v2 publication path.
+Historical v1 tags and assets remain unchanged. See the release operations guide
+for the historical-workflow limitation and the disabled consumer mode.
 The repository name has no `-fork` suffix; the `fork/*` branch prefix continues to
 identify a downstream generation. Prior private repository histories are not
 publication inputs. New metadata/build changes have their own exact-source CI;

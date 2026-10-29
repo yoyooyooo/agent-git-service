@@ -33,6 +33,21 @@ part of the default public CI set.
 - `license-check.yml` - verifies dependency licenses and reviewed third-party
   NOTICE files
 
+## Release candidate workflows
+
+`release-control.yml` is dispatch-only and outside the normal contribution gate.
+It builds exact runtime candidates on Ubuntu 22.04 and macOS 15 using Go 1.26.8,
+then retains a custom runtime-binding attestation under the control SHA. It does
+not publish a Release. `release.yml` now rejects tag publication on this control
+line; historical tags still select their historical workflow files.
+
+Fork CI runs `fork/scripts/test_release.py` and
+`fork/scripts/test_release_binding.py` for manifest v2, ABI v2, disabled tag
+publication, and synthetic binding-policy failures. Synthetic output is not a
+real Sigstore bundle. Production separated-control verification and v2
+installation remain disabled. See [release operations](operations/releases.md)
+for enablement gaps and the historical v1 policy.
+
 ## Main CI Workflow
 
 Trigger:

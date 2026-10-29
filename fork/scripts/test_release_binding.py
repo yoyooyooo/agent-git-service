@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Synthetic policy tests ONLY. No Sigstore bundles or real signatures are made."""
+import copy
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[2]
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+verify = load('binding', ROOT / 'scripts/release_verify.py')
+release = load('producer', ROOT / 'fork/scripts/release.py')
+CONTROL = 'c' * 40
+
+
+def synthetic_policy():
+    # This is only the ABI/binding fragment used by unit tests, NOT an install pin.
+    return {'schema': verify.contract.PIN_SCHEMA, 'repository': verify.REPOSITORY,
+            'repository_id': verify.REPOSITORY_ID,
+            'runtime': {'revision': verify.RUNTIME_REVISION, 'tree': verify.RUNTIME_TREE},
+            'targets': {name: {'manifest_schema': verify.contract.MANIFEST_SCHEMA,
+                               'abi': verify.contract.abi_for(name),
+                               'provenance': {'control_revision': CONTROL, 'signer_digest': CONTROL,
+                                              'signer_workflow': verify.WORKFLOW}}
+                        for name in ('linux_amd64', 'darwin_arm64')}}
+
+
+def synthetic_result(digest):
+    return [{'verificationResult': {'statement': {
+        'predicateType': verify.PREDICATE_TYPE,
+        'predicate': {'schema': 'ags.runtime-binding.v1',
+                      'runtime_revision': verify.RUNTIME_REVISION, 'runtime_tree': verify.RUNTIME_TREE},
+        'subject': [{'name': 'synthetic.txt', 'digest': {'sha256': digest}}]}}}]
+
+
+class BindingTests(unittest.TestCase):
+    def test_dispatch_workflow_has_fixed_native_builders_and_no_release_writes(self):
+        text = (ROOT / '.github/workflows/release-control.yml').read_text()
+        self.assertIn('workflow_dispatch:', text)
+        for forbidden in ('  push:', 'pull_request:', 'workflow_call:', 'self-hosted', 'contents: write', 'release.py publish'):
+            self.assertNotIn(forbidden, text)
+        for required in ('runner: ubuntu-22.04', 'runner: macos-15', 'GOTOOLCHAIN: local',
+                         'go-version-file: .go-version', "'1.26.8'", 'ref: ${{ github.sha }}',
+                         'predicate-path:', verify.PREDICATE_TYPE, 'build-runtime',
+                         'bundle-path', 'persist-credentials: false'):
+            self.assertIn(required, text)
+
+    def test_synthetic_verification_command_has_all_hard_policy_flags(self):
+        args = verify.verification_command('synthetic.txt', synthetic_policy(), 'linux_amd64')
+        self.assertEqual(args[args.index('--source-digest') + 1], CONTROL)
+        self.assertEqual(args[args.index('--signer-workflow') + 1], verify.WORKFLOW)
+        self.assertEqual(args[args.index('--signer-digest') + 1], CONTROL)
+        self.assertIn('--deny-self-hosted-runners', args)
+        self.assertIn('--predicate-type', args)
+
+    def test_synthetic_revision_tree_and_subject_changes_fail(self):
+        good = synthetic_result('d' * 64)
+        verify.check_verified_statement(good, 'd' * 64)
+        for field, value in (('runtime_revision', 'a' * 40), ('runtime_tree', verify.RUNTIME_TREE[:-1] + '0')):
+            bad = copy.deepcopy(good)
+            bad[0]['verificationResult']['statement']['predicate'][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(verify.Rejected, 'binding_unverified'):
+                verify.check_verified_statement(bad, 'd' * 64)
+        with self.assertRaisesRegex(verify.Rejected, 'digest_mismatch'):
+            verify.check_verified_statement(good, 'e' * 64)
+
+    def test_synthetic_old_or_omitted_source_digest_and_legacy_signer_fail(self):
+        for value in (verify.RUNTIME_REVISION, verify.RUNTIME_REVISION[:8], None):
+            pin = synthetic_policy()
+            pin['targets']['linux_amd64']['provenance']['control_revision'] = value
+            with self.subTest(value=value), self.assertRaises(verify.Rejected):
+                verify.verification_command('synthetic.txt', pin, 'linux_amd64')
+        pin = synthetic_policy()
+        pin['targets']['linux_amd64']['provenance']['signer_workflow'] = verify.REPOSITORY + '/.github/workflows/release.yml'
+        with self.assertRaisesRegex(verify.Rejected, 'attestation_failed'):
+            verify.verification_command('synthetic.txt', pin, 'linux_amd64')
+
+    def test_synthetic_gh_failure_including_self_hosted_denial_is_not_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / 'synthetic.txt'
+            archive.write_bytes(b'not a signed bundle')
+            with mock.patch.object(verify.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, b'', b'self-hosted denied')):
+                with self.assertRaisesRegex(verify.Rejected, 'attestation_failed'):
+                    verify.verify_evidence(archive, synthetic_policy(), 'linux_amd64')
+
+    def test_synthetic_material_exercises_post_gh_path_but_never_enables_production(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / 'synthetic.txt'
+            archive.write_bytes(b'synthetic evidence, NOT a Sigstore bundle')
+            payload = json.dumps(synthetic_result(hashlib.sha256(archive.read_bytes()).hexdigest())).encode()
+            with mock.patch.object(verify.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, payload, b'')):
+                verify.verify_evidence(archive, synthetic_policy(), 'linux_amd64')
+            with mock.patch.object(verify.subprocess, 'run', side_effect=AssertionError('disabled before network')):
+                with self.assertRaisesRegex(verify.Rejected, 'binding_unverified') as error:
+                    verify.verify_production(archive, synthetic_policy(), 'linux_amd64')
+                self.assertEqual(error.exception.exit_code, 65)
+            pin_path = Path(directory) / 'synthetic-policy-fragment.json'
+            pin_path.write_text(json.dumps(synthetic_policy()))
+            result = subprocess.run([sys.executable, str(ROOT / 'scripts/release_verify.py'), str(archive),
+                                     '--pin', str(pin_path), '--target', 'linux_amd64'], capture_output=True)
+            self.assertEqual(result.returncode, 65)
+            self.assertEqual(result.stderr.strip(), b'release_source_binding_unverified')
+
+    def test_pin_v1_and_retired_linux_abi_are_not_aliases(self):
+        for field, value in (('schema', 'ags.abi.v1'), ('build_distribution_version', '24.04'),
+                             ('minimum_libc', '2.39'), ('arch', 'arm64')):
+            pin = synthetic_policy()
+            pin['targets']['linux_amd64']['abi'][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(verify.Rejected, 'abi_incompatible'):
+                verify.binding_policy(pin, 'linux_amd64')
+        pin = synthetic_policy()
+        pin['schema'] = 'ags.deploy-release-pin.v1'
+        with self.assertRaisesRegex(verify.Rejected, 'pin_invalid'):
+            verify.binding_policy(pin, 'linux_amd64')
+
+    def test_native_distribution_check_does_not_substitute_symbol_versions(self):
+        release.linux_builder('ID=ubuntu\nVERSION_ID="22.04"\n')
+        for text in ('ID=ubuntu\nVERSION_ID="24.04"\n', 'ID=debian\nVERSION_ID="22.04"\n'):
+            with self.assertRaisesRegex(ValueError, '22.04'):
+                release.linux_builder(text)
+        headers = '[Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]'
+        with mock.patch.object(release.Path, 'is_file', return_value=True):
+            release.linux_dependencies('Name: GLIBC_2.34', headers, 'libc.so.6 => /lib/libc.so.6')
+            for versions, libraries in (('GLIBC_2.39', 'libc.so.6 => /lib/libc.so.6'),
+                                        ('GLIBC_2.35', 'libc.so.6 => not found'), ('', '')):
+                with self.assertRaises(ValueError):
+                    release.linux_dependencies(versions, headers, libraries)
+
+    def test_workflows_parse_with_only_dispatch_and_exact_native_matrix(self):
+        # Bun is already a Fork CI dependency. Parse YAML rather than accepting
+        # a matching runner string hidden in a comment or unrelated job.
+        code = """
+import { strict as assert } from 'node:assert';
+const w=Bun.YAML.parse(await Bun.file('.github/workflows/release-control.yml').text());
+assert.deepEqual(Object.keys(w.on), ['workflow_dispatch']);
+assert.deepEqual(Object.keys(w.on.workflow_dispatch.inputs).sort(), ['runtime_revision','runtime_tree']);
+assert.deepEqual(w.permissions, {contents:'read'});
+assert.deepEqual(w.jobs.build.strategy.matrix.include, [
+  {runner:'ubuntu-22.04',target:'linux_amd64'},
+  {runner:'macos-15',target:'darwin_arm64'},
+]);
+assert.equal(w.jobs.build.permissions.contents,'read');
+for (const step of w.jobs.build.steps.filter(s=>s.uses)) {
+  assert.match(step.uses, /@[0-9a-f]{40}$/);
+  assert.ok(!step.uses.startsWith('./'));
+}
+const attest=w.jobs.build.steps.find(s=>s.id==='attest');
+assert.equal(attest.with['predicate-type'], process.env.EXPECTED_PREDICATE);
+assert.ok(attest.with['predicate-path'].endsWith('/runtime-predicate.json'));
+const old=Bun.YAML.parse(await Bun.file('.github/workflows/release.yml').text());
+assert.deepEqual(Object.keys(old.jobs), ['reject']);
+assert.equal(old.permissions.contents,'read');
+assert.match(old.jobs.reject.steps[0].run,/exit 65/);
+"""
+        result=subprocess.run(['bun','-e',code],cwd=ROOT,env=dict(os.environ,EXPECTED_PREDICATE=verify.PREDICATE_TYPE),capture_output=True,timeout=20)
+        self.assertEqual(result.returncode,0,result.stderr.decode())
+
+    def test_macho_minimum_is_checked_not_just_declared(self):
+        release.darwin_minimum('cmd LC_BUILD_VERSION\n minos 15.0\n sdk 15.5\n')
+        for text in ('minos 14.0', 'minos 16.0', 'sdk 15.0', ''):
+            with self.subTest(text=text),self.assertRaises(ValueError):
+                release.darwin_minimum(text)
+
+    def test_synthetic_build_uses_control_tools_and_writes_matching_predicate(self):
+        import io
+        import sqlite3
+        import tarfile
+        payload=io.BytesIO()
+        with tarfile.open(fileobj=payload,mode='w') as tf:
+            for name in ('LICENSE','NOTICE'):
+                raw=b'synthetic build fixture'
+                member=tarfile.TarInfo(name);member.size=len(raw)
+                tf.addfile(member,io.BytesIO(raw))
+        calls=[]
+        version='source-'+verify.RUNTIME_REVISION
+        def fake_git(*args):
+            if args[0]=='show': return '1.26.8'
+            if args[0]=='status': return ''
+            if args==('rev-parse','HEAD'): return CONTROL
+            return verify.RUNTIME_TREE if args[-1].endswith('^{tree}') else verify.RUNTIME_REVISION
+        def fake_run(args,**kwargs):
+            calls.append((args,kwargs))
+            if args[:3]==['go','env','GOVERSION']: return b'go1.26.8'
+            if 'archive' in args: return payload.getvalue()
+            if args[:2]==['go','build']:
+                Path(args[args.index('-o')+1]).write_bytes(b'synthetic executable, not runnable')
+                self.assertEqual(kwargs['env']['CGO_ENABLED'],'1' if args[-1]=='./cmd/gh-server' else '0')
+                for key,value in (('GOTOOLCHAIN','local'),('GOENV','off'),('GOWORK','off')):
+                    self.assertEqual(kwargs['env'][key],value)
+                return b''
+            if args[-1:] == ['--version']:
+                command=Path(args[0]).name
+                return json.dumps({'schema':'ags.build.v1','command':command,'version':version,
+                                   'revision':verify.RUNTIME_REVISION,'tree':verify.RUNTIME_TREE,
+                                   'goos':'linux','goarch':'amd64','go_version':'go1.26.8'}).encode()
+            if args[:2]==['readelf','--version-info']: return b'Name: GLIBC_2.34'
+            if args[:2]==['readelf','-l']: return b'[Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]'
+            if args[0]=='ldd': return b'libc.so.6 => /lib/libc.so.6'
+            if args[:2]==['bash','scripts/build-exact-source.sh']:
+                self.assertEqual(kwargs['env']['GIT_SHA'],CONTROL)
+                self.assertNotIn('cwd',kwargs)
+                return b''
+            if 'fsck' in args: return b''
+            raise AssertionError(args)
+        def fake_smoke(binary,env,cwd,*args,**kwargs):
+            if binary.name=='gh-server':
+                db=sqlite3.connect(cwd/'smoke.sqlite')
+                for name in ('users','repositories','access_grants'):
+                    db.execute('CREATE TABLE '+name+' (id INTEGER)')
+                db.commit();db.close()
+        previous_umask=os.umask(0o077)
+        try:
+            with tempfile.TemporaryDirectory() as directory,mock.patch.object(release,'git',side_effect=fake_git),mock.patch.object(release,'run',side_effect=fake_run),mock.patch.object(release,'smoke',side_effect=fake_smoke),mock.patch.object(release.platform,'system',return_value='Linux'),mock.patch.object(release.platform,'machine',return_value='x86_64'),mock.patch.object(release,'linux_builder') as distro,mock.patch.object(release,'linux_dependencies'):
+                # Only os-release is read on the host; the Linux baseline decision
+                # itself is covered by the non-mocked distribution tests.
+                output=Path(directory)/'out'
+                with mock.patch.object(release.Path,'read_text',return_value='ID=ubuntu\nVERSION_ID=22.04'):
+                    result=release.build(version,output,runtime_revision=verify.RUNTIME_REVISION,runtime_tree=verify.RUNTIME_TREE)
+                predicate=json.loads((output/'runtime-predicate.json').read_text())
+                self.assertEqual(predicate,synthetic_result('d'*64)[0]['verificationResult']['statement']['predicate'])
+                self.assertEqual(result['source'],verify.RUNTIME_REVISION)
+                self.assertEqual(len([args for args,_ in calls if args[:2]==['go','build']]),3)
+                distro.assert_called_once()
+        finally:
+            os.umask(previous_umask)
+
+    def test_runtime_build_rejects_wrong_revision_tree_before_tools_or_staging(self):
+        for revision, tree in ((verify.RUNTIME_REVISION[:8], verify.RUNTIME_TREE),
+                               (verify.RUNTIME_REVISION, 'f'*40),
+                               (CONTROL, verify.RUNTIME_TREE)):
+            def fake_git(*args):
+                if args==('rev-parse','HEAD'): return CONTROL
+                if args[-1].endswith('^{commit}'): return verify.RUNTIME_REVISION
+                return verify.RUNTIME_TREE
+            with mock.patch.object(release,'git',side_effect=fake_git),mock.patch.object(release,'run',side_effect=AssertionError('must reject before tools')):
+                with self.subTest(revision=revision,tree=tree),self.assertRaises(ValueError):
+                    release.build('source-'+revision,'/unused',runtime_revision=revision,runtime_tree=tree)
+
+    def test_pre_enablement_pin_must_not_claim_separated_control_mode(self):
+        pin=synthetic_policy()
+        pin['targets']['linux_amd64']['provenance']['mode']=verify.MODE
+        with self.assertRaisesRegex(verify.Rejected,'binding_unverified'):
+            verify.binding_policy(pin,'linux_amd64')
+
+    def test_no_runtime_build_executes_historical_builder_scripts(self):
+        text = (ROOT / 'fork/scripts/release.py').read_text()
+        self.assertIn('GIT_SHA=control', text)
+        self.assertIn("unpack_source(run(['git','--no-replace-objects','archive','--format=tar',sha]),source)", text)
+        self.assertNotIn("run(['bash','scripts/build-exact-source.sh','verify'],cwd=source", text)
+
+
+if __name__ == '__main__':
+    unittest.main()

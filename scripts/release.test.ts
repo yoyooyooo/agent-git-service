@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
   chooseNextRc,
   choosePromotableRc,
@@ -9,6 +10,16 @@ import {
 } from "./release";
 
 describe("downstream release version decisions", () => {
+  test("rc and stable refuse before preflight or any tag mutation", () => {
+    for (const command of ["rc", "stable"]) {
+      const result = spawnSync(process.execPath, [new URL("release.ts", import.meta.url).pathname, command], {
+        cwd: "/", encoding: "utf8",
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("release_source_binding_unverified: tag publication disabled");
+      expect(result.stderr).not.toContain("not a git repository");
+    }
+  });
   test("parses RC and stable tags only", () => {
     expect(parseReleaseTag("fork-20260924.1-rc6")).toEqual({
       raw: "fork-20260924.1-rc6",

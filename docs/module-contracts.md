@@ -1290,7 +1290,11 @@ Release linker values identify the full source/tree and fork release version.
 Development defaults remain explicitly unknown, not inferred from a machine path.
 
 `fork/scripts/release.py` owns exact-source archive builds, platform smoke checks,
-complete-CI admission, manifest/archive validation and complete draft publication.
+manifest/archive validation and fail-closed legacy publication entry points.
+The dispatch-only `release-control.yml` builds runtime archives using control
+code and signs the runtime revision/tree predicate under the control SHA.
+`scripts/release_verify.py` owns binding-policy checks; its production
+`separated-control-v1` entry stays disabled pending real evidence and tag policy.
 `scripts/install-release.py` owns verification and replacement of one installed
 program set under `~/.ags/bin`, not service lifetime or schema changes. There are
 no retained version slots. Installed and running identities remain separate facts.

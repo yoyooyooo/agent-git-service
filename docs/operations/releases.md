@@ -42,75 +42,126 @@ The first supported targets are:
 | Bundle | Platform | Runtime constraints |
 | --- | --- | --- |
 | `darwin_arm64` | Apple Silicon, macOS 15 or later | Native CGO primary; only system dynamic libraries. No Apple notarization claim. |
-| `linux_amd64` | x86-64 Linux | Primary built on Ubuntu 24.04, requiring compatible glibc (2.39 baseline); Edge and replication client are CGO-disabled. |
+| `linux_amd64` | x86-64 Linux | Primary built natively on Ubuntu 22.04 with a glibc 2.35 runtime baseline; Edge and replication client are CGO-disabled. |
 
 The primary requires native Git at runtime. Optional integrations may require
 other explicit tools, such as `zstd` for compressed provider logs. Installing the
 bundle does not install those dependencies, certificates or external providers.
 
-## Controlled publication
+## V2 contract and publication hold
 
-Release publication is tag-driven. Maintainers do not manually dispatch the
-build workflow or hand-type the next version. `scripts/release.ts` is the one
-release decision entry and follows the same model as the other maintained
-tag-driven projects:
+New candidates use `ags.release.v2`, structured `ags.abi.v2`, and the
+`ags.deploy-release-pin.v2` pin contract. V1 describes previously published
+assets only. V1 is not an alias for v2, and existing Release pages, tags, assets,
+and signatures are not changed. Ubuntu 24.04 and glibc 2.39 are retired for new
+primary binaries, even if their symbol requirements happen to be below 2.35.
+No `patchelf` conversion qualifies as an Ubuntu 22.04 build.
 
-```bash
-bun scripts/release.ts status
-bun scripts/release.ts rc
-# after that RC is accepted without source changes:
-bun scripts/release.ts stable
+The Linux ABI object has exactly these fields:
+
+```json
+{
+  "schema": "ags.abi.v2",
+  "os": "linux",
+  "arch": "amd64",
+  "build_distribution": "ubuntu",
+  "build_distribution_version": "22.04",
+  "libc": "glibc",
+  "minimum_libc": "2.35"
+}
 ```
 
-`rc` continues the current `fork-YYYYMMDD.N` line with the next `-rcN`.
-Once a line has a stable release, the next `rc` starts
-`fork-YYYYMMDD.(N+1)-rc1`. `stable` selects the latest unpromoted RC, or an
-explicit `--from fork-YYYYMMDD.N-rcN`, and creates
-`fork-YYYYMMDD.N` at **the exact same source SHA**. The RC remains immutable.
-Use `--dry-run` to show and validate a plan without creating a tag,
-`--no-push` for a local-only tag, and `--no-watch` only when another operator
-will observe the resulting workflow.
+The builder checks the native distribution before compilation, then checks all
+GLIBC version needs, the ELF interpreter, and `ldd` resolution. The primary uses
+`CGO_ENABLED=1`; Edge and replication use `CGO_ENABLED=0`. Go is exactly 1.26.8,
+with `GOTOOLCHAIN=local`, `GOENV=off`, and `GOWORK=off`.
+Darwin candidates use native macOS 15, ARM64, deployment target 15.0, and system
+dynamic libraries only. This does not establish notarization or a previously
+reported macOS candidate's full SHA256.
 
-The script requires a clean, current default generation and verifies the native
-GitHub fork identity, exact remote branch state, successful exact-source full CI
-and secret scan, existing RC publication state for promotion, and absence of tag
-or Release collisions. Its only publication write is an exact tag ref. A push of
-`fork-*` is the sole normal trigger for `.github/workflows/release.yml`.
+### Manual control workflow
 
-The Release workflow treats the tag as immutable input; it **never creates or
-moves a tag**. It verifies that the tag already resolves to `github.sha`, then
-re-checks the exact-source CI/disclosure gates before building. Ordinary branch
-pushes and pull requests cannot publish. For a stable version the final Release
-is marked GitHub Latest; RCs remain prereleases and never replace Latest.
+`.github/workflows/release-control.yml` accepts only `workflow_dispatch`, with
+required `runtime_revision` and `runtime_tree` inputs. Both are full lowercase
+40-hex Git object identities. The workflow runs the control commit's builder,
+fetches and verifies the exact runtime commit and tree, and builds a Git archive
+outside the checkout. It does not execute historical build scripts from that
+archive. The candidate version is `source-<full-runtime-revision>`, not a release
+tag. Inputs cannot allocate a version, tag, or Release ID.
 
-Native standard GitHub-hosted runners build both targets. Actual binaries are
-checked for identity, primary SQLite startup/schema/integrity, Edge liveness,
-loopback diagnostics matching the same compiled build identity, and clean shutdown.
-The Edge `/status` response carries `source_revision` plus the credential-free
-`build` record used by `--version`; release archives do not depend on Go's optional
-VCS metadata to remain diagnosable. Build provenance is attested for each archive. Only the final
-publish job has repository-content write permission. It verifies both bundles,
-their provenance and uploaded digests before publishing the complete draft.
-The repository's immutable-release setting locks the published tag and assets.
+The native runners are `ubuntu-22.04` and `macos-15`. The action signs under the
+workflow invocation's **control SHA**, not the runtime SHA. Its custom signed
+predicate type is
+`https://github.com/yoyooyooo/agent-git-service/attestations/runtime-binding/v1`.
+The predicate records `schema=ags.runtime-binding.v1`, `runtime_revision`, and
+`runtime_tree`. The in-toto subject binds the archive digest. Unsigned build
+metadata alone is not evidence of that binding.
 
-A failed draft/upload is retained for inspection. Re-running does not silently
-clobber a tag or finish an ambiguous release. The exact Git tag predates the
-workflow and is never created, replaced or moved by the publisher. Before final
-publication, the complete draft identity, uploaded digests and the pre-existing
-tag-to-source binding are checked again.
+Only the real attestation action can produce the retained Sigstore bundle.
+Workflow artifacts retain the candidate archive, manifest, predicate, and real
+bundle for seven days. There is no Release publish job and no content-write
+permission. Adding this workflow does not authorize dispatch or enable deployment.
 
-An operator may explicitly resume a fully uploaded draft using `recover-draft`
-with its numeric `--draft-id`, exact `--sha`, version and locally downloaded
-original build artifacts. This path revalidates the source's full CI, provenance,
-embedded manifests and every remote upload; it never rebuilds, uploads, changes
-versions or overwrites content. It refuses an already published release or a
-mismatched tag. A tag-triggered run that fails before a complete upload requires
-separate inspection, not a blind new tag or source rebuild. A successful source
-test or release does not deploy anything.
+### Consumer policy remains disabled
 
-## One-command install and upgrade
+`scripts/release_verify.py` implements evidence checks for the approved runtime
+revision `0b2c036604911858c9dae05d81056af44d6eb7d8` and tree
+`6a8548d9419387568d27a8cfcb43531e36c26c78`. It constructs the following policy
+from the pin's provenance, with no caller-supplied signer override:
 
-Release archives are installation artifacts, not CI-only attachments. The
+```text
+gh attestation verify <archive> --repo yoyooyooo/agent-git-service \
+  --source-digest <full-control-SHA> --signer-digest <full-control-SHA> \
+  --signer-workflow yoyooyooo/agent-git-service/.github/workflows/release-control.yml \
+  --deny-self-hosted-runners \
+  --predicate-type https://github.com/yoyooyooo/agent-git-service/attestations/runtime-binding/v1 \
+  --format json [--bundle <real-bundle>]
+```
+
+After successful cryptographic verification, the checker reads only
+`verificationResult.statement` from that command's output. It compares the signed
+runtime revision and tree with the approved pair, and the subject SHA256 with the
+archive's actual SHA256. `--predicate-type` selects the custom signed predicate;
+it does not replace any source, signer, or runner check.
+
+`separated-control-v1` remains **disabled**. The production entry returns
+`release_source_binding_unverified`, exit 65, before invoking `gh`. V2 installs
+also fail closed and cannot fall through to the historical v1 attestation policy.
+The binding-policy helper checks the pin's ABI and provenance fragment; it is not
+a complete pin loader, installation authorization, or host transaction engine.
+No deployable pin is generated by these scripts.
+
+`fork/scripts/test_release_binding.py` uses explicitly synthetic policy fragments
+and mocked verifier output. It exercises altered revision, tree, subject digest,
+old or omitted source digest, the legacy `release.yml` signer, and failed runner
+verification. These are policy tests, not real bundle or certificate acceptance.
+Enabling the mode still requires a separately approved real workflow run for each
+target, retained certificates and predicates, and all real positive and negative
+checks. Removing `--source-digest` is not an equivalent verification policy.
+
+### Legacy tag path is closed on this control line
+
+`.github/workflows/release.yml` retains its tag trigger only to reject publication
+with exit 65. It has no build, signing, or publication job. The Python `gate`,
+legacy `build`, `publish`, and `recover-draft` entries also refuse before network
+or publication effects. The old version-selection commands in `scripts/release.ts`
+are not an enabled v2 publication path. Do not use them to create a tag.
+
+A new control commit cannot change a workflow stored in a historical commit.
+Tagging the old runtime SHA would still select its old Ubuntu 24.04 workflow.
+The repository changes do not claim to fence historical tag creation at GitHub.
+No old tag, Release, or asset is moved or overwritten.
+
+Whether a future tag points to control or runtime remains undecided. Tag identity,
+control ref, and runtime revision must eventually be pinned separately. Until that
+decision and real bundle evidence are approved, neither tag publication nor the
+separated-control production mode is enabled. Existing deployment handoff and
+operator automation are outside this change and are not disabled by it.
+
+## Historical v1 install and upgrade
+
+Previously published v1 Release archives remain installation artifacts. The v2
+workflow currently produces candidates only, not installable Releases. The
 Bash bootstrap selects exact binary bytes and delegates bundle/digest/attestation
 checks to the Python installer. A trusted adjacent installer is used when present;
 a standalone bootstrap fetches the exact installer blob from immutable Latest
@@ -170,7 +221,7 @@ python3 scripts/install-release.py --version fork-20260924.1-rc1 \
 
 Add `--install` to download into an owner-controlled local directory. It requires
 an immutable, non-draft release; pre-releases require their explicit opt-in.
-Before extracting or executing binaries, the installer verifies GitHub's asset
+Before extracting or executing historical v1 binaries, the installer verifies GitHub's asset
 digest, the signed immutable-release asset, build provenance from this
 repository's `release.yml`, exact source digest, archive paths/member types,
 embedded identities and binary hashes. Verification failure is not bypassed by a

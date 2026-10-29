@@ -2,9 +2,8 @@
 /**
  * Maintainer release entry for the downstream AGS fork.
  *
- * The local script decides and pushes one exact immutable tag. That tag is the
- * only publication trigger; GitHub Actions verifies, builds, attests and
- * publishes the Release.
+ * Tag mutation is disabled while the v2 tag destination and real runtime-binding
+ * evidence remain unapproved. Status and pure version-decision helpers remain.
  *
  * Usage:
  *   bun scripts/release.ts status
@@ -38,6 +37,7 @@ if (import.meta.main) {
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
+  requireReadOnlyCommand(options.command);
   const context = preflight();
   const tags = readReleaseTags();
   const lines = releaseLines(tags, context.date);
@@ -91,6 +91,12 @@ async function main(): Promise<void> {
   }
 }
 
+function requireReadOnlyCommand(command: Command): void {
+  if (command !== "status") {
+    fail("release_source_binding_unverified: tag publication disabled pending v2 tag policy and real evidence");
+  }
+}
+
 function parseArgs(args: string[]): Options {
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
     console.log(usage());
@@ -130,9 +136,9 @@ stable:
   Promote the latest RC (or --from RC) by creating the same-source tag without
   -rcN. The RC remains immutable.
 
-Pushing the exact tag triggers .github/workflows/release.yml. The script refuses
-dirty/out-of-date branches, wrong fork identity, missing exact-source CI, tag
-collisions, mutable/unfinished RCs, and sources predating the tag-driven flow.`;
+rc and stable currently refuse before repository/network access or tag mutation.
+The v2 tag destination and real separated-control evidence require separate
+approval. Status is read-only. release-control.yml builds candidates only.`;
 }
 
 function preflight(): Context {
