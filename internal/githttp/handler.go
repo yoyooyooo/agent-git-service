@@ -522,8 +522,10 @@ func (h *Handler) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Run follow-up work after the repository lock is released but before the
-	// request completes so push-side effects remain synchronous.
-	followupCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	// request completes so push-side effects remain synchronous. Git refs may
+	// already be committed when the client disconnects, so retain request values
+	// but give follow-up work its own cancellation deadline.
+	followupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
 	defer cancel()
 	followupCtx = applog.CloneContext(followupCtx, r.Context())
 	if scopedDB, ok := service.DBFromContext(r.Context()); ok {
