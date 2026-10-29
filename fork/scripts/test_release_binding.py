@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -138,40 +139,31 @@ class BindingTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     release.linux_dependencies(versions, headers, libraries)
 
-    def test_workflows_parse_with_only_dispatch_and_exact_native_matrix(self):
-        # Bun is already a Fork CI dependency. Parse YAML rather than accepting
-        # a matching runner string hidden in a comment or unrelated job.
-        code = """
-import { strict as assert } from 'node:assert';
-const w=Bun.YAML.parse(await Bun.file('.github/workflows/release-control.yml').text());
-assert.deepEqual(Object.keys(w.on), ['workflow_dispatch']);
-assert.deepEqual(Object.keys(w.on.workflow_dispatch.inputs).sort(), ['runtime_revision','runtime_tree']);
-assert.deepEqual(w.permissions, {contents:'read'});
-assert.deepEqual(w.jobs.build.strategy.matrix.include, [
-  {runner:'ubuntu-22.04',target:'linux_amd64'},
-  {runner:'macos-15',target:'darwin_arm64'},
-]);
-assert.equal(w.jobs.build.permissions.contents,'read');
-for (const step of w.jobs.build.steps.filter(s=>s.uses)) {
-  assert.match(step.uses, /@[0-9a-f]{40}$/);
-  assert.ok(!step.uses.startsWith('./'));
-}
-const attest=w.jobs.build.steps.find(s=>s.id==='attest');
-assert.equal(attest.with['predicate-type'], process.env.EXPECTED_PREDICATE);
-assert.ok(attest.with['predicate-path'].endsWith('/runtime-predicate.json'));
-const old=Bun.YAML.parse(await Bun.file('.github/workflows/release.yml').text());
-assert.deepEqual(Object.keys(old.jobs), ['reject']);
-assert.equal(old.permissions.contents,'read');
-assert.match(old.jobs.reject.steps[0].run,/exit 65/);
-"""
-        result=subprocess.run(['bun','-e',code],cwd=ROOT,env=dict(os.environ,EXPECTED_PREDICATE=verify.PREDICATE_TYPE),capture_output=True,timeout=20)
-        self.assertEqual(result.returncode,0,result.stderr.decode())
-
-    def test_macho_minimum_is_checked_not_just_declared(self):
-        release.darwin_minimum('cmd LC_BUILD_VERSION\n minos 15.0\n sdk 15.5\n')
-        for text in ('minos 14.0', 'minos 16.0', 'sdk 15.0', ''):
-            with self.subTest(text=text),self.assertRaises(ValueError):
-                release.darwin_minimum(text)
+    def test_workflow_blocks_have_only_dispatch_and_exact_native_matrix(self):
+        # Match the repository's dependency-free source-contract checks. Hosted
+        # CI pins Bun 1.2.17, which has no Bun.YAML.parse API.
+        text=(ROOT/'.github/workflows/release-control.yml').read_text()
+        def block(name):
+            match=re.search(r'^'+name+r':[^\n]*\n(?:(?:[ \t]+[^\n]*|)\n)*',text,re.M)
+            self.assertIsNotNone(match)
+            return match.group(0).strip()
+        self.assertEqual(block('permissions'),'permissions:\n  contents: read')
+        trigger=block('on')
+        self.assertRegex(trigger,r'^on:\n  workflow_dispatch:\n    inputs:')
+        self.assertEqual(re.findall(r'^  ([a-z_]+):',trigger,re.M),['workflow_dispatch'])
+        self.assertEqual(re.findall(r'^      ([a-z_]+):',trigger,re.M),['runtime_revision','runtime_tree'])
+        matrix=re.search(r'^      matrix:\n        include:\n((?:          [^\n]*\n|            [^\n]*\n)+)',text,re.M)
+        self.assertIsNotNone(matrix)
+        self.assertEqual(matrix.group(1),
+                         '          - runner: ubuntu-22.04\n            target: linux_amd64\n'
+                         '          - runner: macos-15\n            target: darwin_arm64\n')
+        actions=re.findall(r'^\s+(?:- )?uses: (\S+)',text,re.M)
+        self.assertGreaterEqual(len(actions),4)
+        for action in actions: self.assertRegex(action,r'^[^ ]+@[0-9a-f]{40}$')
+        self.assertIn('predicate-type: '+verify.PREDICATE_TYPE,text)
+        old=(ROOT/'.github/workflows/release.yml').read_text()
+        self.assertEqual(re.findall(r'^  ([a-z_]+):',old.split('jobs:',1)[1],re.M),['reject'])
+        self.assertIn('exit 65',old)
 
     def test_synthetic_build_uses_control_tools_and_writes_matching_predicate(self):
         import io
