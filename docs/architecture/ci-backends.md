@@ -166,8 +166,17 @@ All three Forgejo rerun routes execute the **whole workflow**, including success
 jobs, and return `X-AGS-CI-Rerun-Scope: workflow`. Original trigger context and
 custom dispatch inputs are not replayed; required inputs without defaults can
 prevent dispatch. Unapproved or fork PR runs are denied rather than escalating
-them to a trusted workflow dispatch. PR checks retain their existing preference
-for actual PR events, so a successful dispatch does not erase a failed PR check.
+them to a trusted workflow dispatch.
+
+PR checks select the newest eligible run per workflow file, regardless of event
+or conclusion. Eligibility still requires the current head SHA and matching
+branch or verified provider PR projection. Creation time orders runs; a higher
+repository run number breaks a timestamp tie, followed by the run attempt.
+A later `workflow_dispatch` can therefore replace an earlier failed PR run.
+A later failed or pending run also replaces an older success. Required checks
+must still all pass, including same-named checks in different workflow files.
+This is AGS's evidence selection rule, not a guarantee that the provider accepts
+a merge: provider branch protection and trigger-specific requirements still apply.
 
 ```bash
 gh run rerun "$RUN_ID"

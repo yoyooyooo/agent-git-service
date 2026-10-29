@@ -486,28 +486,17 @@ func ciCheckSatisfiesRequired(check CICheck) bool {
 	return check.Status == "completed" && (check.Conclusion == "success" || check.Conclusion == "neutral" || check.Conclusion == "skipped")
 }
 
-// preferObservedCIRun keeps one run per workflow. A pull_request run is the
-// evidence a protected pull request check uses. A later workflow_dispatch of the
-// same workflow and job name must not replace that evidence.
+// preferObservedCIRun keeps the newest eligible run per workflow, regardless of
+// event or conclusion. The caller already binds the head SHA and branch/PR.
+// Run numbers break timestamp ties before attempts, which belong to one run.
 func preferObservedCIRun(candidate, current cibackend.Run) bool {
-	candidatePR := ciRunIsPullRequestEvent(candidate.Event)
-	currentPR := ciRunIsPullRequestEvent(current.Event)
-	if candidatePR != currentPR {
-		return candidatePR
+	if !candidate.CreatedAt.Equal(current.CreatedAt) {
+		return candidate.CreatedAt.After(current.CreatedAt)
 	}
-	if candidate.CreatedAt.After(current.CreatedAt) {
-		return true
+	if candidate.Number != current.Number {
+		return candidate.Number > current.Number
 	}
-	return candidate.CreatedAt.Equal(current.CreatedAt) && candidate.Attempt > current.Attempt
-}
-
-func ciRunIsPullRequestEvent(event string) bool {
-	switch strings.TrimSpace(event) {
-	case "pull_request", "pull_request_sync", "pull_request_target":
-		return true
-	default:
-		return false
-	}
+	return candidate.Attempt > current.Attempt
 }
 
 // Safe status errors deliberately omit provider response bodies and credentials.
