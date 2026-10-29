@@ -238,7 +238,7 @@ func TestCIChecksForgejoPRProjectionBindsCurrentHead(t *testing.T) {
 	}
 }
 
-func TestCIChecksPullRequestRunOutranksLaterWorkflowDispatch(t *testing.T) {
+func TestCIChecksLaterWorkflowDispatchReplacesFailedPullRequestRun(t *testing.T) {
 	s, ctx, repo, pr, backend, config := ciFixture(t)
 	selected := config.Backends["builder"]
 	selected.Kind = "forgejo"
@@ -267,11 +267,29 @@ func TestCIChecksPullRequestRunOutranksLaterWorkflowDispatch(t *testing.T) {
 		{Key: "290:1", Run: "290", Name: "check-linux", HeadSHA: pr.HeadSHA, Status: "completed", Conclusion: "success"},
 	}
 	observed, err := s.ReadCIChecks(ctx, pr)
-	if err != nil || len(observed.Checks) != 1 || observed.Checks[0].Name != "check-linux" || observed.Checks[0].Conclusion != "failure" || observed.Checks[0].Event != "pull_request_sync" {
-		t.Fatalf("workflow_dispatch replaced the failed pull_request check: %#v %v", observed, err)
+	if err != nil || len(observed.Checks) != 1 || observed.Checks[0].Name != "check-linux" || observed.Checks[0].Conclusion != "success" || observed.Checks[0].Event != "workflow_dispatch" {
+		t.Fatalf("later workflow_dispatch did not replace the failed pull_request check: %#v %v", observed, err)
 	}
-	if err = s.enforceConfiguredCIForMerge(ctx, pr); err == nil {
-		t.Fatal("failed pull_request check-linux allowed merge after a later workflow_dispatch success")
+	if err = s.enforceConfiguredCIForMerge(ctx, pr); err != nil {
+		t.Fatal("current successful check-linux blocked configured CI preflight", err)
+	}
+	backend.runs[0], backend.runs[1] = backend.runs[1], backend.runs[0]
+	observed, err = s.ReadCIChecks(ctx, pr)
+	if err != nil || len(observed.Checks) != 1 || observed.Checks[0].Event != "workflow_dispatch" {
+		t.Fatalf("run listing order changed selected evidence: %#v %v", observed, err)
+	}
+	for _, state := range []struct{ status, conclusion string }{
+		{"completed", "failure"}, {"in_progress", ""},
+	} {
+		backend.runs[0].Status, backend.runs[0].Conclusion = state.status, state.conclusion
+		backend.jobs[1].Status, backend.jobs[1].Conclusion = state.status, state.conclusion
+		observed, err = s.ReadCIChecks(ctx, pr)
+		if err != nil || len(observed.Checks) != 1 || observed.Checks[0].Event != "workflow_dispatch" || observed.Checks[0].Status != state.status || observed.Checks[0].Conclusion != state.conclusion {
+			t.Fatalf("latest dispatch state was not retained: %#v %v", observed, err)
+		}
+		if err = s.enforceConfiguredCIForMerge(ctx, pr); err == nil {
+			t.Fatal("failed or pending latest dispatch allowed CI preflight")
+		}
 	}
 }
 
@@ -405,5 +423,34 @@ func TestCIRerunAuthorizationStateAndJobIdentity(t *testing.T) {
 	backend.failure = cibackend.ErrForbidden
 	if err = s.CIAction(ctx, repo.FullName, id, "rerun"); !errors.Is(err, ErrForbidden) {
 		t.Fatal(err)
+	}
+}
+
+func TestPreferObservedCIRunOrdersEvidenceNotConclusions(t *testing.T) {
+	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	current := cibackend.Run{Event: "pull_request", CreatedAt: created, Number: 10, Attempt: 1, Status: "completed", Conclusion: "failure"}
+	for _, tc := range []struct {
+		name      string
+		candidate cibackend.Run
+		want      bool
+		reverse   bool
+	}{
+		{"later dispatch success", cibackend.Run{Event: "workflow_dispatch", CreatedAt: created.Add(time.Minute), Number: 11, Attempt: 1, Status: "completed", Conclusion: "success"}, true, false},
+		{"later dispatch failure", cibackend.Run{Event: "workflow_dispatch", CreatedAt: created.Add(time.Minute), Number: 11, Attempt: 1, Status: "completed", Conclusion: "failure"}, true, false},
+		{"later dispatch pending", cibackend.Run{Event: "workflow_dispatch", CreatedAt: created.Add(time.Minute), Number: 11, Attempt: 1, Status: "queued"}, true, false},
+		{"older dispatch success", cibackend.Run{Event: "workflow_dispatch", CreatedAt: created.Add(-time.Minute), Number: 9, Attempt: 1, Status: "completed", Conclusion: "success"}, false, true},
+		{"older PR retry", cibackend.Run{Event: "pull_request", CreatedAt: created.Add(-time.Minute), Number: 9, Attempt: 2}, false, true},
+		{"same timestamp newer run", cibackend.Run{Event: "workflow_dispatch", CreatedAt: created, Number: 11, Attempt: 1}, true, false},
+		{"same run newer attempt", cibackend.Run{Event: "workflow_dispatch", CreatedAt: created, Number: 10, Attempt: 2}, true, false},
+		{"equal rank dispatch", cibackend.Run{Event: "workflow_dispatch", CreatedAt: created, Number: 10, Attempt: 1}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := preferObservedCIRun(tc.candidate, current); got != tc.want {
+				t.Fatalf("preferObservedCIRun() = %v, want %v", got, tc.want)
+			}
+			if got := preferObservedCIRun(current, tc.candidate); got != tc.reverse {
+				t.Fatalf("reverse preference = %v, want %v", got, tc.reverse)
+			}
+		})
 	}
 }
