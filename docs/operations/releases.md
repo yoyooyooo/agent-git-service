@@ -361,8 +361,11 @@ returns a read-only metadata plan. Its verification map explicitly marks asset
 bytes, immutable release proof, attestation, archive and executable identity as
 unverified. `--verify-only` downloads into private temporary scratch, verifies
 all nine assets and both platform bundles, and never creates the installation
-root or executes the candidate. `--install` additionally checks actual binary
-identity and replaces the stopped single installation.
+root or executes the candidate. V2 `--install` is not open. It exits 83
+(`install_contracts_unimplemented`) before creating an installation root, lock,
+claim, candidate execution or receipt. A host entry or a command that exits zero
+does not satisfy the missing backup, Git/DB consistency, mini handoff or
+observation/finalize contracts. The historical v1 replacement path is unchanged.
 
 V2 tags resolve to C. The consumer reads `fork/release-source.json` at C, verifies
 its blob digest and R/T ancestry/tree, and requires the Release source asset to

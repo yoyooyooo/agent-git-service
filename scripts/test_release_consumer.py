@@ -86,6 +86,16 @@ class ConsumerChainTests(unittest.TestCase):
         self.prefix = self.root / 'install-root'
         self.args = argparse.Namespace(version=VERSION, install=False, verify_only=True, prefix=self.prefix)
         self.calls = []
+        self.proof_targets = []
+
+    def rebuild_assets(self):
+        names = sorted(set(self.files) - {'SHA256SUMS'})
+        self.files['SHA256SUMS'] = ''.join(
+            hashlib.sha256(self.files[name]).hexdigest() + '  ' + name + '\n' for name in names).encode()
+        self.assets = [{'id': index, 'name': name, 'size': len(raw),
+                        'digest': 'sha256:' + hashlib.sha256(raw).hexdigest()}
+                       for index, (name, raw) in enumerate(sorted(self.files.items()), 1)]
+        self.release = {**self.release, 'assets': self.assets}
 
     def api(self, path):
         self.calls.append(path)
@@ -109,11 +119,11 @@ class ConsumerChainTests(unittest.TestCase):
         if command[1] == 'release' and command[2] == 'verify-asset':
             return b''
         if command[1] == '--version':
-            target = command[0].split('/')[-3].split('-')[-2] + '_' + command[0].split('/')[-3].split('-')[-1]
-            return json.dumps(self.infos[target]['binaries'][Path(command[0]).name]['identity']).encode()
+            raise AssertionError('candidate executed')
         raise AssertionError(command)
 
     def proof(self, archive, pin, target, **kwargs):
+        self.proof_targets.append(target)
         return {'run_id': '42', 'run_attempt': '1', 'control_revision': CONTROL,
                 'signer_workflow': verifier.WORKFLOW, 'predicate_type': verifier.PREDICATE_TYPE,
                 'bundle_sha256': hashlib.sha256(kwargs['bundle'].read_bytes()).hexdigest(), 'verified': True}
@@ -128,13 +138,18 @@ class ConsumerChainTests(unittest.TestCase):
             return patch.object(consumer.platform, 'libc_ver', return_value=('glibc', version))
         raise AssertionError(target)
 
-    def consume(self, *, install=False, mutate=None, proof=None, target='darwin_arm64', host=None):
+    def consume(self, *, install=False, verify_only=None, mutate=None, proof=None, target='darwin_arm64', host=None):
         self.args.install = install
+        if verify_only is None:
+            verify_only = not install
+        self.args.verify_only = verify_only
         self.calls.clear()
+        self.proof_targets = []
         consumer = installer.adjacent_module('release_install_v2')
         verifier_module = consumer.verifier
         original = verifier_module.verify_release
-        verifier_module.verify_release = proof or self.proof
+        selected = proof or (lambda *args, **kwargs: self.proof(*args, **kwargs))
+        verifier_module.verify_release = selected
         contexts = [patch.object(installer, 'api', side_effect=self.api),
                     patch.object(installer, 'execute', side_effect=self.execute)]
         if host is not None:
@@ -149,8 +164,37 @@ class ConsumerChainTests(unittest.TestCase):
         finally:
             verifier_module.verify_release = original
 
+    def fresh(self):
+        case = ConsumerChainTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        return case
+
+    def sentinel(self, case):
+        case.prefix.mkdir()
+        marker = case.prefix / 'sentinel'
+        marker.write_bytes(b'original')
+        return marker.read_bytes()
+
+    def assert_untouched(self, case, before, install):
+        self.assertEqual(install.call_count, 0)
+        self.assertEqual(list(case.prefix.iterdir()), [case.prefix / 'sentinel'])
+        self.assertEqual((case.prefix / 'sentinel').read_bytes(), before)
+        self.assertFalse(any(isinstance(call, list) and '--version' in call for call in case.calls))
+
+    def rejected(self, case, error, *, proof=None, install=True):
+        before = self.sentinel(case)
+        with patch.object(installer, 'install_verified') as called:
+            with self.assertRaisesRegex(ValueError, error):
+                case.consume(install=install, verify_only=not install, proof=proof)
+        self.assert_untouched(case, before, called)
+        return case
+
     def test_all_nine_assets_proofs_and_both_attestations_before_any_install(self):
-        result = self.consume()
+        with patch.object(installer, 'install_verified') as called:
+            result = self.consume()
+        called.assert_not_called()
+        self.assertEqual(self.proof_targets, list(v2.TARGETS))
         self.assertFalse(self.prefix.exists())
         self.assertEqual(result['verification'], {'metadata': 'verified', 'asset_bytes': 'verified',
                                                    'immutable_release': 'verified', 'attestation': 'verified',
@@ -161,57 +205,144 @@ class ConsumerChainTests(unittest.TestCase):
         self.assertEqual({call[2] for call in self.calls if isinstance(call, list) and call[1] == 'release'}, {'download', 'verify-asset'})
         self.assertNotIn('--version', [call[1] for call in self.calls if isinstance(call, list)])
 
-    def test_any_failed_check_writes_no_prefix_and_makes_no_install_call(self):
-        def wrong_sums():
-            self.files['SHA256SUMS'] = b'0' * 64 + b'  install.sh\n'
-        def wrong_source():
-            self.files['release-source.json'] = b'{}'
-        def wrong_info():
+    def test_verify_only_rejects_each_failed_check_without_install(self):
+        def sums(case):
+            original = case.files['SHA256SUMS']
+            case.files['SHA256SUMS'] = b'0' * 64 + b'  install.sh\n'
+            self.assertNotEqual(case.files['SHA256SUMS'], original)
+
+        def source(case):
+            original = case.files['release-source.json']
+            case.files['release-source.json'] = b'{}'
+            self.assertNotEqual(case.files['release-source.json'], original)
+            case.rebuild_assets()
+
+        def info(case):
             name = 'build-info-linux_amd64.json'
-            self.files[name] = self.files[name].replace(b'"tree":"' + TREE.encode(), b'"tree":"' + (b'0' * 40))
-        def wrong_run(archive, pin, target, **kwargs):
-            return {**self.proof(archive, pin, target, **kwargs), 'run_id': target}
-        cases = [wrong_sums, wrong_source, wrong_info, lambda: None]
-        proofs = [self.proof, self.proof, self.proof, wrong_run]
-        for mutate, proof in zip(cases, proofs):
-            with self.subTest(mutate=mutate.__name__), self.assertRaises(ValueError):
-                self.consume(install=True, mutate=mutate, proof=proof)
-            self.assertFalse(self.prefix.exists())
-            self.assertFalse(any(isinstance(call, list) and call[1] == '--version' for call in self.calls))
+            original = case.files[name]
+            document = json.loads(original)
+            document['tree'] = '0' * 40
+            case.files[name] = (json.dumps(document) + '\n').encode()
+            self.assertNotEqual(case.files[name], original)
+            case.rebuild_assets()
 
-    def test_successful_install_only_after_complete_verification(self):
-        for target in v2.TARGETS:
-            with self.subTest(target=target), patch.object(installer, 'install_verified', side_effect=AssertionError('installer boundary')) as boundary:
-                with self.assertRaisesRegex(AssertionError, 'installer boundary'):
-                    self.consume(install=True, target=target, host=True)
-                boundary.assert_called_once()
-                archive, info, receipt, prefix = boundary.call_args.args
-                self.assertEqual((archive.name, info['tree'], receipt['verification']['executable_identity'], prefix),
-                                 ('ags-' + VERSION + '-' + target + '.tar.gz', TREE, 'verified', self.prefix))
-            self.assertFalse(self.prefix.exists())
+        def split(case):
+            def attest(archive, pin, target, **kwargs):
+                return {**case.proof(archive, pin, target, **kwargs), 'run_id': target}
+            return attest
 
-    def test_install_rejects_incompatible_host_abi_after_verification(self):
+        cases = [('sums', sums, 'release_digest_mismatch', None),
+                 ('source', source, 'release_identity_mismatch', None),
+                 ('info', info, 'release_manifest_invalid', None),
+                 ('split-run', None, 'release_attestation_failed', split)]
+        for name, mutate, error, proof in cases:
+            with self.subTest(name=name):
+                case = self.fresh()
+                if mutate:
+                    mutate(case)
+                seen = self.rejected(case, error, proof=proof(case) if proof else None, install=False)
+                if name == 'split-run':
+                    self.assertEqual(seen.proof_targets, list(v2.TARGETS))
+
+    def test_each_immutable_proof_failure_is_isolated(self):
+        names = [asset['name'] for asset in self.assets]
+        self.assertEqual(len(names), 9)
+        for index, name in enumerate(names):
+            with self.subTest(asset=name):
+                case = self.fresh()
+                execute = case.execute
+                seen = []
+
+                def run(command, execute=execute, seen=seen, failing=index):
+                    if command[1:3] == ['release', 'verify-asset']:
+                        seen.append(Path(command[4]).name)
+                        if len(seen) - 1 == failing:
+                            raise ValueError('immutable proof failure')
+                    return execute(command)
+
+                case.execute = run
+                self.rejected(case, 'immutable proof failure', install=False)
+                self.assertEqual(seen, names[:index + 1])
+
+    def test_each_platform_attestation_failure_is_isolated(self):
+        for failing in v2.TARGETS:
+            with self.subTest(target=failing):
+                case = self.fresh()
+
+                def attest(archive, pin, target, failing=failing, **kwargs):
+                    proof = case.proof(archive, pin, target, **kwargs)
+                    if target == failing:
+                        raise ValueError('attestation failure')
+                    return proof
+
+                self.rejected(case, 'attestation failure', proof=attest, install=False)
+                self.assertIn(failing, case.proof_targets)
+
+    def test_install_refuses_missing_contracts_before_root_or_candidate(self):
         for target in v2.TARGETS:
-            with self.subTest(target=target), patch.object(installer, 'install_verified', side_effect=AssertionError('installer boundary')) as boundary:
-                with self.assertRaisesRegex(ValueError, 'release_abi_incompatible'):
-                    self.consume(install=True, target=target, host=False)
-                boundary.assert_not_called()
-            self.assertFalse(self.prefix.exists())
-        # No simulated probes: the production check still reads this machine.
-        native = {'Darwin': 'darwin', 'Linux': 'linux'}.get(platform.system())
-        arch = {'arm64': 'arm64', 'aarch64': 'arm64', 'x86_64': 'amd64'}.get(platform.machine())
-        native_target = native + '_' + arch if native and arch else None
-        for target in v2.TARGETS:
-            with self.subTest(native=target), patch.object(installer, 'install_verified', side_effect=AssertionError('installer boundary')) as boundary:
-                if target == native_target and v2.host_abi(target):
-                    with self.assertRaisesRegex(AssertionError, 'installer boundary'):
-                        self.consume(install=True, target=target)
-                    boundary.assert_called_once()
-                else:
-                    with self.assertRaisesRegex(ValueError, 'release_abi_incompatible'):
-                        self.consume(install=True, target=target)
-                    boundary.assert_not_called()
-            self.assertFalse(self.prefix.exists())
+            with self.subTest(target=target):
+                case = self.fresh()
+                before = self.sentinel(case)
+                called = unittest.mock.Mock(wraps=installer.install_verified)
+                with patch.object(installer, 'install_verified', called):
+                    with self.assertRaises(ValueError) as caught:
+                        case.consume(install=True, target=target, host=True)
+                self.assertEqual(type(caught.exception).__name__, 'InstallClosed')
+                self.assertEqual(caught.exception.exit_code, 83)
+                self.assertEqual(caught.exception.missing_contracts, [
+                    'backup_git_config_coverage_and_git_db_consistency',
+                    'independent_observation_approval_and_finalize',
+                    'trusted_mini_handoff_bound_to_pin_release_deployment'])
+                self.assertEqual(case.proof_targets, [])
+                self.assertFalse(any(isinstance(call, list) and call[1:3] == ['release', 'download'] for call in case.calls))
+                self.assert_untouched(case, before, called)
+
+    def test_install_refusal_ignores_host_config_and_zero_exit_commands(self):
+        case = self.fresh()
+        before = self.sentinel(case)
+        called = unittest.mock.Mock(wraps=installer.install_verified)
+        with patch.object(installer, 'install_verified', called), \
+                patch.dict(os.environ, {'AGS_BACKUP': '/usr/bin/true', 'AGS_HANDOFF': '/usr/bin/true'}):
+            with self.assertRaisesRegex(ValueError, 'install_contracts_unimplemented') as caught:
+                case.consume(install=True, host=True)
+        self.assertEqual(type(caught.exception).__name__, 'InstallClosed')
+        self.assert_untouched(case, before, called)
+
+    def test_cli_install_refuses_before_consumer_effects(self):
+        case = self.fresh()
+        before = self.sentinel(case)
+
+        def api(path):
+            if path == 'repos/' + installer.REPO:
+                return {'id': installer.REPO_ID, 'private': False}
+            if '/releases/tags/' in path:
+                return case.release
+            if '/git/ref/' in path:
+                return {'object': {'type': 'commit', 'sha': CONTROL}}
+            return case.api(path)
+
+        argv = ['install-release.py', '--version', VERSION, '--allow-prerelease', '--install',
+                '--prefix', str(case.prefix)]
+        with patch.object(sys, 'argv', argv), patch.object(installer, 'api', side_effect=api), \
+                patch.object(installer, 'target', return_value='darwin_arm64'), \
+                patch.object(installer, 'execute', side_effect=AssertionError('download')), \
+                patch.object(installer, 'install_verified', side_effect=AssertionError('replace')) as called, \
+                patch.object(sys, 'stderr', io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                installer.entry()
+        self.assertEqual(caught.exception.code, 83)
+        called.assert_not_called()
+        self.assertEqual((case.prefix / 'sentinel').read_bytes(), before)
+        self.assertFalse(any(isinstance(call, list) for call in case.calls))
+
+    def test_install_gate_does_not_hide_verify_only_failures(self):
+        case = self.fresh()
+        original = case.files['SHA256SUMS']
+        case.files['SHA256SUMS'] = b'not-a-sum\n'
+        self.assertNotEqual(case.files['SHA256SUMS'], original)
+        self.rejected(case, 'release_digest_mismatch', install=False)
+        self.assertFalse(case.args.install)
+        self.assertTrue(case.args.verify_only)
 
 
 if __name__ == '__main__':
