@@ -48,7 +48,8 @@ class Effects:
 
 class UpgradeTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='ags-upgrade-tests-')
+        # directory_fd rejects group/other-writable ancestors. Runner /tmp is 1777.
+        self.tmp = tempfile.TemporaryDirectory(prefix='.ags-upgrade-tests-', dir=Path.home())
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         self.state = self.root / 'local-v2'
