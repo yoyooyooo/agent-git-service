@@ -14,4 +14,16 @@ description = "Hex directory-key check is not a credential"
 condition = "AND"
 paths = ['''(?:^|/)internal/snapshotstore/retention\.go$''']
 regexTarget = "line"
-regexes = ['''^\s*if !item\.IsDir\(\) \|\| !hexDirectoryKey\(key\) \{\s*$''']
+regexes = [
+  '''^\s*if !item\.IsDir\(\) \|\| !hexDirectoryKey\(key\) \{\s*$''',
+  '''^\s*if !item\.IsDir\(\) \|\| len\(key\) != 64 \|\| strings\.Trim\(key, "0123456789abcdef"\) != "" \{\s*$''',
+]
+
+# Historical fixture source embeds the old validation alphabet. Restrict this
+# exception to that exact non-secret value and the one fixture source.
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(?:^|/)fork/scripts/test_secret_policy\.py$''']
+regexTarget = "secret"
+regexes = ['''^0123456789abcdef$''']
