@@ -121,7 +121,94 @@ PY
 ) || die "release tag rejected"
 [[ "$source" == "$tag_source" ]] || die "release source and tag differ"
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/ags-installer.XXXXXXXX")
+# Select a parent using metadata reads only, before mktemp or bootstrap downloads.
+companion=""
+if [[ -n ${BASH_SOURCE[0]:-} ]]; then
+  companion="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install-release.py"
+fi
+scratch_parent=$(python3 - "$prefix" "$companion" <<'PY_SCRATCH'
+import ast
+import os
+from pathlib import Path
+import sys
+
+# Standalone bootstrap has no adjacent source until after scratch is selected.
+def same_directory(path, other):
+    try: return os.path.samestat(path.lstat(), other.lstat())
+    except OSError: return False
+
+def contains_directory(parent, child):
+    """Filesystem identity, independent of path spelling or case."""
+    current=child
+    while True:
+        if same_directory(parent,current): return True
+        parent_of=current.parent
+        try:
+            if same_directory(parent_of,current): return False
+        except OSError:
+            return False
+        current=parent_of
+
+def outside_installation(candidate, root, state):
+    """True only for a real directory outside both protected directories.
+
+    A protected path that does not exist yet has no filesystem identity, so a
+    real candidate elsewhere cannot be inside it. The lexical prefix check
+    still rejects a candidate spelled inside that future path.
+    """
+    if not candidate.is_dir() or candidate.is_symlink(): return False
+    for protected in (root, state):
+        if not protected.exists() and not protected.is_symlink():
+            try: candidate.relative_to(protected)
+            except ValueError: continue
+            return False
+        if contains_directory(protected,candidate): return False
+    return True
+
+def installation_scratch_parent(prefix):
+    """Choose one scratch parent before tempfile probes or downloads.
+
+    tempfile's default selection creates and deletes a probe file in each
+    candidate, including TMPDIR. That probe is already an installation-root
+    write, so an unsafe candidate is never passed to tempfile. TMPDIR, TEMP
+    and TMP are tried in that order. A relative value resolves from the
+    current directory, and symlinks resolve before the location check.
+    Identification and full v2 verification share this parent.
+    """
+    root=prefix.resolve(strict=False)
+    state=(prefix/'state').resolve(strict=False)
+    for envname in ('TMPDIR','TEMP','TMP'):
+        configured=os.environ.get(envname)
+        if not configured: continue
+        candidate=Path(configured).expanduser()
+        if not candidate.is_absolute(): candidate=Path.cwd()/candidate
+        try: resolved=candidate.resolve(strict=True)
+        except OSError: continue
+        if outside_installation(resolved,root,state): return resolved
+    for fallback in (Path('/tmp'), Path('/var/tmp'), Path('/usr/tmp')):
+        try: resolved=fallback.resolve(strict=True)
+        except OSError: continue
+        if outside_installation(resolved,root,state): return resolved
+    return None
+
+
+companion=Path(sys.argv[2]) if sys.argv[2] else None
+if companion is not None and companion.is_file() and not companion.is_symlink():
+    # Evaluate only these read-only helpers, never the installer's entry point.
+    names={'same_directory','contains_directory','outside_installation','installation_scratch_parent'}
+    tree=ast.parse(companion.read_text(),filename=str(companion))
+    definitions=[node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name in names]
+    if {node.name for node in definitions} != names:
+        raise SystemExit('adjacent installer lacks the scratch safety contract')
+    exec(compile(ast.Module(body=definitions,type_ignores=[]),str(companion),'exec'))
+parent=installation_scratch_parent(Path(sys.argv[1]))
+if parent is None:
+    raise SystemExit('release_artifact_unverified: no scratch parent outside installation')
+print(parent)
+PY_SCRATCH
+) || exit 1
+
+tmp=$(mktemp -d "$scratch_parent/ags-installer.XXXXXXXX")
 chmod 700 "$tmp"
 # The trap only removes this invocation's owner-only, freshly-created directory.
 cleanup() {
@@ -135,10 +222,6 @@ PY
 trap cleanup EXIT
 metadata="$tmp/install-release.json"
 installer="$tmp/install-release.py"
-companion=""
-if [[ -n ${BASH_SOURCE[0]:-} ]]; then
-  companion="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install-release.py"
-fi
 if [[ -n "$companion" && -f "$companion" && ! -L "$companion" ]]; then
   installer="$companion"
 else

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Complete offline v2 consumer chain. Synthetic transport is not Sigstore evidence."""
 import argparse
+import ast
 import base64
 import contextlib
 import hashlib
@@ -9,6 +10,7 @@ import io
 import json
 import os
 import platform
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -87,6 +89,136 @@ class ConsumerChainTests(unittest.TestCase):
         self.args = argparse.Namespace(version=VERSION, install=False, verify_only=True, prefix=self.prefix)
         self.calls = []
         self.proof_targets = []
+
+
+    def test_shell_scratch_is_outside_installation_before_v2_refusal(self):
+        for action in ('plan', 'install', 'upgrade'):
+            for location in ('root', 'state', 'root-link', 'state-link', 'outside',
+                             'relative-inside', 'relative-outside', 'no-safe-parent'):
+                with self.subTest(action=action, location=location):
+                    f = self.fresh()
+                    prefix = f.root / 'installation'
+                    (prefix / 'state').mkdir(parents=True)
+                    (prefix / 'state/installation.json').write_bytes(b'existing receipt')
+                    (prefix / 'binary').write_bytes(b'existing binary')
+                    outside = f.root / 'outside'; outside.mkdir()
+                    alias = f.root / 'alias'
+                    alias.symlink_to(prefix / 'state' if location == 'state-link' else prefix)
+                    configured = {'root': str(prefix), 'state': str(prefix / 'state'),
+                                  'root-link': str(alias), 'state-link': str(alias),
+                                  'outside': str(outside), 'relative-inside': 'installation/state',
+                                  'relative-outside': 'outside', 'no-safe-parent': str(prefix)}[location]
+                    selected_prefix = Path('/') if location == 'no-safe-parent' else prefix
+                    transport = f.root / 'transport'; transport.mkdir()
+                    release = {**f.release, 'target_commitish': CONTROL}
+                    (f.root / 'release.json').write_text(json.dumps(release))
+                    (f.root / 'source.json').write_text(json.dumps({
+                        'type': 'file', 'path': 'fork/release-source.json', 'encoding': 'base64',
+                        'sha': hashlib.sha1(b'blob ' + str(len(f.raw)).encode() + b'\0' + f.raw).hexdigest(),
+                        'content': base64.b64encode(f.raw).decode()}))
+                    gh = transport / 'gh'
+                    gh.write_text('#!' + sys.executable + '\n' + r"""import json,os,sys
+from pathlib import Path
+root=Path(os.environ['SHELL_FIXTURE'])
+a=sys.argv[1:]
+with (root/'calls.jsonl').open('a') as stream: stream.write(json.dumps(a)+'\n')
+if a[0]!='api': raise SystemExit('download, installer or candidate execution forbidden')
+p=a[1]
+if p=='repos/yoyooyooo/agent-git-service':
+ value={'id':1384519373,'private':False}
+ (root/'scratch-modes.json').write_text(json.dumps([
+  {'path':str(path),'mode':path.stat().st_mode&0o777}
+  for path in (root/'outside').glob('ags-installer.*')]))
+elif '/releases/tags/' in p: value=json.loads((root/'release.json').read_text())
+elif '/git/ref/' in p: value={'object':{'type':'commit','sha':'c'*40}}
+elif '/contents/' in p: value=json.loads((root/'source.json').read_text())
+elif '/git/commits/' in p: value={'tree':{'sha':'b'*40}}
+elif '/compare/' in p: value={'status':'ahead','merge_base_commit':{'sha':'a'*40}}
+else: raise SystemExit('unexpected transport: '+p)
+print(json.dumps(value))
+""")
+                    gh.chmod(0o755)
+                    env = {k: v for k, v in os.environ.items()
+                           if k not in ('BASH_ENV', 'ENV', 'PYTHONPATH', 'MULTICA_TOKEN',
+                                        'GH_TOKEN', 'GITHUB_TOKEN')}
+                    env.update(TMPDIR=configured, TEMP=str(outside), TMP=str(alias),
+                               SHELL_FIXTURE=str(f.root), PYTHONDONTWRITEBYTECODE='1',
+                               PATH=os.pathsep.join((str(transport), str(Path(sys.executable).parent),
+                                                     '/usr/bin', '/bin', '/usr/sbin', '/sbin')))
+                    def snapshot():
+                        return [(str(path.relative_to(prefix)), path.lstat().st_mode,
+                                 path.lstat().st_mtime_ns, None if path.is_dir() else path.read_bytes())
+                                for path in [prefix, *sorted(prefix.rglob('*'))]]
+                    before = snapshot()
+                    result = subprocess.run(['/bin/bash', '-x', str(HERE / 'install.sh'), action,
+                                             '--version', VERSION, '--allow-prerelease', '--prefix',
+                                             str(selected_prefix), '--bin-dir', str(f.root / 'commands')],
+                                            cwd=f.root, env=env, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(snapshot(), before, result.stderr)
+                    self.assertFalse((f.root / 'commands').exists())
+                    calls = [json.loads(line) for line in (f.root / 'calls.jsonl').read_text().splitlines()]
+                    self.assertTrue(all(call[0] == 'api' for call in calls), calls)
+                    self.assertNotIn('install_verified', result.stderr)
+                    if location == 'no-safe-parent':
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        self.assertIn('release_artifact_unverified', result.stderr)
+                        self.assertNotIn('mktemp ', result.stderr)
+                        self.assertNotIn('python3 ' + str(HERE / 'install-release.py'), result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, 0 if action == 'plan' else 83, result.stderr)
+                        created = re.findall(r'^\+ tmp=(.+)$', result.stderr, re.MULTILINE)
+                        self.assertEqual(len(created), 1, result.stderr)
+                        scratch = Path(created[0]).resolve()
+                        self.assertFalse(scratch.is_relative_to(prefix))
+                        self.assertEqual(scratch.parent, outside)
+                        observed = json.loads((f.root / 'scratch-modes.json').read_text())
+                        self.assertEqual(observed, [{'path': str(scratch), 'mode': 0o700}])
+                        self.assertIn('+ chmod 700 ' + created[0], result.stderr)
+                        self.assertFalse(scratch.exists())
+                        self.assertIn('+ cleanup', result.stderr)
+                        if action != 'plan':
+                            self.assertIn('install_contracts_unimplemented', result.stderr)
+
+    def test_shell_standalone_scratch_selector_matches_python(self):
+        script = (HERE / 'install.sh').read_text()
+        code = script.split("<<'PY_SCRATCH'\n", 1)[1].split('\nPY_SCRATCH', 1)[0]
+        names = ('same_directory', 'contains_directory', 'outside_installation',
+                 'installation_scratch_parent')
+        embedded = {node.name: ast.dump(node, include_attributes=False)
+                    for node in ast.parse(code).body if isinstance(node, ast.FunctionDef)}
+        original = {node.name: ast.dump(node, include_attributes=False)
+                    for node in ast.parse((HERE / 'install-release.py').read_text()).body
+                    if isinstance(node, ast.FunctionDef)}
+        for name in names:
+            self.assertEqual(embedded[name], original[name], name)
+        prefix = self.root / 'Installation'; (prefix / 'state').mkdir(parents=True)
+        outside = self.root / 'outside'; outside.mkdir()
+        link = self.root / 'link'; link.symlink_to(prefix)
+        state_link = self.root / 'state-link'; state_link.symlink_to(prefix / 'state')
+        file = self.root / 'file'; file.write_bytes(b'file')
+        cases = [str(prefix), str(prefix / 'state'), str(link), str(state_link), str(outside),
+                 'Installation/state', 'outside', '', str(file), str(self.root / 'missing'),
+                 str(self.root / 'future/state/scratch')]
+        oldcwd = Path.cwd()
+        try:
+            os.chdir(self.root)
+            for key in ('TMPDIR', 'TEMP', 'TMP'):
+                for configured in cases:
+                    for protected in (prefix, self.root / 'future', Path('/')):
+                        with self.subTest(key=key, configured=configured, prefix=protected):
+                            env = {**os.environ, 'TMPDIR': '', 'TEMP': '', 'TMP': '', key: configured,
+                                   'PYTHONDONTWRITEBYTECODE': '1'}
+                            with patch.dict(os.environ, env):
+                                expected = installer.installation_scratch_parent(protected)
+                            result = subprocess.run([sys.executable, '-c', code, str(protected), ''],
+                                                    env=env, text=True, capture_output=True, timeout=30)
+                            self.assertEqual(result.returncode, 1 if expected is None else 0, result.stderr)
+                            if expected is None:
+                                self.assertIn('release_artifact_unverified', result.stderr)
+                            else:
+                                self.assertEqual(Path(result.stdout.strip()), expected)
+        finally:
+            os.chdir(oldcwd)
 
     def rebuild_assets(self):
         names = sorted(set(self.files) - {'SHA256SUMS'})
