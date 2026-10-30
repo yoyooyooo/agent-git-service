@@ -172,3 +172,11 @@ change global deletion policy.
 Regression: `python3 scripts/test_single_root.py` and
 `python3 fork/scripts/test_install_sh.py` use isolated files and processes.
 Private migration receipts are not evidence that all deployments were migrated.
+
+## Release wiring boundary
+
+The tag publication wiring described in [release operations](releases.md) does
+not install or start these programs. V2 installation and production verification
+remain disabled in slice 1. Each machine upgrade requires separate operator
+approval, compatible verified installation, and its normal stop/start checks.
+Do not use successful publication as a signal to restart a managed runtime.

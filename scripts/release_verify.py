@@ -13,15 +13,16 @@ import re
 import subprocess
 import sys
 
-_spec = importlib.util.spec_from_file_location('ags_installer_contract', Path(__file__).with_name('install-release.py'))
+_spec = importlib.util.spec_from_file_location('ags_installer_contract', Path(__file__).with_name('release_contract.py'))
 contract = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(contract)
 REPOSITORY = 'yoyooyooo/agent-git-service'
 REPOSITORY_ID = 1384519373
 WORKFLOW = REPOSITORY + '/.github/workflows/release-control.yml'
 PREDICATE_TYPE = 'https://github.com/yoyooyooo/agent-git-service/attestations/runtime-binding/v1'
-RUNTIME_REVISION = '0b2c036604911858c9dae05d81056af44d6eb7d8'
-RUNTIME_TREE = '6a8548d9419387568d27a8cfcb43531e36c26c78'
+RELEASE_SOURCE = json.loads((Path(__file__).resolve().parents[1] / 'fork/release-source.json').read_text())
+RUNTIME_REVISION = RELEASE_SOURCE['runtime']['revision']
+RUNTIME_TREE = RELEASE_SOURCE['runtime']['tree']
 MODE = 'separated-control-v1'
 SEPARATED_CONTROL_ENABLED = False
 SHA = re.compile(r'[0-9a-f]{40}')
@@ -33,11 +34,15 @@ class Rejected(ValueError):
         self.exit_code = 64 if code == 'release_pin_invalid' else 65
 
 
-def binding_policy(pin, target):
+def binding_policy(pin, target, *, source=None):
     """Validate the pin's binding/ABI portion, not installation authorization."""
     if pin.get('schema') != contract.PIN_SCHEMA or pin.get('repository') != REPOSITORY or type(pin.get('repository_id')) is not int or pin['repository_id'] != REPOSITORY_ID:
         raise Rejected('release_pin_invalid')
-    if pin.get('runtime') != {'revision': RUNTIME_REVISION, 'tree': RUNTIME_TREE}:
+    source = RELEASE_SOURCE if source is None else source
+    runtime = source.get('runtime', {})
+    if source.get('schema') != 'ags.release-source.v1' or set(runtime) != {'revision', 'tree'} or any(not isinstance(v, str) or not SHA.fullmatch(v) for v in runtime.values()):
+        raise Rejected('release_pin_invalid')
+    if pin.get('runtime') != runtime:
         raise Rejected('release_identity_mismatch')
     # A v2 pin cannot carry a retired platform declaration anywhere.
     serialized = json.dumps(pin)
@@ -58,15 +63,15 @@ def binding_policy(pin, target):
         # No mode may be installed before real evidence and separate enablement.
         raise Rejected('release_source_binding_unverified')
     control = provenance.get('control_revision')
-    if not isinstance(control, str) or not SHA.fullmatch(control) or control == RUNTIME_REVISION:
+    if not isinstance(control, str) or not SHA.fullmatch(control) or control == runtime['revision']:
         raise Rejected('release_source_binding_unverified')
     if provenance.get('signer_workflow') != WORKFLOW or provenance.get('signer_digest') != control:
         raise Rejected('release_attestation_failed')
     return provenance
 
 
-def verification_command(archive, pin, target, *, bundle=None):
-    policy = binding_policy(pin, target)
+def verification_command(archive, pin, target, *, bundle=None, source=None):
+    policy = binding_policy(pin, target, source=source)
     # Neither signer nor source policy can be overridden by command-line flags.
     args = ['gh', 'attestation', 'verify', str(archive), '--repo', REPOSITORY,
             '--source-digest', policy['control_revision'],
@@ -79,34 +84,46 @@ def verification_command(archive, pin, target, *, bundle=None):
     return args
 
 
-def check_verified_statement(rows, archive_digest):
+def check_verified_statement(rows, archive_digest, *, source=None, subject_name=None):
     """Consume only stdout from successful gh verification, never raw DSSE JSON."""
     if not isinstance(rows, list) or len(rows) != 1:
         raise Rejected('release_attestation_failed')
     statement = rows[0].get('verificationResult', {}).get('statement', {})
     if statement.get('predicateType') != PREDICATE_TYPE:
         raise Rejected('release_source_binding_unverified')
+    runtime = (RELEASE_SOURCE if source is None else source)['runtime']
     if statement.get('predicate') != {'schema': 'ags.runtime-binding.v1',
-                                      'runtime_revision': RUNTIME_REVISION,
-                                      'runtime_tree': RUNTIME_TREE}:
+                                      'runtime_revision': runtime['revision'],
+                                      'runtime_tree': runtime['tree']}:
         raise Rejected('release_source_binding_unverified')
     subjects = statement.get('subject', [])
     if not isinstance(subjects, list) or len(subjects) != 1 or subjects[0].get('digest') != {'sha256': archive_digest}:
         raise Rejected('release_digest_mismatch')
+    if subject_name is not None and subjects[0].get('name') != subject_name:
+        raise Rejected('release_digest_mismatch')
     return statement
 
 
-def verify_evidence(archive, pin, target, *, bundle=None):
-    args = verification_command(archive, pin, target, bundle=bundle)
-    result = subprocess.run(args, capture_output=True, timeout=180)
+def verify_evidence(archive, pin, target, *, bundle=None, source=None, invocation_uri=None, source_ref=None):
+    args = verification_command(archive, pin, target, bundle=bundle, source=source)
+    try:
+        result = subprocess.run(args, capture_output=True, timeout=180)
+    except (subprocess.TimeoutExpired, OSError):
+        raise Rejected('release_attestation_failed') from None
     if result.returncode:
         # Provider diagnostics can contain private paths; do not relay them.
         raise Rejected('release_attestation_failed')
     try:
         rows = json.loads(result.stdout)
+        if invocation_uri is not None:
+            extensions = rows[0]['verificationResult']['signature']['certificate']
+            if (extensions.get('runInvocationURI') != invocation_uri
+                    or extensions.get('sourceRepositoryRef') != source_ref
+                    or extensions.get('buildTrigger') != 'push'):
+                raise Rejected('release_attestation_failed')
         digest = hashlib.sha256(Path(archive).read_bytes()).hexdigest()
-        return check_verified_statement(rows, digest)
-    except (KeyError, TypeError, AttributeError, json.JSONDecodeError):
+        return check_verified_statement(rows, digest, source=source)
+    except (KeyError, IndexError, TypeError, AttributeError, json.JSONDecodeError):
         raise Rejected('release_attestation_failed') from None
 
 
