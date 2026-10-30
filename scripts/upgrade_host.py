@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Root-pinned local adapter. Host provisioning/policy activation is a separate gate."""
 import argparse
+import contextlib
+import fcntl
+import stat
 import hashlib
 import importlib.util
 import json
@@ -11,9 +14,8 @@ import sys
 import tempfile
 import urllib.request
 
-from upgrade import BUNDLE, Failure, bundle_engine, execution_identity, private_json
+from upgrade import BUNDLE, Failure, bundle_engine, execution_identity, private_json, validate_pin, directory_fd, read_private_fd, require_apply_contracts, result_exit
 from upgrade_engine import Transaction, authorize, child, dual_smoke, save
-import sqlite3
 
 
 CI_JOBS = {
@@ -68,11 +70,16 @@ def context(args):
     host = socket.gethostname().split('.')[0]
     root = execution_identity(host)
     pin, digest = private_json(root / 'config/ags-deploy-release-pin.json')
-    if digest != args.pin_sha256 or pin.get('schema') != 'ags.deploy-release-pin.v2':
+    validate_pin(pin)
+    if digest != args.pin_sha256:
         raise Failure('release_pin_invalid')
     bundle_digest = pin.get('verification_policy', {}).get('tool_bundle_manifest_sha256', '')
     bundle_engine(BUNDLE, bundle_digest)
-    policy = json.loads((BUNDLE / 'upgrade_policy.json').read_bytes())
+    validate_pin(pin, source=json.loads((BUNDLE / 'release-source.json').read_bytes()))
+    policy_raw = (BUNDLE / 'upgrade_policy.json').read_bytes()
+    if hashlib.sha256(policy_raw).hexdigest() != pin['verification_policy']['policy_sha256']:
+        raise Failure('release_pin_invalid')
+    policy = json.loads(policy_raw)
     if policy.get('schema') != 'ags.upgrade-policy.v2':
         raise Failure('dependency_unavailable')
     entry = policy.get('deployments', {}).get(host)
@@ -155,67 +162,72 @@ class Effects:
         self.health(expected=self.binding['old'])
 
     def backup(self):
-        child(self.entry['backup'], 'prepare', effects=True)
-        receipt_path = Path(self.entry['backup_receipt'])
-        receipt, _ = private_json(receipt_path)
-        if (receipt.get('schema') != 'ags.local-backup.v2' or receipt.get('binding') != self.binding
-                or receipt.get('consistent') is not True or not receipt.get('files')):
-            raise Failure('host_transaction_failed', 'prepare')
-        backup_root = receipt_path.parent
-        seen = set()
-        for item in receipt['files']:
-            relative = Path(item['path'])
-            if relative.is_absolute() or '..' in relative.parts or str(relative) in seen:
-                raise Failure('host_transaction_failed', 'prepare')
-            seen.add(str(relative))
-            path = backup_root / relative
-            if (path.resolve() != path or path.is_symlink() or not path.is_file()
-                    or path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o077
-                    or path.stat().st_size != item['size']
-                    or self.installer.digest(path) != item['sha256']):
-                raise Failure('host_transaction_failed', 'prepare')
-        database = backup_root / receipt['database']
-        if receipt['database'] not in seen:
-            raise Failure('host_transaction_failed', 'prepare')
-        with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
-            if (db.execute('PRAGMA integrity_check').fetchall() != [('ok',)]
-                    or db.execute('PRAGMA foreign_key_check').fetchall()):
-                raise Failure('host_transaction_failed', 'prepare')
+        require_apply_contracts(self.binding['host'])
 
     def stop(self):
         child(self.entry['stop'], 'stop', effects=True)
 
     def install(self):
-        # Only the primary binary is in the deployment scope.
-        destination = self.root / 'bin/gh-server'
-        if destination.is_symlink():
-            raise Failure('host_transaction_failed', 'install')
-        with self.candidate.open('rb') as stream:
-            os.fsync(stream.fileno())
-        # Stage on the destination filesystem; scratch may be another mount.
-        temporary = destination.with_name('.gh-server.upgrading')
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o700)
-        with os.fdopen(fd, 'wb') as stream:
-            stream.write(self.candidate.read_bytes()); stream.flush(); os.fsync(stream.fileno())
-        save(self.root / 'state/installing.json', self.info)
-        os.replace(temporary, destination)
-        fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        """Share installer/runtime locks; all writes stay relative to opened FDs."""
         try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        current, _ = private_json(self.root / 'state/installation.json')
-        current.update(source=self.info['source'], runtime_tree=self.info['runtime_tree'],
-                       control_revision=self.info['control_revision'], version=self.info['version'],
-                       release_id=self.info['release_id'], attestation=self.info['attestation'])
-        current['binaries']['gh-server'] = self.info['binaries']['gh-server']
-        save(self.root / 'state/installation.json', current)
-        (self.root / 'state/installing.json').unlink()
-        fd = os.open(self.root / 'state', os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+            with directory_fd(self.root, private=True) as root_fd, contextlib.ExitStack() as guards:
+                dirs = {}
+                for name in ('state', 'bin'):
+                    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+                    guards.callback(os.close, fd)
+                    mode = os.fstat(fd)
+                    if mode.st_uid != os.getuid() or mode.st_mode & 0o077:
+                        raise Failure('host_transaction_failed', 'install')
+                    dirs[name] = fd
+                state_fd, bin_fd = dirs['state'], dirs['bin']
+                for name in ('install.lock', 'runtime.lock'):
+                    fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=state_fd)
+                    guards.callback(os.close, fd)
+                    mode = os.fstat(fd)
+                    if not stat.S_ISREG(mode.st_mode) or mode.st_uid != os.getuid() or mode.st_mode & 0o077 or mode.st_nlink != 1:
+                        raise Failure('host_transaction_failed', 'install')
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        raise Failure('lock_held', 'install') from None
+                fd = os.open('installation.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=state_fd)
+                try:
+                    current, _ = read_private_fd(fd)
+                finally:
+                    os.close(fd)
+                destination = os.stat('gh-server', dir_fd=bin_fd, follow_symlinks=False)
+                if not stat.S_ISREG(destination.st_mode) or destination.st_uid != os.getuid():
+                    raise Failure('host_transaction_failed', 'install')
+                fd = os.open(self.candidate, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(fd, 'rb') as candidate:
+                    data = candidate.read()
+                if hashlib.sha256(data).hexdigest() != self.info['binaries']['gh-server']['sha256']:
+                    raise Failure('release_digest_mismatch', 'install', 65)
+
+                def write_json(name, value):
+                    staging = name + '.new'
+                    fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=state_fd)
+                    with os.fdopen(fd, 'w') as stream:
+                        json.dump(value, stream, sort_keys=True)
+                        stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+                    os.replace(staging, name, src_dir_fd=state_fd, dst_dir_fd=state_fd)
+                    os.fsync(state_fd)
+
+                fd = os.open('.gh-server.upgrading', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o700, dir_fd=bin_fd)
+                with os.fdopen(fd, 'wb') as stream:
+                    stream.write(data); stream.flush(); os.fsync(stream.fileno())
+                write_json('installing.json', self.info)
+                os.replace('.gh-server.upgrading', 'gh-server', src_dir_fd=bin_fd, dst_dir_fd=bin_fd)
+                os.fsync(bin_fd)
+                current.update(source=self.info['source'], runtime_tree=self.info['runtime_tree'],
+                               control_revision=self.info['control_revision'], version=self.info['version'],
+                               release_id=self.info['release_id'], attestation=self.info['attestation'])
+                current['binaries']['gh-server'] = self.info['binaries']['gh-server']
+                write_json('installation.json', current)
+                os.unlink('installing.json', dir_fd=state_fd)
+                os.fsync(state_fd)
+        except OSError:
+            raise Failure('host_transaction_failed', 'install') from None
 
     def start(self):
         child(self.entry['start'], 'start', effects=True)
@@ -253,15 +265,12 @@ def main():
         return 0
     authorization, _ = private_json(root / 'config' / ('upgrade-authorization-' + args.authorization_id + '.json'))
     authorize(authorization, binding)
-    # imile additionally requires a locally provisioned trusted handoff verifier;
-    # a digest of arbitrary JSON does not establish mini origin.
-    if binding['host'] == 'imile-win':
-        child(entry['mini_handoff_verify'], 'admission')
+    require_apply_contracts(binding['host'])
     with tempfile.TemporaryDirectory(prefix='ags-upgrade-apply-') as directory:
         effects = Effects(root, pin, policy, entry, binding, Path(directory))
         result = Transaction(state, binding, authorization, effects).run()
         print(json.dumps(result))
-    return 0
+    return result_exit(result)
 
 
 if __name__ == '__main__':
@@ -270,5 +279,6 @@ if __name__ == '__main__':
     except Failure as error:
         print(json.dumps({'schema': 'ags.upgrade-diagnostic.v2', 'status': 'failed',
                           'code': error.code, 'phase': error.phase, 'host': socket.gethostname().split('.')[0],
-                          'deployment_id': None, 'attempt_id': None, 'journal_sha256': None}))
+                          'deployment_id': None, 'attempt_id': None, 'journal_sha256': None,
+                          'missing_contracts': getattr(error, 'missing_contracts', [])}))
         sys.exit(error.exit_code)

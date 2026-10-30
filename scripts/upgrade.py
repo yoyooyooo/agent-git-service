@@ -4,6 +4,7 @@
 Deployment bundles are provisioned separately. This checkout never installs one.
 """
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -25,7 +26,9 @@ EXIT_CODES = {'invalid_request': 64, 'invalid_host': 64, 'release_pin_invalid': 
               'migration_admission_rejected': 78, 'schema_not_additive': 78,
               'claim_held': 73, 'claim_mismatch': 73, 'lock_held': 73,
               'forward_only_recovery_required': 81, 'transaction_state_unknown': 82,
-              'journal_invalid': 82, 'host_transaction_failed': 82}
+              'journal_invalid': 82, 'host_transaction_failed': 82,
+              'backup_contract_unimplemented': 83, 'mini_handoff_contract_unimplemented': 84,
+              'observation_finalize_unimplemented': 85, 'awaiting_observation': 86}
 
 
 class Failure(Exception):
@@ -35,27 +38,185 @@ class Failure(Exception):
         self.exit_code = exit_code or EXIT_CODES.get(code, 82)
 
 
-def private_json(path, maximum=65536, *, owner=None):
-    """Read through O_NOFOLLOW and validate the FD, not a prior path lookup."""
+@contextmanager
+def directory_fd(path, *, private=False):
+    """Walk every ancestor without following links; retain the opened directory."""
+    path = Path(path)
+    if not path.is_absolute() or '..' in path.parts:
+        raise Failure('invalid_request')
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        if path.resolve() != path:
-            raise Failure('invalid_request')
-        parent = path.parent.stat()
-        if parent.st_uid != (os.getuid() if owner is None else owner) or parent.st_mode & 0o077:
-            raise Failure('invalid_request')
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        with os.fdopen(fd, 'rb') as stream:
-            before = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(before.st_mode) or before.st_uid != (os.getuid() if owner is None else owner)
-                    or stat.S_IMODE(before.st_mode) != 0o600 or before.st_size > maximum):
+        for part in path.parts[1:]:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+            mode = os.fstat(fd)
+            if mode.st_uid not in (0, os.getuid()) or mode.st_mode & 0o022:
                 raise Failure('invalid_request')
-            raw = stream.read(maximum + 1)
-            after = os.fstat(stream.fileno())
-            if len(raw) > maximum or (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
+        mode = os.fstat(fd)
+        if private and (mode.st_uid != os.getuid() or mode.st_mode & 0o077):
+            raise Failure('invalid_request')
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def read_private_fd(fd, maximum=65536, *, owner=None):
+    before = os.fstat(fd)
+    if (not stat.S_ISREG(before.st_mode)
+            or before.st_uid != (os.getuid() if owner is None else owner)
+            or stat.S_IMODE(before.st_mode) != 0o600 or before.st_size > maximum):
+        raise Failure('invalid_request')
+    raw = os.read(fd, maximum + 1)
+    after = os.fstat(fd)
+    if len(raw) > maximum or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+        raise Failure('invalid_request')
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate JSON field')
+            result[key] = value
+        return result
+    return json.loads(raw, object_pairs_hook=unique), hashlib.sha256(raw).hexdigest()
+
+
+def private_json(path, maximum=65536, *, owner=None):
+    """Validate every directory and read the pinned file through its directory FD."""
+    try:
+        with directory_fd(path.parent) as parent:
+            mode = os.fstat(parent)
+            if mode.st_uid != (os.getuid() if owner is None else owner) or mode.st_mode & 0o077:
                 raise Failure('invalid_request')
-        return json.loads(raw), hashlib.sha256(raw).hexdigest()
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:
+                return read_private_fd(fd, maximum, owner=owner)
+            finally:
+                os.close(fd)
     except (OSError, ValueError, TypeError):
         raise Failure('invalid_request') from None
+
+
+def validate_pin(pin, *, source=None):
+    """Closed preparation schema. Validation does not enable a production mode."""
+    import release_contract as contract
+    from release_verify import WORKFLOW, PREDICATE_TYPE
+
+    def fields(value, names):
+        if type(value) is not dict or set(value) != set(names.split()):
+            raise ValueError('fields')
+
+    def positive(value):
+        if type(value) is not int or value <= 0:
+            raise ValueError('integer')
+
+    def sha(value, width=40):
+        if type(value) is not str or not re.fullmatch('[0-9a-f]{' + str(width) + '}', value):
+            raise ValueError('digest')
+
+    try:
+        fields(pin, 'schema repository repository_id version release_id immutable draft allow_prerelease runtime toolchain targets ci verification_policy')
+        if (pin['schema'] != contract.PIN_SCHEMA or pin['repository'] != contract.REPO
+                or type(pin['repository_id']) is not int or pin['repository_id'] != contract.REPO_ID
+                or type(pin['version']) is not str or not contract.VERSION.fullmatch(pin['version'])
+                or pin['immutable'] is not True or pin['draft'] is not False
+                or type(pin['allow_prerelease']) is not bool
+                or ('-rc' in pin['version'] and not pin['allow_prerelease'])):
+            raise ValueError('identity')
+        positive(pin['release_id'])
+        fields(pin['runtime'], 'revision tree')
+        for value in pin['runtime'].values():
+            sha(value)
+        if source is not None and (source.get('schema') != 'ags.release-source.v1'
+                or source.get('version') != pin['version'] or source.get('runtime') != pin['runtime']):
+            raise ValueError('reviewed runtime')
+        fields(pin['toolchain'], 'go_version pin_path')
+        if pin['toolchain'] != {'go_version': 'go1.26.8', 'pin_path': '.go-version'}:
+            raise ValueError('toolchain')
+        fields(pin['targets'], 'darwin_arm64 linux_amd64')
+        controls = set()
+        for target, entry in pin['targets'].items():
+            fields(entry, 'asset manifest_schema abi binaries provenance')
+            if entry['manifest_schema'] != contract.MANIFEST_SCHEMA:
+                raise ValueError('manifest')
+            contract.validate_abi(entry['abi'], target)
+            asset = entry['asset']
+            fields(asset, 'id name size digest')
+            positive(asset['id']); positive(asset['size'])
+            if (asset['size'] > contract.MAX_ARCHIVE
+                    or asset['name'] != 'ags-' + pin['version'] + '-' + target + '.tar.gz'
+                    or type(asset['digest']) is not str or not re.fullmatch(r'sha256:[0-9a-f]{64}', asset['digest'])):
+                raise ValueError('asset')
+            fields(entry['binaries'], ' '.join(contract.COMMANDS))
+            for command, binary in entry['binaries'].items():
+                fields(binary, 'sha256 size cgo_enabled identity')
+                sha(binary['sha256'], 64); positive(binary['size'])
+                if binary['size'] > contract.MAX_MEMBER or binary['cgo_enabled'] is not (command == 'gh-server'):
+                    raise ValueError('binary')
+                identity = binary['identity']
+                fields(identity, 'schema command version revision tree goos goarch go_version')
+                os_name, arch = target.split('_')
+                if identity != {'schema': 'ags.build.v1', 'command': command, 'version': pin['version'],
+                                **pin['runtime'], 'goos': os_name, 'goarch': arch, 'go_version': 'go1.26.8'}:
+                    raise ValueError('binary identity')
+            provenance = entry['provenance']
+            fields(provenance, 'mode subject_digest repository_id issuer signer_workflow signer_ref signer_digest workflow_run_id workflow_run_attempt control_revision control_tree runtime_revision runtime_tree predicate_digest predicate_type')
+            for key in ('control_revision', 'control_tree', 'signer_digest', 'runtime_revision', 'runtime_tree'):
+                sha(provenance[key])
+            sha(provenance['predicate_digest'], 64)
+            positive(provenance['workflow_run_id']); positive(provenance['workflow_run_attempt'])
+            if (provenance['mode'] != 'separated-control-v1'
+                    or provenance['subject_digest'] != asset['digest']
+                    or type(provenance['repository_id']) is not int or provenance['repository_id'] != contract.REPO_ID
+                    or provenance['issuer'] != 'https://token.actions.githubusercontent.com'
+                    or provenance['signer_workflow'] != WORKFLOW
+                    or provenance['signer_ref'] != 'refs/tags/' + pin['version']
+                    or provenance['signer_digest'] != provenance['control_revision']
+                    or provenance['control_revision'] == pin['runtime']['revision']
+                    or provenance['runtime_revision'] != pin['runtime']['revision']
+                    or provenance['runtime_tree'] != pin['runtime']['tree']
+                    or provenance['predicate_type'] != PREDICATE_TYPE):
+                raise ValueError('provenance')
+            controls.add((provenance['control_revision'], provenance['control_tree']))
+        if len(controls) != 1:
+            raise ValueError('control set')
+        fields(pin['ci'], 'revision fork_ci secret_scan')
+        if pin['ci']['revision'] != pin['runtime']['revision']:
+            raise ValueError('ci runtime')
+        for key, workflow in [('fork_ci', '.github/workflows/ci.yml'), ('secret_scan', '.github/workflows/secret-scan.yml')]:
+            row = pin['ci'][key]
+            fields(row, 'workflow run_id run_attempt')
+            positive(row['run_id']); positive(row['run_attempt'])
+            if row['workflow'] != workflow:
+                raise ValueError('ci workflow')
+        policy = pin['verification_policy']
+        fields(policy, 'schema policy_sha256 tool_bundle_manifest_sha256')
+        if policy['schema'] != 'ags.upgrade-policy.v2':
+            raise ValueError('policy')
+        sha(policy['policy_sha256'], 64); sha(policy['tool_bundle_manifest_sha256'], 64)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise Failure('release_pin_invalid') from None
+
+
+def require_apply_contracts(host):
+    # These contracts have no trusted implementation in this slice. Policy cannot
+    # opt in by adding a host or a command that merely exits successfully.
+    missing = ['backup_git_config_coverage_and_git_db_consistency',
+               'independent_observation_approval_and_finalize']
+    if host == 'imile-win':
+        missing.append('trusted_mini_handoff_bound_to_pin_release_deployment')
+    error = Failure('backup_contract_unimplemented')
+    error.missing_contracts = missing
+    raise error
+
+
+def result_exit(result):
+    if result.get('status') == 'completed':
+        return 0
+    if result.get('status') == 'awaiting_observation':
+        return EXIT_CODES['awaiting_observation']
+    return EXIT_CODES['transaction_state_unknown']
 
 
 def execution_identity(host):
@@ -119,12 +280,14 @@ def main():
     host = socket.gethostname().split('.')[0]
     root = execution_identity(host)
     pin, digest = private_json(root / 'config/ags-deploy-release-pin.json')
-    if digest != args.pin_sha256 or pin.get('schema') != 'ags.deploy-release-pin.v2':
+    validate_pin(pin)
+    if digest != args.pin_sha256:
         raise Failure('release_pin_invalid')
     expected = pin.get('verification_policy', {}).get('tool_bundle_manifest_sha256', '')
     if not SHA256.fullmatch(expected):
         raise Failure('release_pin_invalid')
     engine = bundle_engine(BUNDLE, expected)
+    validate_pin(pin, source=json.loads((BUNDLE / 'release-source.json').read_bytes()))
     # The wrapper owns no lock/claim. The pinned engine is their only writer.
     command = [sys.executable, str(engine), *sys.argv[1:]]
     try:

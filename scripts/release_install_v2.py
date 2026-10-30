@@ -1,6 +1,7 @@
 """V2 consumer for a complete reviewed checkout; never used by v1 bootstrap."""
 import base64
 import hashlib
+import importlib
 import json
 from pathlib import Path
 import re
@@ -8,6 +9,7 @@ import platform
 import tempfile
 
 TARGETS = ('darwin_arm64', 'linux_amd64')
+verifier = importlib.import_module('release_verify')
 
 
 def source_at(installer, control, version):
@@ -93,7 +95,6 @@ def run(installer, args, release, control, target):
                                 'archive': 'unverified', 'executable_identity': 'unverified'}}
     if not args.install and not args.verify_only:
         return receipt
-    verifier = installer.adjacent_module('release_verify')
     contract = installer.adjacent_module('release_contract')
     pin = {'schema': contract.PIN_SCHEMA, 'repository': installer.REPO,
            'repository_id': installer.REPO_ID, 'runtime': source['runtime'],

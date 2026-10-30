@@ -185,6 +185,7 @@ def install_verified(archive, info, receipt, prefix):
                 identity=json.loads(execute([str(staged/'bin'/command),'--version']))
                 if identity!=info['binaries'][command]['identity']:
                     raise ValueError('Actual executable identity mismatch')
+            if 'verification' in receipt: receipt['verification']['executable_identity']='verified'
             atomic_json(state/'installing.json',receipt)
             for command in COMMANDS: os.replace(staged/'bin'/command,bindir/command)
             for name in ('LICENSE','NOTICE'):
