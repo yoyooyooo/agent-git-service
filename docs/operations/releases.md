@@ -286,13 +286,23 @@ ordinary program replacement does not retain a complete historical environment.
 ## Plan, verify and replace the single installation
 
 Use Python 3.9+ and a GitHub CLI supporting `release verify-asset` and
-`attestation verify` (the delivery path is exercised with 2.86.0). The Python
-entry remains the lower-level interface for automation from a trusted checkout. The default operation is a read-only plan:
+`attestation verify` (the delivery path is exercised with 2.86.0). From a
+trusted checkout, the guaranteed automation entry is the shell launcher
+`scripts/install-release`. It exports `PYTHONDONTWRITEBYTECODE=1`, unsets
+`PYTHONPYCACHEPREFIX` and execs `python3 -B` before the installer runs. The
+default operation is a read-only plan:
 
 ```bash
-python3 scripts/install-release.py --version fork-20260924.1-rc1 \
+scripts/install-release plan --version fork-20260924.1-rc1 \
   --allow-prerelease
 ```
+
+`scripts/install-release.py` is the internal implementation. Running it as
+`python3 scripts/install-release.py` is outside the read-only guarantee:
+CPython can write standard-library bytecode before the first line of that file
+if the caller points `PYTHONPYCACHEPREFIX` or `-X pycache_prefix` at a writable
+directory. The file then executes `from __future__ import annotations` before
+setting `sys.dont_write_bytecode`; those settings cannot prevent earlier writes.
 
 Add `--install` to download into an owner-controlled local directory. It requires
 an immutable, non-draft release; pre-releases require their explicit opt-in.
@@ -309,10 +319,13 @@ Transaction downloads/candidates are cleaned on success or exceptions. A small
 current receipt and interruption marker live in `state/`, not inside downloads.
 
 ```bash
-python3 scripts/install-release.py --version fork-20260924.1-rc1 \
-  --allow-prerelease --install
+scripts/install-release install --version fork-20260924.1-rc1 \
+  --allow-prerelease
 ~/.ags/bin/gh-server --version
 ```
+
+`scripts/install-release verify-only` is the guaranteed verify-only entry. It
+forwards `--verify-only` to the same internal implementation.
 
 An interrupted replacement prevents startup until the same exact verified
 installation completes. No unattended auto-updater is enabled. Installed and
@@ -356,7 +369,7 @@ package checksum does not resolve them.
 
 ## V2 consumer and local upgrade source
 
-From a complete reviewed checkout, `scripts/install-release.py --version <tag>`
+From a complete reviewed checkout, `scripts/install-release --version <tag>`
 returns a read-only metadata plan. Its verification map explicitly marks asset
 bytes, immutable release proof, attestation, archive and executable identity as
 unverified. `--verify-only` downloads into private temporary scratch, verifies
@@ -385,17 +398,29 @@ The Bash `install.sh` wrapper selects its bootstrap scratch parent under the
 same rule before `mktemp`, installer download or installer invocation, for
 plan, install and upgrade. That selection uses only the functions embedded in
 the wrapper. It does not parse, import or execute the adjacent
-`install-release.py`, so version identification and refusal do not depend on
-its contents. After a parent is selected, a regular adjacent
+`install-release.py`, so scratch selection does not depend on its contents.
+Version identification and refusal still execute the selected trusted installer
+after that choice. After a parent is selected, a regular adjacent
 `install-release.py` is the installer that runs: it is the trusted source of
 the release being installed, not an untrusted input isolated by this wrapper.
 A copied standalone bootstrap has no adjacent source and fetches the exact
 installer blob only after scratch selection. Regression tests compare the
 embedded functions, syntax and results, with the Python selector. No suitable
 parent exits 1 without creating scratch. Bootstrap scratch remains mode `0700`
-and is removed on exit. The wrapper and the direct Python entry both disable
-bytecode caches themselves, including an inherited cache-prefix setting, before
-any import. Classification has three outcomes:
+and is removed on exit.
+
+The guaranteed bytecode entries are `scripts/install.sh`, `scripts/install-release`
+(`plan`, `install`, `verify-only`) and `scripts/upgrade`. Each sets
+`PYTHONDONTWRITEBYTECODE=1`, unsets `PYTHONPYCACHEPREFIX` and starts `python3 -B`
+before the internal implementation runs. The `.py` files are internal. Their
+`from __future__ import annotations`, where present, executes before
+`sys.dont_write_bytecode` runs, so those in-process settings do not cover
+interpreter startup. Direct `python3 script.py` is outside this guarantee.
+`-X pycache_prefix` is an interpreter option, not a launcher argument; these
+launchers accept application arguments only. The internal helper
+`scripts/ags-python.sh` also protects Python subprocess entry points used by
+tests and CI. Its `-B` remains effective even with an explicit `-X` prefix.
+Classification has three outcomes:
 
 - V2: a readable manifest declares `ags.release.v2` or contains `abi`, or the
   readable archive contains `NOTICE` and does not pass the complete historical

@@ -1,4 +1,10 @@
-"""V2 consumer for a complete reviewed checkout; never used by v1 bootstrap."""
+"""Internal v2 consumer, not a guaranteed entry.
+
+Used by the reviewed checkout installer. Never used by the v1 bootstrap.
+Direct "python3 scripts/release_install_v2.py" is not covered by the read-only
+guarantee. scripts/install-release starts the installer with bytecode writes
+disabled before Python starts.
+"""
 import sys
 sys.dont_write_bytecode = True
 sys.pycache_prefix = None

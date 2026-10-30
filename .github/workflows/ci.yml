@@ -66,13 +66,13 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_public_ranges.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_casefold_policy.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_release.py
-          PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_release_binding.py
+          scripts/ags-python.sh fork/scripts/test_release_binding.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_install_sh.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_single_root.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_install_v2.py
-          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_upgrade.py
+          scripts/ags-python.sh scripts/test_upgrade.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_upgrade_safety.py
-          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_release_consumer.py
+          scripts/ags-python.sh scripts/test_release_consumer.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_deploy_handoff.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_deploy_probe.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_maintenance_window.py

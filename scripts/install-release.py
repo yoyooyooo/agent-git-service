@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
-"""Install one verified AGS release in a durable user root (default ~/.ags).
+"""Internal installer implementation, not a guaranteed entry.
+
+Install one verified AGS release in a durable user root (default ~/.ags).
 Default is a read-only plan. --install replaces the single installation, never
 migrates data or restarts services. Versions identify bytes, not retained slots.
+
+Guaranteed invocation is scripts/install-release (plan, install, verify-only)
+or scripts/install.sh. Those launchers set PYTHONDONTWRITEBYTECODE and clear
+PYTHONPYCACHEPREFIX before the first Python process, then exec python3 -B.
+Direct "python3 scripts/install-release.py" is not covered by the read-only
+guarantee: CPython may write standard-library bytecode before this file runs.
 """
 from __future__ import annotations
 import os

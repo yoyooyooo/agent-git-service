@@ -396,13 +396,91 @@ print(json.dumps(value))
                 env['PYTHONPYCACHEPREFIX'] = str(prefix / 'cache')
                 env['PYTHONPATH'] = str(prefix / 'scripts')
                 result = subprocess.run(
-                    [sys.executable, '-B', str(prefix / 'scripts/install-release.py'), '--version', VERSION,
+                    [str(HERE / 'ags-python.sh'), str(prefix / 'scripts/install-release.py'), '--version', VERSION,
                      '--allow-prerelease', '--prefix', str(prefix), *extra],
                     cwd=prefix, env=env, capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0 if mode == 'plan' else 83, result.stderr)
                 self.assert_no_bytecode(prefix, before, result)
                 calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()]
                 self.assertTrue(all(call[0] == 'api' for call in calls), calls)
+
+    def test_controlled_launchers_prevent_startup_cache(self):
+        # No caller -B or PYTHONDONTWRITEBYTECODE: exercise the actual shell entries.
+        commands = [('install-release', [], 0), ('install-release', ['plan'], 0),
+                    ('install-release', ['--install'], 83),
+                    ('install-release', ['--verify-only'], 1),
+                    ('install-release', ['install'], 83),
+                    ('install-release', ['verify-only'], 1)]
+        commands += [('upgrade', [command], 64) for command in ('plan', 'apply', 'status')]
+        for location in ('cache', 'state/cache'):
+            for entry, arguments, expected in commands:
+                with self.subTest(entry=entry, arguments=arguments, location=location):
+                    with tempfile.TemporaryDirectory(prefix='ags-launcher-') as directory:
+                        root = Path(directory).resolve()
+                        prefix, outside, transport = self.shell_fixture(root)
+                        for name in ('scripts', 'fork'):
+                            self.copy_source(HERE.parent / name, prefix / name)
+                        command = [str(prefix / 'scripts' / entry), *arguments]
+                        if entry == 'install-release':
+                            command += ['--version', VERSION, '--allow-prerelease', '--prefix', str(prefix)]
+                        else:
+                            # Invalid request fails before any real host identity/config lookup.
+                            command += ['--deployment-id', 'fixture', '--pin-sha256', 'invalid',
+                                        '--ci-run-id', '1', '--ci-run-attempt', '1',
+                                        '--authorization-id', 'fixture']
+                        env = self.shell_environment(root, transport, str(outside))
+                        env['PYTHONPYCACHEPREFIX'] = str(prefix / location)
+                        self.assertNotIn('PYTHONDONTWRITEBYTECODE', env)
+                        self.assertFalse((prefix / location).exists())
+                        before = self.shell_snapshot(prefix)
+                        result = subprocess.run(command, cwd=prefix, env=env,
+                                                capture_output=True, text=True, timeout=30)
+                        self.assertEqual(result.returncode, expected, result.stderr)
+                        self.assert_no_bytecode(prefix, before, result)
+                        if entry == 'upgrade':
+                            self.assertEqual(json.loads(result.stdout)['code'], 'invalid_request')
+                        else:
+                            calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()]
+                            if expected == 1:
+                                self.assertIn('Verification/download command failed: gh release (no fallback)', result.stderr)
+                                self.assertEqual(calls[-1][:2], ['release', 'download'])
+                            else:
+                                self.assertTrue(all(call[0] == 'api' for call in calls), calls)
+
+    def test_bare_python_startup_is_outside_readonly_contract(self):
+        # Document the excluded interface, rather than pretending in-script settings
+        # can undo CPython startup writes. Each interpreter gets a fresh cache path.
+        for options in ([], ['-X']):
+            with self.subTest(options=options):
+                with tempfile.TemporaryDirectory(prefix='ags-bare-startup-') as directory:
+                    root = Path(directory).resolve()
+                    prefix, outside, transport = self.shell_fixture(root)
+                    cache = prefix / 'state/cache'
+                    env = self.shell_environment(root, transport, str(outside))
+                    env['PYTHONPYCACHEPREFIX'] = str(cache)
+                    command = [sys.executable]
+                    if options:
+                        command += ['-X', 'pycache_prefix=' + str(cache)]
+                    command += [str(HERE / 'install-release.py'), '--help']
+                    before = self.shell_snapshot(prefix)
+                    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertGreater(len(list(cache.rglob('*.pyc'))), 0)
+                    self.assertNotEqual(self.shell_snapshot(prefix), before)
+
+    def test_controlled_python_helper_overrides_explicit_cache_prefix(self):
+        with tempfile.TemporaryDirectory(prefix='ags-helper-startup-') as directory:
+            root = Path(directory).resolve()
+            prefix, outside, transport = self.shell_fixture(root)
+            env = self.shell_environment(root, transport, str(outside))
+            env['PYTHONPYCACHEPREFIX'] = str(prefix / 'cache')
+            before = self.shell_snapshot(prefix)
+            result = subprocess.run(
+                [str(HERE / 'ags-python.sh'), '-X', 'pycache_prefix=' + str(prefix / 'state/cache'),
+                 str(HERE / 'install-release.py'), '--help'], env=env,
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assert_no_bytecode(prefix, before, result)
 
     def test_pre_refusal_implicit_caches_do_not_write_installation_root(self):
         variables = ('HOME', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'PIP_CACHE_DIR',

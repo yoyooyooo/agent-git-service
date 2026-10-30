@@ -1,4 +1,9 @@
-"""Durable local transaction state. The fixed host adapter supplies authorized effects."""
+"""Internal transaction implementation, not a guaranteed entry.
+
+Durable local transaction state. The fixed host adapter supplies authorized effects.
+Callers reach this module through scripts/upgrade, which starts Python with
+bytecode writes disabled. Direct "python3 scripts/upgrade_engine.py" is not covered.
+"""
 import sys
 sys.dont_write_bytecode = True
 sys.pycache_prefix = None
@@ -81,8 +86,15 @@ def migration_admission(old, new, migrations, registry):
 
 
 def child(argv, phase, *, env=None, cwd=None, timeout=120, effects=False):
+    env = os.environ.copy() if env is None else dict(env)
+    env['PYTHONDONTWRITEBYTECODE'] = '1'
+    env.pop('PYTHONPYCACHEPREFIX', None)
+    command = list(argv)
+    if command and (command[0] == sys.executable
+                    or re.fullmatch(r'python(?:3(?:\.\d+)?)?', Path(command[0]).name)):
+        command.insert(1, '-B')
     try:
-        result = subprocess.run(argv, env=env, cwd=cwd, capture_output=True, timeout=timeout)
+        result = subprocess.run(command, env=env, cwd=cwd, capture_output=True, timeout=timeout)
     except FileNotFoundError:
         raise Failure('dependency_unavailable', phase) from None
     except subprocess.TimeoutExpired:
@@ -148,7 +160,7 @@ def smoke(binary, revision, directory, *, database=None, timeout=60, _namespace=
     if sys.platform.startswith('linux') and not _namespace:
         # The fixed helper brings up only loopback in a new user/network namespace.
         helper = Path(__file__).with_name('upgrade_smoke.py')
-        command = ['/usr/bin/unshare', '--user', '--map-root-user', '--net', sys.executable,
+        command = ['/usr/bin/unshare', '--user', '--map-root-user', '--net', sys.executable, '-B',
                    str(helper), str(binary), revision, str(directory), str(timeout)]
         if database is not None:
             command.append(str(database))

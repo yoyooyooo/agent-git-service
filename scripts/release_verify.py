@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Check v2 release binding evidence. Production separated-control is NOT enabled.
+"""Internal v2 binding checker, not a guaranteed entry.
 
-No installation, publication or service effects. Only gh-verified statements are
-read as signed evidence. Unit fixtures are not Sigstore bundles.
+Production separated-control is NOT enabled. No installation, publication or
+service effects. Only gh-verified statements are read as signed evidence.
+Unit fixtures are not Sigstore bundles. Direct "python3 scripts/release_verify.py"
+is not covered by the read-only guarantee.
 """
 import sys
 sys.dont_write_bytecode = True

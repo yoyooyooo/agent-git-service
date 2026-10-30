@@ -149,6 +149,33 @@ Transaction(Path(sys.argv[1]),b,a,Effects()).run()
             engine.child([str(self.root / 'absent')], 'admission')
         self.assertEqual(caught.exception.exit_code, 69)
 
+    def test_python_child_disables_bytecode_before_startup(self):
+        prefix = self.root / 'installation'
+        (prefix / 'state').mkdir(parents=True)
+        (prefix / 'state/receipt').write_bytes(b'existing receipt')
+        def snapshot():
+            return [(str(path.relative_to(prefix)), path.stat().st_mode, path.stat().st_mtime_ns,
+                     None if path.is_dir() else path.read_bytes())
+                    for path in [prefix, *sorted(prefix.rglob('*'))]]
+        before = snapshot()
+        for explicit in (False, True):
+            with self.subTest(explicit_environment=explicit):
+                env = {key: value for key, value in os.environ.items()
+                       if key not in ('PYTHONDONTWRITEBYTECODE', 'PYTHONPYCACHEPREFIX',
+                                      'PYTHONPATH', 'BASH_ENV')}
+                cache = prefix / ('state/cache-explicit' if explicit else 'cache-inherited')
+                env['PYTHONPYCACHEPREFIX'] = str(cache)
+                command = [sys.executable, '-X', 'pycache_prefix=' + str(cache), '-c',
+                           'import sys; print(sys.flags.dont_write_bytecode)']
+                with patch.dict(os.environ, env, clear=True):
+                    output = engine.child(command, 'admission', env=env if explicit else None)
+                self.assertEqual(output, b'1\n')
+                self.assertEqual(snapshot(), before)
+                self.assertEqual(list(prefix.rglob('*.pyc')), [])
+                self.assertNotIn('PYTHONDONTWRITEBYTECODE', env)
+                self.assertEqual(env['PYTHONPYCACHEPREFIX'], str(cache))
+                self.assertNotIn('-B', command)
+
     def binary(self, name, revision, new):
         path = self.root / name
         path.write_text('#!' + sys.executable + '\n' + '''import json,os,signal,sqlite3

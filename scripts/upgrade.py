@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Fixed local upgrade entry. plan is read-only; apply requires external authorization.
+"""Internal local upgrade implementation, not a guaranteed entry.
 
+plan is read-only; apply requires external authorization.
 Deployment bundles are provisioned separately. This checkout never installs one.
+
+Guaranteed invocation is scripts/upgrade. That launcher sets
+PYTHONDONTWRITEBYTECODE and clears PYTHONPYCACHEPREFIX before the first Python
+process, then execs python3 -B. Direct "python3 scripts/upgrade.py" is not
+covered by the read-only guarantee.
 """
 import sys
 sys.dont_write_bytecode = True
@@ -292,7 +298,7 @@ def main():
     engine = bundle_engine(BUNDLE, expected)
     validate_pin(pin, source=json.loads((BUNDLE / 'release-source.json').read_bytes()))
     # The wrapper owns no lock/claim. The pinned engine is their only writer.
-    command = [sys.executable, str(engine), *sys.argv[1:]]
+    command = [sys.executable, '-B', str(engine), *sys.argv[1:]]
     try:
         result = subprocess.run(command, cwd=root, env={
             'HOME': str(root.parent), 'USER': 'yoyo', 'LOGNAME': 'yoyo',
