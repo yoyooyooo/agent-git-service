@@ -196,6 +196,45 @@ def install_verified(archive, info, receipt, prefix):
             atomic_json(state/'installation.json',receipt)
             (state/'installing.json').unlink()
 
+def release_generation(assets):
+    """Name-only v2 selection before any installation effect.
+
+    Archive names are shared with historical v1, so they are not the classifier.
+    release-source.json or either attestation is sufficient. When all three are
+    absent, main reads the archive manifest before creating an installation root.
+    """
+    markers={'release-source.json','attestation-darwin_arm64.sigstore.json','attestation-linux_amd64.sigstore.json'}
+    for asset in assets:
+        name=asset.get('name') if isinstance(asset, dict) else None
+        if name in markers:
+            return 'v2'
+    return 'v1'
+
+def archive_declares_v2(archive):
+    """Read only build-info.json outside any installation root.
+
+    Schema ags.release.v2 is sufficient. A damaged schema is still v2 when the
+    manifest carries the structured v2 ABI or the archive contains NOTICE,
+    which historical v1 bundles do not. Does not extract, execute or create a root.
+    """
+    if not tarfile.is_tarfile(archive):
+        return False
+    with tarfile.open(archive) as tf:
+        names={member.name for member in tf.getmembers()}
+        try:
+            member=tf.getmember('build-info.json')
+        except KeyError:
+            member=None
+        info=None
+        if member is not None and member.isfile() and member.size<=1024*1024:
+            try:
+                info=json.load(tf.extractfile(member))
+            except (json.JSONDecodeError, OSError, tarfile.TarError, TypeError):
+                info=None
+        if isinstance(info, dict) and (info.get('schema')==MANIFEST_SCHEMA or 'abi' in info):
+            return True
+        return 'NOTICE' in names
+
 def adjacent_module(name):
     import importlib.util
     path=Path(__file__).with_name(name+'.py')
@@ -222,10 +261,10 @@ def main():
     if ref['type']=='tag': ref=api('repos/'+REPO+'/git/tags/'+ref['sha'])['object']
     if ref['type']!='commit' or not SHA.fullmatch(ref['sha']): raise ValueError('Release tag is not an exact commit')
     source=ref['sha']; platform_target=target(); name='ags-'+a.version+'-'+platform_target+'.tar.gz'
-    # An exact nine-asset inventory selects v2. A damaged v2 cannot fall back to v1.
-    v2_names={'release-source.json','attestation-darwin_arm64.sigstore.json','attestation-linux_amd64.sigstore.json'}
-    is_v2=any(asset['name'] in v2_names for asset in release['assets'])
-    if is_v2:
+    # Names that only exist on v2 select it before any root, download, lock or candidate.
+    # A v2 archive whose three marker names are missing is still identified below,
+    # from its manifest, before the historical path creates an installation root.
+    if release_generation(release['assets'])=='v2':
         helper=adjacent_module('release_install_v2')
         import sys
         if a.install:
@@ -241,14 +280,16 @@ def main():
     plan={'schema':INSTALLATION_SCHEMA,'repository':REPO,'version':a.version,'source':source,'target':platform_target,'prefix':str(prefix),'install':a.install,'service_or_data_changed':False,'verification':{'metadata':'verified','asset_bytes':'unverified','immutable_release':'unverified','attestation':'unverified','archive':'unverified','executable_identity':'unverified'}}
     if not a.install and not a.verify_only: print(json.dumps(plan,indent=2));return
     os.umask(0o077)
-    if a.install: owned_directory(prefix)
-    # Downloads are transaction-local on both success and verification failure.
-    with tempfile.TemporaryDirectory(prefix='.download-',dir=prefix if a.install else None) as directory:
+    # Private scratch, never the installation root. v2 format is refused before owned_directory.
+    with tempfile.TemporaryDirectory(prefix='ags-release-identify-') as directory:
         cache=Path(directory)
         execute(['gh','release','download',a.version,'--repo',REPO,'--pattern',name,'--dir',str(cache)])
         archive=cache/name
         if 'sha256:'+digest(archive)!=matching[0]['digest'] or archive.stat().st_size!=matching[0]['size']: raise ValueError('Downloaded asset differs from GitHub digest/size')
         execute(['gh','release','verify-asset',a.version,str(archive),'--repo',REPO])
+        if archive_declares_v2(archive):
+            raise ValueError('release_artifact_unverified')
+        if a.install: owned_directory(prefix)
         info=inspect_bundle(archive,a.version,source,platform_target)
         require_installable_manifest(info)
         execute(['gh','attestation','verify',str(archive),'--repo',REPO,'--source-digest',source,'--signer-workflow',REPO+'/.github/workflows/release.yml','--deny-self-hosted-runners'])
@@ -267,6 +308,8 @@ def entry():
         import sys
         if type(error).__name__=='InstallClosed':
             print(str(error),file=sys.stderr);sys.exit(error.exit_code)
+        if str(error)=='release_artifact_unverified':
+            print(str(error),file=sys.stderr);sys.exit(1)
         raise
 
 if __name__=='__main__': entry()
