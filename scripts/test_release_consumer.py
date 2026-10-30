@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import platform
 from pathlib import Path
 import subprocess
 import sys
@@ -117,18 +118,34 @@ class ConsumerChainTests(unittest.TestCase):
                 'signer_workflow': verifier.WORKFLOW, 'predicate_type': verifier.PREDICATE_TYPE,
                 'bundle_sha256': hashlib.sha256(kwargs['bundle'].read_bytes()).hexdigest(), 'verified': True}
 
-    def consume(self, *, install=False, mutate=None, proof=None):
+    def simulated_host(self, consumer, target, *, compatible):
+        # Patch the probes production host_abi reads. Do not replace host_abi itself.
+        if target == 'darwin_arm64':
+            version = '15.5' if compatible else '14.0'
+            return patch.object(consumer.platform, 'mac_ver', return_value=(version, ('', '', ''), 'arm64'))
+        if target == 'linux_amd64':
+            version = '2.35' if compatible else '2.31'
+            return patch.object(consumer.platform, 'libc_ver', return_value=('glibc', version))
+        raise AssertionError(target)
+
+    def consume(self, *, install=False, mutate=None, proof=None, target='darwin_arm64', host=None):
         self.args.install = install
         self.calls.clear()
         consumer = installer.adjacent_module('release_install_v2')
         verifier_module = consumer.verifier
         original = verifier_module.verify_release
         verifier_module.verify_release = proof or self.proof
+        contexts = [patch.object(installer, 'api', side_effect=self.api),
+                    patch.object(installer, 'execute', side_effect=self.execute)]
+        if host is not None:
+            contexts.append(self.simulated_host(consumer, target, compatible=host))
         try:
-            with patch.object(installer, 'api', side_effect=self.api), patch.object(installer, 'execute', side_effect=self.execute):
+            with contextlib.ExitStack() as stack:
+                for context in contexts:
+                    stack.enter_context(context)
                 if mutate:
                     mutate()
-                return consumer.run(installer, self.args, self.release, CONTROL, 'darwin_arm64')
+                return consumer.run(installer, self.args, self.release, CONTROL, target)
         finally:
             verifier_module.verify_release = original
 
@@ -163,14 +180,38 @@ class ConsumerChainTests(unittest.TestCase):
             self.assertFalse(any(isinstance(call, list) and call[1] == '--version' for call in self.calls))
 
     def test_successful_install_only_after_complete_verification(self):
-        with patch.object(installer, 'install_verified', side_effect=AssertionError('installer boundary')) as boundary:
-            with self.assertRaisesRegex(AssertionError, 'installer boundary'):
-                self.consume(install=True)
-            boundary.assert_called_once()
-            archive, info, receipt, prefix = boundary.call_args.args
-            self.assertEqual((archive.name, info['tree'], receipt['verification']['executable_identity'], prefix),
-                             ('ags-' + VERSION + '-darwin_arm64.tar.gz', TREE, 'verified', self.prefix))
-        self.assertFalse(self.prefix.exists())
+        for target in v2.TARGETS:
+            with self.subTest(target=target), patch.object(installer, 'install_verified', side_effect=AssertionError('installer boundary')) as boundary:
+                with self.assertRaisesRegex(AssertionError, 'installer boundary'):
+                    self.consume(install=True, target=target, host=True)
+                boundary.assert_called_once()
+                archive, info, receipt, prefix = boundary.call_args.args
+                self.assertEqual((archive.name, info['tree'], receipt['verification']['executable_identity'], prefix),
+                                 ('ags-' + VERSION + '-' + target + '.tar.gz', TREE, 'verified', self.prefix))
+            self.assertFalse(self.prefix.exists())
+
+    def test_install_rejects_incompatible_host_abi_after_verification(self):
+        for target in v2.TARGETS:
+            with self.subTest(target=target), patch.object(installer, 'install_verified', side_effect=AssertionError('installer boundary')) as boundary:
+                with self.assertRaisesRegex(ValueError, 'release_abi_incompatible'):
+                    self.consume(install=True, target=target, host=False)
+                boundary.assert_not_called()
+            self.assertFalse(self.prefix.exists())
+        # No simulated probes: the production check still reads this machine.
+        native = {'Darwin': 'darwin', 'Linux': 'linux'}.get(platform.system())
+        arch = {'arm64': 'arm64', 'aarch64': 'arm64', 'x86_64': 'amd64'}.get(platform.machine())
+        native_target = native + '_' + arch if native and arch else None
+        for target in v2.TARGETS:
+            with self.subTest(native=target), patch.object(installer, 'install_verified', side_effect=AssertionError('installer boundary')) as boundary:
+                if target == native_target and v2.host_abi(target):
+                    with self.assertRaisesRegex(AssertionError, 'installer boundary'):
+                        self.consume(install=True, target=target)
+                    boundary.assert_called_once()
+                else:
+                    with self.assertRaisesRegex(ValueError, 'release_abi_incompatible'):
+                        self.consume(install=True, target=target)
+                    boundary.assert_not_called()
+            self.assertFalse(self.prefix.exists())
 
 
 if __name__ == '__main__':
