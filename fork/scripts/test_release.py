@@ -235,6 +235,18 @@ class TagWiringTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'publication_disabled'):
                     release.tag_gate(self.context())
 
+    def test_review_requires_independent_human_current_head_approval(self):
+        pr={'user':{'id':1},'head':{'sha':'a'*40}}
+        approval={'id':10,'user':{'id':2,'type':'User'},'author_association':'COLLABORATOR','state':'APPROVED','commit_id':'a'*40}
+        self.assertEqual(release.review_evidence(pr,[approval]),[10])
+        for rows in ([],[{**approval,'commit_id':'b'*40}],
+                     [{**approval,'user':{'id':1,'type':'User'}}],
+                     [{**approval,'user':{'id':2,'type':'Bot'}}],
+                     [{**approval,'author_association':'NONE'}],
+                     [approval,{**approval,'id':11,'state':'CHANGES_REQUESTED'}]):
+            with self.subTest(rows=rows),self.assertRaisesRegex(ValueError,'human_review'):
+                release.review_evidence(pr,rows)
+
     def test_required_job_inventory_is_exact_not_a_minimum_count(self):
         expected=release.CI_JOBS['.github/workflows/ci.yml']
         self.assertEqual(len(expected),12)
@@ -320,8 +332,21 @@ class CompleteGateTests(unittest.TestCase):
         if '/commits/' in path and '/pulls?' in path:
             revision=path.split('/commits/')[1].split('/')[0]
             return [{'number':69 if revision==SOURCE else 70}]
-        if '/reviews' in path:
-            raise AssertionError('publication must not read PR reviews')
+        if '/pulls/' in path and '/reviews?' in path:
+            number=int(path.split('/pulls/')[1].split('/')[0])
+            approval={'id':10,'user':{'id':2,'type':'User'},'author_association':'COLLABORATOR',
+                      'state':'APPROVED','commit_id':'d'*40}
+            if number==69:
+                if self.drift=='runtime_approved_control_empty':
+                    return [approval]
+                if self.drift=='neither_review':
+                    return []
+                raise AssertionError('runtime publication must not read PR reviews')
+            if self.drift in ('control_review_empty','runtime_approved_control_empty','neither_review'):
+                return []
+            if self.drift=='control_changes_requested':
+                return [{**approval,'id':11,'state':'CHANGES_REQUESTED'}]
+            return [approval]
         if '/pulls/' in path:
             number=int(path.rsplit('/',1)[1]);return {**self.pr,'number':number,'merge_commit_sha':SOURCE if number==69 else 'c'*40}
         if '/git/commits/' in path: return {'tree':{'sha':TREE}}
@@ -354,12 +379,20 @@ class CompleteGateTests(unittest.TestCase):
         with mock.patch.dict(os.environ,{'AGS_RELEASE_PUBLICATION_ENABLED':'true'}),mock.patch.object(release,'api',side_effect=api),mock.patch.object(release,'git',side_effect=self.fake_git),mock.patch.object(release,'run',side_effect=self.fake_run):
             return release.tag_gate(self.context(),prior=prior)
 
-    def test_no_approve_all_other_conditions_met_admits_and_rechecks(self):
+    def test_control_approval_without_runtime_approval_admits_and_rechecks(self):
         self.fixture()
         binding=self.gate()
-        self.assertEqual(binding['control_review'],{'pull_request':70,'head':'d'*40})
+        self.assertEqual(binding['control_review'],{'pull_request':70,'head':'d'*40,'reviews':[10]})
         self.assertEqual(binding['runtime_review'],{'pull_request':69,'head':'d'*40})
+        self.assertNotIn('reviews',binding['runtime_review'])
         self.assertEqual(self.gate(prior=binding),binding)
+
+    def test_missing_control_approval_rejects_even_if_runtime_is_approved(self):
+        self.fixture()
+        for drift in ('control_review_empty','runtime_approved_control_empty','control_changes_requested','neither_review'):
+            self.drift=drift
+            with self.subTest(drift=drift),self.assertRaisesRegex(ValueError,'human_review_required'):
+                self.gate()
 
     def test_complete_gate_and_each_identity_ci_rejection(self):
         self.fixture()
