@@ -6,8 +6,8 @@ The checked-in `upgrade_policy.json` admits no deployments and no migrations.
 An operator must review and provision a root-owned tool bundle independently.
 
 Each machine upgrade is manually initiated and separately approved. The order
-is mini first, then imile-win. Each machine has one local Dagu flow calling this
-entry; neither flow automatically starts the other. No schedule, webhook, SSH
+is mini first, then imile-win. Each future machine flow calls this
+entry; neither flow automatically starts the other. No such flow exists in this slice. No schedule, webhook, SSH
 step or parent enqueue belongs in that flow. Dagu YAML and automation repository
 changes are outside this slice.
 
@@ -23,8 +23,8 @@ A future local Dagu flow uses three distinct steps:
 Dagu native approval waits after its command finishes. Attaching it to `apply`
 would allow effects before approval and is prohibited. A long-lived deployment
 switch, starting a Dagu run or a successful CI run is not per-attempt approval.
-The transaction never writes `approved=true` and leaves successful work in
-`awaiting_observation`. This slice has no automatic finalize/release-claim command.
+The transaction never writes `approved=true`. `awaiting_observation` is not
+completion and exits 86. This slice has no observation-approval or finalize command.
 
 The request parameters are `--deployment-id`, `--pin-sha256`, `--ci-run-id`,
 `--ci-run-attempt` and `--authorization-id`. These identify one local attempt.
@@ -52,12 +52,12 @@ owner HOME and an owner-writable cwd, without root tokens, gh configuration or
 Dagu credentials. mini already runs as its owner and needs no extra runuser.
 The source does not discover or configure either machine's service commands.
 
-An independently provisioned root policy binds exact backup, stop, start,
-legacy-check, mini-handoff-verifier commands and a local readyz endpoint.
-For imile, the handoff verifier must authenticate mini provenance and the same
-release/pin/deployment, fresh readyz and independently accepted observation.
-A JSON file plus digest alone cannot prove mini origin. No arbitrary command
-arguments are accepted from the Dagu request or release pin.
+An independently provisioned root policy may later bind exact backup, stop,
+start, legacy-check and a local readyz endpoint. This slice does not implement
+or accept a mini handoff verifier. A command that exits zero, or a JSON digest,
+cannot prove mini provenance, the current pin/release/deployment, fresh readyz
+or independent observation approval. No arbitrary command arguments are accepted
+from the Dagu request or release pin.
 
 ## Admission and transaction
 
@@ -84,11 +84,25 @@ scratch HOME, TMPDIR, SQLite and Git roots, never production configuration or DB
 They check readyz revision, clean exit, database integrity and preservation of
 old rows/columns. Migration identifiers include structural digests.
 
+## Unavailable apply contracts
+
+`apply` rechecks authorization, then returns exit 83 before creating a claim or
+running backup, stop or installation. The diagnostic names every missing contract:
+
+- `backup_git_config_coverage_and_git_db_consistency`
+- `independent_observation_approval_and_finalize`
+- `trusted_mini_handoff_bound_to_pin_release_deployment` on imile-win
+
+SQLite-only receipts and zero-exit commands are not implementations of these
+contracts. `plan`, `status` and verify-only remain available. Exit 86 is reserved
+for a future transaction that has stopped at observation; it is distinct from
+exit 0, which requires `status=completed`.
+
 Apply rechecks full exact-head CI for R and C, verifies the v2 immutable Release,
 then checks actual candidate identity before smoke. Only gh-server is replaced;
 Edge, replication, credentials, data and service definitions are not replaced.
-The host adapter's backup command is operator policy, not a complete backup
-implementation in this source slice.
+The host adapter does not run backup, stop or installation until the missing
+contracts below exist. A configured command cannot bypass that refusal.
 
 ## Known incomplete acceptance
 
@@ -101,13 +115,15 @@ rejects changes to indexes, foreign keys and triggers. Empty affected tables are
 refused until a reviewed populated fixture is available. The backup command must supply an owner-only `ags.local-backup.v2` receipt
 binding the request, a consistent snapshot, file sizes/digests and SQLite
 integrity/foreign-key checks. Complete Git/config backup semantics remain
-operator acceptance work. Authenticated mini handoff, full pin unknown-field validation,
-post-observation finalize and durable journal-aware crash reconciliation still
-need implementation/acceptance. No live tool bundle is provisioned. The empty
-policy keeps these gaps fail-closed. Do not remove these refusals just to obtain
-an upgrade success.
+operator acceptance work. The pin loader rejects unknown fields, wrong types, missing fields, duplicate
+JSON fields, and an unsafe ancestor directory. Mini handoff, Git/config backup
+coverage, Git/database consistency, observation approval and finalize are
+unimplemented and independently refused by apply. Journal-aware forward recovery
+is also unimplemented. Empty policy is an additional default refusal, not proof
+that every stage is implemented fail-closed. Do not remove these refusals just
+to obtain an upgrade success.
 
-Tests: `python3 scripts/test_upgrade.py`, `python3 scripts/test_install_v2.py`.
+Tests: `python3 scripts/test_upgrade.py`, `python3 scripts/test_upgrade_safety.py`, `python3 scripts/test_install_v2.py`, `python3 scripts/test_release_consumer.py`.
 Real cryptographic acceptance is separately run with
 `python3 scripts/test_release_crypto.py <local-evidence-directory>` against
 pre-downloaded evidence. It never installs or executes candidate binaries.

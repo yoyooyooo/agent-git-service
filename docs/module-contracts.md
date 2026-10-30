@@ -1308,8 +1308,7 @@ routes failed v2 evidence through v1.
 program set under `~/.ags/bin`, not service lifetime or schema changes.
 `upgrade.py` validates identity and the fixed root-owned bundle; `upgrade_host.py`
 is the local adapter and `upgrade_engine.py` owns claim/journal/receipt writes.
-The checked-in upgrade policy is empty and known acceptance gaps remain
-fail-closed; see [local upgrades](operations/local-upgrade.md). There are
+The checked-in upgrade policy is empty. Apply also refuses unimplemented backup, handoff and observation contracts before effects; see [local upgrades](operations/local-upgrade.md). There are
 no retained version slots. Installed and running identities remain separate facts.
 `scripts/ags-runtime.py` owns the optional single-root process launcher, startup
 dependency observations and bounded stdout/stderr; the service manager owns

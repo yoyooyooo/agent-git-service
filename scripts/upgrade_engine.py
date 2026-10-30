@@ -15,7 +15,7 @@ import time
 import re
 import urllib.request
 
-from upgrade import Failure, private_json
+from upgrade import Failure, private_json, require_apply_contracts
 
 PRE_EFFECT = {'admission', 'source_verify', 'release_resolve', 'artifact_download',
               'artifact_verify', 'candidate_identity', 'candidate_smoke', 'old_smoke',
@@ -233,6 +233,7 @@ class Transaction:
     def run(self):
         # Authorization is rechecked here, before claim, backup or service calls.
         authorize(self.authorization, self.binding)
+        require_apply_contracts(self.binding.get('host'))
         controlled_directory(self.state)
         fd = os.open(self.state / 'hostops.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'w') as lock:

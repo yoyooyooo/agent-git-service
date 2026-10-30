@@ -54,6 +54,9 @@ class UpgradeTests(unittest.TestCase):
         self.state = self.root / 'local-v2'
         self.binding = {'deployment_id': 'fixture', 'attempt_id': '1.1', 'old': OLD, 'new': NEW}
         self.auth = authorization(self.binding)
+        # Dormant journal mechanics are separate from the unconditional apply gate.
+        gate = patch.object(engine, 'require_apply_contracts')
+        gate.start(); self.addCleanup(gate.stop)
 
     def test_authorization_precedes_even_claim_and_backup(self):
         self.auth['decision'] = 'deny'
@@ -114,6 +117,8 @@ class UpgradeTests(unittest.TestCase):
     def test_real_process_crash_retains_claim_and_refuses_replay(self):
         script = '''import os,sys,json
 from pathlib import Path
+import upgrade_engine
+upgrade_engine.require_apply_contracts=lambda host: None
 from upgrade_engine import Transaction
 class Effects:
  def preflight(self): os._exit(91)

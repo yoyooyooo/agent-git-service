@@ -178,6 +178,6 @@ Private migration receipts are not evidence that all deployments were migrated.
 The tag publication wiring described in [release operations](releases.md) does
 not install or start these programs. V2 installation now has a complete-checkout consumer with a distinct verification-only
 mode; the legacy production-pin gate remains disabled. The [local upgrade entry](local-upgrade.md)
-is source preparation with an empty host/migration policy and explicit acceptance gaps. Each machine upgrade requires separate operator
+is source preparation. Empty policy and explicit unimplemented-contract refusals block apply before effects. Each machine upgrade requires separate operator
 approval, compatible verified installation, and its normal stop/start checks.
 Do not use successful publication as a signal to restart a managed runtime.
