@@ -128,7 +128,11 @@ def run(installer, args, release, control, target):
                      'provenance': {'control_revision': control, 'signer_digest': control,
                                     'signer_workflow': verifier.WORKFLOW}} for name in TARGETS}}
     # Verification has no installation-root writes, including on failure.
-    with tempfile.TemporaryDirectory(prefix='ags-release-verify-') as directory:
+    # Select the parent before TemporaryDirectory; the default selector probes TMPDIR.
+    scratch_parent=installer.installation_scratch_parent(prefix)
+    if scratch_parent is None:
+        raise ValueError('release_artifact_unverified')
+    with tempfile.TemporaryDirectory(prefix='ags-release-verify-', dir=scratch_parent) as directory:
         cache = Path(directory)
         for name, row in assets.items():
             installer.execute(['gh', 'release', 'download', args.version, '--repo', installer.REPO,

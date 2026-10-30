@@ -364,18 +364,22 @@ all nine assets and both platform bundles, and never creates the installation
 root or executes the candidate. A release is classified as v2 before any
 installation effect when its asset names include `release-source.json` or either
 platform attestation. Archive names are shared with historical v1, so they are
-not the classifier. If all three names are absent, both `--install` and
-`--verify-only` select the scratch parent before creating a directory or
-downloading. `TMPDIR`, then `TEMP`, then `TMP` is used only when that value
-resolves through its final symlink to an existing real directory which is
-neither the canonical installation root nor its `state` directory, and is not
-inside either one. Relative values resolve from the current directory, and
-identity uses filesystem identity rather than text case. If every configured
-value is absent or unsafe, `/tmp`, `/var/tmp` and `/usr/tmp` are tried in that
-order under the same rule. No usable parent rejects with
-`release_artifact_unverified` and exit 1 before any scratch or download. The
-selected parent then receives private mode `0700` temporary scratch outside
-the installation root. Classification has three outcomes:
+not the classifier. Named v2 verification and the path used when all three
+names are absent share one scratch-parent selector. Both `--install` and
+`--verify-only` select that parent before creating a directory or downloading,
+including a named v2 release that downloads all nine assets. `TMPDIR`, then
+`TEMP`, then `TMP` is used only when that value resolves through its final
+symlink to an existing real directory which is neither the canonical
+installation root nor its `state` directory, and is not inside either one.
+Relative values resolve from the current directory, and identity uses
+filesystem identity rather than text case. If every configured value is absent
+or unsafe, `/tmp`, `/var/tmp` and `/usr/tmp` are tried in that order under the
+same rule. No usable parent rejects with `release_artifact_unverified` and
+exit 1 before any scratch or download. The selected parent then receives
+private mode `0700` temporary scratch outside the installation root. A
+successful verification uses that same parent and removes the scratch
+afterwards; neither rejection nor success writes the installation root or its
+`state` directory. Classification has three outcomes:
 
 - V2: a readable manifest declares `ags.release.v2` or contains `abi`, or the
   readable archive contains `NOTICE` and does not pass the complete historical

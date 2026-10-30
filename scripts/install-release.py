@@ -242,14 +242,15 @@ def outside_installation(candidate, root, state):
         if contains_directory(protected,candidate): return False
     return True
 
-def identify_scratch_parent(prefix):
-    """Choose the identification parent before tempfile probes or downloads.
+def installation_scratch_parent(prefix):
+    """Choose one scratch parent before tempfile probes or downloads.
 
     tempfile's default selection creates and deletes a probe file in each
     candidate, including TMPDIR. That probe is already an installation-root
     write, so an unsafe candidate is never passed to tempfile. TMPDIR, TEMP
     and TMP are tried in that order. A relative value resolves from the
     current directory, and symlinks resolve before the location check.
+    Identification and full v2 verification share this parent.
     """
     root=prefix.resolve(strict=False)
     state=(prefix/'state').resolve(strict=False)
@@ -266,6 +267,10 @@ def identify_scratch_parent(prefix):
         except OSError: continue
         if outside_installation(resolved,root,state): return resolved
     return None
+
+def identify_scratch_parent(prefix):
+    """Identification scratch uses the shared installation-scratch parent."""
+    return installation_scratch_parent(prefix)
 
 def archive_generation(archive, version, source, platform_target):
     """Classify without extraction or installation effects; only validated v1 may proceed."""
@@ -339,7 +344,7 @@ def main():
     os.umask(0o077)
     # Private scratch, never the installation root. Select its parent before
     # tempfile can probe TMPDIR. v2 format is refused before owned_directory.
-    scratch_parent=identify_scratch_parent(prefix)
+    scratch_parent=installation_scratch_parent(prefix)
     if scratch_parent is None: raise ValueError('release_artifact_unverified')
     with tempfile.TemporaryDirectory(prefix='ags-release-identify-',dir=scratch_parent) as directory:
         cache=Path(directory)
