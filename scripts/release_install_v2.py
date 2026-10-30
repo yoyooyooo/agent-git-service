@@ -76,6 +76,13 @@ def host_abi(target):
         return False
 
 
+def require_host_abi(target):
+    # Install stays closed. This check remains so opening that gate later still
+    # refuses an incompatible host after verification and before replacement.
+    if not host_abi(target):
+        raise ValueError('release_abi_incompatible')
+
+
 class InstallClosed(ValueError):
     """V2 replacement stays closed until backup, handoff and observation exist."""
     exit_code = 83
@@ -158,4 +165,7 @@ def run(installer, args, release, control, target):
                        build_provenance_verified=True)
         receipt['verification'].update(asset_bytes='verified', immutable_release='verified',
                                        attestation='verified', archive='verified')
+        # Same point as the closed install path: after verification, before any
+        # root, lock, claim, candidate or receipt. Verify-only reports this too.
+        require_host_abi(target)
         return receipt
