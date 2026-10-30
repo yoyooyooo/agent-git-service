@@ -76,7 +76,26 @@ def host_abi(target):
         return False
 
 
+class InstallClosed(ValueError):
+    """V2 replacement stays closed until backup, handoff and observation exist."""
+    exit_code = 83
+
+
+def require_install_contracts():
+    # Same missing contracts as upgrade apply. A host entry or a command that
+    # exits zero is not an implementation, and this gate does not read either.
+    missing = ['backup_git_config_coverage_and_git_db_consistency',
+               'independent_observation_approval_and_finalize',
+               'trusted_mini_handoff_bound_to_pin_release_deployment']
+    error = InstallClosed('install_contracts_unimplemented')
+    error.missing_contracts = missing
+    raise error
+
+
 def run(installer, args, release, control, target):
+    if getattr(args, 'install', False):
+        # Closed before downloads, scratch, installation root, locks or candidate execution.
+        require_install_contracts()
     if (release.get('tag_name') != args.version or type(release.get('id')) is not int
             or release.get('prerelease') is not ('-rc' in args.version)):
         raise ValueError('release_identity_mismatch')
@@ -139,11 +158,4 @@ def run(installer, args, release, control, target):
                        build_provenance_verified=True)
         receipt['verification'].update(asset_bytes='verified', immutable_release='verified',
                                        attestation='verified', archive='verified')
-        if args.install:
-            if not host_abi(target):
-                raise ValueError('release_abi_incompatible')
-            # install_verified checks executable identity before persisting this receipt.
-            receipt['verification']['executable_identity'] = 'verified'
-            installer.install_verified(selected_archive, selected_info, receipt, prefix)
-            receipt['verification']['executable_identity'] = 'verified'
         return receipt

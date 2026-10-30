@@ -98,11 +98,14 @@ contracts. `plan`, `status` and verify-only remain available. Exit 86 is reserve
 for a future transaction that has stopped at observation; it is distinct from
 exit 0, which requires `status=completed`.
 
-Apply rechecks full exact-head CI for R and C, verifies the v2 immutable Release,
-then checks actual candidate identity before smoke. Only gh-server is replaced;
-Edge, replication, credentials, data and service definitions are not replaced.
-The host adapter does not run backup, stop or installation until the missing
-contracts below exist. A configured command cannot bypass that refusal.
+A future apply, after the contracts above exist, rechecks full exact-head CI for
+R and C, verifies the v2 immutable Release, then checks actual candidate identity
+before smoke. That sequence is not reachable in this slice. Only gh-server would
+be replaced; Edge, replication, credentials, data and service definitions are not
+replaced. The host adapter does not run backup, stop or installation until those
+contracts exist. A configured command cannot bypass that refusal. The direct v2
+`--install` entry is separately closed with the same exit 83; see
+[release operations](releases.md).
 
 ## Known incomplete acceptance
 
@@ -112,10 +115,11 @@ brings up loopback only; this Linux chain has not been executed on the current
 macOS test machine. Disabled user namespaces fail closed. BASE_URL alone cannot
 constrain the server's production listener. The schema comparator conservatively
 rejects changes to indexes, foreign keys and triggers. Empty affected tables are
-refused until a reviewed populated fixture is available. The backup command must supply an owner-only `ags.local-backup.v2` receipt
+refused until a reviewed populated fixture is available. A future backup command must supply an owner-only `ags.local-backup.v2` receipt
 binding the request, a consistent snapshot, file sizes/digests and SQLite
-integrity/foreign-key checks. Complete Git/config backup semantics remain
-operator acceptance work. The pin loader rejects unknown fields, wrong types, missing fields, duplicate
+integrity/foreign-key checks. That receipt path is not implemented: current
+backup only refuses the missing contract. Complete Git/config backup semantics
+remain operator acceptance work. The pin loader rejects unknown fields, wrong types, missing fields, duplicate
 JSON fields, and an unsafe ancestor directory. Mini handoff, Git/config backup
 coverage, Git/database consistency, observation approval and finalize are
 unimplemented and independently refused by apply. Journal-aware forward recovery

@@ -228,6 +228,9 @@ def main():
     if is_v2:
         helper=adjacent_module('release_install_v2')
         import sys
+        if a.install:
+            # Closed before helper.run, so no root, lock, candidate or receipt is created.
+            helper.require_install_contracts()
         print(json.dumps(helper.run(sys.modules[__name__],a,release,source,platform_target),indent=2))
         return
     matching=[asset for asset in release['assets'] if asset['name']==name]
@@ -255,8 +258,15 @@ def main():
             install_verified(archive,info,receipt,prefix)
             receipt['verification']['executable_identity']='verified'
     print(json.dumps(receipt,indent=2))
-if __name__=='__main__':
+def entry():
     try: main()
     except SourceBindingUnverified as error:
         import sys
         print(str(error),file=sys.stderr);sys.exit(65)
+    except Exception as error:
+        import sys
+        if type(error).__name__=='InstallClosed':
+            print(str(error),file=sys.stderr);sys.exit(error.exit_code)
+        raise
+
+if __name__=='__main__': entry()
