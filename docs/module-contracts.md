@@ -1292,8 +1292,10 @@ Development defaults remain explicitly unknown, not inferred from a machine path
 `fork/scripts/release.py` owns exact-source archive builds, platform smoke checks,
 manifest/archive validation and fail-closed legacy publication entry points.
 `release-control.yml` separates dispatch candidates from switch-gated tag
-publication. The read-only gate admits reviewed C/R/T/V and exact CI; control code
-builds native archives and signs runtime binding under C. The publisher validates
+publication. The read-only gate binds C/R/T/V to merged default-branch PRs and
+exact CI. It does not require GitHub human approval or read PR reviews. Independent
+review before merge and CI carry that risk. Control code builds native archives
+and signs runtime binding under C. The publisher validates
 nine assets and retains failed drafts without repeating unknown writes.
 `scripts/release_contract.py` owns the shared side-effect-free ABI/archive checks;
 it never imports the installer. The standalone v1 installer keeps its frozen

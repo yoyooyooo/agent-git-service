@@ -235,18 +235,6 @@ class TagWiringTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'publication_disabled'):
                     release.tag_gate(self.context())
 
-    def test_review_requires_independent_human_current_head_approval(self):
-        pr={'user':{'id':1},'head':{'sha':'a'*40}}
-        approval={'id':10,'user':{'id':2,'type':'User'},'author_association':'COLLABORATOR','state':'APPROVED','commit_id':'a'*40}
-        self.assertEqual(release.review_evidence(pr,[approval]),[10])
-        for rows in ([],[{**approval,'commit_id':'b'*40}],
-                     [{**approval,'user':{'id':1,'type':'User'}}],
-                     [{**approval,'user':{'id':2,'type':'Bot'}}],
-                     [{**approval,'author_association':'NONE'}],
-                     [approval,{**approval,'id':11,'state':'CHANGES_REQUESTED'}]):
-            with self.subTest(rows=rows),self.assertRaisesRegex(ValueError,'human_review'):
-                release.review_evidence(pr,rows)
-
     def test_required_job_inventory_is_exact_not_a_minimum_count(self):
         expected=release.CI_JOBS['.github/workflows/ci.yml']
         self.assertEqual(len(expected),12)
@@ -332,8 +320,8 @@ class CompleteGateTests(unittest.TestCase):
         if '/commits/' in path and '/pulls?' in path:
             revision=path.split('/commits/')[1].split('/')[0]
             return [{'number':69 if revision==SOURCE else 70}]
-        if '/pulls/' in path and '/reviews?' in path:
-            return [] if self.drift=='review' else [{'id':10,'user':{'id':2,'type':'User'},'author_association':'COLLABORATOR','state':'APPROVED','commit_id':'d'*40}]
+        if '/reviews' in path:
+            raise AssertionError('publication must not read PR reviews')
         if '/pulls/' in path:
             number=int(path.rsplit('/',1)[1]);return {**self.pr,'number':number,'merge_commit_sha':SOURCE if number==69 else 'c'*40}
         if '/git/commits/' in path: return {'tree':{'sha':TREE}}
@@ -353,7 +341,7 @@ class CompleteGateTests(unittest.TestCase):
             n=int(path.rsplit('/',1)[1]);sha=self.ci_sha
             return {'id':n,'head_sha':sha,'path':list(release.CI_JOBS)[n-1],
                     'status':'in_progress' if self.drift=='pending-'+sha else 'completed',
-                    'conclusion':'success','event':'push','run_attempt':2,
+                    'conclusion':'failure' if self.drift=='failed-'+sha else 'success','event':'push','run_attempt':2,
                     'repository':{'id':release.REPOSITORY_ID},'head_repository':{'id':release.REPOSITORY_ID}}
         if '/releases/tags/' in path: return {'id':10} if self.drift=='occupied' else None
         if '/releases?' in path: return []
@@ -366,7 +354,14 @@ class CompleteGateTests(unittest.TestCase):
         with mock.patch.dict(os.environ,{'AGS_RELEASE_PUBLICATION_ENABLED':'true'}),mock.patch.object(release,'api',side_effect=api),mock.patch.object(release,'git',side_effect=self.fake_git),mock.patch.object(release,'run',side_effect=self.fake_run):
             return release.tag_gate(self.context(),prior=prior)
 
-    def test_complete_gate_and_each_identity_ci_review_rejection(self):
+    def test_no_approve_all_other_conditions_met_admits_and_rechecks(self):
+        self.fixture()
+        binding=self.gate()
+        self.assertEqual(binding['control_review'],{'pull_request':70,'head':'d'*40})
+        self.assertEqual(binding['runtime_review'],{'pull_request':69,'head':'d'*40})
+        self.assertEqual(self.gate(prior=binding),binding)
+
+    def test_complete_gate_and_each_identity_ci_rejection(self):
         self.fixture()
         binding=self.gate()
         self.assertEqual(binding['source'],self.source)
@@ -376,7 +371,8 @@ class CompleteGateTests(unittest.TestCase):
         for drift,error in (('tip','default_tip'),('ancestor','not_ancestor'),('tree','tree_mismatch'),
                             ('missing-'+'c'*40,'ci_missing'),('missing-'+SOURCE,'ci_missing'),
                             ('pending-'+'c'*40,'ci_incomplete'),('pending-'+SOURCE,'ci_incomplete'),
-                            ('skipped','ci_jobs'),('review','human_review'),('occupied','name_occupied')):
+                            ('failed-'+'c'*40,'ci_incomplete'),('failed-'+SOURCE,'ci_incomplete'),
+                            ('skipped','ci_jobs'),('occupied','name_occupied')):
             self.drift=drift
             with self.subTest(drift=drift),self.assertRaisesRegex(ValueError,error): self.gate()
         self.drift=None
@@ -391,12 +387,14 @@ class CompleteGateTests(unittest.TestCase):
     def test_repo_tag_checkout_source_switch_and_evidence_fail_closed(self):
         import copy
         self.fixture()
-        for drift in ('repo_id','private','parent','branch','tag','checkout','workflow','source','switch','permission','runtime_review'):
+        for drift in ('repo_id','private','parent','branch','tag','tag_target','checkout',
+                      'workflow','source','switch','permission','runtime_unmerged','control_unmerged',
+                      'pr_base','pr_head_repo','pr_merge','pr_head','pr_tree','runtime_pr_number'):
             self.fixture()
             original_api=self.fake_api
             def api(path,**kwargs):
                 if '/actions/runs?' in path:self.ci_sha=path.split('head_sha=')[1].split('&')[0]
-                if drift=='permission' and '/reviews?' in path:raise RuntimeError('read denied')
+                if drift=='permission' and path.endswith('/pulls/69'):raise RuntimeError('read denied')
                 result=copy.deepcopy(original_api(path,**kwargs))
                 if path=='repos/'+release.REPOSITORY:
                     if drift=='repo_id':result['id']=1
@@ -405,7 +403,16 @@ class CompleteGateTests(unittest.TestCase):
                     if drift=='branch':result['default_branch']='main'
                 if drift=='tag' and '/git/ref/tags/' in path:result['object']['type']='tree'
                 if drift=='switch' and '/actions/variables/' in path:result['value']='false'
-                if drift=='runtime_review' and path.endswith('/pulls/69'):result['merged']=False
+                if drift=='tag_target' and '/git/ref/tags/' in path:result['object']['sha']='e'*40
+                if drift=='runtime_unmerged' and path.endswith('/pulls/69'):result['merged']=False
+                if drift=='control_unmerged' and path.endswith('/pulls/70'):result['merged']=False
+                if '/pulls/' in path:
+                    if drift=='pr_base':result['base']['ref']='other'
+                    if drift=='pr_head_repo':result['head']['repo']['id']=1
+                    if drift=='pr_merge':result['merge_commit_sha']='e'*40
+                    if drift=='pr_head':result['head']['sha']='short'
+                if drift=='pr_tree' and '/git/commits/' in path:result['tree']['sha']='e'*40
+                if drift=='runtime_pr_number' and '/commits/'+SOURCE+'/pulls?' in path:result=[]
                 return result
             def git(*args):
                 if drift=='checkout' and args==('rev-parse','HEAD'):return 'e'*40

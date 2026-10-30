@@ -378,25 +378,6 @@ def source_contract(source, version, control):
     return source
 
 
-def review_evidence(pr, reviews):
-    latest = {}
-    for review in sorted(reviews, key=lambda row: row['id']):
-        # COMMENTED reviews do not dismiss or replace an effective decision.
-        if review.get('state') in ('APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'):
-            latest[review.get('user', {}).get('id')] = review
-    if any(row.get('state') == 'CHANGES_REQUESTED' for row in latest.values()):
-        raise ValueError('human_review_required')
-    approvals = [row['id'] for row in latest.values()
-                 if row.get('state') == 'APPROVED' and row.get('commit_id') == pr['head']['sha']
-                 and row.get('user', {}).get('type') == 'User'
-                 and row.get('author_association') in ('OWNER', 'MEMBER', 'COLLABORATOR')
-                 and type(row['user'].get('id')) is int
-                 and row['user']['id'] != pr['user']['id']]
-    if not approvals:
-        raise ValueError('human_review_required')
-    return sorted(approvals)
-
-
 def reviewed_commit(sha, number=None):
     prs = pages('repos/' + REPOSITORY + '/commits/' + sha + '/pulls')
     accepted = []
@@ -409,16 +390,14 @@ def reviewed_commit(sha, number=None):
                 or pr.get('head', {}).get('repo', {}).get('id') != REPOSITORY_ID
                 or pr.get('merge_commit_sha') != sha):
             continue
-        # A rebase/merge may change commit IDs. The approved head's final tree
+        # A rebase/merge may change commit IDs. The PR head's final tree
         # must still equal the accepted commit, rather than trusting `merged`.
         head = pr['head']['sha']
         if not SHA.fullmatch(str(head)):
             continue
         if api('repos/' + REPOSITORY + '/git/commits/' + head)['tree']['sha'] != git('rev-parse', sha + '^{tree}'):
             continue
-        reviews = pages('repos/' + REPOSITORY + '/pulls/' + str(pr['number']) + '/reviews')
-        accepted.append({'pull_request': pr['number'], 'head': head,
-                         'reviews': review_evidence(pr, reviews)})
+        accepted.append({'pull_request': pr['number'], 'head': head})
     if len(accepted) != 1:
         raise ValueError('reviewed_commit_required')
     return accepted[0]
