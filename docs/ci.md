@@ -40,13 +40,15 @@ part of the default public CI set.
 is exactly `true`. Its read-only gate refuses closed tag mode before builds.
 Native builders remain Ubuntu 22.04/macOS 15 and Go 1.26.8. Only the tag publish
 job can write Release contents, after rechecking reviewed C/R/T/V, complete
-exact-head CI and real signed evidence. `release.yml` is a manual retired reject
-entry. Neither workflow deploys. Historical tags still select historical workflows;
+exact-head CI and real signed evidence. Both control and runtime PRs must be
+merged. Publication does not require GitHub human approval or read PR reviews;
+independent review before merge and CI carry that risk. `release.yml` is a manual
+retired reject entry. Neither workflow deploys. Historical tags still select historical workflows;
 platform fencing requires separate approval.
 
 Fork CI runs `fork/scripts/test_release.py`, `fork/scripts/test_release_binding.py`
-and `bun test scripts/release.test.ts` for event/identity/review/CI refusal,
-ABI/archive checks, nine-asset publication, and uncertain-write readback.
+and `bun test scripts/release.test.ts` for event, identity, merged-PR and CI
+refusals, admission without human approval, ABI/archive checks, nine-asset publication, and uncertain-write readback.
 Synthetic fixtures do not replace real cryptographic platform acceptance.
 Production separated-control verification and v2 installation stay disabled.
 A real two-platform candidate already ran on 2026-10-29; no new candidate or tag

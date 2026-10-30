@@ -153,17 +153,21 @@ A new `fork-*` tag selects `release-control.yml`. Tag C must be the current
 PR. C differs from R; R must be an ancestor and its Git tree must equal T.
 The example chooses `fork-20260924.5-rc5`, runtime
 `07506714431912b32cf33cbe71d36d25dac12203`, tree
-`5e61bb20efd72638c1ee07fa948328cd88ed469c`. This is reviewed source selection,
-not evidence that its historical PR has a qualifying approval.
+`5e61bb20efd72638c1ee07fa948328cd88ed469c`. The gate requires the recorded
+runtime PR to have merged into the default branch with matching content and
+green CI.
 
 `AGS_RELEASE_PUBLICATION_ENABLED` must equal `true`; missing or any other value
 fails the read-only gate before builds. The gate also reads the live variable,
 including immediately before publication. No variable is set by this change.
 It requires the expected public fork ID, parent and default branch, a new tag
 creation (no deletion or forced update), the exact tag/checkout/workflow C,
-and independent human `APPROVED` reviews at each accepted PR head. The approved
-head tree must equal the final merged/rebased C or R tree. A merged PR, bot review,
-tag message or missing review data does not authorize publication.
+and a merged default-branch PR for each of C and R. Each PR head tree must equal
+the final merged/rebased C or R tree. Publication no longer requires a GitHub
+human `APPROVED` review for either PR and does not read PR reviews. The tradeoff
+is that independent review before merge and exact-head CI carry the review risk;
+there is no additional human-approval check at publication. A merged PR or tag
+message alone does not satisfy the remaining publication gates.
 
 For both C and R, the newest applicable exact-head `ci.yml` and `secret-scan.yml`
 run and current attempt must succeed. All 12 Fork CI job names and the secret
@@ -172,7 +176,8 @@ incomplete inventories fail closed. The gate runs public audit/disclosure checks
 without importing private operator policies. Published and unpublished draft
 names must be absent. Later jobs retain the admitted C/R/T/V and run/attempt;
 a default-branch advance is allowed only when C remains its ancestor. Tag object,
-review, CI, source, switch and repository facts are reread before publication.
+merged PR identity, CI, source, switch and repository facts are reread before
+publication.
 
 Native builds and signing have no contents-write permission. The publish job
 alone receives contents-write, reads each platform artifact into its own directory,
