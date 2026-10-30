@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Root-pinned local adapter. Host provisioning/policy activation is a separate gate."""
+"""Internal host adapter, not a guaranteed entry.
+
+Root-pinned local adapter. Host provisioning/policy activation is a separate gate.
+The operator bundle is started by scripts/upgrade, which disables bytecode writes
+before Python starts. Direct "python3 scripts/upgrade_host.py" is not covered.
+"""
 import sys
 sys.dont_write_bytecode = True
 sys.pycache_prefix = None

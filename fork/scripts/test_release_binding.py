@@ -126,7 +126,7 @@ class BindingTests(unittest.TestCase):
                 self.assertEqual(error.exception.exit_code, 65)
             pin_path = Path(directory) / 'synthetic-policy-fragment.json'
             pin_path.write_text(json.dumps(synthetic_policy()))
-            result = subprocess.run([sys.executable, str(ROOT / 'scripts/release_verify.py'), str(archive),
+            result = subprocess.run([str(ROOT / 'scripts/ags-python.sh'), str(ROOT / 'scripts/release_verify.py'), str(archive),
                                      '--pin', str(pin_path), '--target', 'linux_amd64'], capture_output=True)
             self.assertEqual(result.returncode, 65)
             self.assertEqual(result.stderr.strip(), b'release_source_binding_unverified')

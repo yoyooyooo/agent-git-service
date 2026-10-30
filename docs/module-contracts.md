@@ -1304,6 +1304,9 @@ contract. `release_install_v2.py` owns the full-checkout v2 consumer and never
 routes failed v2 evidence through v1.
 `scripts/release_verify.py` owns binding-policy checks; its production
 `separated-control-v1` entry stays disabled pending real evidence and tag policy.
+`scripts/install-release` and `scripts/upgrade` are the supported shell entries;
+they disable bytecode before starting Python. The adjacent `.py` files are
+internal implementations; bare Python invocation has no startup-cache guarantee.
 `scripts/install-release.py` owns verification and replacement of one installed
 program set under `~/.ags/bin`, not service lifetime or schema changes.
 `upgrade.py` validates identity and the fixed root-owned bundle; `upgrade_host.py`

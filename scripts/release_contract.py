@@ -1,7 +1,9 @@
-"""Side-effect-free archive and ABI contracts shared by release tools.
+"""Internal archive and ABI contracts, not a guaranteed entry.
 
-The historical standalone installer retains its frozen v1 copy until its v2
-bootstrap/dependency distribution is reviewed separately.
+Side-effect-free contracts shared by release tools. The historical standalone
+installer retains its frozen v1 copy until its v2 bootstrap/dependency
+distribution is reviewed separately. Direct "python3 scripts/release_contract.py"
+is not covered by the read-only guarantee.
 """
 import sys
 sys.dont_write_bytecode = True

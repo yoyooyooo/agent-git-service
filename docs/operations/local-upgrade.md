@@ -1,7 +1,10 @@
 # Local v2 upgrade entry
 
-`scripts/upgrade.py` is the fixed local entry. This source slice does not install
-it, provision a host, create a Dagu flow, activate publication or deploy AGS.
+`scripts/upgrade` is the guaranteed local entry. It starts the internal
+`scripts/upgrade.py` with bytecode writes disabled before Python starts.
+Direct `python3 scripts/upgrade.py` is not covered by that guarantee. This
+source slice does not install the entry, provision a host, create a Dagu flow,
+activate publication or deploy AGS.
 The checked-in `upgrade_policy.json` admits no deployments and no migrations.
 An operator must review and provision a root-owned tool bundle independently.
 
@@ -15,7 +18,7 @@ changes are outside this slice.
 
 A future local Dagu flow uses three distinct steps:
 
-1. `authorize_switch` runs `upgrade.py plan`, then waits for the operator's
+1. `authorize_switch` runs `scripts/upgrade plan`, then waits for the operator's
    decision. The command is read-only: no claim, backup, stop or installation.
 2. `upgrade_local` depends on the accepted authorization and calls `apply`.
 3. `observe_local` records an independent post-switch observation.
