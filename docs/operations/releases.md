@@ -81,7 +81,7 @@ reported macOS candidate's full SHA256.
 
 ### Manual control workflow
 
-`.github/workflows/release-control.yml` accepts only `workflow_dispatch`, with
+`.github/workflows/release-control.yml` retains `workflow_dispatch`, with
 required `runtime_revision` and `runtime_tree` inputs. Both are full lowercase
 40-hex Git object identities. The workflow runs the control commit's builder,
 fetches and verifies the exact runtime commit and tree, and builds a Git archive
@@ -99,15 +99,21 @@ metadata alone is not evidence of that binding.
 
 Only the real attestation action can produce the retained Sigstore bundle.
 Workflow artifacts retain the candidate archive, manifest, predicate, and real
-bundle for seven days. There is no Release publish job and no content-write
-permission. Adding this workflow does not authorize dispatch or enable deployment.
+bundle for seven days in separate target directories. Dispatch never reaches the
+publish job. Candidate run [40876544913](https://github.com/yoyooyooo/agent-git-service/actions/runs/40876544913)
+already built both platforms on 2026-10-29; that historical dispatch does not prove
+the new tag push certificate policy. New real candidate runs require separate
+approval. Adding this workflow does not enable deployment.
 
 ### Consumer policy remains disabled
 
-`scripts/release_verify.py` implements evidence checks for the approved runtime
-revision `0b2c036604911858c9dae05d81056af44d6eb7d8` and tree
-`6a8548d9419387568d27a8cfcb43531e36c26c78`. It constructs the following policy
-from the pin's provenance, with no caller-supplied signer override:
+`scripts/release_verify.py` reads expected runtime R/T from the reviewed
+`fork/release-source.json` at control C. The pin or downloaded asset cannot choose
+its own runtime expectation. `scripts/release_contract.py` shares archive/ABI
+validation with the builder without importing the installer. The historical
+standalone installer retains its self-contained v1 contract until slice 2.
+The verifier constructs the following policy from reviewed control provenance,
+with no caller-supplied signer override:
 
 ```text
 gh attestation verify <archive> --repo yoyooyooo/agent-git-service \
@@ -139,36 +145,87 @@ Enabling the mode still requires a separately approved real workflow run for eac
 target, retained certificates and predicates, and all real positive and negative
 checks. Removing `--source-digest` is not an equivalent verification policy.
 
-### Legacy tag path is closed on this control line
+### Tag publication wiring (disabled by default)
 
-`.github/workflows/release.yml` retains its tag trigger only to reject publication
-with exit 65. It has no build, signing, or publication job. The Python `gate`,
-legacy `build`, `publish`, and `recover-draft` entries also refuse before network
-or publication effects. `scripts/release.ts` is not an enabled v2 publication
-path. Its `rc` and `stable` commands still exit before any tag mutation. If that
-refusal is later removed, the same entry refuses a target whose
-`.github/workflows/release.yml` is not the reject-only workflow on this control
-line. That check reads the workflow stored in the tag target, so a runtime commit
-such as `0b2c036604911858c9dae05d81056af44d6eb7d8` cannot be selected. It does not
-create a tag, and it does not stop someone from creating one outside this script.
+A new `fork-*` tag selects `release-control.yml`. Tag C must be the current
+`fork/main.20260924` tip at admission. `fork/release-source.json` at C contains
+`ags.release-source.v1`, the exact version V, runtime R/T and runtime acceptance
+PR. C differs from R; R must be an ancestor and its Git tree must equal T.
+The example chooses `fork-20260924.5-rc5`, runtime
+`07506714431912b32cf33cbe71d36d25dac12203`, tree
+`5e61bb20efd72638c1ee07fa948328cd88ed469c`. This is reviewed source selection,
+not evidence that its historical PR has a qualifying approval.
 
-A new control commit cannot change a workflow stored in a historical commit.
-Tagging the old runtime SHA would still select its old Ubuntu 24.04 workflow,
-including its `contents: write` publication job. This repository change does not
-fence historical tag creation at GitHub. No old tag, Release, or asset is moved
-or overwritten.
+`AGS_RELEASE_PUBLICATION_ENABLED` must equal `true`; missing or any other value
+fails the read-only gate before builds. The gate also reads the live variable,
+including immediately before publication. No variable is set by this change.
+It requires the expected public fork ID, parent and default branch, a new tag
+creation (no deletion or forced update), the exact tag/checkout/workflow C,
+and independent human `APPROVED` reviews at each accepted PR head. The approved
+head tree must equal the final merged/rebased C or R tree. A merged PR, bot review,
+tag message or missing review data does not authorize publication.
 
-The approved tag destination is a control commit, not a runtime commit. Tag
-identity, control ref, and runtime revision remain three separate pin fields.
-Until a tag is separately approved and real bundle evidence enables
-`separated-control-v1`, neither tag publication nor the production verification
-mode is enabled. Existing deployment handoff and operator automation are outside
-this change and are not disabled by it.
+For both C and R, the newest applicable exact-head `ci.yml` and `secret-scan.yml`
+run and current attempt must succeed. All 12 Fork CI job names and the secret
+job must be present exactly once and successful. Pending, skipped, failed or
+incomplete inventories fail closed. The gate runs public audit/disclosure checks
+without importing private operator policies. Published and unpublished draft
+names must be absent. Later jobs retain the admitted C/R/T/V and run/attempt;
+a default-branch advance is allowed only when C remains its ancestor. Tag object,
+review, CI, source, switch and repository facts are reread before publication.
+
+Native builds and signing have no contents-write permission. The publish job
+alone receives contents-write, reads each platform artifact into its own directory,
+and verifies the real bundle with all flags above. Verified certificate fields
+must identify this push, exact tag ref and run/attempt; the signed statement
+must bind exactly one archive subject and the reviewed R/T. Both manifests and
+all binary identities must agree on V/R/T, toolchain and ABI.
+
+The Release has exactly these nine assets:
+
+- `ags-<V>-darwin_arm64.tar.gz` and `ags-<V>-linux_amd64.tar.gz`
+- `build-info-darwin_arm64.json` and `build-info-linux_amd64.json`
+- `attestation-darwin_arm64.sigstore.json` and `attestation-linux_amd64.sigstore.json`
+- `release-source.json` (byte-for-byte from C), `install.sh`, and `SHA256SUMS`
+
+Sorted `SHA256SUMS` covers the other eight files, excluding itself. Per-platform
+predicate/checksum/build receipts remain intermediate files, not extra Release
+assets. The publisher uses `gh release create --verify-tag --draft`, uploads
+without `--clobber`, then reads back the exact Release ID, names, count, sizes,
+digests and body before publishing. RCs remain prereleases; all versions use
+`make_latest=false`. Stable Latest promotion needs separate approval.
+Published Releases must be immutable and each of the nine assets must pass
+`gh release verify-asset`.
+
+Unknown create/upload/publish results cause exact readback, never a second POST.
+Failed drafts and their assets remain intact; ordinary reruns refuse occupied
+names. Explicit draft recovery is not enabled in this slice. Do not delete,
+overwrite or rebuild a failed draft as a retry. A separately reviewed recovery
+must bind its exact ID and all original asset digests.
+
+`release.yml` has only a manual retired reject entry (exit 65), with no tag
+trigger or build/sign/publish capability. Legacy Python `gate`, `build`,
+`publish`, and `recover-draft` remain closed. `scripts/release.ts rc|stable`
+still refuse before tag mutation; its workflow checks are advisory, while the
+Python v2 gate owns live authorization. Historical commits keep their old
+workflows. New source cannot fence tags targeting those commits: ruleset
+activation and tag creator policy require separate operator approval.
+
+This slice does not activate rulesets, the publication variable, production
+verification, v2 installation, candidate/tag runs, or any deployment. First tag
+acceptance must prove the push certificate policy on both native platforms.
+Publication does not deploy. Operators approve and perform each machine's
+upgrade manually after installation compatibility is separately accepted.
+
+To roll back wiring, submit a reviewed revert PR while keeping publication and
+autodeploy disabled. Do not reset/force-push history, move tags or mutate an
+immutable Release. If an approved future run has uncertain results, read its
+Release/draft ID before any recovery; cancellation does not undo publication.
 
 ## Historical v1 install and upgrade
 
-Previously published v1 Release archives remain installation artifacts. The v2
-workflow currently produces candidates only, not installable Releases. The
+Previously published v1 Release archives remain installation artifacts. V2
+installation remains disabled even after publication wiring is present. The
 Bash bootstrap selects exact binary bytes and delegates bundle/digest/attestation
 checks to the Python installer. A trusted adjacent installer is used when present;
 a standalone bootstrap fetches the exact installer blob from immutable Latest

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import {
+  controlWorkflowRejection,
   chooseNextRc,
   choosePromotableRc,
   latestPublishedTag,
@@ -50,6 +51,15 @@ describe("downstream release version decisions", () => {
     expect(legacyTagWorkflowRejection(runtime)).toContain("release_legacy_tag_refused");
     expect(legacyTagWorkflowRejection(current.replace("exit 65", "exit 0"))).toContain("release_legacy_tag_refused");
     expect(legacyTagWorkflowRejection(current.replace("jobs:", "jobs:\n  build:\n"))).toContain("release_legacy_tag_refused");
+  });
+
+  test("control wiring is distinct from the retired legacy publisher", () => {
+    const control = readFileSync(new URL("../.github/workflows/release-control.yml", import.meta.url), "utf8");
+    expect(controlWorkflowRejection(control)).toBeNull();
+    for (const part of ["release.py tag-gate", "release.py tag-publish", "AGS_RELEASE_PUBLICATION_ENABLED"]) {
+      expect(controlWorkflowRejection(control.replaceAll(part, "missing"))).toBe("release_control_contract_required");
+    }
+    expect(controlWorkflowRejection(control.replace("ubuntu-22.04", "ubuntu-24.04"))).not.toBeNull();
   });
 
   test("parses RC and stable tags only", () => {

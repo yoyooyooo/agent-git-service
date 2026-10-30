@@ -35,20 +35,22 @@ part of the default public CI set.
 
 ## Release candidate workflows
 
-`release-control.yml` is dispatch-only and outside the normal contribution gate.
-It builds exact runtime candidates on Ubuntu 22.04 and macOS 15 using Go 1.26.8,
-then retains a custom runtime-binding attestation under the control SHA. It does
-not publish a Release. `release.yml` now rejects tag publication on this control
-line. `scripts/release.ts` also refuses a future tag whose target commit does not
-contain that reject-only workflow. Historical tags still select their historical
-workflow files; this repository cannot stop those tags from being created.
+`release-control.yml` retains non-publishing dispatch candidates and adds
+`fork-*` tag publication wiring, disabled unless `AGS_RELEASE_PUBLICATION_ENABLED`
+is exactly `true`. Its read-only gate refuses closed tag mode before builds.
+Native builders remain Ubuntu 22.04/macOS 15 and Go 1.26.8. Only the tag publish
+job can write Release contents, after rechecking reviewed C/R/T/V, complete
+exact-head CI and real signed evidence. `release.yml` is a manual retired reject
+entry. Neither workflow deploys. Historical tags still select historical workflows;
+platform fencing requires separate approval.
 
-Fork CI runs `fork/scripts/test_release.py` and
-`fork/scripts/test_release_binding.py` for manifest v2, ABI v2, disabled tag
-publication, and synthetic binding-policy failures. Synthetic output is not a
-real Sigstore bundle. Production separated-control verification and v2
-installation remain disabled. See [release operations](operations/releases.md)
-for enablement gaps and the historical v1 policy.
+Fork CI runs `fork/scripts/test_release.py`, `fork/scripts/test_release_binding.py`
+and `bun test scripts/release.test.ts` for event/identity/review/CI refusal,
+ABI/archive checks, nine-asset publication, and uncertain-write readback.
+Synthetic fixtures do not replace real cryptographic platform acceptance.
+Production separated-control verification and v2 installation stay disabled.
+A real two-platform candidate already ran on 2026-10-29; no new candidate or tag
+run is authorized by wiring. See [release operations](operations/releases.md).
 
 ## Main CI Workflow
 

@@ -50,13 +50,30 @@ class BindingTests(unittest.TestCase):
     def test_dispatch_workflow_has_fixed_native_builders_and_no_release_writes(self):
         text = (ROOT / '.github/workflows/release-control.yml').read_text()
         self.assertIn('workflow_dispatch:', text)
-        for forbidden in ('  push:', 'pull_request:', 'workflow_call:', 'self-hosted', 'contents: write', 'release.py publish'):
-            self.assertNotIn(forbidden, text)
+        build=text.split('  build:',1)[1].split('  publish:',1)[0]
+        for forbidden in ('pull_request:', 'workflow_call:', 'self-hosted', 'contents: write', 'release.py publish'):
+            self.assertNotIn(forbidden, build)
         for required in ('runner: ubuntu-22.04', 'runner: macos-15', 'GOTOOLCHAIN: local',
                          'go-version-file: .go-version', "'1.26.8'", 'ref: ${{ github.sha }}',
                          'predicate-path:', verify.PREDICATE_TYPE, 'build-runtime',
                          'bundle-path', 'persist-credentials: false'):
             self.assertIn(required, text)
+
+    def test_tag_jobs_do_not_grant_candidate_or_gate_release_writes(self):
+        text=(ROOT/'.github/workflows/release-control.yml').read_text()
+        gate=text.split('  gate:',1)[1].split('  build:',1)[0]
+        build=text.split('  build:',1)[1].split('  publish:',1)[0]
+        publish=text.split('  publish:',1)[1]
+        self.assertNotIn('contents: write',gate)
+        self.assertNotIn('id-token: write',gate)
+        self.assertNotIn('attestations: write',gate)
+        self.assertNotIn('contents: write',build)
+        self.assertIn("github.event_name == 'push'",publish)
+        self.assertIn("needs.gate.result == 'success'",publish)
+        self.assertNotIn('id-token: write',publish)
+        self.assertIn('merge-multiple: false',publish)
+        self.assertIn('cancel-in-progress: false',text)
+        self.assertIn('AGS_RELEASE_PUBLICATION_ENABLED',text)
 
     def test_synthetic_verification_command_has_all_hard_policy_flags(self):
         args = verify.verification_command('synthetic.txt', synthetic_policy(), 'linux_amd64')
@@ -149,8 +166,8 @@ class BindingTests(unittest.TestCase):
             return match.group(0).strip()
         self.assertEqual(block('permissions'),'permissions:\n  contents: read')
         trigger=block('on')
-        self.assertRegex(trigger,r'^on:\n  workflow_dispatch:\n    inputs:')
-        self.assertEqual(re.findall(r'^  ([a-z_]+):',trigger,re.M),['workflow_dispatch'])
+        self.assertRegex(trigger,r"^on:\n  push:\n    tags:\n      - 'fork-\*'\n  workflow_dispatch:\n    inputs:")
+        self.assertEqual(re.findall(r'^  ([a-z_]+):',trigger,re.M),['push','workflow_dispatch'])
         self.assertEqual(re.findall(r'^      ([a-z_]+):',trigger,re.M),['runtime_revision','runtime_tree'])
         matrix=re.search(r'^      matrix:\n        include:\n((?:          [^\n]*\n|            [^\n]*\n)+)',text,re.M)
         self.assertIsNotNone(matrix)
@@ -258,6 +275,41 @@ class BindingTests(unittest.TestCase):
         self.assertIn("unpack_source(run(['git','--no-replace-objects','archive','--format=tar',sha]),source)", text)
         self.assertNotIn("run(['bash','scripts/build-exact-source.sh','verify'],cwd=source", text)
 
+
+class InvocationBindingTests(unittest.TestCase):
+    def test_signed_certificate_must_bind_current_tag_push_run_attempt(self):
+        uri='https://github.com/'+verify.REPOSITORY+'/actions/runs/123/attempts/1'
+        ref='refs/tags/fork-20260924.5-rc5'
+        with tempfile.TemporaryDirectory() as directory:
+            archive=Path(directory)/'synthetic.txt';archive.write_bytes(b'fixture')
+            result=synthetic_result(hashlib.sha256(archive.read_bytes()).hexdigest())
+            certificate={'runInvocationURI':uri,'sourceRepositoryRef':ref,'buildTrigger':'push'}
+            result[0]['verificationResult']['signature']={'certificate':certificate}
+            for field,value in ((None,None),('runInvocationURI',uri+'0'),('sourceRepositoryRef','refs/heads/main'),('buildTrigger','workflow_dispatch')):
+                rows=copy.deepcopy(result)
+                if field: rows[0]['verificationResult']['signature']['certificate'][field]=value
+                with mock.patch.object(verify.subprocess,'run',return_value=subprocess.CompletedProcess([],0,json.dumps(rows).encode(),b'')):
+                    if field:
+                        with self.assertRaisesRegex(verify.Rejected,'attestation_failed'):
+                            verify.verify_evidence(archive,synthetic_policy(),'linux_amd64',invocation_uri=uri,source_ref=ref)
+                    else:
+                        verify.verify_evidence(archive,synthetic_policy(),'linux_amd64',invocation_uri=uri,source_ref=ref)
+
+class ReviewedSourceTests(unittest.TestCase):
+    def test_binding_uses_reviewed_source_not_pin_chosen_runtime(self):
+        source=json.loads((ROOT/'fork/release-source.json').read_text())
+        pin=synthetic_policy()
+        pin['runtime']=source['runtime']
+        verify.binding_policy(pin,'linux_amd64',source=source)
+        pin['runtime']={'revision':'e'*40,'tree':'f'*40}
+        with self.assertRaisesRegex(verify.Rejected,'identity_mismatch'):
+            verify.binding_policy(pin,'linux_amd64',source=source)
+
+    def test_shared_contract_does_not_import_installer(self):
+        text=(ROOT/'scripts/release_contract.py').read_text()
+        self.assertNotIn('install-release.py',text)
+        self.assertNotIn('install-release.py',(ROOT/'scripts/release_verify.py').read_text())
+        self.assertFalse(verify.SEPARATED_CONTROL_ENABLED)
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,0 +1,12 @@
+{
+  "schema": "ags.release-source.v1",
+  "version": "fork-20260924.5-rc5",
+  "runtime": {
+    "revision": "07506714431912b32cf33cbe71d36d25dac12203",
+    "tree": "5e61bb20efd72638c1ee07fa948328cd88ed469c"
+  },
+  "acceptance": {
+    "runtime_pull_request": 69,
+    "disclosure": "fork/PUBLICATION.md"
+  }
+}

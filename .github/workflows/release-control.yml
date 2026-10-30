@@ -1,6 +1,9 @@
-name: Release control (candidate only)
+name: Release control
 
 on:
+  push:
+    tags:
+      - 'fork-*'
   workflow_dispatch:
     inputs:
       runtime_revision:
@@ -16,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-control-${{ github.run_id }}
+  group: ${{ github.event_name == 'push' && format('release-{0}', github.ref_name) || format('release-control-candidate-{0}', github.run_id) }}
   cancel-in-progress: false
 
 defaults:
@@ -28,16 +31,41 @@ env:
   GOENV: 'off'
   GOWORK: 'off'
   PYTHONDONTWRITEBYTECODE: '1'
+  AGS_RELEASE_PUBLICATION_ENABLED: ${{ vars.AGS_RELEASE_PUBLICATION_ENABLED }}
+  GH_TOKEN: ${{ github.token }}
   RUNTIME_REVISION: ${{ inputs.runtime_revision }}
   RUNTIME_TREE: ${{ inputs.runtime_tree }}
 
 jobs:
+  gate:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      binding: ${{ steps.gate.outputs.binding }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read-only tag publication gate (missing switch refuses before build)
+        id: gate
+        run: python3 fork/scripts/release.py tag-gate --output "$RUNNER_TEMP/gate.json"
+
   build:
-    if: github.repository_id == '1384519373' && github.event_name == 'workflow_dispatch'
+    needs: gate
+    if: always() && github.repository_id == '1384519373' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.gate.result == 'success'))
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     permissions:
       contents: read
+      actions: read
+      pull-requests: read
       id-token: write
       attestations: write
     strategy:
@@ -54,7 +82,13 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Freeze tag binding from gate
+        if: github.event_name == 'push'
+        env:
+          TAG_BINDING: ${{ needs.gate.outputs.binding }}
+        run: printf '%s\n' "$TAG_BINDING" > "$RUNNER_TEMP/gate.json"
       - name: Validate and fetch exact runtime without checking it out
+        if: github.event_name == 'workflow_dispatch'
         run: |
           [[ "$RUNTIME_REVISION" =~ ^[0-9a-f]{40}$ ]]
           [[ "$RUNTIME_TREE" =~ ^[0-9a-f]{40}$ ]]
@@ -67,7 +101,13 @@ jobs:
         with:
           go-version-file: .go-version
           cache-dependency-path: go.sum
+      - name: Build tag runtime using frozen reviewed identities
+        if: github.event_name == 'push'
+        run: |
+          python3 fork/scripts/release.py tag-build \
+            --binding "$RUNNER_TEMP/gate.json" --output "$RUNNER_TEMP/ags-release-output"
       - name: Build exact runtime using only the control builder
+        if: github.event_name == 'workflow_dispatch'
         run: |
           python3 fork/scripts/release.py build-runtime \
             --runtime-revision "$RUNTIME_REVISION" --runtime-tree "$RUNTIME_TREE" \
@@ -85,10 +125,40 @@ jobs:
         run: cp "$BUNDLE_PATH" "$RUNNER_TEMP/ags-release-output/attestation.sigstore.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-control-candidate-${{ matrix.target }}
+          name: release-control-${{ matrix.target }}
           path: ${{ runner.temp }}/ags-release-output/*
           if-no-files-found: error
           retention-days: 7
 
-# No tag allocation or Release publication: tag destination and real evidence
-# require separate approval. separated-control-v1 remains disabled in consumers.
+  publish:
+    needs: [gate, build]
+    if: github.event_name == 'push' && needs.gate.result == 'success' && needs.build.result == 'success'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-control-*
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: false
+      - name: Verify, create draft, read back all nine assets, then publish
+        env:
+          TAG_BINDING: ${{ needs.gate.outputs.binding }}
+        run: |
+          printf '%s\n' "$TAG_BINDING" > "$RUNNER_TEMP/gate.json"
+          python3 fork/scripts/release.py tag-publish \
+            --binding "$RUNNER_TEMP/gate.json" --output "$RUNNER_TEMP/release-assets"
+
+# Dispatch candidates never reach publish. No deployment or tag allocation.
+# Production verifier, installation, ruleset and publication switch activation
+# require separate approval and real two-platform push evidence.
