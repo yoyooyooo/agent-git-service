@@ -555,6 +555,114 @@ class ConsumerChainTests(unittest.TestCase):
                         self.assert_cli_refuses_before_root(case, assets, allow_identify_download=True,
                                                             existing=existing)
 
+    def test_identification_scratch_stays_outside_an_unsafe_tmpdir(self):
+        archive_name = 'ags-' + VERSION + '-darwin_arm64.tar.gz'
+        for location in ('root', 'state', 'root-link'):
+            for damaged in (False, True):
+                with self.subTest(location=location, damaged=damaged):
+                    case = self.fresh()
+                    case.args.install = True
+                    case.args.verify_only = False
+                    (case.prefix / 'state').mkdir(parents=True)
+                    (case.prefix / 'state/installation.json').write_bytes(b'original receipt')
+                    (case.prefix / 'bin').mkdir()
+                    (case.prefix / 'bin/gh-server').write_bytes(b'original binary')
+                    if damaged:
+                        assets = self.reshape_archive(case, 'non-tar')
+                    else:
+                        assets = [asset for asset in case.assets if asset['name'] == archive_name]
+                    case.release = {**case.release, 'assets': assets}
+                    if location == 'root':
+                        configured = case.prefix
+                    elif location == 'state':
+                        configured = case.prefix / 'state'
+                    else:
+                        configured = case.root / 'root-link'
+                        configured.symlink_to(case.prefix, target_is_directory=True)
+                    self.assertTrue(configured.exists())
+
+                    def tree():
+                        paths = [case.prefix, *sorted(case.prefix.rglob('*'))]
+                        return [(str(path.relative_to(case.prefix)), path.lstat().st_mode,
+                                 path.lstat().st_mtime_ns,
+                                 None if path.is_dir() and not path.is_symlink() else path.read_bytes())
+                                for path in paths]
+
+                    before = tree()
+                    seen = []
+                    audited = {'open', 'os.mkdir', 'os.makedirs', 'os.rename', 'os.replace',
+                               'os.remove', 'os.unlink', 'os.rmdir', 'os.symlink', 'os.link',
+                               'os.chmod', 'shutil.rmtree'}
+
+                    def audit(event, args):
+                        if event == 'open':
+                            args = args[:1]
+                        elif event not in audited:
+                            return
+                        for arg in args:
+                            if not isinstance(arg, (str, bytes, os.PathLike)):
+                                continue
+                            try:
+                                path = Path(os.fsdecode(arg))
+                                if not path.is_absolute():
+                                    path = Path.cwd() / path
+                                path.relative_to(case.prefix)
+                            except (OSError, ValueError):
+                                continue
+                            seen.append((event, str(path)))
+                            return
+
+                    def api(path):
+                        if path == 'repos/' + installer.REPO:
+                            return {'id': installer.REPO_ID, 'private': False}
+                        if '/releases/tags/' in path:
+                            return case.release
+                        if '/git/ref/' in path:
+                            return {'object': {'type': 'commit', 'sha': CONTROL}}
+                        raise AssertionError(path)
+
+                    def command(argv):
+                        if '--dir' in argv:
+                            scratch = Path(argv[argv.index('--dir') + 1])
+                            self.assertFalse(scratch.is_relative_to(case.prefix))
+                            self.assertEqual(scratch.stat().st_mode & 0o777, 0o700)
+                        self.assertNotIn(str(case.prefix), ' '.join(argv))
+                        return case.execute(argv)
+
+                    argv = ['install-release.py', '--version', VERSION, '--allow-prerelease',
+                            '--install', '--prefix', str(case.prefix)]
+                    stderr = io.StringIO()
+                    sys.addaudithook(audit)
+                    # setUp creates its fixture through tempfile, which caches the
+                    # safe process default. Clear only that cache so this call
+                    # observes the unsafe TMPDIR exactly as a fresh process does.
+                    tempfile.tempdir = None
+                    previous_umask = os.umask(0o022)
+                    os.umask(previous_umask)
+                    self.addCleanup(os.umask, previous_umask)
+                    with patch.dict(os.environ, {'TMPDIR': str(configured)}, clear=False), \
+                            patch.object(sys, 'argv', argv), \
+                            patch.object(installer, 'api', side_effect=api), \
+                            patch.object(installer, 'target', return_value='darwin_arm64'), \
+                            patch.object(installer, 'execute', side_effect=command), \
+                            patch.object(installer, 'install_verified', side_effect=AssertionError('replace')) as called, \
+                            patch.object(sys, 'stderr', stderr):
+                        with self.assertRaises(SystemExit) as caught:
+                            installer.entry()
+                    self.assertEqual(caught.exception.code, 1 if damaged else 83)
+                    self.assertIn('release_artifact_unverified' if damaged else 'install_contracts_unimplemented',
+                                  stderr.getvalue())
+                    called.assert_not_called()
+                    self.assertEqual(seen, [])
+                    self.assertEqual(tree(), before)
+                    commands = [call for call in case.calls if isinstance(call, list)]
+                    self.assertEqual([call[1:3] for call in commands],
+                                     [['release', 'download'], ['release', 'verify-asset']])
+                    self.assertFalse(any('--version' in call for call in commands))
+                    self.assertFalse(any(path.name.endswith(('.lock', '.claim', '.new'))
+                                         or path.name.startswith(('.install-', 'ags-release-identify-'))
+                                         for path in case.prefix.rglob('*')))
+
     def test_complete_historical_v1_keeps_install_and_verify_routes(self):
         for target, shape in ((target, shape) for target in v2.TARGETS for shape in ('v1', 'v1-notice')):
             for install in (True, False):

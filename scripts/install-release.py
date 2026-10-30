@@ -210,6 +210,63 @@ def release_generation(assets):
             return 'v2'
     return 'unknown'
 
+def same_directory(path, other):
+    try: return os.path.samestat(path.lstat(), other.lstat())
+    except OSError: return False
+
+def contains_directory(parent, child):
+    """Filesystem identity, independent of path spelling or case."""
+    current=child
+    while True:
+        if same_directory(parent,current): return True
+        parent_of=current.parent
+        try:
+            if same_directory(parent_of,current): return False
+        except OSError:
+            return False
+        current=parent_of
+
+def outside_installation(candidate, root, state):
+    """True only for a real directory outside both protected directories.
+
+    A protected path that does not exist yet has no filesystem identity, so a
+    real candidate elsewhere cannot be inside it. The lexical prefix check
+    still rejects a candidate spelled inside that future path.
+    """
+    if not candidate.is_dir() or candidate.is_symlink(): return False
+    for protected in (root, state):
+        if not protected.exists() and not protected.is_symlink():
+            try: candidate.relative_to(protected)
+            except ValueError: continue
+            return False
+        if contains_directory(protected,candidate): return False
+    return True
+
+def identify_scratch_parent(prefix):
+    """Choose the identification parent before tempfile probes or downloads.
+
+    tempfile's default selection creates and deletes a probe file in each
+    candidate, including TMPDIR. That probe is already an installation-root
+    write, so an unsafe candidate is never passed to tempfile. TMPDIR, TEMP
+    and TMP are tried in that order. A relative value resolves from the
+    current directory, and symlinks resolve before the location check.
+    """
+    root=prefix.resolve(strict=False)
+    state=(prefix/'state').resolve(strict=False)
+    for envname in ('TMPDIR','TEMP','TMP'):
+        configured=os.environ.get(envname)
+        if not configured: continue
+        candidate=Path(configured).expanduser()
+        if not candidate.is_absolute(): candidate=Path.cwd()/candidate
+        try: resolved=candidate.resolve(strict=True)
+        except OSError: continue
+        if outside_installation(resolved,root,state): return resolved
+    for fallback in (Path('/tmp'), Path('/var/tmp'), Path('/usr/tmp')):
+        try: resolved=fallback.resolve(strict=True)
+        except OSError: continue
+        if outside_installation(resolved,root,state): return resolved
+    return None
+
 def archive_generation(archive, version, source, platform_target):
     """Classify without extraction or installation effects; only validated v1 may proceed."""
     try:
@@ -280,8 +337,11 @@ def main():
     plan={'schema':INSTALLATION_SCHEMA,'repository':REPO,'version':a.version,'source':source,'target':platform_target,'prefix':str(prefix),'install':a.install,'service_or_data_changed':False,'verification':{'metadata':'verified','asset_bytes':'unverified','immutable_release':'unverified','attestation':'unverified','archive':'unverified','executable_identity':'unverified'}}
     if not a.install and not a.verify_only: print(json.dumps(plan,indent=2));return
     os.umask(0o077)
-    # Private scratch, never the installation root. v2 format is refused before owned_directory.
-    with tempfile.TemporaryDirectory(prefix='ags-release-identify-') as directory:
+    # Private scratch, never the installation root. Select its parent before
+    # tempfile can probe TMPDIR. v2 format is refused before owned_directory.
+    scratch_parent=identify_scratch_parent(prefix)
+    if scratch_parent is None: raise ValueError('release_artifact_unverified')
+    with tempfile.TemporaryDirectory(prefix='ags-release-identify-',dir=scratch_parent) as directory:
         cache=Path(directory)
         execute(['gh','release','download',a.version,'--repo',REPO,'--pattern',name,'--dir',str(cache)])
         archive=cache/name

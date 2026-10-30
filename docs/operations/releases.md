@@ -365,8 +365,17 @@ root or executes the candidate. A release is classified as v2 before any
 installation effect when its asset names include `release-source.json` or either
 platform attestation. Archive names are shared with historical v1, so they are
 not the classifier. If all three names are absent, both `--install` and
-`--verify-only` download the selected archive into private temporary scratch
-outside the installation root. Classification has three outcomes:
+`--verify-only` select the scratch parent before creating a directory or
+downloading. `TMPDIR`, then `TEMP`, then `TMP` is used only when that value
+resolves through its final symlink to an existing real directory which is
+neither the canonical installation root nor its `state` directory, and is not
+inside either one. Relative values resolve from the current directory, and
+identity uses filesystem identity rather than text case. If every configured
+value is absent or unsafe, `/tmp`, `/var/tmp` and `/usr/tmp` are tried in that
+order under the same rule. No usable parent rejects with
+`release_artifact_unverified` and exit 1 before any scratch or download. The
+selected parent then receives private mode `0700` temporary scratch outside
+the installation root. Classification has three outcomes:
 
 - V2: a readable manifest declares `ags.release.v2` or contains `abi`, or the
   readable archive contains `NOTICE` and does not pass the complete historical
@@ -385,9 +394,10 @@ outside the installation root. Classification has three outcomes:
   not establish that the archive is v1, even if no v2 marker survives.
 
 Classification reads archive members without extracting or executing them. The
-private scratch is removed afterwards. Both refusal paths precede root creation,
-any download into the installation root, candidate execution, installer calls,
-and lock, claim or receipt writes. A named v2 install stops at the same exit 83
+private scratch is removed afterwards. Both refusal paths, and refusal of an
+unsafe scratch parent, precede root creation, any download or temporary file
+inside the installation root or its state directory, candidate execution,
+installer calls, and lock, claim or receipt writes. A named v2 install stops at the same exit 83
 gate before downloading. V2 `--install` remains closed. After v2 verification,
 the consumer also refuses a host whose ABI is below the manifest minimum.
 A host entry or a command that exits zero does not satisfy the missing backup,
