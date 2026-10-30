@@ -20,7 +20,11 @@ REPOSITORY = 'yoyooyooo/agent-git-service'
 REPOSITORY_ID = 1384519373
 WORKFLOW = REPOSITORY + '/.github/workflows/release-control.yml'
 PREDICATE_TYPE = 'https://github.com/yoyooyooo/agent-git-service/attestations/runtime-binding/v1'
-RELEASE_SOURCE = json.loads((Path(__file__).resolve().parents[1] / 'fork/release-source.json').read_text())
+# Bundle provisioning preserves this reviewed source at the adjacent fixed path.
+_source_path = Path(__file__).resolve().parents[1] / 'fork/release-source.json'
+if not _source_path.is_file():
+    _source_path = Path(__file__).with_name('release-source.json')
+RELEASE_SOURCE = json.loads(_source_path.read_text())
 RUNTIME_REVISION = RELEASE_SOURCE['runtime']['revision']
 RUNTIME_TREE = RELEASE_SOURCE['runtime']['tree']
 MODE = 'separated-control-v1'
@@ -123,6 +127,49 @@ def verify_evidence(archive, pin, target, *, bundle=None, source=None, invocatio
                 raise Rejected('release_attestation_failed')
         digest = hashlib.sha256(Path(archive).read_bytes()).hexdigest()
         return check_verified_statement(rows, digest, source=source)
+    except (KeyError, IndexError, TypeError, AttributeError, json.JSONDecodeError):
+        raise Rejected('release_attestation_failed') from None
+
+
+def verify_release(archive, pin, target, *, bundle, source, version):
+    """Installer-only v2 path. The legacy production pin gate stays closed."""
+    args = verification_command(archive, pin, target, bundle=bundle, source=source)
+    args.extend(['--source-ref', 'refs/tags/' + version,
+                 '--cert-oidc-issuer', 'https://token.actions.githubusercontent.com'])
+    try:
+        result = subprocess.run(args, capture_output=True, timeout=180)
+    except FileNotFoundError:
+        error = Rejected('dependency_unavailable'); error.exit_code = 69
+        raise error from None
+    except (subprocess.TimeoutExpired, OSError):
+        raise Rejected('release_attestation_failed') from None
+    if result.returncode:
+        raise Rejected('release_attestation_failed')
+    try:
+        rows = json.loads(result.stdout)
+        check_verified_statement(rows, hashlib.sha256(Path(archive).read_bytes()).hexdigest(),
+                                 source=source, subject_name=Path(archive).name)
+        cert = rows[0]['verificationResult']['signature']['certificate']
+        control = pin['targets'][target]['provenance']['control_revision']
+        ref = 'refs/tags/' + version
+        expected = {'sourceRepositoryDigest': control, 'buildSignerDigest': control,
+                    'sourceRepositoryIdentifier': str(REPOSITORY_ID),
+                    'sourceRepositoryURI': 'https://github.com/' + REPOSITORY,
+                    'sourceRepositoryRef': ref, 'buildTrigger': 'push',
+                    'runnerEnvironment': 'github-hosted',
+                    'issuer': 'https://token.actions.githubusercontent.com',
+                    'buildSignerURI': 'https://github.com/' + WORKFLOW + '@' + ref}
+        if any(cert.get(k) != v for k, v in expected.items()):
+            raise Rejected('release_attestation_failed')
+        match = re.fullmatch('https://github.com/' + re.escape(REPOSITORY)
+                             + r'/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)',
+                             cert.get('runInvocationURI', ''))
+        if not match:
+            raise Rejected('release_attestation_failed')
+        return {'run_id': match[1], 'run_attempt': match[2], 'control_revision': control,
+                'signer_workflow': WORKFLOW, 'predicate_type': PREDICATE_TYPE,
+                'bundle_sha256': hashlib.sha256(Path(bundle).read_bytes()).hexdigest(),
+                'verified': True}
     except (KeyError, IndexError, TypeError, AttributeError, json.JSONDecodeError):
         raise Rejected('release_attestation_failed') from None
 

@@ -55,7 +55,9 @@ artifact provenance, immutable assets, opt-in installation and data-safe rollbac
 `fork-*` tag wiring using reviewed control C and runtime R/T. Publication defaults
 closed through `AGS_RELEASE_PUBLICATION_ENABLED`; `release.yml` is a manual
 retired reject entry. No switch, ruleset, tag or run is activated by source
-acceptance. Production verification and v2 installation remain disabled, as do
+acceptance. The legacy production-pin verifier remains disabled. V2 consumers
+require a complete reviewed checkout; the local upgrade policy admits no hosts
+or migrations pending acceptance. The following remain disabled:
 `bun scripts/release.ts rc|stable` tag writes. Historical v1 assets remain unchanged.
 Publication does not deploy; upgrades are manual operator actions. See the release
 operations guide for nine-asset verification, merged-PR/CI requirements and recovery.

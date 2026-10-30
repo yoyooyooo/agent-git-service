@@ -51,6 +51,7 @@ accepted direction, or incremental work that has not fully landed yet.
 - [Production Deployment](production-deployment.md)
 - [Reviewed Maintenance Windows](operations/maintenance-window.md) - opt-in executor admission, exact candidate import, complete startup recovery review and default forward repair.
 - [Startup Dependency Recovery](operations/startup-dependency-recovery.md) - isolated fault-injection evidence, restart idempotence and boundaries that still require a maintenance window.
+- [Local v2 Upgrade](operations/local-upgrade.md) - fixed entry, per-machine manual authorization, durable claim and current fail-closed gaps.
 - [Single-root User Runtime](operations/user-runtime.md) - one installation under `~/.ags`, durable startup inputs, bounded logs and explicit migration.
 - [Automatic Git Maintenance](operations/git-maintenance.md) - primary-owned storage housekeeping, application object protection and explicit history-retirement boundaries.
 - [Official gh and Task Runs](operations/official-gh.md) - origin-based official clients, native run identity and association without command shims.

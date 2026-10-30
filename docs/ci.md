@@ -51,7 +51,10 @@ Fork CI runs `fork/scripts/test_release.py`, `fork/scripts/test_release_binding.
 and `bun test scripts/release.test.ts` for event, identity, merged-PR and CI
 refusals, admission when the runtime PR has no human approval but the control PR does, ABI/archive checks, nine-asset publication, and uncertain-write readback.
 Synthetic fixtures do not replace real cryptographic platform acceptance.
-Production separated-control verification and v2 installation stay disabled.
+The legacy production-pin verifier stays disabled. The complete-checkout v2
+consumer and local upgrade preparation have tests in `scripts/test_install_v2.py`
+and `scripts/test_upgrade.py`; live upgrade policy remains empty. Real evidence
+acceptance runs separately with `scripts/test_release_crypto.py` and local archives.
 A real two-platform candidate already ran on 2026-10-29; no new candidate or tag
 run is authorized by wiring. See [release operations](operations/releases.md).
 

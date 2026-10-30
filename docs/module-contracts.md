@@ -1299,12 +1299,17 @@ Independent review before merge and CI carry that runtime-PR risk. Control code 
 and signs runtime binding under C. The publisher validates
 nine assets and retains failed drafts without repeating unknown writes.
 `scripts/release_contract.py` owns the shared side-effect-free ABI/archive checks;
-it never imports the installer. The standalone v1 installer keeps its frozen
-contract until the separately reviewed v2 distribution change.
+it never imports the installer. The standalone v1 installer keeps its historical
+contract. `release_install_v2.py` owns the full-checkout v2 consumer and never
+routes failed v2 evidence through v1.
 `scripts/release_verify.py` owns binding-policy checks; its production
 `separated-control-v1` entry stays disabled pending real evidence and tag policy.
 `scripts/install-release.py` owns verification and replacement of one installed
-program set under `~/.ags/bin`, not service lifetime or schema changes. There are
+program set under `~/.ags/bin`, not service lifetime or schema changes.
+`upgrade.py` validates identity and the fixed root-owned bundle; `upgrade_host.py`
+is the local adapter and `upgrade_engine.py` owns claim/journal/receipt writes.
+The checked-in upgrade policy is empty and known acceptance gaps remain
+fail-closed; see [local upgrades](operations/local-upgrade.md). There are
 no retained version slots. Installed and running identities remain separate facts.
 `scripts/ags-runtime.py` owns the optional single-root process launcher, startup
 dependency observations and bounded stdout/stderr; the service manager owns

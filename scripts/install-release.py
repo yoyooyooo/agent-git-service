@@ -195,10 +195,21 @@ def install_verified(archive, info, receipt, prefix):
             atomic_json(state/'installation.json',receipt)
             (state/'installing.json').unlink()
 
+def adjacent_module(name):
+    import importlib.util
+    path=Path(__file__).with_name(name+'.py')
+    if not path.is_file() or path.is_symlink():
+        raise SourceBindingUnverified('dependency_unavailable: use a complete reviewed checkout for v2')
+    spec=importlib.util.spec_from_file_location(name,path)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--version',required=True);p.add_argument('--prefix',type=Path,default=Path.home()/'.ags')
-    p.add_argument('--install',action='store_true');p.add_argument('--allow-prerelease',action='store_true')
+    mode=p.add_mutually_exclusive_group()
+    mode.add_argument('--install',action='store_true');mode.add_argument('--verify-only',action='store_true')
+    p.add_argument('--allow-prerelease',action='store_true')
     a=p.parse_args()
     if not VERSION.fullmatch(a.version): raise ValueError('Invalid explicit release version')
     if os.environ.get('MULTICA_TOKEN'): raise ValueError('Workload context cannot install operator software')
@@ -210,17 +221,25 @@ def main():
     if ref['type']=='tag': ref=api('repos/'+REPO+'/git/tags/'+ref['sha'])['object']
     if ref['type']!='commit' or not SHA.fullmatch(ref['sha']): raise ValueError('Release tag is not an exact commit')
     source=ref['sha']; platform_target=target(); name='ags-'+a.version+'-'+platform_target+'.tar.gz'
+    # An exact nine-asset inventory selects v2. A damaged v2 cannot fall back to v1.
+    v2_names={'release-source.json','attestation-darwin_arm64.sigstore.json','attestation-linux_amd64.sigstore.json'}
+    is_v2=any(asset['name'] in v2_names for asset in release['assets'])
+    if is_v2:
+        helper=adjacent_module('release_install_v2')
+        import sys
+        print(json.dumps(helper.run(sys.modules[__name__],a,release,source,platform_target),indent=2))
+        return
     matching=[asset for asset in release['assets'] if asset['name']==name]
     if len(matching)!=1 or not matching[0].get('digest','').startswith('sha256:'): raise ValueError('Exact asset or digest is missing')
     if matching[0]['size']>MAX_ARCHIVE: raise ValueError('Oversized release asset')
     prefix=a.prefix.expanduser().absolute()
     if prefix.is_symlink() or prefix.resolve()!=prefix: raise ValueError('Installation prefix must be canonical and not a symlink')
-    plan={'schema':INSTALLATION_SCHEMA,'repository':REPO,'version':a.version,'source':source,'target':platform_target,'prefix':str(prefix),'install':a.install,'service_or_data_changed':False}
-    if not a.install: print(json.dumps(plan,indent=2));return
+    plan={'schema':INSTALLATION_SCHEMA,'repository':REPO,'version':a.version,'source':source,'target':platform_target,'prefix':str(prefix),'install':a.install,'service_or_data_changed':False,'verification':{'metadata':'verified','asset_bytes':'unverified','immutable_release':'unverified','attestation':'unverified','archive':'unverified','executable_identity':'unverified'}}
+    if not a.install and not a.verify_only: print(json.dumps(plan,indent=2));return
     os.umask(0o077)
-    owned_directory(prefix)
+    if a.install: owned_directory(prefix)
     # Downloads are transaction-local on both success and verification failure.
-    with tempfile.TemporaryDirectory(prefix='.download-',dir=prefix) as directory:
+    with tempfile.TemporaryDirectory(prefix='.download-',dir=prefix if a.install else None) as directory:
         cache=Path(directory)
         execute(['gh','release','download',a.version,'--repo',REPO,'--pattern',name,'--dir',str(cache)])
         archive=cache/name
@@ -230,7 +249,10 @@ def main():
         require_installable_manifest(info)
         execute(['gh','attestation','verify',str(archive),'--repo',REPO,'--source-digest',source,'--signer-workflow',REPO+'/.github/workflows/release.yml','--deny-self-hosted-runners'])
         receipt={**plan,'asset_sha256':digest(archive),'release_id':release['id'],'immutable_release_verified':True,'build_provenance_verified':True,'binaries':info['binaries']}
-        install_verified(archive,info,receipt,prefix)
+        receipt['verification']={'metadata':'verified','asset_bytes':'verified','immutable_release':'verified','attestation':'verified','archive':'verified','executable_identity':'unverified'}
+        if a.install:
+            install_verified(archive,info,receipt,prefix)
+            receipt['verification']['executable_identity']='verified'
     print(json.dumps(receipt,indent=2))
 if __name__=='__main__':
     try: main()
