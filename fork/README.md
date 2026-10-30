@@ -59,8 +59,8 @@ acceptance. Production verification and v2 installation remain disabled, as do
 `bun scripts/release.ts rc|stable` tag writes. Historical v1 assets remain unchanged.
 Publication does not deploy; upgrades are manual operator actions. See the release
 operations guide for nine-asset verification, merged-PR/CI requirements and recovery.
-Publication does not require GitHub human approval; independent review before
-merge and CI carry that risk.
+Only the runtime PR no longer requires a GitHub human approval; the control PR
+still requires one. Independent review before merge and CI carry that runtime-PR risk.
 The repository name has no `-fork` suffix; the `fork/*` branch prefix continues to
 identify a downstream generation. Prior private repository histories are not
 publication inputs. New metadata/build changes have their own exact-source CI;
