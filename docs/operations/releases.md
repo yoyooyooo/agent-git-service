@@ -379,7 +379,16 @@ exit 1 before any scratch or download. The selected parent then receives
 private mode `0700` temporary scratch outside the installation root. A
 successful verification uses that same parent and removes the scratch
 afterwards; neither rejection nor success writes the installation root or its
-`state` directory. Classification has three outcomes:
+`state` directory.
+
+The Bash `install.sh` wrapper selects its bootstrap scratch parent under the
+same rule before `mktemp`, installer download or installer invocation, for
+plan, install and upgrade. With a trusted adjacent Python source it evaluates
+only the shared read-only selector functions, without executing the installer.
+A standalone bootstrap uses equivalent functions embedded in the wrapper;
+regression tests compare their syntax and results against the Python selector.
+No suitable parent exits 1 without creating scratch. Bootstrap scratch remains
+mode `0700` and is removed on exit. Classification has three outcomes:
 
 - V2: a readable manifest declares `ags.release.v2` or contains `abi`, or the
   readable archive contains `NOTICE` and does not pass the complete historical
