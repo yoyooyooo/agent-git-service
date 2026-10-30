@@ -4,6 +4,12 @@ Default is a read-only plan. --install replaces the single installation, never
 migrates data or restarts services. Versions identify bytes, not retained slots.
 """
 from __future__ import annotations
+import os
+import sys
+sys.dont_write_bytecode = True
+sys.pycache_prefix = None
+os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
+os.environ.pop('PYTHONPYCACHEPREFIX', None)
 import argparse
 import contextlib
 import fcntl
@@ -61,7 +67,10 @@ def validate_manifest_contract(info, platform_target, *, allow_legacy=False):
         raise ValueError('release_manifest_invalid')
 
 def execute(args):
-    result=subprocess.run(args,capture_output=True,timeout=180)
+    env=os.environ.copy()
+    env['PYTHONDONTWRITEBYTECODE']='1'
+    env.pop('PYTHONPYCACHEPREFIX',None)
+    result=subprocess.run(args,capture_output=True,timeout=180,env=env)
     if result.returncode: raise RuntimeError('Verification/download command failed: '+args[0]+' '+args[1]+' (no fallback)')
     return result.stdout
 
@@ -299,6 +308,8 @@ def archive_generation(archive, version, source, platform_target):
 
 def adjacent_module(name):
     import importlib.util
+    sys.dont_write_bytecode = True
+    sys.pycache_prefix = None
     path=Path(__file__).with_name(name+'.py')
     if not path.is_file() or path.is_symlink():
         raise SourceBindingUnverified('dependency_unavailable: use a complete reviewed checkout for v2')

@@ -12,6 +12,7 @@ import os
 import platform
 import re
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -179,9 +180,12 @@ print(json.dumps(value))
                         if action != 'plan':
                             self.assertIn('install_contracts_unimplemented', result.stderr)
 
-    def test_shell_standalone_scratch_selector_matches_python(self):
+    def selector_code(self):
         script = (HERE / 'install.sh').read_text()
-        code = script.split("<<'PY_SCRATCH'\n", 1)[1].split('\nPY_SCRATCH', 1)[0]
+        return script.split("<<'PY_SCRATCH'\n", 1)[1].split('\nPY_SCRATCH', 1)[0]
+
+    def test_shell_standalone_scratch_selector_matches_python(self):
+        code = self.selector_code()
         names = ('same_directory', 'contains_directory', 'outside_installation',
                  'installation_scratch_parent')
         embedded = {node.name: ast.dump(node, include_attributes=False)
@@ -189,8 +193,11 @@ print(json.dumps(value))
         original = {node.name: ast.dump(node, include_attributes=False)
                     for node in ast.parse((HERE / 'install-release.py').read_text()).body
                     if isinstance(node, ast.FunctionDef)}
+        self.assertEqual(set(embedded), set(names))
         for name in names:
             self.assertEqual(embedded[name], original[name], name)
+        self.assertNotIn('ast.parse', code)
+        self.assertNotIn('exec(', code)
         prefix = self.root / 'Installation'; (prefix / 'state').mkdir(parents=True)
         outside = self.root / 'outside'; outside.mkdir()
         link = self.root / 'link'; link.symlink_to(prefix)
@@ -210,7 +217,7 @@ print(json.dumps(value))
                                    'PYTHONDONTWRITEBYTECODE': '1'}
                             with patch.dict(os.environ, env):
                                 expected = installer.installation_scratch_parent(protected)
-                            result = subprocess.run([sys.executable, '-c', code, str(protected), ''],
+                            result = subprocess.run([sys.executable, '-B', '-c', code, str(protected)],
                                                     env=env, text=True, capture_output=True, timeout=30)
                             self.assertEqual(result.returncode, 1 if expected is None else 0, result.stderr)
                             if expected is None:
@@ -219,6 +226,207 @@ print(json.dumps(value))
                                 self.assertEqual(Path(result.stdout.strip()), expected)
         finally:
             os.chdir(oldcwd)
+
+    def copy_source(self, source, destination):
+        shutil.copytree(source, destination, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+
+    def shell_fixture(self, root):
+        prefix = root / 'installation'
+        (prefix / 'state').mkdir(parents=True)
+        (prefix / 'state/installation.json').write_bytes(b'existing receipt')
+        (prefix / 'binary').write_bytes(b'existing binary')
+        outside = root / 'outside'
+        outside.mkdir()
+        release = {**self.release, 'target_commitish': CONTROL}
+        (root / 'release.json').write_text(json.dumps(release))
+        (root / 'source.json').write_text(json.dumps({
+            'type': 'file', 'path': 'fork/release-source.json', 'encoding': 'base64',
+            'sha': hashlib.sha1(b'blob ' + str(len(self.raw)).encode() + b'\0' + self.raw).hexdigest(),
+            'content': base64.b64encode(self.raw).decode()}))
+        transport = root / 'transport'
+        transport.mkdir()
+        gh = transport / 'gh'
+        gh.write_text('#!' + sys.executable + '\n' + r"""import json,os,sys
+from pathlib import Path
+root=Path(os.environ['SHELL_FIXTURE'])
+a=sys.argv[1:]
+with (root/'calls.jsonl').open('a') as stream: stream.write(json.dumps(a)+'\n')
+if a[0]!='api': raise SystemExit('download, installer or candidate execution forbidden')
+p=a[1]
+if p=='repos/yoyooyooo/agent-git-service': value={'id':1384519373,'private':False}
+elif '/releases/tags/' in p: value=json.loads((root/'release.json').read_text())
+elif '/git/ref/' in p: value={'object':{'type':'commit','sha':'c'*40}}
+elif '/contents/' in p: value=json.loads((root/'source.json').read_text())
+elif '/git/commits/' in p: value={'tree':{'sha':'b'*40}}
+elif '/compare/' in p: value={'status':'ahead','merge_base_commit':{'sha':'a'*40}}
+else: raise SystemExit('unexpected transport: '+p)
+print(json.dumps(value))
+""")
+        gh.chmod(0o755)
+        return prefix, outside, transport
+
+    def shell_snapshot(self, prefix):
+        return [(str(path.relative_to(prefix)), path.lstat().st_mode, path.lstat().st_mtime_ns,
+                 None if path.is_dir() else path.read_bytes())
+                for path in [prefix, *sorted(prefix.rglob('*'))]]
+
+    def shell_environment(self, root, transport, configured):
+        env = {key: value for key, value in os.environ.items()
+               if key not in ('BASH_ENV', 'ENV', 'PYTHONPATH', 'PYTHONPYCACHEPREFIX',
+                              'PYTHONDONTWRITEBYTECODE', 'MULTICA_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN')}
+        env.update(HOME=str(root / 'home'), TMPDIR=configured, TEMP=configured, TMP=configured, SHELL_FIXTURE=str(root),
+                   PATH=os.pathsep.join((str(transport), str(Path(sys.executable).parent),
+                                         '/usr/bin', '/bin', '/usr/sbin', '/sbin')))
+        return env
+
+    def test_embedded_selector_ignores_malicious_adjacent_definitions(self):
+        attacks = {
+            'duplicate': "\n\ndef installation_scratch_parent(prefix):\n"
+                         "    Path(os.environ['PROBE_ROOT'], 'selector-executed').write_text('duplicate')\n"
+                         "    return prefix\n",
+            'replaced': None,
+            'decorator': "\n\ndef selector_attack(function):\n"
+                          "    Path(os.environ['PROBE_ROOT'], 'selector-executed').write_text('decorator')\n"
+                          "    return function\n"
+                          "@selector_attack\n"
+                          "def installation_scratch_parent(prefix):\n    return prefix\n",
+            'default': "\n\ndef installation_scratch_parent(prefix, attack=Path(os.environ['PROBE_ROOT'],"
+                       " 'selector-executed').write_text('default')):\n    return prefix\n",
+            'annotation': "\n\ndef installation_scratch_parent(prefix) -> Path(os.environ['PROBE_ROOT'],"
+                          " 'selector-executed').write_text('annotation'):\n    return prefix\n",
+        }
+        source = (HERE / 'install-release.py').read_text()
+        replaced = source.replace(
+            'def installation_scratch_parent(prefix):',
+            "def installation_scratch_parent(prefix):\n"
+            "    Path(os.environ['PROBE_ROOT'], 'selector-executed').write_text('replaced')\n"
+            "    return prefix\n"
+            "def discarded_original_installation_scratch_parent(prefix):",
+            1)
+        attacks['replaced'] = replaced
+        for name, mutation in attacks.items():
+            for action in ('plan', 'install', 'upgrade'):
+                with self.subTest(attack=name, action=action):
+                    fixture = tempfile.TemporaryDirectory(prefix='ags-selector-attack-')
+                    self.addCleanup(fixture.cleanup)
+                    root = Path(fixture.name).resolve()
+                    checkout = root / 'checkout'
+                    checkout.mkdir()
+                    for sibling in ('release_install_v2.py', 'release_verify.py', 'release_contract.py'):
+                        (checkout / sibling).write_bytes((HERE / sibling).read_bytes())
+                    (checkout / 'install.sh').write_bytes((HERE / 'install.sh').read_bytes())
+                    (checkout / 'install.sh').chmod(0o755)
+                    text = mutation if name == 'replaced' else source + mutation
+                    (checkout / 'install-release.py').write_text(text)
+                    (root / 'fork').mkdir()
+                    (root / 'fork/release-source.json').write_bytes((HERE.parent / 'fork/release-source.json').read_bytes())
+                    prefix, outside, transport = self.shell_fixture(root)
+                    before = self.shell_snapshot(prefix)
+                    env = self.shell_environment(root, transport, str(outside))
+                    env['PROBE_ROOT'] = str(prefix)
+                    result = subprocess.run(
+                        ['/bin/bash', '-x', str(checkout / 'install.sh'), action, '--version', VERSION,
+                         '--allow-prerelease', '--prefix', str(prefix), '--bin-dir', str(root / 'commands')],
+                        cwd=root, env=env, capture_output=True, text=True, timeout=30)
+                    created = re.findall(r'^\+ tmp=(.+)$', result.stderr, re.MULTILINE)
+                    self.assertEqual(len(created), 1, result.stderr)
+                    scratch = Path(created[0]).resolve()
+                    self.assertEqual(scratch.parent, outside)
+                    self.assertFalse(scratch.is_relative_to(prefix))
+                    selection = result.stderr.split('+ tmp=', 1)[0]
+                    self.assertNotIn('selector-executed', selection)
+                    self.assertFalse(scratch.exists())
+                    calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()]
+                    self.assertTrue(all(call[0] == 'api' for call in calls), calls)
+                    if action == 'plan':
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertIn('python3 -B ' + str(checkout / 'install-release.py'), result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, 83, result.stderr)
+                        self.assertEqual(self.shell_snapshot(prefix), before, result.stderr)
+                        self.assertFalse((prefix / 'selector-executed').exists())
+
+    def assert_no_bytecode(self, prefix, before, result):
+        after = self.shell_snapshot(prefix)
+        if after != before:
+            changed = [row[0] for row in after if row not in before]
+            self.fail('root changed: ' + ','.join(changed[:30]))
+        self.assertEqual(list(prefix.rglob('*.pyc')), [])
+        self.assertEqual(list(prefix.rglob('__pycache__')), [])
+
+    def test_product_entries_write_no_bytecode_without_caller_protection(self):
+        shapes = ('cache-prefix', 'checkout-in-root')
+        for shape in shapes:
+            for action in ('plan', 'install', 'upgrade'):
+                with self.subTest(entry='shell', shape=shape, action=action):
+                    fixture = tempfile.TemporaryDirectory(prefix='ags-bytecode-')
+                    self.addCleanup(fixture.cleanup)
+                    root = Path(fixture.name).resolve()
+                    prefix, outside, transport = self.shell_fixture(root)
+                    script = HERE / 'install.sh'
+                    if shape == 'checkout-in-root':
+                        for name in ('scripts', 'fork'):
+                            self.copy_source(HERE.parent / name, prefix / name)
+                        script = prefix / 'scripts/install.sh'
+                    before = self.shell_snapshot(prefix)
+                    env = self.shell_environment(root, transport, str(outside))
+                    env['PYTHONPYCACHEPREFIX'] = str(prefix / 'cache')
+                    result = subprocess.run(
+                        ['/bin/bash', str(script), action, '--version', VERSION, '--allow-prerelease',
+                         '--prefix', str(prefix), '--bin-dir', str(root / 'commands')],
+                        cwd=root, env=env, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, 0 if action == 'plan' else 83, result.stderr)
+                    self.assert_no_bytecode(prefix, before, result)
+                    calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()]
+                    self.assertTrue(all(call[0] == 'api' for call in calls), calls)
+        modes = {'plan': [], 'install': ['--install'], 'upgrade': ['--install']}
+        for mode, extra in modes.items():
+            with self.subTest(entry='python', mode=mode):
+                fixture = tempfile.TemporaryDirectory(prefix='ags-python-bytecode-')
+                self.addCleanup(fixture.cleanup)
+                root = Path(fixture.name).resolve()
+                prefix, outside, transport = self.shell_fixture(root)
+                scripts = prefix / 'scripts'
+                scripts.mkdir()
+                for name in ('install-release.py', 'release_install_v2.py', 'release_verify.py', 'release_contract.py'):
+                    (scripts / name).write_bytes((HERE / name).read_bytes())
+                self.copy_source(HERE.parent / 'fork', prefix / 'fork')
+                before = self.shell_snapshot(prefix)
+                env = self.shell_environment(root, transport, str(outside))
+                env['PYTHONPYCACHEPREFIX'] = str(prefix / 'cache')
+                env['PYTHONPATH'] = str(prefix / 'scripts')
+                result = subprocess.run(
+                    [sys.executable, '-B', str(prefix / 'scripts/install-release.py'), '--version', VERSION,
+                     '--allow-prerelease', '--prefix', str(prefix), *extra],
+                    cwd=prefix, env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0 if mode == 'plan' else 83, result.stderr)
+                self.assert_no_bytecode(prefix, before, result)
+                calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()]
+                self.assertTrue(all(call[0] == 'api' for call in calls), calls)
+
+    def test_pre_refusal_implicit_caches_do_not_write_installation_root(self):
+        variables = ('HOME', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'PIP_CACHE_DIR',
+                     'npm_config_cache', 'NODE_COMPILE_CACHE')
+        for variable in variables:
+            for action in ('plan', 'install', 'upgrade'):
+                with self.subTest(variable=variable, action=action):
+                    fixture = tempfile.TemporaryDirectory(prefix='ags-implicit-root-')
+                    self.addCleanup(fixture.cleanup)
+                    root = Path(fixture.name).resolve()
+                    prefix, outside, transport = self.shell_fixture(root)
+                    target = prefix / 'implicit' / variable
+                    before = self.shell_snapshot(prefix)
+                    env = self.shell_environment(root, transport, str(outside))
+                    env[variable] = str(target)
+                    result = subprocess.run(
+                        ['/bin/bash', '-x', str(HERE / 'install.sh'), action, '--version', VERSION,
+                         '--allow-prerelease', '--prefix', str(prefix), '--bin-dir', str(root / 'commands')],
+                        cwd=root, env=env, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, 0 if action == 'plan' else 83, result.stderr)
+                    self.assertEqual(self.shell_snapshot(prefix), before, result.stderr)
+                    self.assertFalse(target.exists())
+                    calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()]
+                    self.assertTrue(all(call[0] == 'api' for call in calls), calls)
 
     def rebuild_assets(self):
         names = sorted(set(self.files) - {'SHA256SUMS'})

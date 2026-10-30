@@ -4,6 +4,9 @@
 No installation, publication or service effects. Only gh-verified statements are
 read as signed evidence. Unit fixtures are not Sigstore bundles.
 """
+import sys
+sys.dont_write_bytecode = True
+sys.pycache_prefix = None
 import argparse
 import hashlib
 import importlib.util

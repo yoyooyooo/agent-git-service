@@ -3,6 +3,9 @@
 The historical standalone installer retains its frozen v1 copy until its v2
 bootstrap/dependency distribution is reviewed separately.
 """
+import sys
+sys.dont_write_bytecode = True
+sys.pycache_prefix = None
 import hashlib
 import json
 from pathlib import Path

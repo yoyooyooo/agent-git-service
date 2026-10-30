@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Root-pinned local adapter. Host provisioning/policy activation is a separate gate."""
+import sys
+sys.dont_write_bytecode = True
+sys.pycache_prefix = None
 import argparse
 import contextlib
 import fcntl

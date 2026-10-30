@@ -3,6 +3,9 @@
 
 Deployment bundles are provisioned separately. This checkout never installs one.
 """
+import sys
+sys.dont_write_bytecode = True
+sys.pycache_prefix = None
 import argparse
 from contextlib import contextmanager
 import hashlib
