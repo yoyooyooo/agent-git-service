@@ -477,7 +477,9 @@ class ConsumerChainTests(unittest.TestCase):
         verify = self.fresh()
         verify.args.install = False
         verify.args.verify_only = True
-        self.assert_cli_refuses_before_root(verify, archive_only, allow_identify_download=True)
+        verify_assets = [asset for asset in self.v2_assets_without(verify, markers)
+                         if not asset['name'].startswith('build-info-')]
+        self.assert_cli_refuses_before_root(verify, verify_assets, allow_identify_download=True)
         # Schema removed. v2 ABI inside the manifest, or NOTICE in the archive, still refuses.
         for label, mutate in (
                 ('abi', lambda info: info.__setitem__('schema', 'damaged')),
@@ -662,6 +664,145 @@ class ConsumerChainTests(unittest.TestCase):
                     self.assertFalse(any(path.name.endswith(('.lock', '.claim', '.new'))
                                          or path.name.startswith(('.install-', 'ags-release-identify-'))
                                          for path in case.prefix.rglob('*')))
+
+    def test_named_v2_verify_only_scratch_stays_outside_an_unsafe_tmpdir(self):
+        """Real --verify-only of the complete nine-asset v2 release.
+
+        TMPDIR is the installation root, its state directory, or a symlink to
+        the root. Rejection and successful verification both keep every download
+        outside that root and leave its bytes, mode and mtime unchanged.
+        """
+        for location in ('root', 'state', 'root-link'):
+            for outcome in ('reject', 'success'):
+                with self.subTest(location=location, outcome=outcome):
+                    case = self.fresh()
+                    case.args.install = False
+                    case.args.verify_only = True
+                    (case.prefix / 'state').mkdir(parents=True)
+                    (case.prefix / 'state/installation.json').write_bytes(b'original receipt')
+                    (case.prefix / 'bin').mkdir()
+                    (case.prefix / 'bin/gh-server').write_bytes(b'original binary')
+                    if location == 'root':
+                        configured = case.prefix
+                    elif location == 'state':
+                        configured = case.prefix / 'state'
+                    else:
+                        configured = case.root / 'root-link'
+                        configured.symlink_to(case.prefix, target_is_directory=True)
+                    self.assertTrue(configured.exists())
+
+                    def tree():
+                        paths = [case.prefix, *sorted(case.prefix.rglob('*'))]
+                        return [(str(path.relative_to(case.prefix)), path.lstat().st_mode,
+                                 path.lstat().st_mtime_ns,
+                                 None if path.is_dir() and not path.is_symlink() else path.read_bytes())
+                                for path in paths]
+
+                    before = tree()
+                    seen = []
+                    audited = {'open', 'os.mkdir', 'os.makedirs', 'os.rename', 'os.replace',
+                               'os.remove', 'os.unlink', 'os.rmdir', 'os.symlink', 'os.link',
+                               'os.chmod', 'shutil.rmtree'}
+
+                    def audit(event, args):
+                        if event == 'open':
+                            args = args[:1]
+                        elif event not in audited:
+                            return
+                        for arg in args:
+                            if not isinstance(arg, (str, bytes, os.PathLike)):
+                                continue
+                            try:
+                                path = Path(os.fsdecode(arg))
+                                if not path.is_absolute():
+                                    path = Path.cwd() / path
+                                path.relative_to(case.prefix)
+                            except (OSError, ValueError):
+                                continue
+                            seen.append((event, str(path)))
+                            return
+
+                    def api(path):
+                        if path == 'repos/' + installer.REPO:
+                            return {'id': installer.REPO_ID, 'private': False}
+                        if '/releases/tags/' in path:
+                            return case.release
+                        if '/git/ref/' in path:
+                            return {'object': {'type': 'commit', 'sha': CONTROL}}
+                        return case.api(path)
+
+                    downloads = []
+
+                    def command(argv):
+                        if '--dir' in argv:
+                            scratch = Path(argv[argv.index('--dir') + 1])
+                            resolved = scratch.resolve()
+                            self.assertFalse(resolved.is_relative_to(case.prefix.resolve()))
+                            self.assertEqual(scratch.stat().st_mode & 0o777, 0o700)
+                            downloads.append(resolved)
+                        self.assertNotIn(str(case.prefix), ' '.join(argv))
+                        return case.execute(argv)
+
+                    def proof(archive, pin, target, **kwargs):
+                        if outcome == 'reject':
+                            raise ValueError('release_artifact_unverified')
+                        return case.proof(archive, pin, target, **kwargs)
+
+                    argv = ['install-release.py', '--version', VERSION, '--allow-prerelease',
+                            '--verify-only', '--prefix', str(case.prefix)]
+                    stderr = io.StringIO()
+                    stdout = io.StringIO()
+                    sys.addaudithook(audit)
+                    tempfile.tempdir = None
+                    previous_umask = os.umask(0o022)
+                    os.umask(previous_umask)
+                    self.addCleanup(os.umask, previous_umask)
+                    consumer = installer.adjacent_module('release_install_v2')
+                    # The CLI selects this machine's archive. Verification still
+                    # covers both platforms, so a non-native host needs the same
+                    # compatible ABI probe the other verify-only cases use.
+                    native = {'Darwin': 'darwin', 'Linux': 'linux'}.get(platform.system())
+                    arch = {'arm64': 'arm64', 'aarch64': 'arm64', 'x86_64': 'amd64'}.get(platform.machine())
+                    selected = native + '_' + arch if native and arch else 'darwin_arm64'
+                    called = unittest.mock.Mock(side_effect=AssertionError('replace'))
+                    contexts = [patch.dict(os.environ, {'TMPDIR': str(configured)}, clear=False),
+                                patch.object(sys, 'argv', argv),
+                                patch.object(installer, 'api', side_effect=api),
+                                patch.object(installer, 'target', return_value=selected),
+                                patch.object(installer, 'execute', side_effect=command),
+                                patch.object(installer, 'install_verified', called),
+                                patch.object(consumer.verifier, 'verify_release', side_effect=proof),
+                                patch.object(sys, 'stderr', stderr),
+                                patch.object(sys, 'stdout', stdout)]
+                    if selected != native + '_' + arch:
+                        contexts.append(case.simulated_host(consumer, selected, compatible=True))
+                    with contextlib.ExitStack() as stack:
+                        for context in contexts:
+                            stack.enter_context(context)
+                        if outcome == 'reject':
+                            with self.assertRaises(SystemExit) as caught:
+                                installer.entry()
+                            self.assertEqual(caught.exception.code, 1)
+                            self.assertIn('release_artifact_unverified', stderr.getvalue())
+                        else:
+                            installer.entry()
+                            result = json.loads(stdout.getvalue())
+                            self.assertEqual(result['verification']['asset_bytes'], 'verified')
+                            self.assertEqual(result['verification']['immutable_release'], 'verified')
+                    called.assert_not_called()
+                    self.assertEqual(seen, [])
+                    self.assertEqual(tree(), before)
+                    commands = [call for call in case.calls if isinstance(call, list)]
+                    self.assertEqual(len([call for call in commands if call[1:3] == ['release', 'download']]), 9)
+                    self.assertEqual(len(downloads), 9)
+                    self.assertTrue(all(not path.exists() for path in downloads))
+                    self.assertFalse(any('--version' in call for call in commands))
+                    self.assertFalse(any(path.name.endswith(('.lock', '.claim', '.new'))
+                                         or path.name.startswith(('.install-', 'ags-release-identify-',
+                                                                  'ags-release-verify-'))
+                                         or 'receipt' in path.name and path.name != 'installation.json'
+                                         for path in case.prefix.rglob('*')))
+                    self.assertEqual((case.prefix / 'state/installation.json').read_bytes(), b'original receipt')
 
     def test_complete_historical_v1_keeps_install_and_verify_routes(self):
         for target, shape in ((target, shape) for target in v2.TARGETS for shape in ('v1', 'v1-notice')):
