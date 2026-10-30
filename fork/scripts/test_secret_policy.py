@@ -20,7 +20,22 @@ class SecretPolicyTests(unittest.TestCase):
             root = Path(directory)
             target = root / "internal/snapshotstore/retention.go"
             target.parent.mkdir(parents=True)
-            line = '\tif !item.IsDir() || len(key) != 64 || strings.Trim(key, "0123456789abcdef") != "" {\n'
+            line = (
+                '\tif !item.IsDir() || !hexDirectoryKey(key) {\n'
+                '\t\treturn nil, errors.New("unexpected published snapshot entry")\n'
+                '\t}\n'
+                'func hexDirectoryKey(key string) bool {\n'
+                '\tif len(key) != 64 {\n'
+                '\t\treturn false\n'
+                '\t}\n'
+                '\tfor _, c := range key {\n'
+                '\t\tif !((c >= \'0\' && c <= \'9\') || (c >= \'a\' && c <= \'f\')) {\n'
+                '\t\t\treturn false\n'
+                '\t\t}\n'
+                '\t}\n'
+                '\treturn true\n'
+                '}\n'
+            )
             target.write_text(line)
 
             def scan():
