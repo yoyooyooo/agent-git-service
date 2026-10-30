@@ -1,4 +1,7 @@
 """Durable local transaction state. The fixed host adapter supplies authorized effects."""
+import sys
+sys.dont_write_bytecode = True
+sys.pycache_prefix = None
 from datetime import datetime, timezone
 import fcntl
 import hashlib

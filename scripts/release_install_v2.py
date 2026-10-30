@@ -1,4 +1,7 @@
 """V2 consumer for a complete reviewed checkout; never used by v1 bootstrap."""
+import sys
+sys.dont_write_bytecode = True
+sys.pycache_prefix = None
 import base64
 import hashlib
 import importlib

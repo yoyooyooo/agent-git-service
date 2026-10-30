@@ -383,12 +383,19 @@ afterwards; neither rejection nor success writes the installation root or its
 
 The Bash `install.sh` wrapper selects its bootstrap scratch parent under the
 same rule before `mktemp`, installer download or installer invocation, for
-plan, install and upgrade. With a trusted adjacent Python source it evaluates
-only the shared read-only selector functions, without executing the installer.
-A standalone bootstrap uses equivalent functions embedded in the wrapper;
-regression tests compare their syntax and results against the Python selector.
-No suitable parent exits 1 without creating scratch. Bootstrap scratch remains
-mode `0700` and is removed on exit. Classification has three outcomes:
+plan, install and upgrade. That selection uses only the functions embedded in
+the wrapper. It does not parse, import or execute the adjacent
+`install-release.py`, so version identification and refusal do not depend on
+its contents. After a parent is selected, a regular adjacent
+`install-release.py` is the installer that runs: it is the trusted source of
+the release being installed, not an untrusted input isolated by this wrapper.
+A copied standalone bootstrap has no adjacent source and fetches the exact
+installer blob only after scratch selection. Regression tests compare the
+embedded functions, syntax and results, with the Python selector. No suitable
+parent exits 1 without creating scratch. Bootstrap scratch remains mode `0700`
+and is removed on exit. The wrapper and the direct Python entry both disable
+bytecode caches themselves, including an inherited cache-prefix setting, before
+any import. Classification has three outcomes:
 
 - V2: a readable manifest declares `ags.release.v2` or contains `abi`, or the
   readable archive contains `NOTICE` and does not pass the complete historical
