@@ -208,32 +208,32 @@ def release_generation(assets):
         name=asset.get('name') if isinstance(asset, dict) else None
         if name in markers:
             return 'v2'
-    return 'v1'
+    return 'unknown'
 
-def archive_declares_v2(archive):
-    """Read only build-info.json outside any installation root.
-
-    Schema ags.release.v2 is sufficient. A damaged schema is still v2 when the
-    manifest carries the structured v2 ABI or the archive contains NOTICE,
-    which historical v1 bundles do not. Does not extract, execute or create a root.
-    """
-    if not tarfile.is_tarfile(archive):
-        return False
-    with tarfile.open(archive) as tf:
-        names={member.name for member in tf.getmembers()}
-        try:
-            member=tf.getmember('build-info.json')
-        except KeyError:
-            member=None
-        info=None
-        if member is not None and member.isfile() and member.size<=1024*1024:
+def archive_generation(archive, version, source, platform_target):
+    """Classify without extraction or installation effects; only validated v1 may proceed."""
+    try:
+        with tarfile.open(archive) as tf:
+            members=tf.getmembers()
+            manifests=[member for member in members if member.name=='build-info.json']
+            if len(manifests)!=1 or not manifests[0].isfile() or manifests[0].size>1024*1024:
+                return 'unknown', None
+            info=json.load(tf.extractfile(manifests[0]))
+            if not isinstance(info, dict):
+                return 'unknown', None
+            if info.get('schema')==MANIFEST_SCHEMA or 'abi' in info:
+                return 'v2', None
+            notice=any(member.name=='NOTICE' for member in members)
+        # Historical packagers also copied NOTICE when present. Only a complete
+        # validated v1 contract takes precedence over that format clue.
+        if info.get('schema')==LEGACY_MANIFEST_SCHEMA:
             try:
-                info=json.load(tf.extractfile(member))
-            except (json.JSONDecodeError, OSError, tarfile.TarError, TypeError):
-                info=None
-        if isinstance(info, dict) and (info.get('schema')==MANIFEST_SCHEMA or 'abi' in info):
-            return True
-        return 'NOTICE' in names
+                return 'v1', inspect_bundle(archive,version,source,platform_target)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                pass
+        return ('v2' if notice else 'unknown'), None
+    except (ValueError, TypeError, KeyError, AttributeError, OSError, tarfile.TarError, EOFError):
+        return 'unknown', None
 
 def adjacent_module(name):
     import importlib.util
@@ -287,10 +287,12 @@ def main():
         archive=cache/name
         if 'sha256:'+digest(archive)!=matching[0]['digest'] or archive.stat().st_size!=matching[0]['size']: raise ValueError('Downloaded asset differs from GitHub digest/size')
         execute(['gh','release','verify-asset',a.version,str(archive),'--repo',REPO])
-        if archive_declares_v2(archive):
+        generation,info=archive_generation(archive,a.version,source,platform_target)
+        if generation=='v2' and a.install:
+            adjacent_module('release_install_v2').require_install_contracts()
+        if generation!='v1':
             raise ValueError('release_artifact_unverified')
         if a.install: owned_directory(prefix)
-        info=inspect_bundle(archive,a.version,source,platform_target)
         require_installable_manifest(info)
         execute(['gh','attestation','verify',str(archive),'--repo',REPO,'--source-digest',source,'--signer-workflow',REPO+'/.github/workflows/release.yml','--deny-self-hosted-runners'])
         receipt={**plan,'asset_sha256':digest(archive),'release_id':release['id'],'immutable_release_verified':True,'build_provenance_verified':True,'binaries':info['binaries']}
