@@ -364,22 +364,35 @@ all nine assets and both platform bundles, and never creates the installation
 root or executes the candidate. A release is classified as v2 before any
 installation effect when its asset names include `release-source.json` or either
 platform attestation. Archive names are shared with historical v1, so they are
-not the classifier. If all three of those names are absent, both `--install` and `--verify-only`
-still download the selected archive into private temporary scratch outside the
-installation root, read only its `build-info.json`, and refuse before creating
-that root. The refusal matches schema `ags.release.v2`, a manifest that carries
-the structured v2 ABI, or an archive that contains `NOTICE`. Historical v1
-archives have none of those and continue through the historical path. The
-private scratch is removed afterwards. Refusal happens before any download into
-the installation root, candidate execution, installer call, or lock, claim or
-receipt. V2 `--install` is
-not open. A classified v2 install exits 83
-(`install_contracts_unimplemented`) before those effects. After verification,
-and still before them, the consumer also refuses a host whose ABI is below the
-manifest minimum. A host entry or a command that exits zero does not satisfy
-the missing backup, Git/DB consistency, mini handoff or observation/finalize
-contracts. The historical v1 replacement path is unchanged and runs only after
-the manifest read shows it is not v2.
+not the classifier. If all three names are absent, both `--install` and
+`--verify-only` download the selected archive into private temporary scratch
+outside the installation root. Classification has three outcomes:
+
+- V2: a readable manifest declares `ags.release.v2` or contains `abi`, or the
+  readable archive contains `NOTICE` and does not pass the complete historical
+  v1 checks. `--install` exits 83
+  (`install_contracts_unimplemented`). `--verify-only` rejects the missing v2
+  inventory with `release_artifact_unverified` and exit 1.
+- Valid historical v1: the manifest declares `ags.release.v1` and has no `abi`.
+  Historical packagers also copied `NOTICE` when present, so this member alone
+  cannot exclude a valid v1 archive. The complete archive must pass the
+  existing historical checks for members, limits, repository, source, platform,
+  binary inventory, identities and SHA256 digests before the v1 path may create
+  an installation root. Historical attestation verification still follows.
+- Unknown or damaged: a missing, invalid or oversized manifest, non-tar content,
+  or a manifest with no v2 clue that fails the historical checks rejects with
+  `release_artifact_unverified` and exit 1. A manifest that cannot be read does
+  not establish that the archive is v1, even if no v2 marker survives.
+
+Classification reads archive members without extracting or executing them. The
+private scratch is removed afterwards. Both refusal paths precede root creation,
+any download into the installation root, candidate execution, installer calls,
+and lock, claim or receipt writes. A named v2 install stops at the same exit 83
+gate before downloading. V2 `--install` remains closed. After v2 verification,
+the consumer also refuses a host whose ABI is below the manifest minimum.
+A host entry or a command that exits zero does not satisfy the missing backup,
+Git/DB consistency, mini handoff or observation/finalize contracts. Valid
+historical v1 archives retain their existing verification and replacement path.
 
 V2 tags resolve to C. The consumer reads `fork/release-source.json` at C, verifies
 its blob digest and R/T ancestry/tree, and requires the Release source asset to

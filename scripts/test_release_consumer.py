@@ -356,9 +356,24 @@ class ConsumerChainTests(unittest.TestCase):
         return [asset for asset in case.assets if asset['name'] not in omitted]
 
     def assert_cli_refuses_before_root(self, case, assets, *,
-                                       allow_identify_download=False, error='release_artifact_unverified'):
+                                       allow_identify_download=False, error='release_artifact_unverified', existing=False):
         case.release = {**case.release, 'assets': assets}
-        self.assertFalse(case.prefix.exists())
+        if existing:
+            (case.prefix / 'bin').mkdir(parents=True)
+            (case.prefix / 'bin/gh-server').write_bytes(b'original binary')
+            (case.prefix / 'state').mkdir()
+            (case.prefix / 'state/installation.json').write_bytes(b'original receipt')
+        else:
+            self.assertFalse(case.prefix.exists())
+
+        def snapshot():
+            if not case.prefix.exists():
+                return None
+            paths = [case.prefix, *sorted(case.prefix.rglob('*'))]
+            return [(str(path.relative_to(case.prefix)), path.stat().st_mode,
+                     path.stat().st_mtime_ns, None if path.is_dir() else path.read_bytes()) for path in paths]
+
+        before = snapshot()
         events = []
 
         def api(path):
@@ -398,12 +413,21 @@ class ConsumerChainTests(unittest.TestCase):
         self.assertNotEqual(caught.exception.code, 0)
         self.assertIn(error, stderr.getvalue())
         called.assert_not_called()
-        self.assertFalse(case.prefix.exists())
+        self.assertEqual(snapshot(), before)
+        if not existing:
+            self.assertFalse(case.prefix.exists())
         self.assertNotIn('owned', [kind for kind, _ in events])
+        self.assertEqual(caught.exception.code, 83 if error == 'install_contracts_unimplemented' else 1)
         downloads = [argv for kind, argv in events if kind == 'command']
         self.assertFalse(any('--version' in argv for argv in downloads))
         for argv in downloads:
             self.assertNotIn(str(case.prefix), ' '.join(argv))
+            self.assertIn(argv[1:3], (('release', 'download'), ('release', 'verify-asset')))
+            if '--dir' in argv:
+                self.assertFalse(Path(argv[argv.index('--dir') + 1]).exists())
+        if case.prefix.exists():
+            self.assertFalse(any(path.name.endswith(('.lock', '.claim')) or path.name.startswith('.install-')
+                                 for path in case.prefix.rglob('*')))
         if not allow_identify_download:
             # A named v2 selection stops at the closed install gate. It may
             # download nothing, and it never downloads into the prefix.
@@ -429,19 +453,25 @@ class ConsumerChainTests(unittest.TestCase):
         # None of the three names. External build-info assets remain, and the
         # v2 schema inside the archive is refused before the install root.
         case = self.fresh()
+        case.args.install = True
+        case.args.verify_only = False
         unnamed = self.v2_assets_without(case, markers)
         self.assertTrue(any(asset['name'].startswith('build-info-') for asset in unnamed))
         self.assertIn('ags-' + VERSION + '-darwin_arm64.tar.gz', {asset['name'] for asset in unnamed})
-        events = self.assert_cli_refuses_before_root(case, unnamed, allow_identify_download=True)
+        events = self.assert_cli_refuses_before_root(case, unnamed, allow_identify_download=True,
+                                                    error='install_contracts_unimplemented')
         commands = [argv for kind, argv in events if kind == 'command']
         self.assertEqual([argv[1:3] for argv in commands], [('release', 'download'), ('release', 'verify-asset')])
         self.assertTrue(all('--dir' in argv and str(case.prefix) not in argv for argv in commands if argv[2] == 'download'))
-        # Archive only: no external build-info name, and the same refusal on --verify-only.
+        # Archive only must exercise --install as well as --verify-only.
         case = self.fresh()
+        case.args.install = True
+        case.args.verify_only = False
         archive_only = [asset for asset in unnamed if not asset['name'].startswith('build-info-')]
         self.assertIn('ags-' + VERSION + '-darwin_arm64.tar.gz', {asset['name'] for asset in archive_only})
         self.assertFalse(any(asset['name'].startswith('build-info-') for asset in archive_only))
-        events = self.assert_cli_refuses_before_root(case, archive_only, allow_identify_download=True)
+        events = self.assert_cli_refuses_before_root(case, archive_only, allow_identify_download=True,
+                                                    error='install_contracts_unimplemented')
         commands = [argv for kind, argv in events if kind == 'command']
         self.assertEqual([argv[1:3] for argv in commands], [('release', 'download'), ('release', 'verify-asset')])
         verify = self.fresh()
@@ -454,6 +484,8 @@ class ConsumerChainTests(unittest.TestCase):
                 ('notice', lambda info: info.__setitem__('schema', 'ags.release.v1') or info.pop('abi'))):
             with self.subTest(shape=label):
                 shaped = self.fresh()
+                shaped.args.install = True
+                shaped.args.verify_only = False
                 info = json.loads(shaped.files['build-info-darwin_arm64.json'])
                 mutate(info)
                 raw = (json.dumps(info) + '\n').encode()
@@ -472,52 +504,98 @@ class ConsumerChainTests(unittest.TestCase):
                                      'digest': 'sha256:' + hashlib.sha256(raw).hexdigest()})
                     elif not asset['name'].endswith('.tar.gz'):
                         rows.append(asset)
-                self.assert_cli_refuses_before_root(shaped, rows, allow_identify_download=True)
-        # Historical v1 has no NOTICE and no v2 ABI. Identification must not refuse it as v2.
-        historical = self.fresh()
-        info = {'schema': 'ags.release.v1', 'version': VERSION, 'binaries': {}}
-        path = historical.root / ('ags-' + VERSION + '-darwin_arm64.tar.gz')
-        with tarfile.open(path, 'w:gz') as stream:
-            payload = json.dumps(info).encode()
-            member = tarfile.TarInfo('build-info.json'); member.size = len(payload)
-            stream.addfile(member, io.BytesIO(payload))
-            license_raw = b'license'
-            member = tarfile.TarInfo('LICENSE'); member.size = len(license_raw)
-            stream.addfile(member, io.BytesIO(license_raw))
-        historical.files = {path.name: path.read_bytes()}
-        historical.rebuild_assets()
-        historical.release = {**historical.release, 'assets': historical.assets}
-        seen = []
+                self.assert_cli_refuses_before_root(shaped, rows, allow_identify_download=True,
+                                                    error='install_contracts_unimplemented')
 
-        def api(api_path):
-            if api_path == 'repos/' + installer.REPO:
-                return {'id': installer.REPO_ID, 'private': False}
-            if '/releases/tags/' in api_path:
-                return historical.release
-            if '/git/ref/' in api_path:
-                return {'object': {'type': 'commit', 'sha': CONTROL}}
-            return historical.api(api_path)
+    def reshape_archive(self, case, shape, target='darwin_arm64'):
+        name = 'ags-' + VERSION + '-' + target + '.tar.gz'
+        output = io.BytesIO()
+        with tarfile.open(fileobj=io.BytesIO(case.files[name])) as original, \
+                tarfile.open(fileobj=output, mode='w:gz') as stream:
+            for member in original.getmembers():
+                if (member.name == 'NOTICE' and shape != 'v1-notice') or (member.name == 'build-info.json' and shape == 'missing-manifest'):
+                    continue
+                payload = original.extractfile(member).read()
+                if member.name == 'build-info.json':
+                    if shape == 'invalid-json':
+                        payload = b'{"schema":"ags.release.v2",'
+                    elif shape == 'oversized-manifest':
+                        payload += b' ' * 1048576
+                    elif shape in ('v1', 'v1-notice'):
+                        info = json.loads(payload)
+                        info.update(schema=installer.LEGACY_MANIFEST_SCHEMA, revision=CONTROL,
+                                    minimum_platform='macOS 15 (Apple Silicon)' if target.startswith('darwin')
+                                    else 'Ubuntu 24.04 / glibc 2.39 for gh-server')
+                        info.pop('abi'); info.pop('toolchain')
+                        for binary in info['binaries'].values():
+                            binary['identity']['revision'] = CONTROL
+                        payload = json.dumps(info).encode()
+                    elif shape == 'unknown-schema':
+                        info = json.loads(payload)
+                        info['schema'] = 'unknown'; info.pop('abi')
+                        payload = json.dumps(info).encode()
+                    elif shape == 'invalid-v1':
+                        payload = b'{"schema":"ags.release.v1","binaries":{}}'
+                member.size = len(payload)
+                stream.addfile(member, io.BytesIO(payload))
+        case.files = {name: b'not a tar archive' if shape == 'non-tar' else output.getvalue()}
+        case.rebuild_assets()
+        return case.assets
 
-        def command(argv):
-            seen.append(tuple(argv))
-            return historical.execute(argv)
+    def test_unknown_archives_are_refused_before_install_and_verify_effects(self):
+        for shape in ('missing-manifest', 'invalid-json', 'oversized-manifest', 'non-tar',
+                      'unknown-schema', 'invalid-v1'):
+            for install in (True, False):
+                for existing in (False, True):
+                    with self.subTest(shape=shape, install=install, existing=existing):
+                        case = self.fresh()
+                        case.args.install = install
+                        case.args.verify_only = not install
+                        assets = self.reshape_archive(case, shape)
+                        self.assert_cli_refuses_before_root(case, assets, allow_identify_download=True,
+                                                            existing=existing)
 
-        def owned(root):
-            seen.append(('owned', root))
-            raise AssertionError('historical root')
+    def test_complete_historical_v1_keeps_install_and_verify_routes(self):
+        for target, shape in ((target, shape) for target in v2.TARGETS for shape in ('v1', 'v1-notice')):
+            for install in (True, False):
+                with self.subTest(target=target, shape=shape, install=install):
+                    case = self.fresh()
+                    self.reshape_archive(case, shape, target)
 
-        argv = ['install-release.py', '--version', VERSION, '--allow-prerelease', '--install',
-                '--prefix', str(historical.prefix)]
-        with patch.object(sys, 'argv', argv), patch.object(installer, 'api', side_effect=api), \
-                patch.object(installer, 'target', return_value='darwin_arm64'), \
-                patch.object(installer, 'execute', side_effect=command), \
-                patch.object(installer, 'owned_directory', side_effect=owned), \
-                patch.object(sys, 'stderr', io.StringIO()):
-            with self.assertRaises(AssertionError) as caught:
-                installer.entry()
-        self.assertIn('historical root', str(caught.exception))
-        self.assertIn('owned', [kind for kind, *_ in seen])
-        self.assertFalse(historical.prefix.exists())
+                    def api(path):
+                        if path == 'repos/' + installer.REPO:
+                            return {'id': installer.REPO_ID, 'private': False}
+                        if '/releases/tags/' in path:
+                            return case.release
+                        if '/git/ref/' in path:
+                            return {'object': {'type': 'commit', 'sha': CONTROL}}
+                        raise AssertionError(path)
+
+                    def command(argv):
+                        if argv[1:3] == ['attestation', 'verify']:
+                            case.calls.append(argv)
+                            return b''
+                        return case.execute(argv)
+
+                    mode = '--install' if install else '--verify-only'
+                    argv = ['install-release.py', '--version', VERSION, '--allow-prerelease', mode,
+                            '--prefix', str(case.prefix)]
+                    with patch.object(sys, 'argv', argv), patch.object(installer, 'api', side_effect=api), \
+                            patch.object(installer, 'target', return_value=target), \
+                            patch.object(installer, 'execute', side_effect=command), \
+                            patch.object(installer, 'install_verified') as called, \
+                            contextlib.redirect_stdout(io.StringIO()) as out:
+                        installer.entry()
+                    self.assertEqual(called.call_count, int(install))
+                    result = json.loads(out.getvalue())
+                    self.assertEqual(result['verification']['archive'], 'verified')
+                    self.assertTrue(result['build_provenance_verified'])
+                    self.assertEqual(case.prefix.exists(), install)
+                    if install:
+                        self.assertEqual(list(case.prefix.iterdir()), [])
+                        self.assertEqual(called.call_args.args[1]['schema'], installer.LEGACY_MANIFEST_SCHEMA)
+                    self.assertTrue(any(argv[1:3] == ['attestation', 'verify'] for argv in case.calls))
+                    self.assertFalse(any('--version' in argv for argv in case.calls))
 
     def test_host_abi_rejects_incompatible_platforms_and_reads_this_machine(self):
         consumer = installer.adjacent_module('release_install_v2')
