@@ -76,6 +76,18 @@ func (s *Store) ConfigureRetention(policy RetentionPolicy) error {
 	return nil
 }
 
+func hexDirectoryKey(key string) bool {
+	if len(key) != 64 {
+		return false
+	}
+	for _, c := range key {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Store) inventoryLocked(ctx context.Context) ([]retainedInfo, error) {
 	items, err := os.ReadDir(filepath.Join(s.root, "published"))
 	if err != nil {
@@ -87,7 +99,7 @@ func (s *Store) inventoryLocked(ctx context.Context) ([]retainedInfo, error) {
 			return nil, err
 		}
 		key := item.Name()
-		if !item.IsDir() || len(key) != 64 || strings.Trim(key, "0123456789abcdef") != "" {
+		if !item.IsDir() || !hexDirectoryKey(key) {
 			return nil, errors.New("unexpected published snapshot entry")
 		}
 		root := filepath.Join(s.root, "published", key)
