@@ -1,11 +1,13 @@
-# Local backup and recovery contract (S1)
+# Local backup and recovery contract (S1) and cold snapshot (S2)
 
-S1 defines and validates recovery inventory and evidence. It does not copy a
-backup, seal files, restore data, delete anything, stop/start a service or enable
-upgrades. `upgrade.py`, the host adapter and transaction engine still reject
-`apply` with `backup_contract_unimplemented` / 83 after authorization. Direct v2
-install also remains closed with 83. The public deployment and migration policy
-stays empty. See [local upgrade](local-upgrade.md) for the entry and gates.
+S1 defines and validates recovery inventory and evidence. S2 adds
+`scripts/upgrade_backup.py` and `scripts/upgrade_restore_verify.py`, which copy a
+declared recovery group with the SQLite backup API and ordinary file copies, seal
+`ags.local-backup.v2`, and check an independent restore copy offline. They are not
+called by `upgrade.py`, the host adapter, the transaction engine or direct v2
+install. Those entries still reject with `backup_contract_unimplemented` / 83.
+The public deployment and migration policy stays empty. See
+[local upgrade](local-upgrade.md) for the entry and gates.
 
 ## Recovery group
 
@@ -128,8 +130,9 @@ changes fail the test until the semantic mapping is reviewed and updated.
 `copy_method=ordinary_copy`. Both roots must be distinct absolute paths outside
 all source roots, outside each other, `/tmp` and `.git`. Future host provisioning
 must additionally enforce private policy ownership, no writable ancestors or
-links, no tracked checkout as destination, 0700 backup directories and 0600
-sensitive files. S1 validates declarations; it creates no destination and makes
+links, no tracked checkout as destination, and 0700 backup roots. Payload modes
+are preserved inside that private root; evidence files use 0600. S1 validates
+declarations; it creates no destination and makes
 no claim that filesystem permissions/ACL/xattr restoration work on a host.
 
 `capacity` has integer `backup_bytes`, `restore_copy_bytes`,
@@ -137,8 +140,10 @@ no claim that filesystem permissions/ACL/xattr restoration work on a host.
 `available_bytes`. Restore capacity must cover at least the full backup. The sum
 of all five costs must fit the declared available bytes, or validation refuses
 with `insufficient_space`. Inventory also rejects a backup-byte estimate below
-measured source bytes. A future cold-window preflight must measure live free
-space and recheck it before effects; declared space alone is not that proof.
+measured source bytes. S2 measures free space before creating a partial backup.
+It checks both roots
+when backup and restore storage are on different filesystems, and rechecks the
+restore root before creating a restore copy. Declared space alone is not proof.
 Moving material to Trash does not release usable space.
 
 `retention` is a closed, fixed contract, not a deletion switch:
@@ -158,10 +163,18 @@ Each machine retains only its latest five sealed **and independently restore
 verified** backups. After validation the restore-copy is removed through the
 verified system Trash. Failed/incomplete backups or failed restore copies do not
 count toward five and are not automatically deleted; they await manual review.
-S1 only defines and validates these values. It implements neither retention
-selection nor backup/restore-copy deletion. Any later deletion uses the system
-Trash, on macOS `/usr/bin/trash <absolute-path>` without `--`, never permanent
-unlink. Insufficient space refuses the operation; it does not trigger cleanup.
+S2 counts a backup only after it validates the S1 seal, host identity and the
+separate restore report's manifest binding. It sorts by the seal's `ended_at`,
+not directory modification time. It accepts only safe direct children of the
+backup root, never a symlink, the root itself, a traversal or an outside path.
+Before moving an old backup, it reads and validates that evidence again.
+
+The caller must inject a verified system Trash function. There is no default
+implementation. On macOS the function must use `/usr/bin/trash <absolute-path>`
+without `--`. Only a successful restore copy and eligible backups beyond the
+latest five go to Trash. Failed partial backups and failed restore copies stay
+in place for manual review and do not count toward five. Trash does not release
+usable space. The preflight refuses instead of removing material to make room.
 
 ## Seal and independent restore evidence
 
@@ -191,10 +204,30 @@ Every manifest entry contains `object_id`, relative payload `path`, `kind`,
 `acl_sha256`, `xattrs_sha256` and absolute `restore_target`. Payload paths start
 with their object ID and map exactly to the declared restore root; duplicate
 paths/targets, missing object roots/parents and a file used as a directory fail.
-ACL/xattr digests reference required metadata; S1 does not implement capture or
-restoration. Every declared object must be covered. Future S2 must compare this
-manifest against actual complete payload bytes and metadata, establish source
-stability, fsync files/directories and publish the seal only after success.
+S1 keeps these fields unchanged. S2 captures and verifies mode, uid, gid and
+nanosecond mtime. It preserves those values on both payload and restore copy.
+Ownership that the current user cannot preserve is refused. macOS provenance
+xattrs are captured, hashed, copied and verified. Other xattrs and macOS ACLs
+are refused rather than recorded as absent. On Linux, any xattr, including a
+POSIX ACL xattr, is refused. Other platforms are unsupported. These checks do
+not establish native service-manager or full host recovery acceptance.
+
+S2 checks the copied payload against the manifest before publication. It also
+compares source content and metadata before and after the copy. SQLite uses the
+backup API to include committed WAL data, then normalizes the backup to DELETE
+journal mode. Offline reads therefore do not create unlisted WAL payload.
+Unexpected payload paths are still errors; no suffix-based exclusion hides them.
+
+The backup stores canonical `inventory.json` and `recovery-group.json` beside the
+S1 evidence. The manifest's existing inventory and group digests bind these
+files without adding S1 fields. Inventory supplies the admitted schema and
+source logical digest for later recovery, even if the original source is gone.
+Files are fsynced before their directories, and the partial directory is renamed
+only after seal and payload validation. `publication.json` records `publishing`
+until the rename and root sync complete, then `published`. A failure leaves the
+partial or final directory and a failure marker when it can be written. A
+missing, failed or publishing marker is not a successful publication. No failure
+path deletes or moves that material automatically.
 
 The separate `ags.local-backup.v2` receipt contains `schema`, `state=sealed`,
 `snapshot_id`, raw `manifest_sha256`, `inventory_sha256` and canonical
@@ -210,26 +243,47 @@ Its closed checks are `independent_copy`, `manifest`, `sqlite_integrity`,
 binding, not whether someone actually performed those checks. A handwritten
 success report cannot bypass apply's unconditional refusal.
 
-Future restore verification must use an independent ordinary copy with no shared
-inodes and no production target, verify every file, run SQLite integrity/FK and
-source/backup/restore logical comparisons, Git fsck and DB/CAS dependencies, and
-never start AGS with production credentials or contact providers. New-version
-startup can migrate data and resume business; after `start_attempted`, a binary
-only rollback is unsafe. Full DB+Git+CAS+configuration+old-program restoration
-requires separate incident authorization and reconciliation of later facts.
+S2 requires the reviewed group, DSN and admitted schema. A missing input,
+missing inventory basis or invalid seal refuses verification. It copies every
+object using the group's role-to-ID mapping and compares device/inode pairs
+with the backup payload, not the original data paths. The copy runs SQLite
+integrity and FK checks, Git fsck, DB-OID and Wiki CAS checks, dependency checks,
+and sealed-source/backup/restore logical comparisons. Only completed checks are
+written as true. It checks the final manifest and supported metadata before
+publishing a separate report. A restore attempt ID stays inside the unchanged
+96-character identifier rule. It embeds the snapshot ID when that fits; a longer
+legal snapshot uses a prefix and snapshot digest with the same random suffix.
+The report still binds the original snapshot ID and manifest digest. The report
+file is fsynced before directory sync
+and atomic publication. `restore-publication.json` stays `publishing` until the
+report publication and directory sync finish. Retention requires `published`.
+A publication error marks the outcome failed or unknown and retains the restore copy. Only successful verification calls injected Trash.
+
+It never starts AGS or contacts providers. New-version startup can migrate data
+and resume business. After `start_attempted`, a binary-only rollback is unsafe.
+Full data, Git, CAS, configuration and old-program restoration requires separate
+incident authorization and reconciliation of later facts.
+
 Independent media/encryption is strongly recommended; same-disk copies cover a
 narrower failure domain. SHA256/owner permissions do not authenticate a human or
 protect against a malicious same-UID/root writer.
 
 ## Verification boundary
 
-Run `scripts/ags-python.sh scripts/test_upgrade_inventory.py` with independent
-HOME/TMPDIR/cwd and no inherited PYTHONPATH/PYTHONPYCACHEPREFIX/BASH_ENV or
+Run `scripts/ags-python.sh scripts/test_upgrade_inventory.py`,
+`scripts/test_upgrade_backup.py BackupTests`,
+`scripts/test_upgrade_restore.py RestoreTests`, and
+`scripts/test_upgrade_backup_regressions.py` with independent HOME/TMPDIR/cwd
+and no inherited PYTHONPATH/PYTHONPYCACHEPREFIX/BASH_ENV or
 PYTHONDONTWRITEBYTECODE (the shell entry establishes bytecode controls itself).
-The suite uses real SQLite and bare Git with synthetic identities. It covers
+The suites use real SQLite and bare Git with synthetic identities. They cover
 empty DB/repo, optional Wiki, historical CAS, typed row bytes, WAL, DB-only and
 cross-fork OIDs, external SHA classification, schema/source drift, dependency and
-budget failures, seal tampering and the unchanged 83 gates.
+budget failures, seal tampering, source changes, hard links, missing space,
+retained interrupted copies, invalid retention evidence and paths, metadata,
+file fsync, source-independent role mapping, complete WAL round trips,
+alternates/shallow repositories, unknown OIDs, tombstones
+without an earlier same-repository body, and the unchanged 83 gates.
 
 This is source/component evidence. It does not establish a live host's writer
 set, effective configuration graph, normal shutdown, cold-window durability,

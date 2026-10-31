@@ -44,7 +44,8 @@ The manifest schema is `ags.upgrade-tool-bundle.v2`, its entry is
 The bundle and ancestors must be root-owned and not group/world writable.
 Required files include the wrapper, host adapter, transaction engine, policy,
 installer, v2 consumer, verifier, shared archive contract, `upgrade_smoke.py`,
-`upgrade_backup_contract.py`, `upgrade_inventory.py` and reviewed
+`upgrade_backup_contract.py`, `upgrade_inventory.py`, `upgrade_backup.py`,
+`upgrade_restore_verify.py` and reviewed
 `release-source.json`. Missing or changed dependencies fail with
 `dependency_unavailable`, exit 69; there is no PATH/source fallback.
 
@@ -116,12 +117,19 @@ contracts exist. A configured command cannot bypass that refusal. The direct v2
 [Backup and recovery](backup-recovery.md) owns the complete recovery group,
 strict seal/restore evidence schemas, local SQLite/Git/Wiki inventory and fixed
 per-host retention fields. The two S1 modules are required in the exact-digest
-tool bundle. They have no apply integration and implement no backup, restore,
-retention deletion, service action or approval. Every machine retains only its
+tool bundle. S2 adds a synthetic cold-backup producer and an offline
+restore-copy checker. Neither is called by apply, backup, the transaction engine
+or direct install. Every machine retains only its
 latest five sealed and restore-verified backups; restore copies go to system
-Trash after verification, failures/incomplete material await manual review and
+Trash only after successful verification. Failed restore copies and partial
+backups remain in place for manual review and
 do not count toward five. Insufficient space refuses; Trash is not free space.
-S1 only validates this policy. Apply and direct v2 install still exit 83.
+S1 validates the policy. S2 validates seal/report binding and host identity, then
+selects the latest five by seal time. A caller must inject a verified system
+Trash function; the component has no default Trash implementation. Recovery
+requires the reviewed group, DSN, admitted schema and sealed inventory evidence,
+but does not require the original data paths to exist. Apply and direct v2
+install still exit 83.
 
 ## Known incomplete acceptance
 
@@ -133,11 +141,11 @@ constrain the server's production listener. The schema comparator conservatively
 rejects changes to indexes, foreign keys and triggers. Empty affected tables are
 refused until a reviewed populated fixture is available. A future backup command must supply an owner-only `ags.local-backup.v2` receipt
 binding the request, a consistent snapshot, file sizes/digests and SQLite
-integrity/foreign-key checks. S1 defines strict receipt/manifest and inventory components, but no producer
-or independent restore-copy implementation exists: current backup still only
-refuses the missing contract. Capturing complete Git/config bytes, proving cold
-source stability and recovering them remain later implementation and acceptance
-work. The pin loader rejects unknown fields, wrong types, missing fields, duplicate
+integrity/foreign-key checks. S1 defines the receipt/manifest and inventory
+components. S2 produces a sealed synthetic snapshot and checks an offline
+restore copy, but current backup, apply and direct install still only refuse the
+missing contract. Cold-window quiescence, production invocation and accepted
+recovery remain later work. The pin loader rejects unknown fields, wrong types, missing fields, duplicate
 JSON fields, and an unsafe ancestor directory. Mini handoff, Git/config backup
 coverage, Git/database consistency, observation approval and finalize are
 unimplemented and independently refused by apply. Journal-aware forward recovery
@@ -147,6 +155,7 @@ to obtain an upgrade success.
 
 Tests use `scripts/ags-python.sh` followed by `scripts/test_upgrade.py`,
 `scripts/test_upgrade_safety.py`, `scripts/test_upgrade_inventory.py`,
+`scripts/test_upgrade_backup.py`, `scripts/test_upgrade_restore.py`,
 `scripts/test_install_v2.py` or `scripts/test_release_consumer.py`. Run with
 independent HOME/TMPDIR/cwd and remove inherited Python injection variables.
 Real cryptographic acceptance is separately run with

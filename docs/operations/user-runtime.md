@@ -35,7 +35,14 @@ The Git root uses `<GitRepoDir>/<full_name>.git` with optional sibling
 auxiliary state. `GitStorageID` does not name its directory. Current installation
 state is not a recovery archive. [Backup and recovery](backup-recovery.md) defines
 the S1 complete recovery group and per-machine five-verified-backup retention
-contract; S1 performs no backup or deletion and does not enable upgrade apply.
+contract. S2 can copy a synthetic cold snapshot and check an offline restore
+copy. It does not enable upgrade apply. A caller must inject a verified system
+Trash function; there is no default implementation. Only successful restore
+copies and sealed, restore-verified backups beyond the latest five per host are
+moved to Trash. Failed partial backups and failed restore copies remain in place
+for manual review, do not count toward five and are not automatically removed.
+Seal time, host identity and validated seal/report binding determine eligibility,
+not directory modification time. Insufficient space refuses before copying.
 
 ## Program installation
 
