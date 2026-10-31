@@ -503,6 +503,124 @@ class WireupTests(WireFixture):
                 self.assertEqual(self.binary.read_bytes(), self.old)
                 self.assertEqual(self.manager.starts, 0)
 
+    def assert_stage_authorization_refused(self, *, starting):
+        journal, _ = upgrade.private_json(self.pending / 'journal.json')
+        self.assertEqual(journal['phase'], 'start_attempted' if starting else 'stop')
+        self.assertEqual(journal['service_state'], 'stopped_or_unknown')
+        self.assertTrue(journal['recovery_required'])
+        self.assertTrue(journal['stop_started'])
+        self.assertEqual(journal['start_attempted'], starting)
+        marker, window, _ = cold.read_window(self.root)
+        self.assertEqual(window['start_attempted'], starting)
+        self.assertEqual(marker['generation'], window['generation'])
+        if starting:
+            self.assertFalse(window['handoff']['consumed'])
+        self.assertEqual(self.manager.starts, 0)
+        self.assertEqual(self.binary.read_bytes(), self.new if starting else self.old)
+        before = snapshot(self.root)
+        with self.assertRaises(upgrade.Failure) as replay: self.invoke()
+        self.assertIn(replay.exception.exit_code, (77, 81))
+        self.assertEqual(snapshot(self.root), before)
+        self.assertEqual(self.manager.starts, 0)
+
+    def test_authorization_revoked_after_begin_before_stop(self):
+        def revoke(phase):
+            if phase == 'stop-intent':
+                engine.save(self.root / 'config/upgrade-authorization-window-auth.json',
+                            {**self.auth, 'decision': 'reject'})
+        with patch.object(self.manager, 'stop', wraps=self.manager.stop) as stop, \
+                patch.object(cold, 'checkpoint', revoke):
+            with self.assertRaises(upgrade.Failure) as error: self.invoke()
+        self.assertEqual(error.exception.exit_code, 83)
+        self.assertEqual(stop.call_count, 0)
+        self.assert_stage_authorization_refused(starting=False)
+
+    def test_authorization_revoked_after_start_intent_before_start(self):
+        original = engine.Transaction.checkpoint
+        def revoke(tx, phase, **kw):
+            original(tx, phase, **kw)
+            if phase == 'start_attempted':
+                engine.save(self.root / 'config/upgrade-authorization-window-auth.json',
+                            {**self.auth, 'decision': 'reject'})
+        with patch.object(self.manager, 'start', wraps=self.manager.start) as start, \
+                patch.object(engine.Transaction, 'checkpoint', revoke):
+            with self.assertRaises(upgrade.Failure) as error: self.invoke()
+        self.assertEqual(error.exception.exit_code, 83)
+        self.assertEqual(start.call_count, 0)
+        self.assert_stage_authorization_refused(starting=True)
+
+    def test_window_expires_after_start_intent_before_manager_start(self):
+        original = engine.Transaction.checkpoint
+        expired = datetime.fromisoformat(self.auth['expires_at']) + timedelta(seconds=1)
+        class LateClock(datetime):
+            @classmethod
+            def now(cls, tz=None): return expired
+        with ExitStack() as stack:
+            def delay(tx, phase, **kw):
+                original(tx, phase, **kw)
+                if phase == 'start_attempted':
+                    stack.enter_context(patch.object(engine, 'datetime', LateClock))
+            start = stack.enter_context(patch.object(self.manager, 'start', wraps=self.manager.start))
+            stack.enter_context(patch.object(engine.Transaction, 'checkpoint', delay))
+            with self.assertRaises(upgrade.Failure) as error: self.invoke()
+        self.assertEqual(error.exception.exit_code, 83)
+        self.assertEqual(start.call_count, 0)
+        self.assert_stage_authorization_refused(starting=True)
+
+    def test_authorization_revoked_by_restart_suppression_before_stop(self):
+        original = self.manager.suppress_restart
+        def revoke():
+            original()
+            engine.save(self.root / 'config/upgrade-authorization-window-auth.json',
+                        {**self.auth, 'decision': 'reject'})
+        with patch.object(self.manager, 'suppress_restart', revoke), \
+                patch.object(self.manager, 'stop', wraps=self.manager.stop) as stop:
+            with self.assertRaises(upgrade.Failure) as error: self.invoke()
+        self.assertEqual(error.exception.exit_code, 83)
+        self.assertEqual(stop.call_count, 0)
+        self.assert_stage_authorization_refused(starting=False)
+
+    def test_authorization_revoked_after_manager_start_intent(self):
+        def revoke(phase):
+            if phase == 'manager-start-intent':
+                engine.save(self.root / 'config/upgrade-authorization-window-auth.json',
+                            {**self.auth, 'decision': 'reject'})
+        with patch.object(cold, 'checkpoint', revoke), \
+                patch.object(self.manager, 'start', wraps=self.manager.start) as start:
+            with self.assertRaises(upgrade.Failure) as error: self.invoke()
+        self.assertEqual(error.exception.exit_code, 83)
+        self.assertEqual(start.call_count, 0)
+        self.assert_stage_authorization_refused(starting=True)
+
+    def stage_authorization_read_failure(self, invalidate):
+        def tamper(phase):
+            if phase == 'quiescent':
+                invalidate(self.root / 'config/upgrade-authorization-window-auth.json')
+        with patch.object(cold, 'checkpoint', tamper):
+            with self.assertRaises(upgrade.Failure) as error: self.invoke()
+        self.assertEqual((error.exception.code, error.exception.exit_code),
+                         ('minimum_contract_unsatisfied', 83))
+        journal, _ = upgrade.private_json(self.pending / 'journal.json')
+        self.assertEqual(journal['phase'], 'quiescent')
+        self.assertEqual(journal['service_state'], 'stopped_or_unknown')
+        self.assertTrue(journal['recovery_required'])
+        self.assertFalse(journal['install_started'])
+        self.assertFalse(journal['start_attempted'])
+        self.assertEqual(self.binary.read_bytes(), self.old)
+        self.assertEqual(self.manager.starts, 0)
+
+    def test_stage_authorization_unsafe_permissions_keep_83(self):
+        self.stage_authorization_read_failure(lambda path: path.chmod(0o644))
+
+    def test_stage_authorization_unreadable_keeps_83(self):
+        self.stage_authorization_read_failure(lambda path: path.chmod(0o000))
+
+    def test_stage_authorization_missing_keeps_83(self):
+        self.stage_authorization_read_failure(lambda path: path.rename(self.root / 'retained-authorization.json'))
+
+    def test_stage_authorization_malformed_keeps_83(self):
+        self.stage_authorization_read_failure(lambda path: path.write_text('{broken'))
+
     def test_real_apply_prestart_recovery_and_poststart_refusal(self):
         def interrupted(name):
             if name == 'installed': raise RuntimeError('fixture lost response')

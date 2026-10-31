@@ -252,11 +252,15 @@ class ColdWindow:
         replace_json(self.pending / 'cold-journal.json', self.journal)
         checkpoint(name)
 
-    def stop(self):
+    def stop(self, *, authorize=None):
         require(self.journal['phase'] == 'stop' and not self.journal.get('stop_called'), 'cold_phase_invalid')
         self.journal['stop_called'] = True
         replace_json(self.pending / 'cold-journal.json', self.journal)
+        if authorize is not None:
+            authorize()
         self.manager.suppress_restart()
+        if authorize is not None:
+            authorize()
         record = self.manager.stop()
         require(type(record) is dict and record.get('generation') == self.journal['runtime_generation']
                 and record.get('root') == str(self.root)
@@ -411,7 +415,7 @@ class ColdWindow:
                             'receipt_sha256': self.journal['installed_receipt_sha256'],
                             'manager_requested': False})
 
-    def start(self):
+    def start(self, *, authorize=None):
         require(self.owner is not None and self.locks is None
                 and self.journal['phase'] == 'start_attempted', 'cold_start_refused')
         # No dynamic argv/token environment: fixed manager invokes the fixed launcher;
@@ -425,6 +429,8 @@ class ColdWindow:
         replace_json(self.pending / 'cold-journal.json', current)
         checkpoint('manager-start-intent')
         self.journal = current
+        if authorize is not None:
+            authorize()
         self.manager.start()
 
 
