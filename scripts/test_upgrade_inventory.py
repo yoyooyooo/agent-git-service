@@ -572,8 +572,10 @@ class SourceMappingTests(unittest.TestCase):
         # Independent AST lock of the complete recovery selectors/auxiliary semantics.
         selected = [node for node in tree.body if isinstance(node, ast.FunctionDef)
                     and node.name in ('recovery_inventory', 'retirement_auxiliary', 'store_fsck')]
-        self.assertEqual(hashlib.sha256(ast.dump(ast.Module(body=selected, type_ignores=[])).encode()).hexdigest(),
-                         '515af6275abedef5586acc7160e43e232e886df6ebebd9777d9256480c8de8ba')
+        # Hash source segments, not ast.dump: Python releases add AST fields.
+        segments = '\n'.join(ast.get_source_segment(path.read_text(), node) for node in selected)
+        self.assertEqual(hashlib.sha256(segments.encode()).hexdigest(),
+                         'e87686cab2a58b93c88d0b02428991ec56835ad6dd58ef0f42961a3fa2399fb6')
         model_sources = [(str(p.relative_to(ROOT)), hashlib.sha256(p.read_bytes()).hexdigest())
                          for p in sorted((ROOT / 'internal/db').glob('*.go'))
                          if not p.name.endswith('_test.go')]
