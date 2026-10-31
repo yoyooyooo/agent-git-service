@@ -22,6 +22,18 @@ CHECKS = ('independent_copy', 'manifest', 'sqlite_integrity', 'sqlite_fk', 'sqli
           'git_fsck', 'db_oids', 'wiki_cas', 'dependencies')
 
 
+def restore_attempt_id(snapshot_id):
+    """Keep the random suffix and fit the unchanged S1 identifier limit."""
+    from upgrade_backup_contract import identifier
+    identifier(snapshot_id)
+    label = snapshot_id
+    if len(label) > 75:
+        label = label[:62] + '-' + hashlib.sha256(snapshot_id.encode('ascii')).hexdigest()[:12]
+    attempt = ATTEMPT_PREFIX + label + '-' + hashlib.sha256(os.urandom(16)).hexdigest()[:12]
+    identifier(attempt)
+    return attempt
+
+
 def load_sealed(backup_dir, group):
     """A sealed backup is valid only when S1 accepts its manifest, receipt and group."""
     backup_dir = safe_path(backup_dir, 'directory')
@@ -158,7 +170,7 @@ def verify_sealed_backup(backup_dir, *, trash, group=None, dsn=None, schema=None
     restore_root = assert_private_destination(group['storage']['restore_root'])
     require(os.statvfs(restore_root).f_bavail * os.statvfs(restore_root).f_frsize
             >= group['capacity']['restore_copy_bytes'], 'insufficient_space')
-    attempt = ATTEMPT_PREFIX + manifest['snapshot_id'] + '-' + hashlib.sha256(os.urandom(16)).hexdigest()[:12]
+    attempt = restore_attempt_id(manifest['snapshot_id'])
     destination = restore_root / attempt
     require(not destination.exists() and destination.parent == restore_root, 'restore_attempt_invalid')
     destination.mkdir(mode=0o700)
