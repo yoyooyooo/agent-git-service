@@ -121,10 +121,14 @@ tool bundle. S2 adds a synthetic cold-backup producer and an offline
 restore-copy checker. Neither is called by apply, backup, the transaction engine
 or direct install. Every machine retains only its
 latest five sealed and restore-verified backups; restore copies go to system
-Trash after verification, failures/incomplete material await manual review and
+Trash only after successful verification. Failed restore copies and partial
+backups remain in place for manual review and
 do not count toward five. Insufficient space refuses; Trash is not free space.
-S1 validates the policy. S2 can select verified backups and move older ones to
-system Trash only when a caller invokes that component. Apply and direct v2
+S1 validates the policy. S2 validates seal/report binding and host identity, then
+selects the latest five by seal time. A caller must inject a verified system
+Trash function; the component has no default Trash implementation. Recovery
+requires the reviewed group, DSN, admitted schema and sealed inventory evidence,
+but does not require the original data paths to exist. Apply and direct v2
 install still exit 83.
 
 ## Known incomplete acceptance

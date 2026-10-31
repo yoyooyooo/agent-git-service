@@ -13,6 +13,7 @@ import upgrade_backup_contract as c
 import upgrade_inventory as inv
 import upgrade_restore_verify as restore
 from test_upgrade_backup import BackupTests
+from test_upgrade_inventory import fixture_db
 
 
 class RestoreTests(BackupTests):
@@ -20,27 +21,33 @@ class RestoreTests(BackupTests):
         self.repo()
         return self.take()
 
+    def verify(self, backup_dir, **kwargs):
+        kwargs.setdefault('group', self.last_group)
+        kwargs.setdefault('schema', self.admission)
+        kwargs.setdefault('dsn', 'sqlite:' + str(self.dbpath))
+        return restore.verify_sealed_backup(backup_dir, **kwargs)
+
     def test_restore_copy_matches_manifest_and_is_removed(self):
         sealed = self.seal_fixture()
         calls = []
 
         def fake_trash(path):
             calls.append(Path(path))
-            shutil.rmtree(path)
+            Path(path).rename(self.root / ('trashed-' + Path(path).name))
 
-        report = restore.verify_sealed_backup(sealed['backup_dir'], trash=fake_trash)
+        report = self.verify(sealed['backup_dir'], trash=fake_trash)
         self.assertTrue(all(report['checks'].values()))
         self.assertEqual(report['manifest_sha256'], sealed['receipt']['manifest_sha256'])
         self.assertEqual(len(calls), 1)
-        self.assertFalse(Path(report['restore_copy']).exists() if 'restore_copy' in report else False)
+        self.assertEqual(calls[0].name, report['restore_copy_id'])
+        self.assertFalse(calls[0].exists())
         self.assertEqual(calls[0].name.startswith('restore-'), True)
-        listed = backup.list_backups(self.backups)
+        listed = backup.list_backups(self.backups, group=self.last_group, host_instance='fixture')
         self.assertEqual([item['snapshot_id'] for item in listed['verified']], ['snapshot1'])
 
     def corrupt(self, path, mutator):
         """Change payload bytes and the sealed size/hash so manifest still describes them."""
         mutator(path)
-        raw = (Path(path).parents[3] / 'manifest.json').read_bytes() if False else None
         backup_dir = None
         for parent in Path(path).parents:
             if (parent / 'manifest.json').is_file() and (parent / 'receipt.json').is_file():
@@ -56,6 +63,7 @@ class RestoreTests(BackupTests):
         ]
         for item in manifest['entries']:
             if item['path'] == relative and info is not None and item['kind'] == 'file':
+                item['mtime_ns'] = info.st_mtime_ns
                 item['size'] = info.st_size
                 item['sha256'] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
         raw = c.canonical(manifest)
@@ -63,6 +71,8 @@ class RestoreTests(BackupTests):
         receipt['manifest_sha256'] = hashlib.sha256(raw).hexdigest()
         (backup_dir / 'manifest.json').write_bytes(raw)
         (backup_dir / 'receipt.json').write_bytes(c.canonical(receipt))
+        (backup_dir / 'publication.json').write_bytes(c.canonical({'state': 'published',
+                     'manifest_sha256': receipt['manifest_sha256']}))
         return backup_dir
 
     def test_bad_foreign_key_fails_restore(self):
@@ -70,7 +80,7 @@ class RestoreTests(BackupTests):
         payload = Path(sealed['backup_dir']) / 'sqlite'
 
         def break_fk(path):
-            with sqlite3.connect(path) as db:
+            with fixture_db(path) as db:
                 db.execute('PRAGMA foreign_keys=OFF')
                 db.execute('CREATE TABLE parent(id INTEGER PRIMARY KEY)')
                 db.execute('CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id))')
@@ -78,7 +88,7 @@ class RestoreTests(BackupTests):
 
         self.corrupt(payload, break_fk)
         with self.assertRaisesRegex(c.ContractError, 'sqlite_fk_failed'):
-            restore.verify_sealed_backup(sealed['backup_dir'], trash=lambda path: None,
+            self.verify(sealed['backup_dir'], trash=lambda path: None,
                                          schema=self.admission)
         self.assertTrue(Path(sealed['backup_dir']).exists())
 
@@ -92,7 +102,7 @@ class RestoreTests(BackupTests):
         loose = next(path for path in (copied / 'objects').rglob('*') if path.is_file())
         loose.unlink()
         with self.assertRaisesRegex(c.ContractError, 'manifest_mismatch|git_validation_failed'):
-            restore.verify_sealed_backup(sealed['backup_dir'], trash=lambda path: None,
+            self.verify(sealed['backup_dir'], trash=lambda path: None,
                                          schema=self.admission)
 
     def test_missing_db_only_oid_fails(self):
@@ -104,7 +114,7 @@ class RestoreTests(BackupTests):
         loose = next(path for path in (copied / 'objects').rglob('*') if path.is_file())
         loose.unlink()
         with self.assertRaises(c.ContractError):
-            restore.verify_sealed_backup(sealed['backup_dir'], trash=lambda path: None)
+            self.verify(sealed['backup_dir'], trash=lambda path: None)
 
     def test_missing_cas_fails(self):
         self.repo()
@@ -115,14 +125,14 @@ class RestoreTests(BackupTests):
         cas = Path(sealed['backup_dir']) / 'git_root' / '.wikiblobs' / sha[:2] / sha[2:4] / sha
         cas.unlink()
         with self.assertRaisesRegex(c.ContractError, 'wiki_cas_missing|manifest_mismatch'):
-            restore.verify_sealed_backup(sealed['backup_dir'], trash=lambda path: None)
+            self.verify(sealed['backup_dir'], trash=lambda path: None)
 
     def test_changed_config_or_hash_fails(self):
         sealed = self.seal_fixture()
         config = Path(sealed['backup_dir']) / 'runtime_env'
         config.write_bytes(config.read_bytes() + b'\nCHANGED=1\n')
         with self.assertRaisesRegex(c.ContractError, 'manifest_mismatch'):
-            restore.verify_sealed_backup(sealed['backup_dir'], trash=lambda path: None)
+            self.verify(sealed['backup_dir'], trash=lambda path: None)
 
     def test_alternates_shallow_and_unknown_sha_class_refuse(self):
         repo = self.repo()
@@ -180,7 +190,7 @@ class RestoreTests(BackupTests):
                     body_size=len(restored), body_inline=restored, head_revision_id=4,
                     head_changeset_id=4, deleted_at='2026-01-02T00:00:00Z')
         sealed = self.take()
-        report = restore.verify_sealed_backup(sealed['backup_dir'], trash=lambda path: shutil.rmtree(path))
+        report = self.verify(sealed['backup_dir'], trash=lambda path: Path(path).rename(self.root / ('trashed-' + Path(path).name)))
         self.assertTrue(report['checks']['wiki_cas'])
         self.assertEqual(report['manifest_sha256'], sealed['receipt']['manifest_sha256'])
 

@@ -55,8 +55,10 @@ class BackupTests(InventoryTests):
 
     def take(self, group=None, **kwargs):
         group = group or self.prepared_group()
+        self.last_group = group
+        snapshot_id = kwargs.pop('snapshot_id', 'snapshot1')
         return backup.create_sealed_backup(group, 'sqlite:' + str(self.dbpath), self.admission,
-                                           binding(), quiescence(), 'snapshot1', **kwargs)
+                                           binding(), quiescence(), snapshot_id, **kwargs)
 
     def test_empty_database_and_optional_wiki_seal_without_hardlinks(self):
         repo = self.repo()
@@ -83,7 +85,7 @@ class BackupTests(InventoryTests):
             self.assertNotEqual(source_object.stat().st_ino, copied_object.stat().st_ino)
         self.assertTrue((payload / 'git_root' / '.wikiblobs').exists())
         self.assertFalse((payload / 'manifest.json').stat().st_mode & 0o077)
-        listed = backup.list_backups(self.backups)
+        listed = backup.list_backups(self.backups, group=self.last_group, host_instance='fixture')
         self.assertEqual(listed['verified'], [])
         self.assertEqual([item['snapshot_id'] for item in listed['sealed_unverified']], ['snapshot1'])
 
@@ -99,7 +101,8 @@ class BackupTests(InventoryTests):
         with unittest.mock.patch.object(backup, 'copy_tree', mutate):
             with self.assertRaisesRegex(c.ContractError, 'source_changed'):
                 self.take()
-        self.assertEqual(list(self.backups.iterdir()), [])
+        self.assertTrue((self.backups / '.partial-snapshot1').is_dir())
+        self.assertTrue((self.backups / '.partial-snapshot1' / 'failure.json').is_file())
 
     def test_hardlink_and_path_escape_refuse(self):
         self.repo()
@@ -122,9 +125,10 @@ class BackupTests(InventoryTests):
             self.take(group)
         self.assertEqual(list(self.backups.iterdir()), [])
 
-    def test_interrupted_steps_leave_no_retained_partial(self):
+    def test_interrupted_steps_retain_partial_for_review(self):
         self.repo()
-        steps = ('scan', 'copy', 'sqlite', 'seal')
+        steps = ('scan', 'copy', 'sqlite', 'payload', 'seal', 'inventory', 'manifest',
+                 'receipt', 'publish', 'rename', 'root-sync')
         for step in steps:
             with self.subTest(step=step):
                 def fail(name):
@@ -132,8 +136,15 @@ class BackupTests(InventoryTests):
                         raise c.ContractError('interrupted')
                 with unittest.mock.patch.object(backup, 'checkpoint', fail):
                     with self.assertRaisesRegex(c.ContractError, 'interrupted'):
-                        self.take()
-                self.assertEqual(list(self.backups.iterdir()), [])
+                        self.take(snapshot_id='snapshot-' + step)
+                partial = self.backups / ('.partial-snapshot-' + step)
+                final = self.backups / ('snapshot-' + step)
+                if step == 'scan':
+                    self.assertFalse(partial.exists())
+                else:
+                    kept = final if final.exists() else partial
+                    self.assertTrue(kept.is_dir())
+                    self.assertTrue((kept / 'failure.json').is_file())
 
     def test_apply_backup_and_direct_install_stay_83(self):
         for machine in ('mini', 'imile-win'):
@@ -163,17 +174,18 @@ class BackupTests(InventoryTests):
             calls.append(Path(path))
             Path(path).rename(self.root / ('trashed-' + Path(path).name))
 
-        verified = []
+        import upgrade_restore_verify as restore
+        self.repo()
+        group = self.prepared_group()
         for index in range(6):
-            directory = self.backups / ('snap' + str(index))
-            directory.mkdir(mode=0o700)
-            (directory / 'sealed').write_bytes(b'ok')
-            verified.append({'snapshot_id': 'snap' + str(index), 'sealed_at': '2026-01-0' + str(index + 1),
-                             'path': directory, 'state': 'restore_verified'})
+            result = self.take(group, snapshot_id='snap' + str(index),
+                               now='2026-01-0' + str(index + 1) + 'T00:00:00+00:00')
+            restore.verify_sealed_backup(result['backup_dir'], group=group, schema=self.admission,
+                                         dsn='sqlite:' + str(self.dbpath), trash=lambda path: None)
         failed = self.backups / 'failed-partial'
         failed.mkdir(mode=0o700)
         (failed / 'incomplete').write_bytes(b'keep')
-        backup.apply_retention(self.backups, verified, trash=fake_trash)
+        backup.apply_retention(self.backups, group=group, host_instance='fixture', trash=fake_trash)
         self.assertEqual([item.name for item in calls], ['snap0'])
         self.assertTrue(failed.exists())
         self.assertFalse((self.backups / 'snap0').exists())
