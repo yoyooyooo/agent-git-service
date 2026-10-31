@@ -30,6 +30,13 @@ rehearsal workspace from live configuration. Relative replication paths resolve
 from the replication JSON's directory, not the service working directory. Use
 explicit durable paths and check all referenced files before switching roots.
 
+The Git root uses `<GitRepoDir>/<full_name>.git` with optional sibling
+`<full_name>.wiki.git`, plus historical Wiki CAS under `.wikiblobs` and durable
+auxiliary state. `GitStorageID` does not name its directory. Current installation
+state is not a recovery archive. [Backup and recovery](backup-recovery.md) defines
+the S1 complete recovery group and per-machine five-verified-backup retention
+contract; S1 performs no backup or deletion and does not enable upgrade apply.
+
 ## Program installation
 
 The verified Python installer places the current three native commands directly

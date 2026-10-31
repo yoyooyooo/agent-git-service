@@ -50,7 +50,7 @@ Does not own:
 
 ```
 Init(fullName, seed)
-  → go-git: create bare repo at GIT_REPO_DIR/{storage-key}.git
+  → go-git: create bare repo at GIT_REPO_DIR/{fullName}.git
   → if seed: create initial commit with empty README.md via go-git object APIs
 
 Fork(src, dst)
@@ -59,6 +59,14 @@ Fork(src, dst)
 Delete(fullName)
   → os.RemoveAll(repoPath)
 ```
+
+The path helper uses the repository's full name, such as
+`sample/project.git`; `GitStorageID` is a replication identity and does not
+select a disk path. Existing Wiki repositories are siblings such as
+`sample/project.wiki.git`. The same Git root can also hold `.wikiblobs` CAS and
+persistent delivery/retirement auxiliary state. Complete recovery must preserve
+those as well as every bare Git object and DB-held root; see
+[backup and recovery](../operations/backup-recovery.md).
 
 ### Merge (Regular)
 
