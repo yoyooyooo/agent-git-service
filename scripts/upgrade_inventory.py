@@ -486,7 +486,8 @@ def database_inventory(path, root, reviewed_schema_sha256, limit=MAX_ENTRIES):
         # op=delete revision whose blob is empty. deleted_at selects that class.
         # A live head must still match the page body exactly. A tombstone must
         # prove its retained body came from an earlier content revision of the
-        # same page; skipping every deleted row would hide a forged body.
+        # same page and repository, strictly before the current delete head;
+        # skipping every deleted row would hide a forged body.
         for page in all_rows['wiki_pages']:
             revision = revisions.get((page['page_id'], page['head_revision_id']))
             require(revision is not None and revision['changeset_id'] == page['head_changeset_id'],
@@ -497,6 +498,8 @@ def database_inventory(path, root, reviewed_schema_sha256, limit=MAX_ENTRIES):
             if decode(revision['op']) == 'delete':
                 require(deleted, 'wiki_head_revision_mismatch')
                 require(any(item['page_id'] == page['page_id']
+                            and item['revision_id'] < revision['revision_id']
+                            and changesets[item['changeset_id']]['repository_id'] == page['repository_id']
                             and decode(item['op']) in ('create', 'update', 'rename', 'restore', 'compact')
                             and item['blob_sha'] == page['head_blob_sha']
                             and item['body_size'] == page['body_size']
