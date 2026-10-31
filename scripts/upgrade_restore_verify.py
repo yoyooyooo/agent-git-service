@@ -156,6 +156,7 @@ def open_readonly(path):
 
 def verify_sealed_backup(backup_dir, *, trash, group=None, dsn=None, schema=None):
     """Copy the sealed payload aside, run every required check, then Trash only a successful copy."""
+    require(callable(trash), 'trash_unavailable')
     require(group is not None and schema is not None and dsn is not None, 'restore_input_missing')
     backup_dir, manifest, receipt, _raw = load_sealed(backup_dir, group)
     basis = load_inventory(backup_dir, manifest, group, schema, dsn)

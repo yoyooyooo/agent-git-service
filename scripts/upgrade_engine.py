@@ -24,11 +24,12 @@ import re
 import urllib.request
 
 from upgrade import Failure, private_json, require_apply_contracts
+from upgrade_backup_contract import ContractError
 
 PRE_EFFECT = {'admission', 'source_verify', 'release_resolve', 'artifact_download',
               'artifact_verify', 'candidate_identity', 'candidate_smoke', 'old_smoke',
               'upgrade_smoke', 'schema_compare', 'legacy_scan'}
-FLAGS = ('prepare_started', 'stop_started', 'install_started', 'backup_created')
+FLAGS = ('prepare_started', 'stop_started', 'install_started', 'backup_created', 'start_attempted')
 
 
 def save(path, value):
@@ -288,13 +289,24 @@ class Transaction:
                 self.effects.preflight()
                 authorize(self.authorization, self.binding)
                 self.checkpoint('prepare', prepare_started=True)
-                self.effects.backup()
-                self.checkpoint('prepare', backup_created=True)
+                self.effects.begin()
                 self.checkpoint('stop', stop_started=True)
                 self.effects.stop()
-                self.checkpoint('install', install_started=True)
+                self.effects.quiescent()
+                self.checkpoint('quiescent')
+                self.effects.backup()
+                self.checkpoint('backup', backup_created=True)
+                self.effects.restore()
+                self.checkpoint('restore_verified')
+                authorize(self.authorization, self.binding)
+                self.effects.install_intent(lambda: authorize(self.authorization, self.binding))
+                self.checkpoint('install_started', install_started=True)
                 self.effects.install()
-                self.checkpoint('start')
+                self.effects.installed()
+                self.checkpoint('installed')
+                self.effects.start_intent()
+                self.checkpoint('start_attempted', start_attempted=True)
+                self.effects.release()
                 self.effects.start()
                 self.checkpoint('health')
                 self.effects.health()
@@ -306,7 +318,15 @@ class Transaction:
                 self.checkpoint('awaiting_observation')
                 return result
             except Exception as error:
-                self.checkpoint(self.journal['phase'], failed=True)
+                self.checkpoint(self.journal['phase'], failed=True,
+                                service_state='stopped_or_unknown' if self.journal['stop_started'] else 'unchanged',
+                                recovery_required=self.journal['stop_started'])
+                if isinstance(error, ContractError):
+                    raise Failure('minimum_contract_unsatisfied', self.journal['phase'], 83) from error
+                if isinstance(error, Failure) and error.exit_code == 83:
+                    raise
                 if self.journal['stop_started'] or self.journal['install_started']:
                     raise Failure('forward_only_recovery_required', self.journal['phase']) from error
                 raise
+            finally:
+                self.effects.release()

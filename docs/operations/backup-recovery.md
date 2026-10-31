@@ -1,11 +1,14 @@
-# Local backup and recovery contract (S1) and cold snapshot (S2)
+# Local backup, cold window and pre-start recovery (S1–S3)
 
 S1 defines and validates recovery inventory and evidence. S2 adds
 `scripts/upgrade_backup.py` and `scripts/upgrade_restore_verify.py`, which copy a
 declared recovery group with the SQLite backup API and ordinary file copies, seal
 `ags.local-backup.v2`, and check an independent restore copy offline. They are not
 called by `upgrade.py`, the host adapter, the transaction engine or direct v2
-install. Those entries still reject with `backup_contract_unimplemented` / 83.
+install. Apply and the host backup adapter still reject with
+`backup_contract_unimplemented` / 83; direct v2 install rejects with
+`install_contracts_unimplemented` / 83. S3 reuses these components only in a
+private cold-window harness, not through production apply.
 The public deployment and migration policy stays empty. See
 [local upgrade](local-upgrade.md) for the entry and gates.
 
@@ -268,12 +271,52 @@ Independent media/encryption is strongly recommended; same-disk copies cover a
 narrower failure domain. SHA256/owner permissions do not authenticate a human or
 protect against a malicious same-UID/root writer.
 
+## S3 pre-start recovery
+
+`upgrade_recovery.py` owns the private durable cold-window protocol described in
+[local upgrade](local-upgrade.md#s3-private-cold-window-protocol). It does not
+redefine the S1 recovery group, binding, seal, retention or restore attempt ID.
+It revalidates S2 payloads, publication markers and the restore report's exact
+`manifest_sha256` before installation and recovery. The injected Trash callback
+must be callable before any restore-copy creation; `None` is refused early.
+Retention stays five eligible backups per host; failure material is not eligible
+and is not deleted. S3 deliberately does not invoke backup retirement during an
+active transaction, so it cannot retire a recovery dependency. S2 remains the
+owner of retention selection and Trash execution.
+
+Pre-start recovery restores only old gh-server bytes and the raw old
+`installation.json`, retained before installation intent and compared with the
+sealed payload. It requires new hostops ownership, both exclusive locks, original
+claim binding and data/config equal to Tq. The data fingerprint covers the
+admitted logical DB, full Git/CAS tree, config and every other recovery object;
+only the binary and receipt being replaced are excluded. S2's full fingerprint
+still guards backup and install intent. Source collection is bounded by S1 limits.
+
+A private owner-only `ags.prestart-recovery-approval.v1` file has exactly
+`schema`, `approval_id`, `purpose=prestart-recover`, `decision=approve`, `binding`,
+`generation`, `journal_sha256`, `issued_at`, `expires_at` and
+`actor={type:human,id,source}`. Times must be timezone-aware and currently valid.
+The approval ID must differ from the window authorization ID; its exact blocked
+cold-journal digest and generation prevent stale reuse. This is a human
+declaration, not a signature or proof of an independent identity. The component
+never generates an approval.
+
+Approval consumption and `recovery_authorized` are durable before either old
+file is replaced. Only matching hashes after both durable replacements produce
+`old_restored`. The cold marker remains and no process is started. Recovery
+crashes, missing evidence, changed data, unknown phase, generation mismatch,
+missing approval or any durable `start_attempted` refuse restoration/replay.
+No timeout clears ownership facts. Restarting the old version requires a later
+separately admitted protocol; S3 supplies no recovery CLI or old-start command.
+Post-start full DB/Git/CAS/config restore is not implemented or authorized.
+
 ## Verification boundary
 
 Run `scripts/ags-python.sh scripts/test_upgrade_inventory.py`,
 `scripts/test_upgrade_backup.py BackupTests`,
 `scripts/test_upgrade_restore.py RestoreTests`, and
-`scripts/test_upgrade_backup_regressions.py` with independent HOME/TMPDIR/cwd
+`scripts/test_upgrade_backup_regressions.py`, `scripts/test_upgrade_quiescence.py`
+and `scripts/test_upgrade_recovery.py` with independent HOME/TMPDIR/cwd
 and no inherited PYTHONPATH/PYTHONPYCACHEPREFIX/BASH_ENV or
 PYTHONDONTWRITEBYTECODE (the shell entry establishes bytecode controls itself).
 The suites use real SQLite and bare Git with synthetic identities. They cover
@@ -286,7 +329,7 @@ alternates/shallow repositories, unknown OIDs, tombstones
 without an earlier same-repository body, and the unchanged 83 gates.
 
 This is source/component evidence. It does not establish a live host's writer
-set, effective configuration graph, normal shutdown, cold-window durability,
-complete backup/restore, real key decryption, native manager/ACL/xattr behavior,
+set, effective configuration graph, native manager shutdown, host cold-window durability,
+production backup/restore, real key decryption, native manager/ACL/xattr behavior,
 production migration, business/provider health or disaster recovery. Later
 slices must implement and verify those parts before apply can be connected.
