@@ -267,6 +267,186 @@ class ManualTests(ManualFixture):
         with patch.object(self, 'probe', side_effect=AssertionError('no replay')):
             self.assertEqual(self.confirm(), expected)
 
+    def snapshot(self):
+        return {str(p.relative_to(self.root)): (p.stat().st_mode, p.stat().st_mtime_ns,
+                p.read_bytes() if p.is_file() else None) for p in self.root.rglob('*')}
+
+    def crash_partial_stage(self, *, empty=False):
+        pid = os.fork()
+        if pid == 0:
+            original = manual.durable_bytes
+            def interrupted(path, raw):
+                if path.name.endswith('.commit'):
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    if not empty:
+                        os.write(fd, raw[:len(raw) // 2])
+                    os.fsync(fd)
+                    os._exit(91)
+                original(path, raw)
+            manual.durable_bytes = interrupted
+            self.confirm()
+            os._exit(92)
+        _, status = os.waitpid(pid, 0)
+        self.assertEqual(os.waitstatus_to_exitcode(status), 91)
+        staging = next(self.pending.parent.glob('.*.commit'))
+        fragment = staging.read_bytes()
+        self.assertEqual(bool(fragment), not empty)
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads(fragment)
+        before = self.snapshot()
+        for command in ('status', 'reconcile'):
+            result = engine.acceptance(command, self.root, self.request)
+            self.assertEqual(result['status'], 'awaiting_observation')
+            self.assertNotIn('completion', result)
+        self.assertEqual(before, self.snapshot())
+        self.assertTrue(self.pending.exists())
+        self.assertFalse(manual.completion_path(self.pending.parent, self.request).exists())
+        return staging, fragment
+
+    def assert_retained_fragment(self, fragment):
+        retained = [p for p in self.pending.parent.rglob('*') if p.is_file()
+                    and p.name != 'hostops.lock' and p.read_bytes() == fragment]
+        self.assertEqual(len(retained), 1, retained)
+        return retained[0]
+
+    def test_partial_stage_process_crash_readonly_retry_and_idempotence(self):
+        staging, fragment = self.crash_partial_stage()
+        # A fragment cannot bypass renewed approval or full-chain validation.
+        original = self.approval_path.read_bytes()
+        engine.save(self.approval_path, {**self.approval, 'decision': 'pending'})
+        self.reject()
+        self.assertEqual(staging.read_bytes(), fragment)
+        self.approval_path.write_bytes(original)
+        payload = Path(self.window.journal['backup_dir']) / 'old_binary'
+        original = payload.read_bytes()
+        info = payload.stat()
+        payload.write_bytes(b'corrupt')
+        self.reject()
+        self.assertEqual(staging.read_bytes(), fragment)
+        payload.write_bytes(original)
+        os.utime(payload, ns=(info.st_atime_ns, info.st_mtime_ns))
+        result = self.confirm()
+        self.assertEqual(result['status'], 'completed')
+        self.assertFalse(staging.exists())
+        retained = self.assert_retained_fragment(fragment)
+        before = self.snapshot()
+        with patch.object(self, 'probe', side_effect=AssertionError('no replay')):
+            self.assertEqual(self.confirm(), result)
+            for command in ('status', 'reconcile'):
+                self.assertEqual(engine.acceptance(command, self.root, self.request)['completion'], result)
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(retained.read_bytes(), fragment)
+
+    def test_empty_stage_process_crash_retry(self):
+        staging, fragment = self.crash_partial_stage(empty=True)
+        self.assertEqual(self.confirm()['status'], 'completed')
+        self.assertFalse(staging.exists())
+        self.assert_retained_fragment(fragment)
+
+    def test_partial_stage_recovery_crash_after_retaining_fragment(self):
+        staging, fragment = self.crash_partial_stage()
+        inode = staging.stat().st_ino
+        pid = os.fork()
+        if pid == 0:
+            original = manual.durable_bytes
+            def interrupted(path, raw):
+                if path.name.endswith('.commit'):
+                    os._exit(96)
+                original(path, raw)
+            manual.durable_bytes = interrupted
+            self.confirm()
+            os._exit(97)
+        _, status = os.waitpid(pid, 0)
+        self.assertEqual(os.waitstatus_to_exitcode(status), 96)
+        self.assertFalse(staging.exists())
+        self.assertTrue(self.pending.exists())
+        retained = self.assert_retained_fragment(fragment)
+        self.assertEqual(retained.stat().st_ino, inode)
+        before = self.snapshot()
+        self.assertEqual(engine.acceptance('reconcile', self.root, self.request)['status'], 'awaiting_observation')
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(self.confirm()['status'], 'completed')
+        self.assertEqual(retained.read_bytes(), fragment)
+
+    def test_complete_but_mismatched_stage_is_not_discarded(self):
+        with patch.object(manual, 'checkpoint', side_effect=lambda name: (_ for _ in ()).throw(
+                RuntimeError('crash')) if name == 'completion-staged' else None):
+            with self.assertRaises(RuntimeError):
+                self.confirm()
+        staging = next(self.pending.parent.glob('.*.commit'))
+        candidate, _ = manual.read_document(staging)
+        candidate['consumed_approval']['approval_id'] = 'unrelated-approval'
+        engine.save(staging, candidate)
+        before = self.snapshot()
+        self.reject()
+        self.assertEqual(before, self.snapshot())
+        self.assertTrue(staging.exists())
+
+    def test_partial_stage_expired_approval_cannot_recover(self):
+        staging, fragment = self.crash_partial_stage()
+        self.now += timedelta(minutes=6)
+        before = self.snapshot()
+        self.reject()
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(staging.read_bytes(), fragment)
+
+    def assert_readonly_completion_rejected(self):
+        before = self.snapshot()
+        with patch.object(manual, 'check_running', side_effect=AssertionError('no health')), \
+                patch.object(manual, 'load_chain', side_effect=AssertionError('no live chain')), \
+                patch.object(manual, 'validate_approval', side_effect=AssertionError('no approval reuse')), \
+                patch.object(engine.Transaction, 'run', side_effect=AssertionError('no upgrade')):
+            for command in ('status', 'reconcile'):
+                with self.subTest(command=command), self.assertRaises(upgrade.Failure):
+                    engine.acceptance(command, self.root, self.request)
+        self.assertEqual(before, self.snapshot())
+
+    def test_completed_readback_rejects_internal_inconsistency(self):
+        record = self.confirm()
+        path = manual.completion_path(self.pending.parent, self.request)
+        mutations = [('receipt', 'generation', 'different-generation'),
+                     ('consumed_approval', 'approval_id', 'unrelated-approval'),
+                     ('receipt', 'approval_sha256', '0' * 64),
+                     ('consumed_approval', 'sha256', '0' * 64),
+                     ('receipt', 'evidence_packet_sha256', '0' * 64),
+                     ('receipt', 'rollback_mode', 'automatic'),
+                     ('receipt', 'unknown', True),
+                     (None, 'approval_sha256', 'not-a-digest'),
+                     (None, 'generation', '../invalid'),
+                     (None, 'approval_id', ''),
+                     (None, 'completed_at', 'not-a-time')]
+        for section, key, value in mutations:
+            candidate = copy.deepcopy(record)
+            target = candidate if section is None else candidate[section]
+            target[key] = value
+            engine.save(path, candidate)
+            with self.subTest(section=section, key=key):
+                self.assert_readonly_completion_rejected()
+        engine.save(path, record)
+        self.assertEqual(manual.status(self.root, self.request)['completion'], record)
+
+    def test_completed_readback_checks_claim_before_and_after_archive(self):
+        with patch.object(manual, 'checkpoint', side_effect=lambda name: (_ for _ in ()).throw(
+                RuntimeError('crash')) if name == 'completion-durable' else None):
+            with self.assertRaises(RuntimeError):
+                self.confirm()
+        record, _ = manual.read_document(manual.completion_path(self.pending.parent, self.request))
+        for directory in (self.pending, self.pending.parent / ('accepted-' + record['generation'])):
+            claim_path = directory / 'claim.json'
+            before = self.snapshot()
+            with patch.object(self, 'probe', side_effect=AssertionError('no replay')):
+                for command in ('status', 'reconcile'):
+                    self.assertEqual(engine.acceptance(command, self.root, self.request)['completion'], record)
+            self.assertEqual(before, self.snapshot())
+            original = claim_path.read_bytes()
+            for key, value in (('authorization_id', 'different-window'), ('old', 'c' * 40)):
+                engine.save(claim_path, {'schema': 'ags.local-claim.v2', 'binding': {**self.request, key: value}})
+                with self.subTest(directory=directory.name, field=key):
+                    self.assert_readonly_completion_rejected()
+                claim_path.write_bytes(original)
+            with patch.object(self, 'probe', side_effect=AssertionError('no replay')):
+                self.assertEqual(self.confirm(), record)
+
     def test_real_flock_concurrent_confirm(self):
         with manual.hostops(self.root):
             command = '''import json,sys

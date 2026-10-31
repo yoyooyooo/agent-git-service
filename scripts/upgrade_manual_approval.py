@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import tempfile
 
 from upgrade import Failure, directory_fd, private_json, read_private_fd, validate_pin
 from upgrade_backup_contract import (canonical, digest, fields, fingerprint, identifier,
@@ -304,19 +305,30 @@ def validate_approval(value, packet, packet_sha, now, *, consumed=False):
     text(media['evidence']); text(media['reason'])
 
 
-def validate_record(record, packet, approval, approval_sha, packet_sha):
+def validate_completion(record, binding):
+    """Historical record invariants shared by confirm, handoff and read-only queries."""
     fields(record, RECORD_FIELDS)
     require(record['schema'] == 'ags.manual-completion.v1' and record['status'] == 'completed'
-            and record['binding'] == packet['binding'] and record['generation'] == packet['generation']
+            and record['binding'] == binding, 'completion_mismatch')
+    identifier(record['generation']); identifier(record['approval_id'])
+    digest(record['approval_sha256']); digest(record['evidence_packet_sha256'])
+    timestamp(record['completed_at'])
+    require(record['consumed_approval'] == {'approval_id': record['approval_id'],
+                                          'sha256': record['approval_sha256']}
+            and record['receipt'] == {'schema': 'ags.local-upgrade-receipt.v2', 'status': 'completed',
+                'binding': binding, 'generation': record['generation'], 'rollback_mode': 'forward-only',
+                'approval_sha256': record['approval_sha256'],
+                'evidence_packet_sha256': record['evidence_packet_sha256']}, 'completion_mismatch')
+
+
+def validate_record(record, packet, approval, approval_sha, packet_sha):
+    validate_completion(record, packet['binding'])
+    require(record['generation'] == packet['generation']
             and record['approval_id'] == approval['approval_id'] and record['approval_sha256'] == approval_sha
             and record['evidence_packet_sha256'] == packet_sha, 'completion_mismatch')
     completed = timestamp(record['completed_at'])
     require(timestamp(approval['recorded_at']) <= completed < timestamp(approval['expires_at']),
             'completion_time_invalid')
-    require(record['consumed_approval'] == {'approval_id': approval['approval_id'], 'sha256': approval_sha}
-            and record['receipt'] == {'schema': 'ags.local-upgrade-receipt.v2', 'status': 'completed',
-                'binding': packet['binding'], 'generation': packet['generation'], 'rollback_mode': 'forward-only',
-                'approval_sha256': approval_sha, 'evidence_packet_sha256': packet_sha}, 'completion_mismatch')
 
 
 def validate_handoff(value, key, imile_pin_sha, now):
@@ -432,13 +444,24 @@ def _confirm(root, binding, approval_path, packet_path, pin, pin_sha, probe, clo
                               'binding': binding, 'generation': packet['generation'], 'rollback_mode': 'forward-only',
                               'approval_sha256': approval_sha, 'evidence_packet_sha256': packet_sha}}
         # Atomic publication of BOTH receipt and consumed approval in one inode.
-        # Unique staging is resumable only if identical bytes survived the crash.
+        # A complete stage must match this acceptance. A torn JSON stage is not
+        # consumption: retain its inode only after revalidating the live chain
+        # and unexpired approval above. Queries never enter this recovery path.
         staging = completed.with_name('.' + completed.name + '.commit')
+        candidate = None
         if staging.exists() or staging.is_symlink():
-            candidate, _ = read_document(staging)
-            validate_record(candidate, packet, approval, approval_sha, packet_sha)
-            record = candidate
-        else:
+            try:
+                candidate, _ = read_document(staging)
+            except json.JSONDecodeError:
+                retained = Path(tempfile.mkdtemp(prefix=staging.name + '.partial-', dir=state))
+                with directory_fd(state, private=True) as parent, directory_fd(retained, private=True) as fragment:
+                    os.rename(staging.name, staging.name, src_dir_fd=parent, dst_dir_fd=fragment)
+                    os.fsync(fragment)
+                    os.fsync(parent)
+            else:
+                validate_record(candidate, packet, approval, approval_sha, packet_sha)
+                record = candidate
+        if candidate is None:
             durable_bytes(staging, canonical(record))
         checkpoint('completion-staged')
         with directory_fd(state, private=True) as parent:
@@ -465,12 +488,20 @@ def status(root, binding):
     """Queries return facts, not authorization. No file/lock creation or healing."""
     with hostops(root) as state:
         path = completion_path(state, binding)
-        if path.exists():
+        if path.exists() or path.is_symlink():
             record, _ = read_document(path)
-            fields(record, RECORD_FIELDS)
-            require(record['schema'] == 'ags.manual-completion.v1' and record['binding'] == binding
-                    and record['status'] == 'completed' and record['receipt']['binding'] == binding
-                    and record['receipt']['status'] == 'completed', 'completion_mismatch')
+            validate_completion(record, binding)
+            archive = state / ('accepted-' + record['generation'])
+            history = archive if archive.exists() or archive.is_symlink() else state / 'pending'
+            claim, _ = read_document(history / 'claim.json')
+            fields(claim, ('schema', 'binding'))
+            require(claim['schema'] == 'ags.local-claim.v2' and claim['binding'] == binding, 'claim_mismatch')
+            cold, _ = read_document(history / 'cold-journal.json')
+            validate_binding(cold['backup_binding'])
+            validate_request(binding, cold['backup_binding'])
+            require(cold['schema'] == 'ags.cold-journal.v1' and cold['phase'] == 'start_attempted'
+                    and cold['start_attempted'] is True and cold['generation'] == record['generation']
+                    and cold['binding_sha256'] == fingerprint(binding), 'completion_mismatch')
             return {'query': 'read_only_no_replay', 'completion': record}
         read_original_binding(state / 'pending', binding)
         journal, _ = read_document(state / 'pending/journal.json')
