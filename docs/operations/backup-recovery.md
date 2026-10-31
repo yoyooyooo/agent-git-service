@@ -86,6 +86,21 @@ inline `wiki_blob_refs` metadata does not require a CAS file, matching the
 catalog GC contract. Non-inline referenced and pending CAS must be present.
 Unknown Wiki source/format or malformed OID fails.
 
+`deleted_at` classifies a Wiki page. A live row (`deleted_at` empty) must match
+its head revision's blob, size and inline body exactly. `applyDelete` in
+`internal/wikicatalog/applychange.go` is different: it inserts an `op=delete`
+revision with an empty blob and zero size, then updates only `deleted_at`,
+`updated_at`, `head_revision_id` and `head_changeset_id`. The page keeps the
+body it had before deletion. Inventory accepts that tombstone only when the
+head revision is that delete row, the changeset belongs to the same repository,
+and some earlier content revision of the same page (`create`, `update`,
+`rename`, `restore` or `compact`) still carries the retained body. A deleted
+row is not skipped. A live row pointing at a delete revision, or a tombstone
+whose head is still a content revision, is `wiki_head_revision_mismatch`. A
+tombstone whose retained body matches no earlier content revision of that page
+is `wiki_tombstone_body_unproven`. Restore/recreate clears `deleted_at` and
+writes a new content head; that row is live again and must match its head.
+
 Each bare repository runs `git fsck --full --strict`; Git uses a minimal isolated
 environment, no global/system configuration, hooks, replace objects, automatic
 maintenance, prompts or allowed network protocols. Alternates, shallow/promisor,

@@ -57,7 +57,7 @@ def fixture_schema():
         add(table, 'id', *names)
     add('deployments', 'repository_id', 'ref')
     add('wiki_changesets', 'changeset_id', 'repository_id', 'synth_commit_sha', 'synth_format_ver', 'source')
-    add('wiki_pages', 'page_id', 'repository_id', 'head_blob_sha', 'body_size', 'body_inline', 'head_revision_id', 'head_changeset_id')
+    add('wiki_pages', 'page_id', 'repository_id', 'head_blob_sha', 'body_size', 'body_inline', 'head_revision_id', 'head_changeset_id', 'deleted_at')
     add('wiki_page_revisions', 'page_id', 'revision_id', 'changeset_id', 'blob_sha', 'body_size', 'body_inline', 'commit_sha', 'op')
     for table in ('wiki_blob_refs', 'wiki_pending_blobs'):
         add(table, 'blob_sha', 'size')
@@ -247,6 +247,125 @@ class InventoryTests(unittest.TestCase):
         path = self.store / '.wikiblobs' / sha[:2] / sha[2:4] / sha
         path.rename(path.with_name('0' * 40))
         with self.assertRaises(c.ContractError):
+            self.inventory()
+
+    def wiki_changeset(self, changeset_id, sha):
+        self.insert('wiki_changesets', changeset_id=changeset_id, repository_id=1,
+                    synth_commit_sha=sha, synth_format_ver=0, source='rest')
+
+    def content_revision(self, revision_id, changeset_id, body, op, commit):
+        self.insert('wiki_page_revisions', page_id=1, revision_id=revision_id, changeset_id=changeset_id,
+                    blob_sha=inv.git_blob(body), body_size=len(body), body_inline=body,
+                    commit_sha=commit, op=op)
+
+    def test_soft_deleted_wiki_page_keeps_historical_body_and_rejects_bad_heads(self):
+        # applyDelete writes op=delete with an empty blob and leaves the previous
+        # body on the page. The review probe at the old head failed this state.
+        self.repo()
+        historical = b'historical body'
+        self.wiki_changeset(1, '1' * 40)
+        self.wiki_changeset(2, '2' * 40)
+        self.content_revision(1, 1, historical, 'create', '1' * 40)
+        self.insert('wiki_page_revisions', page_id=1, revision_id=2, changeset_id=2,
+                    blob_sha='', body_size=0, body_inline=None, commit_sha='2' * 40, op='delete')
+        self.insert('wiki_pages', page_id=1, repository_id=1, head_blob_sha=inv.git_blob(historical),
+                    body_size=len(historical), body_inline=historical, head_revision_id=2,
+                    head_changeset_id=2, deleted_at='2026-01-01T00:00:00Z')
+        result = self.inventory()
+        self.assertEqual(result['tables']['wiki_pages']['rows'], 1)
+        self.assertEqual(result['tables']['wiki_page_revisions']['rows'], 2)
+        self.assertEqual(result['local_oids'], [])
+
+        # Same bytes, live head still the create revision: also inventoryable.
+        with fixture_db(self.dbpath) as db:
+            db.execute('UPDATE wiki_pages SET head_revision_id=1, head_changeset_id=1, deleted_at=NULL')
+        live = self.inventory()
+        self.assertEqual(live['tables']['wiki_pages']['rows'], 1)
+        with fixture_db(self.dbpath) as db:
+            db.execute("UPDATE wiki_pages SET head_revision_id=2, head_changeset_id=2, deleted_at='2026-01-01T00:00:00Z'")
+
+        # deleted_at empty while head is the delete revision.
+        with fixture_db(self.dbpath) as db:
+            db.execute('UPDATE wiki_pages SET deleted_at=NULL')
+        with self.assertRaisesRegex(c.ContractError, 'wiki_head_revision_mismatch'):
+            self.inventory()
+        with fixture_db(self.dbpath) as db:
+            db.execute("UPDATE wiki_pages SET deleted_at='2026-01-01T00:00:00Z'")
+
+        # deleted_at set while head is still the content revision.
+        with fixture_db(self.dbpath) as db:
+            db.execute("UPDATE wiki_pages SET head_revision_id=1, head_changeset_id=1")
+        with self.assertRaisesRegex(c.ContractError, 'wiki_head_revision_mismatch'):
+            self.inventory()
+        with fixture_db(self.dbpath) as db:
+            db.execute('UPDATE wiki_pages SET head_revision_id=2, head_changeset_id=2')
+
+        # Tombstone body that no content revision of this page ever stored.
+        forged = b'forged body'
+        with fixture_db(self.dbpath) as db:
+            db.execute('UPDATE wiki_pages SET head_blob_sha=?, body_size=?, body_inline=?',
+                       (inv.git_blob(forged), len(forged), forged))
+        with self.assertRaisesRegex(c.ContractError, 'wiki_tombstone_body_unproven'):
+            self.inventory()
+
+        # Restore/recreate: clear deleted_at and point head at a new content revision.
+        restored = b'restored body'
+        self.wiki_changeset(3, '3' * 40)
+        self.content_revision(3, 3, restored, 'restore', '3' * 40)
+        with fixture_db(self.dbpath) as db:
+            db.execute('UPDATE wiki_pages SET head_blob_sha=?, body_size=?, body_inline=?,'
+                       ' head_revision_id=3, head_changeset_id=3, deleted_at=NULL',
+                       (inv.git_blob(restored), len(restored), restored))
+        restored_result = self.inventory()
+        self.assertEqual(restored_result['tables']['wiki_page_revisions']['rows'], 3)
+
+        # Delete again. The retained body is the restore revision, not the original create.
+        self.wiki_changeset(4, '4' * 40)
+        self.insert('wiki_page_revisions', page_id=1, revision_id=4, changeset_id=4,
+                    blob_sha='', body_size=0, body_inline=None, commit_sha='4' * 40, op='delete')
+        with fixture_db(self.dbpath) as db:
+            db.execute("UPDATE wiki_pages SET head_revision_id=4, head_changeset_id=4, deleted_at='2026-01-02T00:00:00Z'")
+        again = self.inventory()
+        self.assertEqual(again['tables']['wiki_page_revisions']['rows'], 4)
+
+        # A body copied from another page does not prove this tombstone.
+        other = b'other page body'
+        self.wiki_changeset(5, '5' * 40)
+        self.insert('wiki_page_revisions', page_id=9, revision_id=1, changeset_id=5,
+                    blob_sha=inv.git_blob(other), body_size=len(other), body_inline=other,
+                    commit_sha='5' * 40, op='create')
+        with fixture_db(self.dbpath) as db:
+            db.execute('UPDATE wiki_pages SET head_blob_sha=?, body_size=?, body_inline=?',
+                       (inv.git_blob(other), len(other), other))
+        with self.assertRaisesRegex(c.ContractError, 'wiki_tombstone_body_unproven'):
+            self.inventory()
+
+    def test_historical_oversized_body_survives_soft_delete_only_with_cas(self):
+        self.repo()
+        old = b'old historical body' * 300
+        sha = self.cas(old)
+        self.wiki_changeset(1, '6' * 40)
+        self.wiki_changeset(2, '7' * 40)
+        self.insert('wiki_page_revisions', page_id=1, revision_id=1, changeset_id=1, blob_sha=sha,
+                    body_size=len(old), body_inline=None, commit_sha='6' * 40, op='create')
+        self.insert('wiki_page_revisions', page_id=1, revision_id=2, changeset_id=2, blob_sha='',
+                    body_size=0, body_inline=None, commit_sha='7' * 40, op='delete')
+        self.insert('wiki_pages', page_id=1, repository_id=1, head_blob_sha=sha, body_size=len(old),
+                    body_inline=None, head_revision_id=2, head_changeset_id=2,
+                    deleted_at='2026-01-01T00:00:00Z')
+        self.assertEqual(self.inventory()['tables']['wiki_pages']['rows'], 1)
+        path = self.store / '.wikiblobs' / sha[:2] / sha[2:4] / sha
+        held = self.root / 'held-cas'
+        path.rename(held)
+        with self.assertRaisesRegex(c.ContractError, 'wiki_cas_missing'):
+            self.inventory()
+        held.rename(path)
+
+    def test_deleted_at_is_a_required_wiki_column(self):
+        with fixture_db(self.dbpath) as db:
+            db.execute('ALTER TABLE wiki_pages DROP COLUMN deleted_at')
+        self.admission = inv.schema_digest(self.dbpath)
+        with self.assertRaisesRegex(c.ContractError, 'required_column_missing'):
             self.inventory()
 
     def test_materialized_wiki_requires_real_objects_and_type(self):
@@ -569,6 +688,20 @@ class SourceMappingTests(unittest.TestCase):
         assignment = next(v for v in tree.body if isinstance(v, ast.Assign)
                           and any(isinstance(t, ast.Name) and t.id == 'TABLE_KEYS' for t in v.targets))
         self.assertEqual(set(ast.literal_eval(assignment.value)), inv.RECOVERY_TABLES)
+        applychange = (ROOT / 'internal/wikicatalog/applychange.go').read_text()
+        delete = applychange.split('func (c *Catalog) applyDelete(', 1)[1].split('func (c *Catalog) applyRename(', 1)[0]
+        self.assertIn('BlobSHA:     ""', delete)
+        self.assertIn('BodySize:    0', delete)
+        self.assertIn('Op:          revOpDelete', delete)
+        self.assertIn('"deleted_at":', delete)
+        self.assertIn('"head_revision_id":', delete)
+        self.assertIn('"head_changeset_id":', delete)
+        self.assertNotIn('head_blob_sha', delete)
+        self.assertNotIn('body_inline', delete)
+        upsert = applychange.split('func pageUpsertColumns(', 1)[1]
+        self.assertIn('"head_blob_sha":', upsert)
+        self.assertIn('"body_inline":', upsert)
+        self.assertIn('out["deleted_at"] = nil', upsert)
         # Independent AST lock of the complete recovery selectors/auxiliary semantics.
         selected = [node for node in tree.body if isinstance(node, ast.FunctionDef)
                     and node.name in ('recovery_inventory', 'retirement_auxiliary', 'store_fsck')]
@@ -611,6 +744,7 @@ SOURCE_LOCKS = {
     'internal/wikicatalog/blobstore.go': 'f366a2a76475f1200c1bbe05c06252a77ffc364f6c9a08fbcf9ec3057659e75b',
     'internal/wikicatalog/gc.go': 'c3904aceb0366be0f00e2d7740b7ec9eb4bab92758dd9226b93984d5d0cf6dc9',
     'internal/wikicatalog/apply.go': 'f9eb2996be5e80054dd600e88fd98d98279a0a9cc44c79b4112df65e4feb40b5',
+    'internal/wikicatalog/applychange.go': 'acffc58e78d73a4ef8712ce3bd34fcc223a7b241acb6c7046329b6fa2909af99',
     'internal/db/models_wiki_catalog.go': '30f5b16b21185acca0021854a522f3d1ea5bb13b28833d3f404f155922820197',
     'internal/db/models_wiki_v2.go': '75a8d514af3bc91bef8f1a4441e3c18a7cc74f34e5845da1ba7de904080b1a52',
 }
