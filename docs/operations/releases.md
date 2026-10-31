@@ -468,3 +468,24 @@ The [local upgrade entry](local-upgrade.md) describes per-machine manual approva
 mini-before-imile order, Dagu approval-before-apply sequencing and current gaps.
 No Dagu flow, host provisioning, installation, tag or workflow run is performed
 by this source change. Its empty host/migration policy blocks live apply.
+
+## Manual upgrade acceptance is not publication
+
+S4 adds a private manual acceptance consumer for an existing S1/S2/S3 transaction.
+It does not open `apply`, host backup, transaction execution or direct v2 install;
+those entries still refuse with exit 83. It does not publish a Release, install a
+bundle, provision policy, remove a startup fence, open traffic or start another
+machine. The checked-in deployments and migration admissions remain empty.
+
+Starting AGS can already restore business writes, migrations and provider effects.
+`confirm` accepts the completed upgrade after human observation; it is not a
+post-start traffic switch. The executor emits only pending requests. A human
+records approval privately, then the consumer validates evidence and fresh health.
+Same approval retries return one durable acceptance record, not another upgrade.
+
+The manual mini-to-imile package requires the same repository/Release/runtime and
+both platform asset/provenance identities, with distinct machine-bound pins allowed.
+Hashes and actor text do not authenticate the carrier. imile still needs its own
+local approval and recovery group. No transport, workflow dispatch, tag, Release
+or deployment is part of this package. See [manual acceptance](local-upgrade.md#s4-manual-acceptance)
+and [acceptance contracts](backup-recovery.md#s4-acceptance-file-contract).

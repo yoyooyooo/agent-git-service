@@ -1,14 +1,16 @@
-# Local backup, cold window and pre-start recovery (S1–S3)
+# Local backup, recovery and manual acceptance (S1–S4)
 
 S1 defines and validates recovery inventory and evidence. S2 adds
 `scripts/upgrade_backup.py` and `scripts/upgrade_restore_verify.py`, which copy a
 declared recovery group with the SQLite backup API and ordinary file copies, seal
 `ags.local-backup.v2`, and check an independent restore copy offline. They are not
-called by `upgrade.py`, the host adapter, the transaction engine or direct v2
-install. Apply and the host backup adapter still reject with
+called by production apply or direct v2 install. S4 acceptance revalidates their
+stored evidence without creating another backup or restore copy.
+Apply and the host backup adapter still reject with
 `backup_contract_unimplemented` / 83; direct v2 install rejects with
 `install_contracts_unimplemented` / 83. S3 reuses these components only in a
-private cold-window harness, not through production apply.
+private cold-window harness, not through production apply. S4 adds a human
+acceptance consumer and human-carried mini evidence, not production installation.
 The public deployment and migration policy stays empty. See
 [local upgrade](local-upgrade.md) for the entry and gates.
 
@@ -333,3 +335,70 @@ set, effective configuration graph, native manager shutdown, host cold-window du
 production backup/restore, real key decryption, native manager/ACL/xattr behavior,
 production migration, business/provider health or disaster recovery. Later
 slices must implement and verify those parts before apply can be connected.
+
+## S4 acceptance file contract
+
+S4 reuses S1 binding, group, seal and restore contracts and S3's original claim,
+marker, cold journal and `verified_backup`. It does not define another backup
+format. Acceptance reads the original private
+`config/upgrade-authorization-<authorization_id>.json` and checks it against the
+awaiting receipt. It validates the historical authorization window at issue time,
+not as a new permission to run any upgrade effect.
+The public apply and backup gates remain `backup_contract_unimplemented` / 83.
+Direct v2 install remains `install_contracts_unimplemented` / 83.
+
+The closed `ags.manual-upgrade-approval.v1` accept declaration has these fields:
+
+- `schema`, `approval_id`, `purpose=accept`, `decision=approve`.
+- `actor={type:human,id,source}`, `recorded_at`, `authority_reference`. The reference
+  must equal the original `authorization_id`. Actor identity is a human declaration.
+- `issued_at`, `expires_at`, both timezone-aware, with recorded time in that window.
+- `binding`, the entire original v2 request; `backup_binding`, the entire S1 binding,
+  including host instance and transaction ID; `generation` and `evidence_id`.
+- `evidence_packet_sha256`, the digest of the packet's original bytes.
+- `confirmations`, exactly `start_restores_business=true`,
+  `rollback_mode=forward-only`, `prestart_recovery_requires_separate_approval=true`,
+  `manual_provenance_only=true` and `no_zero_loss_poststart_rollback=true`.
+- `accepted_limitations`, a list of unique `{category,reason}` entries. Allowed
+  categories are `native_platform_unverified`, `real_copy_start_unverified` and
+  `long_tail_observation_unverified`. Unknown writers, bad FK, missing OIDs and
+  unresolved provider results are not waivers.
+- `independent_media={status,evidence,reason}`, with status `done` or `omitted`.
+- `unresolved_blockers=[]`.
+
+Other approval purposes keep their existing owners: the window uses
+`ags.local-upgrade-authorization.v2`; pre-start recovery uses S3's
+`ags.prestart-recovery-approval.v1`. The accept consumer does not reinterpret them
+or authorize any recovery action.
+
+`ags.manual-evidence.v1` fixes the original request, S1 binding, cold generation,
+transaction and cold-journal digests, snapshot ID, seal/restore/inventory digests,
+quiescence, installed receipt and binary digests. Its `running` object binds the
+runtime file digest, generation, revision, start time and health digest. Observation
+records start/end, that generation, business/Git/provider/recovery report digests
+with `pass` or `not_applicable` status, and no unresolved blockers. These reports
+remain human assertions about the referenced private evidence; S4 does not perform
+business writes or provider reconciliation. The packet also binds `release_key`
+and either a human handoff or null. Approval follows the observation end.
+
+The `ags.manual-mini-handoff.v1` package contains `mini_pin`, `mini_pin_sha256`,
+`imile_pin_sha256`, `mini_packet`, `mini_evidence_package_sha256`, `mini_completion`,
+`mini_completed_receipt_sha256`, `mini_approval`, `mini_approval_sha256`, `release_key`,
+`mini_generation`, `mini_health_observed_at`, `carried_by`, `source`, `received_at`,
+`readback` and `artifacts`. Artifacts retain the original UTF-8 JSON bytes as
+strings named `pin`, `packet`, `approval`, and `completion`. Received digests apply
+to these bytes, not a re-serialized object. The mini packet cannot contain another
+handoff. Readback contains exactly `confirmed=true`, `mini_generation`,
+`mini_completed_receipt_sha256` and `mini_evidence_package_sha256`.
+
+The mini completed record must bind its consumed approval and evidence. Mini's
+release key must equal the imile target key, while each pin binds its own machine.
+Human health observation must follow mini completion, precede receiver readback,
+and be no older than five minutes at validation. Expired mini approval is allowed
+only as evidence of an already-consumed historical acceptance; it cannot approve
+imile. This unsigned protocol cannot prevent a human source error, same-UID
+forgery, or mini changing after readback.
+
+See [manual acceptance](local-upgrade.md#s4-manual-acceptance) for durable completion,
+crash retry, query semantics and the retained startup fence. Component fixtures
+are not production, native-manager or end-to-end upgrade acceptance.

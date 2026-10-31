@@ -259,7 +259,8 @@ def bundle_engine(bundle, expected_digest, *, owner=0):
                         'release_verify.py', 'release_contract.py', 'release_install_v2.py',
                         'install-release.py', 'release-source.json', 'upgrade_smoke.py',
                         'upgrade_backup_contract.py', 'upgrade_inventory.py',
-                        'upgrade_backup.py', 'upgrade_restore_verify.py', 'upgrade_recovery.py'} <= set(manifest['files'])):
+                        'upgrade_backup.py', 'upgrade_restore_verify.py', 'upgrade_recovery.py',
+                        'upgrade_manual_approval.py'} <= set(manifest['files'])):
             raise Failure('dependency_unavailable')
         for name, digest in manifest['files'].items():
             if not re.fullmatch(r'[A-Za-z0-9_.-]+', name) or not SHA256.fullmatch(digest):
@@ -276,13 +277,17 @@ def bundle_engine(bundle, expected_digest, *, owner=0):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['plan', 'apply', 'status'])
+    parser.add_argument('command', choices=['plan', 'apply', 'status', 'reconcile', 'confirm'])
     parser.add_argument('--deployment-id', required=True)
     parser.add_argument('--pin-sha256', required=True)
     parser.add_argument('--ci-run-id', required=True)
     parser.add_argument('--ci-run-attempt', required=True)
     parser.add_argument('--authorization-id', required=True)
+    parser.add_argument('--approval-file', type=Path)
+    parser.add_argument('--evidence-packet', type=Path)
     args = parser.parse_args()
+    if args.command != 'confirm' and (args.approval_file or args.evidence_packet):
+        raise Failure('invalid_request')
     if (not ID.fullmatch(args.deployment_id) or not ID.fullmatch(args.authorization_id)
             or not SHA256.fullmatch(args.pin_sha256)
             or not re.fullmatch(r'[1-9][0-9]*', args.ci_run_id)
