@@ -31,6 +31,7 @@ def authorization(binding):
 class Effects:
     def __init__(self, root, fail=None):
         self.root, self.fail = root, fail
+        self.released = False
 
     def event(self, event):
         with (self.root / 'effects').open('a') as stream:
@@ -38,6 +39,18 @@ class Effects:
         if self.fail == event:
             raise upgrade.Failure('child_timeout', event, 82)
 
+    def begin(self): self.event('begin')
+    def quiescent(self): self.event('quiescent')
+    def restore(self): self.event('restore')
+    def install_intent(self, authorize): authorize(); self.event('install_intent')
+    def installed(self): self.event('installed')
+    def start_intent(self): self.event('start_intent')
+    def release(self):
+        if not self.released:
+            self.released = True
+            # No resource was acquired on an admission/preflight failure.
+            if (self.root / 'effects').exists() and 'begin' in (self.root / 'effects').read_text().splitlines():
+                self.event('release')
     def preflight(self): self.event('preflight')
     def backup(self): self.event('backup')
     def stop(self): self.event('stop')
@@ -101,7 +114,7 @@ class UpgradeTests(unittest.TestCase):
         second = engine.Transaction(self.state, self.binding, self.auth, Effects(self.root)).run()
         self.assertEqual(first, second)
         events = (self.root / 'effects').read_text().splitlines()
-        self.assertEqual(events, ['preflight', 'backup', 'stop', 'install', 'start', 'health', 'health'])
+        self.assertEqual(events, ['preflight', 'begin', 'stop', 'quiescent', 'backup', 'restore', 'install_intent', 'install', 'installed', 'start_intent', 'release', 'start', 'health', 'health'])
         self.assertNotIn('approved', json.dumps(first))
         self.assertEqual(first['status'], 'awaiting_observation')
 
@@ -113,7 +126,7 @@ class UpgradeTests(unittest.TestCase):
         self.assertTrue(journal['install_started'])
         with self.assertRaisesRegex(upgrade.Failure, 'forward_only_recovery_required'):
             engine.Transaction(self.state, self.binding, self.auth, Effects(self.root)).run()
-        self.assertEqual((self.root / 'effects').read_text().splitlines(), ['preflight', 'backup', 'stop', 'install'])
+        self.assertEqual((self.root / 'effects').read_text().splitlines(), ['preflight', 'begin', 'stop', 'quiescent', 'backup', 'restore', 'install_intent', 'install', 'release'])
 
     def test_real_process_crash_retains_claim_and_refuses_replay(self):
         script = '''import os,sys,json
@@ -123,6 +136,7 @@ upgrade_engine.require_apply_contracts=lambda host: None
 from upgrade_engine import Transaction
 class Effects:
  def preflight(self): os._exit(91)
+ def release(self): pass
 b=json.loads(sys.argv[2]);a=json.loads(sys.argv[3])
 Transaction(Path(sys.argv[1]),b,a,Effects()).run()
 '''
@@ -139,6 +153,18 @@ Transaction(Path(sys.argv[1]),b,a,Effects()).run()
         with self.assertRaises(upgrade.Failure):
             engine.Transaction(self.state, self.binding, self.auth, Effects(self.root)).run()
         self.assertFalse((self.root / 'effects').exists())
+
+    def test_contract_failure_after_stop_preserves_83_and_stopped_recovery_state(self):
+        effects = Effects(self.root)
+        from upgrade_backup_contract import ContractError
+        with patch.object(effects, 'backup', side_effect=ContractError('source_changed')):
+            with self.assertRaises(upgrade.Failure) as caught:
+                engine.Transaction(self.state, self.binding, self.auth, effects).run()
+        self.assertEqual(caught.exception.exit_code, 83)
+        journal, _ = upgrade.private_json(self.state / 'pending/journal.json')
+        self.assertEqual(journal['service_state'], 'stopped_or_unknown')
+        self.assertTrue(journal['recovery_required'])
+        self.assertNotIn('install', (self.root / 'effects').read_text().splitlines())
 
     def test_child_timeout_classifies_phase_and_missing_command(self):
         for phase, effects, code in [('old_smoke', False, 69), ('prepare', True, 82), ('stop', True, 82)]:

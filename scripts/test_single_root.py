@@ -30,7 +30,7 @@ runtime = module('single_runtime', 'ags-runtime.py')
 
 class SingleRootTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix='ags-single-root-')
+        self.temporary = tempfile.TemporaryDirectory(prefix='ags-single-root-', dir=Path.home())
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name).resolve()
         self.root = self.directory / 'home'
@@ -68,6 +68,15 @@ class SingleRootTests(unittest.TestCase):
         env = self.root / 'config/runtime.env'
         env.write_text('DB_DSN="sqlite://' + str(self.root / 'data/fixture.db') + '"\nPRIVATE_TEST_TOKEN=never-print-me\n')
         env.chmod(0o600)
+
+    def test_cold_window_marker_blocks_spawn_and_direct_installer(self):
+        self.configured()
+        runtime.atomic_json(self.root / 'state/upgrade-cold.json', {'phase': 'unknown'})
+        self.assertFalse(runtime.inspect(self.root)['ready_to_start'])
+        with patch.object(runtime.subprocess, 'Popen', side_effect=AssertionError('must not spawn')):
+            self.assertEqual(runtime.serve(self.root), 78)
+        with self.assertRaises(ValueError):
+            self.install('2')
 
     def test_repeated_upgrades_keep_one_installation_and_no_downloads(self):
         for suffix in ('1', '2', '3', '3'):
@@ -378,7 +387,12 @@ class SingleRootTests(unittest.TestCase):
             process.send_signal(signal.SIGTERM)
             process.wait(timeout=10)
             with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
-            self.assertIn('stopped_at', json.loads(state.read_text()))
+            record = json.loads(state.read_text())
+            self.assertIn('stopped_at', record)
+            self.assertTrue(record['stop_requested'])
+            self.assertFalse(record['forced_kill'])
+            self.assertTrue(record['process_group_empty'])
+            self.assertIsInstance(record['generation'], str)
             self.assertNotIn('never-print-me', (self.root / 'logs/runtime.log').read_text())
         finally:
             if process.poll() is None: process.kill(); process.wait()

@@ -259,7 +259,7 @@ def bundle_engine(bundle, expected_digest, *, owner=0):
                         'release_verify.py', 'release_contract.py', 'release_install_v2.py',
                         'install-release.py', 'release-source.json', 'upgrade_smoke.py',
                         'upgrade_backup_contract.py', 'upgrade_inventory.py',
-                        'upgrade_backup.py', 'upgrade_restore_verify.py'} <= set(manifest['files'])):
+                        'upgrade_backup.py', 'upgrade_restore_verify.py', 'upgrade_recovery.py'} <= set(manifest['files'])):
             raise Failure('dependency_unavailable')
         for name, digest in manifest['files'].items():
             if not re.fullmatch(r'[A-Za-z0-9_.-]+', name) or not SHA256.fullmatch(digest):

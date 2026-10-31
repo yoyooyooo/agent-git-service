@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real filesystem/lock regressions; inert bytes never execute as AGS."""
 import copy
+from types import SimpleNamespace
 import contextlib
 import fcntl
 import hashlib
@@ -74,6 +75,29 @@ class SafetyTests(unittest.TestCase):
         self.effects = object.__new__(host.Effects)
         self.effects.root, self.effects.candidate, self.effects.info = self.root, self.candidate, self.info
         self.effects.binding = {'host': 'mini'}
+        self.effects._cold = unittest.mock.Mock()
+        self.effects._cold.journal = {'phase': 'install_started'}
+        self.effects._cold.backup_binding = {'new': self.info['source'],
+                                            'new_binary_sha256': self.info['binaries']['gh-server']['sha256']}
+        self.guards = contextlib.ExitStack()
+        self.addCleanup(self.guards.close)
+        def acquire():
+            for name in ('install.lock', 'runtime.lock'):
+                lock = self.guards.enter_context((self.root / 'state' / name).open('a+'))
+                os.chmod(lock.name, 0o600)
+                try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError: raise upgrade.Failure('lock_held')
+            return self.effects._cold
+        self.effects._window = acquire
+
+    def test_direct_host_install_without_private_cold_harness_stays_83(self):
+        del self.effects._cold
+        del self.effects._window
+        with self.assertRaises(upgrade.Failure) as caught:
+            self.effects.install()
+        self.assertEqual((caught.exception.code, caught.exception.exit_code),
+                         ('backup_contract_unimplemented', 83))
+        self.assertEqual(self.destination.read_bytes(), b'old')
 
     def test_each_shared_lock_blocks_without_replacement_or_receipt(self):
         for name in ('install.lock', 'runtime.lock'):
@@ -87,6 +111,7 @@ class SafetyTests(unittest.TestCase):
                 self.assertEqual((self.root / 'state/installation.json').read_bytes(), before)
                 self.assertFalse((self.root / 'state/installing.json').exists())
                 self.assertFalse((self.root / 'bin/.gh-server.upgrading').exists())
+                self.guards.close()
 
     def test_bin_ancestor_symlink_never_writes_outside(self):
         outside = self.root / 'outside'
@@ -173,6 +198,36 @@ class SafetyTests(unittest.TestCase):
             candidate = copy.deepcopy(pin); candidate['targets']['linux_amd64']['provenance'][key] = value
             with self.assertRaises(upgrade.Failure):
                 upgrade.validate_pin(candidate)
+
+    def test_context_reads_original_claim_not_replaced_or_missing_installation_receipt(self):
+        bundle = self.root / 'bundle'; bundle.mkdir(mode=0o700)
+        policy = {'schema': 'ags.upgrade-policy.v2', 'deployments': {'mini': {'root': str(self.root)}},
+                  'migration_admissions': []}
+        engine.save(bundle / 'upgrade_policy.json', policy)
+        pin = pin_fixture()
+        pin['verification_policy']['policy_sha256'] = hashlib.sha256((bundle / 'upgrade_policy.json').read_bytes()).hexdigest()
+        engine.save(self.root / 'config/ags-deploy-release-pin.json', pin)
+        engine.save(bundle / 'release-source.json', {'schema': 'ags.release-source.v1',
+                                                   'version': VERSION, 'runtime': pin['runtime']})
+        _, digest = upgrade.private_json(self.root / 'config/ags-deploy-release-pin.json')
+        args = SimpleNamespace(deployment_id='fixture', ci_run_id='1', ci_run_attempt='1',
+                               authorization_id='auth', pin_sha256=digest)
+        patches = [patch.object(host, 'BUNDLE', bundle),
+                   patch.object(host, 'execution_identity', return_value=self.root),
+                   patch.object(host.socket, 'gethostname', return_value='mini'),
+                   patch.object(host, 'bundle_engine')]
+        with contextlib.ExitStack() as stack:
+            for guard in patches: stack.enter_context(guard)
+            original = host.context(args)[-1]
+            pending = self.root / 'state/ags-autodeploy/local-v2/pending'
+            pending.mkdir(mode=0o700, parents=True)
+            pending.parent.chmod(0o700); pending.parent.parent.chmod(0o700)
+            engine.save(pending / 'claim.json', {'schema': 'ags.local-claim.v2', 'binding': original})
+            # Even an interrupted receipt cannot change the immutable original old.
+            (self.root / 'state/installation.json').rename(self.root / 'retained-installation')
+            self.assertEqual(host.context(args)[-1], original)
+            args.deployment_id = 'different'
+            with self.assertRaises(upgrade.Failure): host.context(args)
 
     def test_apply_rejects_even_with_approved_host_before_claim_or_any_effect(self):
         binding = {'host': 'imile-win'}; auth = authorization(binding)

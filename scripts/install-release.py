@@ -183,6 +183,9 @@ def install_verified(archive, info, receipt, prefix):
             fcntl.flock(runtime_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError('Stop the managed runtime before replacing its programs') from None
+        for guard in (state/'upgrade-cold.json', state/'ags-autodeploy/local-v2/pending'):
+            if guard.exists() or guard.is_symlink():
+                raise ValueError('Pending local upgrade requires explicit recovery')
         pending=read_receipt(state/'installing.json')
         previous=read_receipt(state/'installation.json')
         if pending and any(pending.get(k)!=receipt.get(k) for k in ('version','source','target')):

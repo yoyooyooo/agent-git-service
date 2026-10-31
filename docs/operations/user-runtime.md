@@ -84,6 +84,31 @@ python3 ~/.ags/bin/ags-runtime.py --root ~/.ags doctor
 python3 ~/.ags/bin/ags-runtime.py --root ~/.ags serve
 ```
 
+## Cold-window startup fence
+
+The S3 [local upgrade component](local-upgrade.md#s3-private-cold-window-protocol)
+adds `state/upgrade-cold.json`, independently of `installing.json`. Before spawn,
+the launcher refuses pending upgrades with missing marker/claim/journal, unknown
+phase, changed binary/receipt or mismatched generation. A fixed-manager handoff
+is permitted only after durable `start_attempted` and manager-request intent.
+The launcher consumes that token under runtime EX and install SH, fsyncs it
+before spawn, and never refunds it. Repeated manager starts therefore refuse;
+uncertain startup needs read-only diagnosis, not another start. The marker has
+no TTL and S3 never removes it or automatically restores restart policy.
+Direct installers also refuse a pending upgrade even after OS locks were lost.
+
+Ordinary installations without pending upgrades retain the standalone launcher
+path. A launcher provisioned for the new cold-window protocol needs adjacent
+`upgrade_recovery.py` and its complete pinned dependency set; missing imports
+with a pending upgrade fail closed. Provisioning those files or changing a
+manager on a host is not part of this source slice. Runtime receipts now include
+a unique generation, requested-stop/forced-kill flags, child exit status and
+process-group-empty evidence. A fixed manager must separately prove supervisor
+exit and restart suppression; a stop command returning zero does not prove it.
+See [pre-start recovery](backup-recovery.md#s3-pre-start-recovery).
+
+## Runtime lifecycle
+
 The launcher reads `config/runtime.env`, preserves ordinary authentication, starts
 one owning primary with `<root>` as its working directory, forwards termination
 to its process group, and waits for the child. It never starts a second primary

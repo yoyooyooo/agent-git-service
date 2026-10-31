@@ -24,6 +24,7 @@ import urllib.request
 
 from upgrade import BUNDLE, Failure, bundle_engine, execution_identity, private_json, validate_pin, directory_fd, read_private_fd, require_apply_contracts, result_exit
 from upgrade_engine import Transaction, authorize, child, dual_smoke, save
+from upgrade_recovery import read_original_binding, checkpoint as cold_checkpoint
 
 
 CI_JOBS = {
@@ -97,14 +98,23 @@ def context(args):
         raise Failure('invalid_host')
     if pin.get('repository') != 'yoyooyooo/agent-git-service' or pin.get('repository_id') != 1384519373:
         raise Failure('release_pin_invalid')
-    old_receipt, _ = private_json(root / 'state/installation.json')
+    pending = root / 'state/ags-autodeploy/local-v2/pending'
+    original = read_original_binding(pending) if pending.exists() else None
+    if original is None:
+        old_receipt, _ = private_json(root / 'state/installation.json')
     target = pin['runtime']
     binding = {'host': host, 'deployment_id': args.deployment_id,
                'attempt_id': args.ci_run_id + '.' + args.ci_run_attempt,
-               'pin_sha256': digest, 'old': old_receipt['source'], 'new': target['revision'],
+               'pin_sha256': digest, 'old': original['old'] if original else old_receipt['source'], 'new': target['revision'],
                'runtime_tree': target['tree'], 'release_id': pin['release_id'],
                'engine_sha256': bundle_digest, 'policy_sha256': hashlib.sha256((BUNDLE / 'upgrade_policy.json').read_bytes()).hexdigest(),
                'authorization_id': args.authorization_id}
+    if original is not None:
+        # The installed receipt may now be new. All other caller/pin fields must match.
+        binding['old'] = original.get('old')
+        if binding != original:
+            raise Failure('claim_mismatch')
+        binding = original
     return root, pin, policy, entry, binding
 
 
@@ -170,13 +180,39 @@ class Effects:
         self.health(expected=self.binding['old'])
 
     def backup(self):
+        # Keep the adapter backup gate unconditional in S3. The private
+        # ColdWindow harness calls S2 directly; this is not an apply path.
         require_apply_contracts(self.binding['host'])
 
-    def stop(self):
-        child(self.entry['stop'], 'stop', effects=True)
+    def _window(self):
+        # S3 has no production constructor/entry for this capability. S5 must
+        # admit the reviewed manager, recovery group and writer closure first.
+        if not hasattr(self, '_cold'):
+            require_apply_contracts(self.binding.get('host'))
+        return self._cold
+
+    def begin(self): self._window().begin()
+    def stop(self): self._window().stop()
+    def quiescent(self): self._window().quiescent()
+    def restore(self): self._window().restore()
+    def install_intent(self, authorize): self._window().install_intent(authorize)
+    def installed(self):
+        self._window().installed(self.info['binaries']['gh-server']['identity'],
+                                 lambda p: json.loads(child([str(p), '--version'], 'installed')))
+    def start_intent(self): self._window().start_intent()
+    def release(self):
+        if hasattr(self, '_cold'):
+            self._cold.release()
 
     def install(self):
         """Share installer/runtime locks; all writes stay relative to opened FDs."""
+        cold = self._window()
+        if cold.locks is None or cold.journal['phase'] != 'install_started':
+            raise Failure('backup_contract_unimplemented', 'install', 83)
+        cold.unchanged(); cold.verified_backup()
+        if (self.info['source'] != cold.backup_binding['new']
+                or self.info['binaries']['gh-server']['sha256'] != cold.backup_binding['new_binary_sha256']):
+            raise Failure('minimum_contract_unsatisfied', 'install', 83)
         try:
             with directory_fd(self.root, private=True) as root_fd, contextlib.ExitStack() as guards:
                 dirs = {}
@@ -188,16 +224,6 @@ class Effects:
                         raise Failure('host_transaction_failed', 'install')
                     dirs[name] = fd
                 state_fd, bin_fd = dirs['state'], dirs['bin']
-                for name in ('install.lock', 'runtime.lock'):
-                    fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=state_fd)
-                    guards.callback(os.close, fd)
-                    mode = os.fstat(fd)
-                    if not stat.S_ISREG(mode.st_mode) or mode.st_uid != os.getuid() or mode.st_mode & 0o077 or mode.st_nlink != 1:
-                        raise Failure('host_transaction_failed', 'install')
-                    try:
-                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    except BlockingIOError:
-                        raise Failure('lock_held', 'install') from None
                 fd = os.open('installation.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=state_fd)
                 try:
                     current, _ = read_private_fd(fd)
@@ -218,27 +244,36 @@ class Effects:
                     with os.fdopen(fd, 'w') as stream:
                         json.dump(value, stream, sort_keys=True)
                         stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+                    cold_checkpoint(name + ':file-sync')
                     os.replace(staging, name, src_dir_fd=state_fd, dst_dir_fd=state_fd)
+                    cold_checkpoint(name + ':rename')
                     os.fsync(state_fd)
+                    cold_checkpoint(name + ':directory-sync')
 
                 fd = os.open('.gh-server.upgrading', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o700, dir_fd=bin_fd)
                 with os.fdopen(fd, 'wb') as stream:
                     stream.write(data); stream.flush(); os.fsync(stream.fileno())
+                cold_checkpoint('candidate-file-sync')
                 write_json('installing.json', self.info)
+                cold_checkpoint('installing-durable')
                 os.replace('.gh-server.upgrading', 'gh-server', src_dir_fd=bin_fd, dst_dir_fd=bin_fd)
+                cold_checkpoint('binary-renamed')
                 os.fsync(bin_fd)
+                cold_checkpoint('binary-directory-sync')
                 current.update(source=self.info['source'], runtime_tree=self.info['runtime_tree'],
                                control_revision=self.info['control_revision'], version=self.info['version'],
                                release_id=self.info['release_id'], attestation=self.info['attestation'])
                 current['binaries']['gh-server'] = self.info['binaries']['gh-server']
                 write_json('installation.json', current)
+                cold_checkpoint('receipt-durable')
                 os.unlink('installing.json', dir_fd=state_fd)
                 os.fsync(state_fd)
+                cold_checkpoint('install-marker-cleared')
         except OSError:
             raise Failure('host_transaction_failed', 'install') from None
 
     def start(self):
-        child(self.entry['start'], 'start', effects=True)
+        self._window().start()
 
     def health(self, expected=None):
         expected = expected or self.binding['new']

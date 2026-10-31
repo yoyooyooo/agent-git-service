@@ -45,7 +45,7 @@ The bundle and ancestors must be root-owned and not group/world writable.
 Required files include the wrapper, host adapter, transaction engine, policy,
 installer, v2 consumer, verifier, shared archive contract, `upgrade_smoke.py`,
 `upgrade_backup_contract.py`, `upgrade_inventory.py`, `upgrade_backup.py`,
-`upgrade_restore_verify.py` and reviewed
+`upgrade_restore_verify.py`, `upgrade_recovery.py` and reviewed
 `release-source.json`. Missing or changed dependencies fail with
 `dependency_unavailable`, exit 69; there is no PATH/source fallback.
 
@@ -77,7 +77,9 @@ The engine owns the lock, claim, journal and receipt under
 before those effects. Interrupted attempts preserve the pending claim. An exact
 successful reentry checks health and returns the stored receipt without replaying
 effects; incomplete or mismatched attempts fail explicitly. A failure or crash
-at/after stop or install requires forward recovery. There is no automatic old
+at/after stop retains the cold-window fence and requires explicit recovery. The
+private S3 component permits separately approved pre-start program/receipt recovery
+only while data still equals Tq; it never starts the old version. There is no automatic old
 binary rollback and no automatic timeout-based claim release. Post-observation
 finalization is deliberately unavailable here.
 
@@ -109,7 +111,7 @@ before smoke. That sequence is not reachable in this slice. Only gh-server would
 be replaced; Edge, replication, credentials, data and service definitions are not
 replaced. The host adapter does not run backup, stop or installation until those
 contracts exist. A configured command cannot bypass that refusal. The direct v2
-`--install` entry is separately closed with the same exit 83; see
+`--install` entry is separately closed with `install_contracts_unimplemented`, exit 83; see
 [release operations](releases.md).
 
 ## S1 inventory and evidence contracts
@@ -118,8 +120,8 @@ contracts exist. A configured command cannot bypass that refusal. The direct v2
 strict seal/restore evidence schemas, local SQLite/Git/Wiki inventory and fixed
 per-host retention fields. The two S1 modules are required in the exact-digest
 tool bundle. S2 adds a synthetic cold-backup producer and an offline
-restore-copy checker. Neither is called by apply, backup, the transaction engine
-or direct install. Every machine retains only its
+restore-copy checker. Neither is called by production apply, the host backup adapter or direct
+install. S3 uses both only through its private cold-window component. Every machine retains only its
 latest five sealed and restore-verified backups; restore copies go to system
 Trash only after successful verification. Failed restore copies and partial
 backups remain in place for manual review and
@@ -130,6 +132,67 @@ Trash function; the component has no default Trash implementation. Recovery
 requires the reviewed group, DSN, admitted schema and sealed inventory evidence,
 but does not require the original data paths to exist. Apply and direct v2
 install still exit 83.
+
+## S3 private cold-window protocol
+
+`upgrade_recovery.py` provides a private component harness, not a production
+command. Its order is `stop → quiescent → backup → restore_verified →
+install_started → installed → start_attempted`. It reuses S1 binding/group/seal
+validation and S2 backup and independent restore verification without changing
+those contracts. The public host backup adapter and both apply gates remain
+unconditionally `backup_contract_unimplemented` / 83. Direct host install also
+refuses without a private cold guard; direct v2 install remains
+`install_contracts_unimplemented` / 83. There is no recovery CLI or new route
+from `upgrade.py`, `upgrade_host.py` or `release_install_v2.py` to installation.
+
+Before stopping, the owner fsyncs independent `state/upgrade-cold.json` and
+`pending/cold-journal.json` under `state/ags-autodeploy/local-v2`. The marker is
+not `installing.json` and is never expired, cleared on timeout or removed to
+start. Missing journal/claim, unknown phase or generation mismatch blocks spawn.
+The original claim binding remains the source of old identity after replacement;
+current installation identity is checked separately.
+
+Hostops ownership spans manager handoff. After normal supervisor and child exit,
+the component takes nonblocking install EX then runtime EX locks and retains
+them through snapshot, restore verification and durable installation. Runtime
+continues to take runtime EX then install SH, also nonblocking; no lock waits
+form a cycle. Install uses the same guard instead of reacquiring its own locks.
+The fixed manager fixture suppresses restart, proves both exit statuses, no
+forced kill, matching runtime generation and an empty process group. A successful
+stop command alone is insufficient. The reviewed writer probe must close every
+other writer; locks do not constrain unmanaged processes or malicious same-UID
+file edits. Writer/lock/unknown failures retain the fence, with no automatic start.
+
+Tq records a nonce plus S2's complete source fingerprint and a data/config
+fingerprint. The latter excludes only the deliberately replaced binary and
+installation receipt. Before installation intent, authorization, source, sealed
+payload and manifest-bound restore report are revalidated under both locks.
+Original binary and raw receipt bytes are retained. New hash, identity and receipt
+must agree before `installed` can advance. Contract failures after stop keep exit
+83 and record `service_state=stopped_or_unknown`, `recovery_required=true`; 83 no
+longer implies that service remained online in a private harness.
+
+Before releasing either lock, `start_attempted` persists a token and generation.
+The fixed manager reads no arbitrary command/token arguments: it invokes the
+fixed launcher, which reads the durable handoff, consumes it under runtime EX
+and install SH, fsyncs consumption, then spawns. Manager invocation is separately
+recorded before the call; a timeout/lost return cannot cause another call. A crash
+after token consumption may mean no process started: only read-only diagnosis is
+safe. A manager restart cannot consume the same token. S3 does not clear the
+marker or restore normal restart policy after observation; that remains gated
+completion work. Startup can migrate and resume business immediately.
+
+`recover_prestart` requires hostops plus both locks, matching original binding,
+known pre-start phase, unchanged data/config, valid sealed evidence and a fresh
+owner-only `ags.prestart-recovery-approval.v1` file. It binds generation, exact
+blocked cold-journal SHA256, time window, human declaration and a new approval ID.
+The file is consumed before replacement. It restores only original binary and
+raw installation receipt, retains marker and journal, and never starts a process.
+Interrupted recovery is readback-only, not replay. After durable `start_attempted`
+it always refuses old-version restoration, even if no PID exists. Full data
+restore and post-start forward repair are separate incident work. See
+[backup and recovery](backup-recovery.md#s3-pre-start-recovery) and
+[runtime startup fencing](user-runtime.md#cold-window-startup-fence).
 
 ## Known incomplete acceptance
 
@@ -144,11 +207,11 @@ binding the request, a consistent snapshot, file sizes/digests and SQLite
 integrity/foreign-key checks. S1 defines the receipt/manifest and inventory
 components. S2 produces a sealed synthetic snapshot and checks an offline
 restore copy, but current backup, apply and direct install still only refuse the
-missing contract. Cold-window quiescence, production invocation and accepted
-recovery remain later work. The pin loader rejects unknown fields, wrong types, missing fields, duplicate
-JSON fields, and an unsafe ancestor directory. Mini handoff, Git/config backup
-coverage, Git/database consistency, observation approval and finalize are
-unimplemented and independently refused by apply. Journal-aware forward recovery
+missing contract. S3 exercises cold-window quiescence and pre-start recovery only through
+private synthetic components. Production invocation and accepted host recovery
+remain later work. The pin loader rejects unknown fields, wrong types, missing fields, duplicate
+JSON fields, and an unsafe ancestor directory. Production admission for mini handoff, complete backup coverage, consistency,
+observation approval and finalize remains unimplemented and refused by apply. Journal-aware forward recovery
 is also unimplemented. Empty policy is an additional default refusal, not proof
 that every stage is implemented fail-closed. Do not remove these refusals just
 to obtain an upgrade success.
@@ -156,6 +219,7 @@ to obtain an upgrade success.
 Tests use `scripts/ags-python.sh` followed by `scripts/test_upgrade.py`,
 `scripts/test_upgrade_safety.py`, `scripts/test_upgrade_inventory.py`,
 `scripts/test_upgrade_backup.py`, `scripts/test_upgrade_restore.py`,
+`scripts/test_upgrade_quiescence.py`, `scripts/test_upgrade_recovery.py`,
 `scripts/test_install_v2.py` or `scripts/test_release_consumer.py`. Run with
 independent HOME/TMPDIR/cwd and remove inherited Python injection variables.
 Real cryptographic acceptance is separately run with

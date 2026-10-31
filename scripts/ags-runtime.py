@@ -19,6 +19,29 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
+
+
+def cold_pending(root):
+    return any(p.exists() or p.is_symlink() for p in
+               (root / 'state/upgrade-cold.json', root / 'state/ags-autodeploy/local-v2/pending'))
+
+
+def startup_permitted(root):
+    if not cold_pending(root):
+        return True
+    try:
+        from upgrade_recovery import startup_permitted as permitted
+        return permitted(root)
+    except (ImportError, OSError, ValueError):
+        return False
+
+
+def consume_start(root):
+    if not cold_pending(root):
+        return uuid.uuid4().hex
+    from upgrade_recovery import consume_start as consume
+    return consume(root)
 
 
 class CheckFailure(ValueError):
@@ -58,6 +81,11 @@ def atomic_json(path: Path, value: dict) -> None:
         output.flush()
         os.fsync(output.fileno())
     os.replace(temporary, path)
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def private_file(path: Path) -> bool:
@@ -102,6 +130,7 @@ def inspect(root: Path) -> dict:
     checks['root'] = 'ok' if root_ok and root.stat().st_uid == os.getuid() and root.stat().st_mode & 0o077 == 0 else 'unsafe'
     marker = root / 'state/installing.json'
     checks['installation'] = 'interrupted' if marker.exists() or marker.is_symlink() else 'ok'
+    checks['upgrade_cold_window'] = 'ok' if startup_permitted(root) else 'blocked'
     for name in ('bin', 'config', 'state', 'logs'):
         directory = root / name
         checks[name + '_directory'] = 'ok' if directory.is_dir() and not directory.is_symlink() and directory.resolve() == directory.absolute() else 'missing_or_unsafe'
@@ -259,15 +288,18 @@ class BoundedLog:
             self.fd = None
 
 
-def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock) -> int:
+def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock, generation=None) -> int:
     child = subprocess.Popen([str(root / 'bin/gh-server')], cwd=root, env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
     selector = None
     previous = {}
     stop_deadline = None
+    forced_kill = False
 
     def forward(signum, frame=None):
-        nonlocal stop_deadline
+        nonlocal stop_deadline, forced_kill
+        if signum == signal.SIGKILL:
+            forced_kill = True
         if signum in (signal.SIGTERM, signal.SIGINT) and stop_deadline is None:
             stop_deadline = time.monotonic() + 80
         try:
@@ -281,6 +313,7 @@ def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock)
         for sig in (signal.SIGTERM, signal.SIGINT):
             previous[sig] = signal.signal(sig, forward)
         current = {'schema': 'ags.runtime.v1', 'supervisor_pid': os.getpid(), 'pid': child.pid,
+                   'generation': generation or uuid.uuid4().hex,
                    'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'root': str(root), 'build': build}
         atomic_json(root / 'state/runtime.json', current)
         install_lock.close()
@@ -307,7 +340,14 @@ def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock)
                 last_checks = (report['checks'], report['check_details']) if not report['ready_to_start'] else None
                 next_check = time.monotonic() + 60
         code = child.wait()
-        current.update(exit_code=code, stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())
+        try:
+            os.killpg(child.pid, 0)
+            group_empty = False
+        except ProcessLookupError:
+            group_empty = True
+        current.update(process_group_empty=group_empty, exit_code=code, forced_kill=forced_kill,
+                       stop_requested=stop_deadline is not None,
+                       stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())
         atomic_json(root / 'state/runtime.json', current)
         return code
     finally:
@@ -366,8 +406,10 @@ def serve(root: Path) -> int:
             receipt = json.loads((root / 'state/installation.json').read_text())
             if build != receipt['binaries']['gh-server']['identity']:
                 raise ValueError('program identity mismatch')
+            stage = 'upgrade_handoff'
+            generation = consume_start(root)
             stage = 'process_lifecycle'
-            return supervise(root, env, build, log, install_lock)
+            return supervise(root, env, build, log, install_lock, generation)
         except Exception as error:
             # Do not serialize exception text: subprocess output/config can be sensitive.
             failure = {'schema': 'ags.runtime-failure.v1', 'stage': stage,
