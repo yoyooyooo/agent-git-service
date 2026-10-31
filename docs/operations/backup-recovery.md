@@ -250,7 +250,11 @@ with the backup payload, not the original data paths. The copy runs SQLite
 integrity and FK checks, Git fsck, DB-OID and Wiki CAS checks, dependency checks,
 and sealed-source/backup/restore logical comparisons. Only completed checks are
 written as true. It checks the final manifest and supported metadata before
-publishing a separate report. The report file is fsynced before directory sync
+publishing a separate report. A restore attempt ID stays inside the unchanged
+96-character identifier rule. It embeds the snapshot ID when that fits; a longer
+legal snapshot uses a prefix and snapshot digest with the same random suffix.
+The report still binds the original snapshot ID and manifest digest. The report
+file is fsynced before directory sync
 and atomic publication. `restore-publication.json` stays `publishing` until the
 report publication and directory sync finish. Retention requires `published`.
 A publication error marks the outcome failed or unknown and retains the restore copy. Only successful verification calls injected Trash.

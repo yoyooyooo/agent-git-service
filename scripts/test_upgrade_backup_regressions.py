@@ -334,6 +334,39 @@ class BackupRegressionTests(unittest.TestCase):
                 self.verify(sealed)
         self.assertTrue(all(handle.was_closed for handle in handles))
 
+    def test_snapshot_identifier_boundaries_restore_and_retry(self):
+        self.t.repo()
+        for length in (75, 76, 96):
+            with self.subTest(length=length):
+                snapshot = ('S0_.-' * 20)[:length]
+                c.identifier(snapshot)
+                sealed = self.t.take(snapshot_id=snapshot)
+                root = Path(sealed['backup_dir'])
+                receipt = c.strict_json((root / 'receipt.json').read_bytes())
+                c.validate_seal((root / 'manifest.json').read_bytes(), c.canonical(receipt), self.t.last_group)
+                attempts = []
+                for _ in range(2):
+                    calls = []
+
+                    def fake_trash(path):
+                        calls.append(Path(path))
+                        Path(path).rename(self.t.root / ('trashed-' + Path(path).name))
+
+                    report = self.verify(sealed, trash=fake_trash)
+                    published = c.validate_restore_report((root / 'restore-report.json').read_bytes(), receipt)
+                    self.assertEqual(published, report)
+                    self.assertEqual(report['snapshot_id'], snapshot)
+                    self.assertEqual(report['manifest_sha256'], receipt['manifest_sha256'])
+                    self.assertTrue(all(report['checks'].values()))
+                    self.assertLessEqual(len(report['restore_copy_id']), 96)
+                    self.assertRegex(report['restore_copy_id'], r'^restore-[A-Za-z0-9_.-]+-[0-9a-f]{12}$')
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(calls[0].name, report['restore_copy_id'])
+                    self.assertFalse(calls[0].exists())
+                    self.assertFalse(any(self.t.restores.glob('*/failure.json')))
+                    attempts.append(report['restore_copy_id'])
+                self.assertNotEqual(attempts[0], attempts[1])
+
     def test_cross_filesystem_restore_root_space_is_checked(self):
         self.t.repo(); group = self.t.prepared_group(); original = os.stat
         def devices(path, *args, **kwargs):
