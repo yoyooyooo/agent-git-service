@@ -671,7 +671,8 @@ class InventoryTests(unittest.TestCase):
         names = ('upgrade_host.py', 'upgrade.py', 'upgrade_engine.py', 'upgrade_policy.json',
                  'release_verify.py', 'release_contract.py', 'release_install_v2.py',
                  'install-release.py', 'release-source.json', 'upgrade_smoke.py',
-                 'upgrade_backup_contract.py', 'upgrade_inventory.py')
+                 'upgrade_backup_contract.py', 'upgrade_inventory.py',
+                 'upgrade_backup.py', 'upgrade_restore_verify.py')
         hashes = {}
         for name in names:
             path = bundle / name; path.write_bytes(b'inert fixture'); path.chmod(0o600)
@@ -694,7 +695,8 @@ class InventoryTests(unittest.TestCase):
                 return upgrade.bundle_engine(bundle, hashlib.sha256(raw).hexdigest(), owner=os.getuid())
 
         self.assertEqual(check(hashes), bundle / 'upgrade_host.py')
-        for name in ('upgrade_backup_contract.py', 'upgrade_inventory.py'):
+        for name in ('upgrade_backup_contract.py', 'upgrade_inventory.py',
+                     'upgrade_backup.py', 'upgrade_restore_verify.py'):
             with self.subTest(name=name), self.assertRaises(upgrade.Failure) as caught:
                 check({k: v for k, v in hashes.items() if k != name})
             self.assertEqual(caught.exception.exit_code, 69)

@@ -72,6 +72,8 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_install_v2.py
           scripts/ags-python.sh scripts/test_upgrade.py -v
           scripts/ags-python.sh scripts/test_upgrade_inventory.py -v
+          scripts/ags-python.sh scripts/test_upgrade_backup.py BackupTests -v
+          scripts/ags-python.sh scripts/test_upgrade_restore.py RestoreTests -v
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_upgrade_safety.py
           scripts/ags-python.sh scripts/test_release_consumer.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_deploy_handoff.py
