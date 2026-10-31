@@ -92,14 +92,20 @@ its head revision's blob, size and inline body exactly. `applyDelete` in
 revision with an empty blob and zero size, then updates only `deleted_at`,
 `updated_at`, `head_revision_id` and `head_changeset_id`. The page keeps the
 body it had before deletion. Inventory accepts that tombstone only when the
-head revision is that delete row, the changeset belongs to the same repository,
-and some earlier content revision of the same page (`create`, `update`,
-`rename`, `restore` or `compact`) still carries the retained body. A deleted
-row is not skipped. A live row pointing at a delete revision, or a tombstone
-whose head is still a content revision, is `wiki_head_revision_mismatch`. A
-tombstone whose retained body matches no earlier content revision of that page
+head revision is that delete row and its changeset belongs to the page's repository.
+The retained blob, size and inline body must exactly match an earlier content
+revision of the same `page_id`, with `op` in `create`, `update`, `rename`,
+`restore` or `compact`. That candidate's `revision_id` must be strictly less
+than the delete head's `revision_id`, and its changeset's `repository_id` must
+equal the page's `repository_id`. A later restore revision or another repository's
+changeset cannot prove the retained body. A deleted row is not skipped.
+A live row pointing at a delete revision, or a tombstone whose head is still a
+content revision, is `wiki_head_revision_mismatch`. A
+tombstone whose retained body has no candidate meeting all these conditions
 is `wiki_tombstone_body_unproven`. Restore/recreate clears `deleted_at` and
 writes a new content head; that row is live again and must match its head.
+After another soft delete, the bound is the new delete head, so a restore
+revision between the two deletes can prove the retained body.
 
 Each bare repository runs `git fsck --full --strict`; Git uses a minimal isolated
 environment, no global/system configuration, hooks, replace objects, automatic

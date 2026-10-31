@@ -258,6 +258,65 @@ class InventoryTests(unittest.TestCase):
                     blob_sha=inv.git_blob(body), body_size=len(body), body_inline=body,
                     commit_sha=commit, op=op)
 
+    def seed_soft_deleted_page(self):
+        self.repo()
+        body = b'history before deletion'
+        sha = inv.git_blob(body)
+        inline = body
+        self.wiki_changeset(1, '1' * 40)
+        self.wiki_changeset(2, '2' * 40)
+        self.insert('wiki_page_revisions', page_id=1, revision_id=1, changeset_id=1,
+                    blob_sha=sha, body_size=len(body), body_inline=inline, commit_sha='1' * 40, op='create')
+        self.insert('wiki_page_revisions', page_id=1, revision_id=2, changeset_id=2,
+                    blob_sha='', body_size=0, body_inline=None, commit_sha='2' * 40, op='delete')
+        self.insert('wiki_pages', page_id=1, repository_id=1, head_blob_sha=sha,
+                    body_size=len(body), body_inline=inline, head_revision_id=1,
+                    head_changeset_id=1, deleted_at=None)
+        self.assertEqual(self.inventory()['tables']['wiki_pages']['rows'], 1)
+        # Exact page columns changed by applyDelete; retained body stays untouched.
+        with fixture_db(self.dbpath) as db:
+            db.execute("UPDATE wiki_pages SET head_revision_id=2, head_changeset_id=2,"
+                       " deleted_at='2026-01-01T00:00:00Z'")
+        self.assertEqual(self.inventory()['tables']['wiki_pages']['rows'], 1)
+        return body
+
+    def test_future_revision_cannot_prove_predelete_body(self):
+        self.seed_soft_deleted_page()
+        forged = b'body only written AFTER delete'
+        self.wiki_changeset(3, '3' * 40)
+        self.content_revision(3, 3, forged, 'restore', '3' * 40)
+        with fixture_db(self.dbpath) as db:
+            db.execute('UPDATE wiki_pages SET head_blob_sha=?, body_size=?, body_inline=?',
+                       (inv.git_blob(forged), len(forged), forged))
+        # Delete head remains revision 2. Only revision 3 carries the new body.
+        with self.assertRaisesRegex(c.ContractError, 'wiki_tombstone_body_unproven'):
+            self.inventory()
+
+    def test_foreign_changeset_cannot_prove_retained_body(self):
+        self.seed_soft_deleted_page()
+        self.repo('sample/other', 2)
+        # The delete head stays in repository 1; only its body source moves.
+        with fixture_db(self.dbpath) as db:
+            db.execute('UPDATE wiki_changesets SET repository_id=2 WHERE changeset_id=1')
+        with self.assertRaisesRegex(c.ContractError, 'wiki_tombstone_body_unproven'):
+            self.inventory()
+
+    def test_foreign_delete_head_is_rejected(self):
+        self.seed_soft_deleted_page()
+        self.repo('sample/other', 2)
+        with fixture_db(self.dbpath) as db:
+            db.execute('UPDATE wiki_changesets SET repository_id=2 WHERE changeset_id=2')
+        with self.assertRaisesRegex(c.ContractError, 'wiki_head_revision_mismatch'):
+            self.inventory()
+
+    def test_nonempty_delete_revision_is_rejected(self):
+        body = self.seed_soft_deleted_page()
+        with fixture_db(self.dbpath) as db:
+            db.execute('UPDATE wiki_page_revisions SET blob_sha=?, body_size=?, body_inline=?'
+                       ' WHERE revision_id=2', (inv.git_blob(body), len(body), body))
+        with self.assertRaisesRegex(c.ContractError, 'wiki_delete_revision_invalid'):
+            self.inventory()
+
     def test_soft_deleted_wiki_page_keeps_historical_body_and_rejects_bad_heads(self):
         # applyDelete writes op=delete with an empty blob and leaves the previous
         # body on the page. The review probe at the old head failed this state.
