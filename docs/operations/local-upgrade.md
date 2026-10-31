@@ -43,7 +43,8 @@ The manifest schema is `ags.upgrade-tool-bundle.v2`, its entry is
 `upgrade_host.py`, and its `files` maps each adjacent file to an exact SHA256.
 The bundle and ancestors must be root-owned and not group/world writable.
 Required files include the wrapper, host adapter, transaction engine, policy,
-installer, v2 consumer, verifier, shared archive contract and reviewed
+installer, v2 consumer, verifier, shared archive contract, `upgrade_smoke.py`,
+`upgrade_backup_contract.py`, `upgrade_inventory.py` and reviewed
 `release-source.json`. Missing or changed dependencies fail with
 `dependency_unavailable`, exit 69; there is no PATH/source fallback.
 
@@ -110,6 +111,18 @@ contracts exist. A configured command cannot bypass that refusal. The direct v2
 `--install` entry is separately closed with the same exit 83; see
 [release operations](releases.md).
 
+## S1 inventory and evidence contracts
+
+[Backup and recovery](backup-recovery.md) owns the complete recovery group,
+strict seal/restore evidence schemas, local SQLite/Git/Wiki inventory and fixed
+per-host retention fields. The two S1 modules are required in the exact-digest
+tool bundle. They have no apply integration and implement no backup, restore,
+retention deletion, service action or approval. Every machine retains only its
+latest five sealed and restore-verified backups; restore copies go to system
+Trash after verification, failures/incomplete material await manual review and
+do not count toward five. Insufficient space refuses; Trash is not free space.
+S1 only validates this policy. Apply and direct v2 install still exit 83.
+
 ## Known incomplete acceptance
 
 This implementation is a source preparation, not an accepted deployment path.
@@ -120,9 +133,11 @@ constrain the server's production listener. The schema comparator conservatively
 rejects changes to indexes, foreign keys and triggers. Empty affected tables are
 refused until a reviewed populated fixture is available. A future backup command must supply an owner-only `ags.local-backup.v2` receipt
 binding the request, a consistent snapshot, file sizes/digests and SQLite
-integrity/foreign-key checks. That receipt path is not implemented: current
-backup only refuses the missing contract. Complete Git/config backup semantics
-remain operator acceptance work. The pin loader rejects unknown fields, wrong types, missing fields, duplicate
+integrity/foreign-key checks. S1 defines strict receipt/manifest and inventory components, but no producer
+or independent restore-copy implementation exists: current backup still only
+refuses the missing contract. Capturing complete Git/config bytes, proving cold
+source stability and recovering them remain later implementation and acceptance
+work. The pin loader rejects unknown fields, wrong types, missing fields, duplicate
 JSON fields, and an unsafe ancestor directory. Mini handoff, Git/config backup
 coverage, Git/database consistency, observation approval and finalize are
 unimplemented and independently refused by apply. Journal-aware forward recovery
@@ -130,9 +145,12 @@ is also unimplemented. Empty policy is an additional default refusal, not proof
 that every stage is implemented fail-closed. Do not remove these refusals just
 to obtain an upgrade success.
 
-Tests: `python3 scripts/test_upgrade.py`, `python3 scripts/test_upgrade_safety.py`, `python3 scripts/test_install_v2.py`, `python3 scripts/test_release_consumer.py`.
+Tests use `scripts/ags-python.sh` followed by `scripts/test_upgrade.py`,
+`scripts/test_upgrade_safety.py`, `scripts/test_upgrade_inventory.py`,
+`scripts/test_install_v2.py` or `scripts/test_release_consumer.py`. Run with
+independent HOME/TMPDIR/cwd and remove inherited Python injection variables.
 Real cryptographic acceptance is separately run with
-`python3 scripts/test_release_crypto.py <local-evidence-directory>` against
+`scripts/ags-python.sh scripts/test_release_crypto.py <local-evidence-directory>` against
 pre-downloaded evidence. It never installs or executes candidate binaries.
 A dispatch candidate does not establish tag-push certificate acceptance.
 See [release operations](releases.md) and [single-root runtime](user-runtime.md).

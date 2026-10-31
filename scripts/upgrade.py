@@ -257,7 +257,8 @@ def bundle_engine(bundle, expected_digest, *, owner=0):
                 or manifest['entry'] != 'upgrade_host.py' or not isinstance(manifest['files'], dict)
                 or not {'upgrade_host.py', 'upgrade.py', 'upgrade_engine.py', 'upgrade_policy.json',
                         'release_verify.py', 'release_contract.py', 'release_install_v2.py',
-                        'install-release.py', 'release-source.json', 'upgrade_smoke.py'} <= set(manifest['files'])):
+                        'install-release.py', 'release-source.json', 'upgrade_smoke.py',
+                        'upgrade_backup_contract.py', 'upgrade_inventory.py'} <= set(manifest['files'])):
             raise Failure('dependency_unavailable')
         for name, digest in manifest['files'].items():
             if not re.fullmatch(r'[A-Za-z0-9_.-]+', name) or not SHA256.fullmatch(digest):
