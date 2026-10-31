@@ -35,7 +35,9 @@ The Git root uses `<GitRepoDir>/<full_name>.git` with optional sibling
 auxiliary state. `GitStorageID` does not name its directory. Current installation
 state is not a recovery archive. [Backup and recovery](backup-recovery.md) defines
 the S1 complete recovery group and per-machine five-verified-backup retention
-contract; S1 performs no backup or deletion and does not enable upgrade apply.
+contract. S2 can copy a synthetic cold snapshot and check an offline restore
+copy; it does not enable upgrade apply or delete backups except by moving an
+older verified snapshot to system Trash when that component is called.
 
 ## Program installation
 

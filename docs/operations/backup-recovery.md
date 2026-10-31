@@ -1,11 +1,13 @@
-# Local backup and recovery contract (S1)
+# Local backup and recovery contract (S1) and cold snapshot (S2)
 
-S1 defines and validates recovery inventory and evidence. It does not copy a
-backup, seal files, restore data, delete anything, stop/start a service or enable
-upgrades. `upgrade.py`, the host adapter and transaction engine still reject
-`apply` with `backup_contract_unimplemented` / 83 after authorization. Direct v2
-install also remains closed with 83. The public deployment and migration policy
-stays empty. See [local upgrade](local-upgrade.md) for the entry and gates.
+S1 defines and validates recovery inventory and evidence. S2 adds
+`scripts/upgrade_backup.py` and `scripts/upgrade_restore_verify.py`, which copy a
+declared recovery group with the SQLite backup API and ordinary file copies, seal
+`ags.local-backup.v2`, and check an independent restore copy offline. They are not
+called by `upgrade.py`, the host adapter, the transaction engine or direct v2
+install. Those entries still reject with `backup_contract_unimplemented` / 83.
+The public deployment and migration policy stays empty. See
+[local upgrade](local-upgrade.md) for the entry and gates.
 
 ## Recovery group
 
@@ -158,10 +160,14 @@ Each machine retains only its latest five sealed **and independently restore
 verified** backups. After validation the restore-copy is removed through the
 verified system Trash. Failed/incomplete backups or failed restore copies do not
 count toward five and are not automatically deleted; they await manual review.
-S1 only defines and validates these values. It implements neither retention
-selection nor backup/restore-copy deletion. Any later deletion uses the system
-Trash, on macOS `/usr/bin/trash <absolute-path>` without `--`, never permanent
-unlink. Insufficient space refuses the operation; it does not trigger cleanup.
+S2 selects retention only among backups that are sealed and have a separate
+restore report. It keeps the latest five per backup root and moves older verified
+snapshots through an injected trash function. The default function is
+`/usr/bin/trash <absolute-path>` without `--`. Failed and incomplete directories
+are not counted and are not moved. A restore copy created by this component is
+moved to Trash after the check, including when the check fails. Moving a
+directory to Trash does not make its bytes available; the space preflight refuses
+instead of deleting anything to make room.
 
 ## Seal and independent restore evidence
 
@@ -192,9 +198,10 @@ Every manifest entry contains `object_id`, relative payload `path`, `kind`,
 with their object ID and map exactly to the declared restore root; duplicate
 paths/targets, missing object roots/parents and a file used as a directory fail.
 ACL/xattr digests reference required metadata; S1 does not implement capture or
-restoration. Every declared object must be covered. Future S2 must compare this
-manifest against actual complete payload bytes and metadata, establish source
-stability, fsync files/directories and publish the seal only after success.
+restoration. Every declared object must be covered. S2 compares the copied payload with this manifest, fingerprints the source
+before and after the copy, fsyncs files and directories, and renames the partial
+directory to the snapshot id only after `validate_seal` accepts the bytes. A
+failure removes that partial directory. It does not become a retained backup.
 
 The separate `ags.local-backup.v2` receipt contains `schema`, `state=sealed`,
 `snapshot_id`, raw `manifest_sha256`, `inventory_sha256` and canonical
@@ -223,13 +230,17 @@ protect against a malicious same-UID/root writer.
 
 ## Verification boundary
 
-Run `scripts/ags-python.sh scripts/test_upgrade_inventory.py` with independent
-HOME/TMPDIR/cwd and no inherited PYTHONPATH/PYTHONPYCACHEPREFIX/BASH_ENV or
+Run `scripts/ags-python.sh scripts/test_upgrade_inventory.py`,
+`scripts/test_upgrade_backup.py BackupTests` and
+`scripts/test_upgrade_restore.py RestoreTests` with independent HOME/TMPDIR/cwd
+and no inherited PYTHONPATH/PYTHONPYCACHEPREFIX/BASH_ENV or
 PYTHONDONTWRITEBYTECODE (the shell entry establishes bytecode controls itself).
-The suite uses real SQLite and bare Git with synthetic identities. It covers
+The suites use real SQLite and bare Git with synthetic identities. They cover
 empty DB/repo, optional Wiki, historical CAS, typed row bytes, WAL, DB-only and
 cross-fork OIDs, external SHA classification, schema/source drift, dependency and
-budget failures, seal tampering and the unchanged 83 gates.
+budget failures, seal tampering, source changes, hard links, missing space,
+interrupted copies, alternates/shallow repositories, unknown OIDs, tombstones
+without an earlier same-repository body, and the unchanged 83 gates.
 
 This is source/component evidence. It does not establish a live host's writer
 set, effective configuration graph, normal shutdown, cold-window durability,
