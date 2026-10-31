@@ -386,6 +386,14 @@ class QuiescenceTests(ColdFixture):
         with self.assertRaises(c.ContractError): cold.consume_start(self.root)
         self.assertFalse(cold.startup_permitted(self.root))
 
+    def test_s2_inventory_basis_is_revalidated_before_install(self):
+        self.prepare(until='restore_verified')
+        backup = Path(self.window.journal['backup_dir'])
+        engine.save(backup / 'inventory.json', {'inventory_sha256': '0' * 64})
+        with self.assertRaises(c.ContractError): self.window.install_intent(lambda: None)
+        self.assertEqual(self.binary.read_bytes(), self.old)
+        self.assertFalse(cold.startup_permitted(self.root))
+
     def test_s2_seal_and_restore_report_are_revalidated_not_trusted_booleans(self):
         self.prepare(until='restore_verified')
         backup = Path(self.window.journal['backup_dir'])

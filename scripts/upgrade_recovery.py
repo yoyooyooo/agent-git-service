@@ -23,7 +23,7 @@ from upgrade_backup_contract import (ContractError, MAX_ENTRIES, canonical, dige
 from upgrade_backup import (create_sealed_backup, durable_bytes, group_object, source_fingerprint,
                             supported_metadata, verify_payload)
 from upgrade_inventory import database_inventory, file_digest, safe_path, scan_tree, sqlite_path
-from upgrade_restore_verify import load_sealed, verify_sealed_backup
+from upgrade_restore_verify import load_sealed, load_inventory, verify_sealed_backup
 
 MARKER = 'upgrade-cold.json'
 PHASES = ('stop', 'quiescent', 'backup', 'restore_verified', 'install_started',
@@ -351,9 +351,13 @@ class ColdWindow:
         require(manifest['binding'] == self.backup_binding
                 and manifest['quiescence'] == self.journal['quiescence']
                 and manifest['source_before_sha256'] == self.journal['tq_sha256'], 'backup_binding_mismatch')
+        load_inventory(path, manifest, self.group, self.schema, self.dsn)
+        stored_group, _ = private_json(path / 'recovery-group.json')
+        require(stored_group == self.group, 'group_mismatch')
         verify_payload(path, manifest['entries'], auxiliary=AUXILIARY)
         report, _ = private_json(path / 'restore-report.json')
         validate_restore_report(canonical(report), receipt)
+        require(timestamp(report['verified_at']) >= timestamp(manifest['ended_at']), 'time_order_invalid')
         publication, _ = private_json(path / 'restore-publication.json')
         require(publication == {'state': 'published', 'manifest_sha256': receipt['manifest_sha256']},
                 'restore_outcome_unknown')
