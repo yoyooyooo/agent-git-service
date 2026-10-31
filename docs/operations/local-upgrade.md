@@ -323,3 +323,8 @@ backup evidence. Nothing sends this package or initiates imile automatically.
 `bash scripts/upgrade-regression.sh` is the shared isolated local/CI runner and is
 listed in `scripts/regression_gate.list`. See [backup contracts](backup-recovery.md#s5-wiring)
 and [CI scope](../ci.md).
+
+Live health treats a consumed cold-window token as a restart refusal, not a
+failure of the running generation. Every other periodic startup check must be
+healthy; the current process, generation, installation and both health routes
+are still revalidated. A blocked restart fence never grants another spawn.
