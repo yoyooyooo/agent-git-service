@@ -24,7 +24,7 @@ import urllib.request
 
 from upgrade import BUNDLE, Failure, bundle_engine, execution_identity, private_json, validate_pin, directory_fd, read_private_fd, require_apply_contracts, result_exit
 from upgrade_engine import Transaction, acceptance, authorize, child, dual_smoke, save
-from upgrade_recovery import read_original_binding, checkpoint as cold_checkpoint
+from upgrade_recovery import ColdWindow, read_original_binding, checkpoint as cold_checkpoint
 
 
 CI_JOBS = {
@@ -88,11 +88,14 @@ def context(args):
     policy_raw = (BUNDLE / 'upgrade_policy.json').read_bytes()
     if hashlib.sha256(policy_raw).hexdigest() != pin['verification_policy']['policy_sha256']:
         raise Failure('release_pin_invalid')
-    policy = json.loads(policy_raw)
+    from upgrade_backup_contract import strict_json
+    policy = strict_json(policy_raw)
     if policy.get('schema') != 'ags.upgrade-policy.v2':
         raise Failure('dependency_unavailable')
     entry = policy.get('deployments', {}).get(host)
     if not entry:
+        if getattr(args, 'command', 'apply') == 'apply':
+            require_apply_contracts(host)
         raise Failure('dependency_unavailable')
     if entry['root'] != str(root):
         raise Failure('invalid_host')
@@ -133,9 +136,11 @@ def context(args):
 
 
 class Effects:
-    def __init__(self, root, pin, policy, entry, binding, scratch):
+    def __init__(self, root, pin, policy, entry, binding, scratch, *,
+                 package=None):
         self.root, self.pin, self.policy = root, pin, policy
         self.entry, self.binding, self.scratch = entry, binding, scratch
+        self.package = package
         self.installer = load_installer()
 
     def preflight(self):
@@ -194,26 +199,53 @@ class Effects:
         self.health(expected=self.binding['old'])
 
     def backup(self):
-        # Keep the adapter backup gate unconditional in S3. The private
-        # ColdWindow harness calls S2 directly; this is not an apply path.
-        require_apply_contracts(self.binding['host'])
+        if getattr(self, 'package', None) is None:
+            require_apply_contracts(self.binding.get('host'))
+        self._authorize_stage()
+        self._window().backup()
 
     def _window(self):
-        # S3 has no production constructor/entry for this capability. S5 must
-        # admit the reviewed manager, recovery group and writer closure first.
         if not hasattr(self, '_cold'):
-            require_apply_contracts(self.binding.get('host'))
+            require_apply_contracts(self.binding.get('host'), package=getattr(self, 'package', None),
+                                    binding=self.binding)
+            raise Failure('minimum_contract_unsatisfied', 'cold_window', 83)
         return self._cold
 
-    def begin(self): self._window().begin()
+    def begin(self):
+        package = self.package
+        self._authorize_stage()
+        require_apply_contracts(self.binding['host'], package=package, binding=self.binding)
+        self._cold = ColdWindow(self.root, self.binding, package.backup_binding, package.group,
+                                package.dsn, package.schema_sha256, package.manager,
+                                package.writer_probe, package.trash)
+        # Transaction owns this same inode. Borrow its ownership, never flock
+        # a second descriptor (which would self-conflict).
+        self._cold.owner = self.owner_fd
+        self._cold.begin()
     def stop(self): self._window().stop()
     def quiescent(self): self._window().quiescent()
     def restore(self): self._window().restore()
-    def install_intent(self, authorize): self._window().install_intent(authorize)
+    def _authorize_stage(self):
+        package = self.package
+        current, _ = private_json(self.root / 'config' / ('upgrade-authorization-' + self.binding['authorization_id'] + '.json'))
+        if current != package.authorization:
+            raise Failure('minimum_contract_unsatisfied', 'authorization_changed', 83)
+        try:
+            package.validate(self.binding['host'], self.binding)
+        except Failure as error:
+            if error.exit_code == 77:
+                raise Failure('minimum_contract_unsatisfied', 'authorization_expired', 83) from error
+            raise
+
+    def install_intent(self, authorize):
+        self._authorize_stage()
+        self._window().install_intent(authorize)
     def installed(self):
         self._window().installed(self.info['binaries']['gh-server']['identity'],
                                  lambda p: json.loads(child([str(p), '--version'], 'installed')))
-    def start_intent(self): self._window().start_intent()
+    def start_intent(self):
+        self._authorize_stage()
+        self._window().start_intent()
     def release(self):
         if hasattr(self, '_cold'):
             self._cold.release()
@@ -223,6 +255,8 @@ class Effects:
         cold = self._window()
         if cold.locks is None or cold.journal['phase'] != 'install_started':
             raise Failure('backup_contract_unimplemented', 'install', 83)
+        if getattr(self, 'package', None) is not None:
+            self._authorize_stage()
         cold.unchanged(); cold.verified_backup()
         if (self.info['source'] != cold.backup_binding['new']
                 or self.info['binaries']['gh-server']['sha256'] != cold.backup_binding['new_binary_sha256']):
@@ -289,7 +323,26 @@ class Effects:
     def start(self):
         self._window().start()
 
+    def verify_waiting(self):
+        from upgrade_manual_approval import load_chain, check_running
+        from datetime import datetime, timezone
+        chain = load_chain(self.root, self.binding)
+        check_running(self.root, chain, lambda: acceptance_health(self.root, self.entry, self.binding),
+                      datetime.now(timezone.utc))
+
     def health(self, expected=None):
+        if expected is None and self.package is not None:
+            from upgrade_manual_approval import check_running
+            from upgrade_recovery import read_window
+            from datetime import datetime, timezone
+            marker, journal, _ = read_window(self.root)
+            if journal.get('handoff', {}).get('consumed') is not True:
+                raise Failure('host_transaction_failed', 'health')
+            check_running(self.root, {'backup_binding': journal['backup_binding'],
+                          'generation': marker['generation']},
+                          lambda: acceptance_health(self.root, self.entry, self.binding),
+                          datetime.now(timezone.utc))
+            return
         expected = expected or self.binding['new']
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
@@ -304,10 +357,16 @@ class Effects:
 def acceptance_health(root, entry, binding):
     """Read-only runtime/process + local and service route health, no manager calls.
 
-    S4 admits no deployed host. A later reviewed private adapter must supply the
-    two fixed URLs; absence is unknown health, never completion.
+    The admitted private policy supplies two fixed URLs. Missing health is
+    unknown, never completion; this does not discover or provision a host.
     """
     runtime, _ = private_json(root / 'state/runtime.json')
+    startup, _ = private_json(root / 'state/startup-health.json')
+    from upgrade_backup_contract import timestamp
+    if (startup.get('schema') != 'ags.startup-health.v1' or startup.get('ready_to_start') is not True
+            or not startup.get('checks') or any(value != 'ok' for value in startup['checks'].values())
+            or timestamp(startup['checked_at']) > timestamp(runtime['started_at'])):
+        raise Failure('host_transaction_failed', 'health')
     for key in ('pid', 'supervisor_pid'):
         pid = runtime.get(key)
         if type(pid) is not int or pid <= 0:
@@ -352,9 +411,13 @@ def main():
         return result_exit(result) if args.command == 'confirm' else 0
     authorization, _ = private_json(root / 'config' / ('upgrade-authorization-' + args.authorization_id + '.json'))
     authorize(authorization, binding)
-    require_apply_contracts(binding['host'])
+    package = None
+    if entry.get('host_package'):
+        from upgrade_wireup import load_admission
+        package = load_admission(root, pin, policy, entry, binding, authorization, BUNDLE)
+    require_apply_contracts(binding['host'], package=package, binding=binding)
     with tempfile.TemporaryDirectory(prefix='ags-upgrade-apply-') as directory:
-        effects = Effects(root, pin, policy, entry, binding, Path(directory))
+        effects = Effects(root, pin, policy, entry, binding, Path(directory), package=package)
         result = Transaction(state, binding, authorization, effects).run()
         print(json.dumps(result))
     return result_exit(result)

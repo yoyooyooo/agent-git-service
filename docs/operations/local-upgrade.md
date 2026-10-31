@@ -28,7 +28,7 @@ would allow effects before approval and is prohibited. A long-lived deployment
 switch, starting a Dagu run or a successful CI run is not per-attempt approval.
 The transaction never writes `approved=true`. `awaiting_observation` is not
 completion and exits 86. S4 adds manual `confirm` for an existing valid transaction;
-it does not enable `apply`.
+S5 connects `apply` only through a complete private host package.
 
 The request parameters are `--deployment-id`, `--pin-sha256`, `--ci-run-id`,
 `--ci-run-attempt` and `--authorization-id`. These identify one local attempt.
@@ -49,7 +49,8 @@ The bundle and ancestors must be root-owned and not group/world writable.
 Required files include the wrapper, host adapter, transaction engine, policy,
 installer, v2 consumer, verifier, shared archive contract, `upgrade_smoke.py`,
 `upgrade_backup_contract.py`, `upgrade_inventory.py`, `upgrade_backup.py`,
-`upgrade_restore_verify.py`, `upgrade_recovery.py`, `upgrade_manual_approval.py` and reviewed
+`upgrade_restore_verify.py`, `upgrade_recovery.py`, `upgrade_manual_approval.py`,
+`upgrade_wireup.py` and reviewed
 `release-source.json`. Missing or changed dependencies fail with
 `dependency_unavailable`, exit 69; there is no PATH/source fallback.
 
@@ -61,10 +62,9 @@ owner HOME and an owner-writable cwd, without root tokens, gh configuration or
 Dagu credentials. mini already runs as its owner and needs no extra runuser.
 The source does not discover or configure either machine's service commands.
 
-An independently provisioned root policy may later bind exact backup, stop,
-start, legacy-check and a local readyz endpoint. This slice does not implement
-or accept a production mini handoff adapter. S4 validates human-carried evidence
-for existing transactions. A command that exits zero, or a JSON digest, cannot
+An independently provisioned root policy selects the fixed private adapter and
+local/service health routes. No production adapter is shipped. S5 consumes S4
+human-carried mini evidence before imile stop. A command that exits zero, or a JSON digest, cannot
 authenticate mini provenance or prove an independent observer's identity. No arbitrary command arguments are accepted
 from the Dagu request or release pin.
 
@@ -95,28 +95,65 @@ scratch HOME, TMPDIR, SQLite and Git roots, never production configuration or DB
 They check readyz revision, clean exit, database integrity and preservation of
 old rows/columns. Migration identifiers include structural digests.
 
-## Unavailable apply contracts
+## S5 two-layer admission
 
-`apply` rechecks authorization, then returns exit 83 before creating a claim or
-running backup, stop or installation. The diagnostic names every missing contract:
+The checked-in policy still has `deployments={}` and `migration_admissions=[]`.
+With a valid pin/bundle and window authorization, that default `apply` returns
+`backup_contract_unimplemented` / 83 before any claim or service effect. Earlier
+pin/bundle/identity failures retain 64/69/77. No host is provisioned by source.
+Direct v2 `--install` remains unconditionally `install_contracts_unimplemented` /
+83, including when a private upgrade package exists. It is not a second path.
 
-- `backup_git_config_coverage_and_git_db_consistency`
-- `independent_observation_approval_and_finalize`
-- `trusted_mini_handoff_bound_to_pin_release_deployment` on imile-win
+The capability layer runs before claim creation. A root-owned exact-digest
+`ags.upgrade-policy.v2` entry has exactly `root`, `readyz`, `service_readyz`,
+`legacy_check` (fixed absolute argv) and `host_package` (absolute private path).
+The root-owned bundle must include `upgrade_wireup.py` and the package's adapter
+module. Policy has no enabled, force, skip-backup or success-command option.
+The empty migration registry must be replaced only by separately reviewed exact
+old/new/observed migration admissions; normal preflight still checks Release,
+R/C exact-head CI, ABI, binary identity and old/new/populated smoke.
 
-SQLite-only receipts and zero-exit commands are not implementations of these
-contracts. `plan`, `status` and verify-only remain available. Exit 86 is reserved
-for a future transaction that has stopped at observation; it is distinct from
-exit 0, which requires `status=completed`.
+`host_package` is a single-link owner-only JSON file, read with the S4 private
+reader. Its closed `ags.private-host-package.v1` fields are:
 
-A future apply, after the contracts above exist, rechecks full exact-head CI for
-R and C, verifies the v2 immutable Release, then checks actual candidate identity
-before smoke. That sequence is not reachable in this slice. Only gh-server would
-be replaced; Edge, replication, credentials, data and service definitions are not
-replaced. The host adapter does not run backup, stop or installation until those
-contracts exist. A configured command cannot bypass that refusal. The direct v2
-`--install` entry is separately closed with `install_contracts_unimplemented`, exit 83; see
-[release operations](releases.md).
+- `schema`, `host`, `host_instance`, `deployment_id`, `transaction_id`,
+  `authorization_id`, `pin_sha256` (this machine's exact request/window).
+- `dsn` (local SQLite), `schema_sha256` (reviewed, not discovered approval),
+  `recovery_group` (the existing S1 graph, capacity and storage contract).
+- `adapter_module`, an `upgrade_adapter_<name>.py` exact-digest member of the
+  root-owned bundle and an explicit `tool` in the recovery group.
+- `mini_handoff`, null on mini; the S4 human-carried package on imile.
+
+The adapter declares `SCHEMA=ags.upgrade-host-adapter.v1`. Its side-effect-free
+`create(root, package)` returns exactly `manager`, `writer_probe`, `trash`.
+The fixed manager implements `suppress_restart`, `stop`, `start`; stop and writer
+probe results must satisfy S3, not merely exit zero. `trash` must be a verified
+system Trash callback; the executor never supplies a delete fallback. Root-owned
+adapter code is trusted provisioning, not an untrusted JSON command interpreter.
+No production adapter is shipped here. A synthetic adapter is only a test.
+
+The window authorization `evidence_sha256` equals the raw private-package SHA256.
+Changing the package requires a new human authorization, not a runtime edit.
+The capability layer reuses S1 inventory/schema, capacity and path validation,
+S4 pin/request/release-key binding and imile handoff, and the retained original
+window authorization. The package's transaction ID plus host/deployment/window
+binding distinguishes deployments of the same CI build. Machine-specific pin,
+policy, old identity and bundle digests need not equal those of the other host.
+
+The stage layer then runs `stop → quiescent → backup → restore_verified →
+install_started → installed → start_attempted → health → awaiting_observation`.
+It never demands a future seal before stopping. S3 owns the durable marker,
+writer evidence, dual locks, S1 seal/S2 restore revalidation and one-shot start.
+Window authorization is reread before stop, installation and start; imile's
+handoff must still be fresh. Stage contract failures retain 83 plus stopped/unknown
+service state and recovery-required journal fields. Installation/start outcomes
+that are unknown keep 81/82. A stopped 83 is not proof that the old service is up.
+
+Successful apply stops at 86. Only a separate S4 human `confirm` can return
+completed / 0 after validating its own full evidence and consumption chain.
+Neither query success nor a timer is acceptance. Reentry never blindly repeats
+an interrupted effect; awaiting reentry revalidates the full evidence chain and
+running generation. Completed history remains an acceptance record, not live health.
 
 ## S1 inventory and evidence contracts
 
@@ -124,8 +161,7 @@ contracts exist. A configured command cannot bypass that refusal. The direct v2
 strict seal/restore evidence schemas, local SQLite/Git/Wiki inventory and fixed
 per-host retention fields. The two S1 modules are required in the exact-digest
 tool bundle. S2 adds a synthetic cold-backup producer and an offline
-restore-copy checker. Neither is called by production apply, the host backup adapter or direct
-install. S3 uses both only through its private cold-window component. Every machine retains only its
+restore-copy checker. S5 calls both only through S3's admitted cold-window component; direct v2 install cannot call them. Every machine retains only its
 latest five sealed and restore-verified backups; restore copies go to system
 Trash only after successful verification. Failed restore copies and partial
 backups remain in place for manual review and
@@ -134,8 +170,7 @@ S1 validates the policy. S2 validates seal/report binding and host identity, the
 selects the latest five by seal time. A caller must inject a verified system
 Trash function; the component has no default Trash implementation. Recovery
 requires the reviewed group, DSN, admitted schema and sealed inventory evidence,
-but does not require the original data paths to exist. Apply and direct v2
-install still exit 83.
+but does not require the original data paths to exist. Default public apply and direct v2 install still exit 83.
 
 ## S3 private cold-window protocol
 
@@ -143,11 +178,10 @@ install still exit 83.
 command. Its order is `stop → quiescent → backup → restore_verified →
 install_started → installed → start_attempted`. It reuses S1 binding/group/seal
 validation and S2 backup and independent restore verification without changing
-those contracts. The public host backup adapter and both apply gates remain
-unconditionally `backup_contract_unimplemented` / 83. Direct host install also
+those contracts. S5 connects the host backup adapter and apply only after private-package admission.
+Without it, they retain `backup_contract_unimplemented` / 83. Direct host install also
 refuses without a private cold guard; direct v2 install remains
-`install_contracts_unimplemented` / 83. There is no recovery CLI or new route
-from `upgrade.py`, `upgrade_host.py` or `release_install_v2.py` to installation.
+`install_contracts_unimplemented` / 83. There is no recovery CLI or direct-install route around the admitted transaction.
 
 Before stopping, the owner fsyncs independent `state/upgrade-cold.json` and
 `pending/cold-journal.json` under `state/ags-autodeploy/local-v2`. The marker is
@@ -198,34 +232,35 @@ restore and post-start forward repair are separate incident work. See
 [backup and recovery](backup-recovery.md#s3-pre-start-recovery) and
 [runtime startup fencing](user-runtime.md#cold-window-startup-fence).
 
-## Known incomplete acceptance
+## Verification limits
 
-This implementation is a source preparation, not an accepted deployment path.
-Linux smoke invokes a fixed unprivileged user/network namespace helper and
-brings up loopback only; this Linux chain has not been executed on the current
-macOS test machine. Disabled user namespaces fail closed. BASE_URL alone cannot
-constrain the server's production listener. The schema comparator conservatively
-rejects changes to indexes, foreign keys and triggers. Empty affected tables are
-refused until a reviewed populated fixture is available. A future backup command must supply an owner-only `ags.local-backup.v2` receipt
-binding the request, a consistent snapshot, file sizes/digests and SQLite
-integrity/foreign-key checks. S1 defines the receipt/manifest and inventory
-components. S2 produces a sealed synthetic snapshot and checks an offline
-restore copy, but current backup, apply and direct install still only refuse the
-missing contract. S3 exercises cold-window quiescence and pre-start recovery only through
-private synthetic components. Production invocation and accepted host recovery
-remain later work. The pin loader rejects unknown fields, wrong types, missing fields, duplicate
-JSON fields, and an unsafe ancestor directory. Production admission for mini handoff, complete backup coverage, consistency,
-production acceptance integration remains unimplemented and refused by apply.
-S4's consumer tests do not constitute an end-to-end apply test. Journal-aware forward recovery
-is also unimplemented. Empty policy is an additional default refusal, not proof
-that every stage is implemented fail-closed. Do not remove these refusals just
-to obtain an upgrade success.
+Source wiring is not host provisioning or production acceptance. Linux smoke
+still requires its unprivileged user/network namespace and refuses when that
+is unavailable. The schema comparator still rejects changed indexes, FKs and
+triggers and empty affected populated-smoke tables. Real Release verification,
+permissions, bytecode controls and provenance failures do not fall back to a
+weaker path. Tests replace only synthetic manager/health and Release transport
+boundaries, not the total gate, backup validators, manual validators or order.
+
+Darwin/Linux native full chains, isolated VM execution and production-copy server
+startup/migration remain unverified by this source suite. Same-UID/root can forge
+files and declarations. Actual writer closure, native ACL/fsync/ABI, routing,
+provider outcomes and long-tail business health need separately approved field
+verification. No unknown writer, corrupt backup or provider uncertainty can be
+accepted as a limitation. Starting AGS already resumes business writes.
+
+S3 pre-start recovery restores only old binary/receipt and keeps the startup
+fence; it does not start old AGS. S5 does not add old-start or normal automatic
+manager restart authority. The one-shot fence remains after confirm. This is a
+conservative retained stop, not automatic rollback or continuous availability.
+Restoring normal manager lifecycle, post-start repair, full data restore and
+retiring recovery materials require separate design/approval. No claim is TTL-cleared.
 
 Tests use `scripts/ags-python.sh` followed by `scripts/test_upgrade.py`,
 `scripts/test_upgrade_safety.py`, `scripts/test_upgrade_inventory.py`,
 `scripts/test_upgrade_backup.py`, `scripts/test_upgrade_restore.py`,
 `scripts/test_upgrade_quiescence.py`, `scripts/test_upgrade_recovery.py`,
-`scripts/test_upgrade_manual_approval.py`,
+`scripts/test_upgrade_manual_approval.py`, `scripts/test_upgrade_wireup.py`,
 `scripts/test_install_v2.py` or `scripts/test_release_consumer.py`. Run with
 independent HOME/TMPDIR/cwd and remove inherited Python injection variables.
 Real cryptographic acceptance is separately run with
@@ -259,7 +294,7 @@ S1 seal, S2 inventory and payload, independent restore report and publication
 record. It calls S3's evidence validator rather than trusting a success flag.
 It checks installed bytes and receipt, current runtime generation, and both local
 and service health before committing. Missing or unknown health refuses completion.
-The private host policy must provide `readyz` and `service_readyz`; S4 adds no
+The private host policy must provide `readyz` and `service_readyz`; source adds no
 host entries and does not provision either URL.
 
 One atomic `completed-<request-fingerprint>.json` record contains both the completed
@@ -274,8 +309,7 @@ the service remains healthy after completion.
 `status` and `reconcile` only read facts under the existing hostops lock. They do
 not create the lock, repair a journal, consume approval or replay any effect.
 The cold marker stays in place even after acceptance. S4 grants no manager restart
-authority and does not remove S3's one-shot startup fence. A later host integration
-must separately define normal restart admission.
+authority and does not remove S3's one-shot startup fence. Normal restart admission remains separately scoped; S5 does not remove that fence.
 
 The human mini-to-imile package binds the completed mini record and raw evidence
 bytes, both machine-specific pins, a shared release key, mini generation and a
@@ -285,3 +319,7 @@ revisions. Pins need not be equal. The receiver validates the carried bytes,
 source declaration and readback within five minutes, but hashes do not authenticate
 transport or prove mini is still unchanged. imile needs its own approval and local
 backup evidence. Nothing sends this package or initiates imile automatically.
+
+`bash scripts/upgrade-regression.sh` is the shared isolated local/CI runner and is
+listed in `scripts/regression_gate.list`. See [backup contracts](backup-recovery.md#s5-wiring)
+and [CI scope](../ci.md).

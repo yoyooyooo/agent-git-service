@@ -471,9 +471,10 @@ by this source change. Its empty host/migration policy blocks live apply.
 
 ## Manual upgrade acceptance is not publication
 
-S4 adds a private manual acceptance consumer for an existing S1/S2/S3 transaction.
-It does not open `apply`, host backup, transaction execution or direct v2 install;
-those entries still refuse with exit 83. It does not publish a Release, install a
+S4 owns separate manual acceptance; S5 connects the S1–S4 transaction only with
+a complete privately provisioned host package and current human window approval.
+Default empty policy still refuses apply/backup/transaction with exit 83. Direct
+v2 install is always closed with exit 83 and cannot borrow upgrade admission. It does not publish a Release, install a
 bundle, provision policy, remove a startup fence, open traffic or start another
 machine. The checked-in deployments and migration admissions remain empty.
 

@@ -1,24 +1,19 @@
-# Local backup, recovery and manual acceptance (S1–S4)
+# Local backup, recovery and manual acceptance (S1–S5)
 
-S1 defines and validates recovery inventory and evidence. S2 adds
-`scripts/upgrade_backup.py` and `scripts/upgrade_restore_verify.py`, which copy a
-declared recovery group with the SQLite backup API and ordinary file copies, seal
-`ags.local-backup.v2`, and check an independent restore copy offline. They are not
-called by production apply or direct v2 install. S4 acceptance revalidates their
-stored evidence without creating another backup or restore copy.
-Apply and the host backup adapter still reject with
-`backup_contract_unimplemented` / 83; direct v2 install rejects with
-`install_contracts_unimplemented` / 83. S3 reuses these components only in a
-private cold-window harness, not through production apply. S4 adds a human
-acceptance consumer and human-carried mini evidence, not production installation.
-The public deployment and migration policy stays empty. See
-[local upgrade](local-upgrade.md) for the entry and gates.
+S1 owns inventory and evidence; S2 copies the full declared recovery group with
+SQLite backup API and ordinary copies and verifies an independent restore-copy.
+S3 owns the durable cold-window protocol; S4 consumes separate human acceptance.
+S5 connects these existing owners through strict private-package admission.
+The public deployments/migration policy remains empty: default apply and backup
+still return `backup_contract_unimplemented` / 83. Direct v2 install always returns
+`install_contracts_unimplemented` / 83 and cannot borrow the S5 admission.
+No source acceptance provisions, publishes or upgrades a host. See
+[local upgrade](local-upgrade.md#s5-two-layer-admission) for the exact package/adapter contract.
 
 ## Recovery group
 
 `scripts/upgrade_backup_contract.py` owns the closed JSON contracts;
-`scripts/upgrade_inventory.py` supplies bounded read-only components, with no CLI
-or production call from apply. A caller must supply an operator-reviewed exact
+`scripts/upgrade_inventory.py` supplies bounded read-only components, with no standalone backup CLI; admitted S5 apply reuses them through S3. A caller must supply an operator-reviewed exact
 SQLite schema digest and dependency graph. Computing a digest with
 `schema_digest` discovers bytes; it does not admit or approve that schema.
 Unknown tables, a changed schema, missing required semantic tables/columns,
@@ -37,7 +32,7 @@ A complete group includes:
 
 | Object | Required coverage |
 | --- | --- |
-| `sqlite` | One persistent local business DB: every table, row, schema object, index, trigger, FK, intent, lease, audit and migration fact. The future snapshot producer must use the SQLite backup API, including committed WAL; copying only the main file is insufficient. |
+| `sqlite` | One persistent local business DB: every table, row, schema object, index, trigger, FK, intent, lease, audit and migration fact. The snapshot producer uses the SQLite backup API, including committed WAL; copying only the main file is insufficient. |
 | `git_root` | One complete Git root, with all bare main repositories and existing optional sibling Wiki repositories, objects/packs/indexes, refs/reflogs/HEAD/config/hooks and metadata. Unreferenced and DB-only objects remain included. Clone or `bundle --all` is insufficient. |
 | Wiki and auxiliary data inside Git root | All existing `.wikiblobs/<aa>/<bb>/<sha>` CAS, including historical/unreferenced content, DB inline bodies and revisions; `.github-app-deliveries` spool; `.ags-artifact-retirement` only with a private, empty, non-busy `operation.lock`. Pending/force/unknown retirement state is refused. |
 | `runtime_env`, `config`, `secret`, `policy` | Current environment, integration/replication/retention/authority configuration, all referenced keys/certificates/seeds/receipts and recoverable `SECRET_ENCRYPTION_KEY`. Never copy all of HOME. |
@@ -333,8 +328,7 @@ without an earlier same-repository body, and the unchanged 83 gates.
 This is source/component evidence. It does not establish a live host's writer
 set, effective configuration graph, native manager shutdown, host cold-window durability,
 production backup/restore, real key decryption, native manager/ACL/xattr behavior,
-production migration, business/provider health or disaster recovery. Later
-slices must implement and verify those parts before apply can be connected.
+production migration, business/provider health or disaster recovery. Those field claims need separate operator approval and evidence; synthetic wiring does not establish them.
 
 ## S4 acceptance file contract
 
@@ -344,7 +338,8 @@ format. Acceptance reads the original private
 `config/upgrade-authorization-<authorization_id>.json` and checks it against the
 awaiting receipt. It validates the historical authorization window at issue time,
 not as a new permission to run any upgrade effect.
-The public apply and backup gates remain `backup_contract_unimplemented` / 83.
+Default public apply and backup remain `backup_contract_unimplemented` / 83;
+S5 private-package admission is distinct from the S4 acceptance evidence chain.
 Direct v2 install remains `install_contracts_unimplemented` / 83.
 
 The closed `ags.manual-upgrade-approval.v1` accept declaration has these fields:
@@ -402,3 +397,29 @@ forgery, or mini changing after readback.
 See [manual acceptance](local-upgrade.md#s4-manual-acceptance) for durable completion,
 crash retry, query semantics and the retained startup fence. Component fixtures
 are not production, native-manager or end-to-end upgrade acceptance.
+
+## S5 wiring
+
+[Local upgrade](local-upgrade.md#s5-two-layer-admission) owns the closed package and
+root-pinned adapter contract. S5 does not redefine S1 seal, recovery graph, S2
+restore report, S3 cold journal or S4 approval/consumption records. Capability
+admission precedes claims; stage evidence is generated only in its stage and
+revalidated before the next irreversible effect. Missing Git/CAS/config, altered
+payload/seal/report or changed source cannot install. No prior snapshot can fill
+in this attempt's quiescence nonce and immutable request.
+
+`test_upgrade_wireup.py` uses real host dispatch, the real total gate, SQLite,
+bare Git, locks and evidence validators. Release transport/smoke and manager/health
+are explicitly synthetic. Real phase crashes and lost responses must refuse
+blind replay; pre-start restore requires a new approval; post-start old restore
+is forbidden. Two logical hosts use different pins and the same release key,
+with completed mini evidence before imile stop and its own final approval.
+`bash scripts/upgrade-regression.sh` runs S1–S5 and existing consumer/runtime
+regressions in independent HOME/TMPDIR/cwd, retaining its sandbox for diagnosis.
+
+The startup fence is retained after acceptance and pre-start recovery. Normal
+manager restarts and old-version restart after recovery are not implemented by
+S5 and must not be inferred from completed/old_restored. Native Darwin/Linux
+full-chain, isolated VM and production-copy startup exercises remain outside
+this source evidence. Publication, installation, service configuration, actual
+windows, human decisions and recovery-material retirement require separate approval.

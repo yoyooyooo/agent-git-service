@@ -132,7 +132,7 @@ class UpgradeTests(unittest.TestCase):
         script = '''import os,sys,json
 from pathlib import Path
 import upgrade_engine
-upgrade_engine.require_apply_contracts=lambda host: None
+upgrade_engine.require_apply_contracts=lambda host, **kwargs: None
 from upgrade_engine import Transaction
 class Effects:
  def preflight(self): os._exit(91)

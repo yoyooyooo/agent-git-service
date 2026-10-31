@@ -73,3 +73,17 @@ the initial generation preservation receipt is not reused as a new runtime test.
 The public architecture and operational guide for the optional Edge are in [`docs/architecture/ags-edge.md`](../docs/architecture/ags-edge.md). Reusable examples use documentation-only hosts and addresses. Real hostnames, account paths, node certificates, operator tokens, and acceptance transcripts belong to the operator's private configuration and evidence store.
 
 Do not transplant another project's storage rules blindly. This server's existing GORM migrations, deployed SQLite data, TiDB test semantics and Git invariants remain binding compatibility constraints. Source cleanup must not turn a migration into data loss or broaden authorization.
+
+## Minimal upgrade source wiring (S5)
+
+S5 connects the existing backup/inventory, offline restore, cold-window and
+manual acceptance components under a root-pinned private host package. The
+checked-in deployments and migration admissions remain empty. Default apply,
+backup and transaction retain 83; direct v2 install stays unconditionally 83.
+The shared [regression entry](../scripts/upgrade-regression.sh) is referenced by
+`regression_gate.list` and Fork CI and includes the non-mocked total-gate synthetic
+flow. [Local upgrade](../docs/operations/local-upgrade.md#s5-two-layer-admission)
+owns the contract and retained restart/recovery stops. No version, release-source
+identity, publication switch, deployment setting or accepted-generation receipt
+is updated by wiring. Native platform/VM/production-copy startup remain separate
+unverified acceptance surfaces. Source PR/CI is not permission to provision or deploy.
