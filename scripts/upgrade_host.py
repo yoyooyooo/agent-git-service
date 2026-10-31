@@ -23,7 +23,7 @@ import tempfile
 import urllib.request
 
 from upgrade import BUNDLE, Failure, bundle_engine, execution_identity, private_json, validate_pin, directory_fd, read_private_fd, require_apply_contracts, result_exit
-from upgrade_engine import Transaction, authorize, child, dual_smoke, save
+from upgrade_engine import Transaction, acceptance, authorize, child, dual_smoke, save
 from upgrade_recovery import read_original_binding, checkpoint as cold_checkpoint
 
 
@@ -100,6 +100,20 @@ def context(args):
         raise Failure('release_pin_invalid')
     pending = root / 'state/ags-autodeploy/local-v2/pending'
     original = read_original_binding(pending) if pending.exists() else None
+    if original is None and getattr(args, 'command', 'apply') in ('status', 'reconcile', 'confirm'):
+        # Completion archives pending. Locate only this exact request's original
+        # claim; never reconstruct old from the now-new installation receipt.
+        matches = []
+        for archived in pending.parent.glob('accepted-*'):
+            candidate = read_original_binding(archived)
+            if all(candidate.get(k) == v for k, v in {
+                    'host': host, 'deployment_id': args.deployment_id, 'pin_sha256': digest,
+                    'attempt_id': args.ci_run_id + '.' + args.ci_run_attempt,
+                    'authorization_id': args.authorization_id}.items()):
+                matches.append(candidate)
+        if len(matches) != 1:
+            raise Failure('transaction_state_unknown')
+        original = matches[0]
     if original is None:
         old_receipt, _ = private_json(root / 'state/installation.json')
     target = pin['runtime']
@@ -287,25 +301,55 @@ class Effects:
             raise Failure('host_transaction_failed', 'health') from None
 
 
+def acceptance_health(root, entry, binding):
+    """Read-only runtime/process + local and service route health, no manager calls.
+
+    S4 admits no deployed host. A later reviewed private adapter must supply the
+    two fixed URLs; absence is unknown health, never completion.
+    """
+    runtime, _ = private_json(root / 'state/runtime.json')
+    for key in ('pid', 'supervisor_pid'):
+        pid = runtime.get(key)
+        if type(pid) is not int or pid <= 0:
+            raise Failure('host_transaction_failed', 'health')
+        os.kill(pid, 0)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    result = {'generation': runtime.get('generation'), 'running_revision': runtime.get('build', {}).get('revision')}
+    for key, config in (('local', 'readyz'), ('service', 'service_readyz')):
+        url = entry.get(config)
+        if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
+            raise Failure('host_transaction_failed', 'health')
+        with opener.open(url, timeout=15) as response:
+            body = json.load(response)
+        result[key] = {'status': body.get('status'), 'revision': body.get('version')}
+    after, _ = private_json(root / 'state/runtime.json')
+    if after != runtime:
+        raise Failure('host_transaction_failed', 'health')
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['plan', 'apply', 'status'])
+    parser.add_argument('command', choices=['plan', 'apply', 'status', 'reconcile', 'confirm'])
     for name in ('deployment-id', 'pin-sha256', 'ci-run-id', 'ci-run-attempt', 'authorization-id'):
         parser.add_argument('--' + name, required=True)
+    parser.add_argument('--approval-file', type=Path)
+    parser.add_argument('--evidence-packet', type=Path)
     args = parser.parse_args()
+    if args.command != 'confirm' and (args.approval_file or args.evidence_packet):
+        raise Failure('invalid_request')
     root, pin, policy, entry, binding = context(args)
     state = root / 'state/ags-autodeploy/local-v2'
     if args.command == 'plan':
         print(json.dumps({'schema': 'ags.local-upgrade-request.v2', 'binding': binding,
                           'read_only': True, 'verification': 'not_run', 'authorized': False}))
         return 0
-    if args.command == 'status':
-        if (state / 'pending/receipt.json').exists():
-            result, _ = private_json(state / 'pending/receipt.json')
-            print(json.dumps(result))
-        else:
-            print(json.dumps({'status': 'unknown', 'binding': binding}))
-        return 0
+    if args.command in ('status', 'reconcile', 'confirm'):
+        result = acceptance(args.command, root, binding, approval_path=args.approval_file,
+                            packet_path=args.evidence_packet, pin=pin, pin_sha=args.pin_sha256,
+                            probe=lambda: acceptance_health(root, entry, binding))
+        print(json.dumps(result))
+        return result_exit(result) if args.command == 'confirm' else 0
     authorization, _ = private_json(root / 'config' / ('upgrade-authorization-' + args.authorization_id + '.json'))
     authorize(authorization, binding)
     require_apply_contracts(binding['host'])

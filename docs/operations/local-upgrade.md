@@ -27,11 +27,15 @@ Dagu native approval waits after its command finishes. Attaching it to `apply`
 would allow effects before approval and is prohibited. A long-lived deployment
 switch, starting a Dagu run or a successful CI run is not per-attempt approval.
 The transaction never writes `approved=true`. `awaiting_observation` is not
-completion and exits 86. This slice has no observation-approval or finalize command.
+completion and exits 86. S4 adds manual `confirm` for an existing valid transaction;
+it does not enable `apply`.
 
 The request parameters are `--deployment-id`, `--pin-sha256`, `--ci-run-id`,
 `--ci-run-attempt` and `--authorization-id`. These identify one local attempt.
-`plan`, `status` and `apply` use the same parameters. Plan reports unverified
+`plan`, `status`, `reconcile`, `confirm` and `apply` use the same parameters.
+`confirm` also accepts `--approval-file` and `--evidence-packet`, both private
+absolute paths. Missing approval returns 86. Invalid approval or evidence returns
+77. Neither query exit 0 nor plan exit 0 means the upgrade completed. Plan reports unverified
 stages; it does not download, smoke-test or prove installability.
 
 ## Fixed bundle and execution identity
@@ -45,7 +49,7 @@ The bundle and ancestors must be root-owned and not group/world writable.
 Required files include the wrapper, host adapter, transaction engine, policy,
 installer, v2 consumer, verifier, shared archive contract, `upgrade_smoke.py`,
 `upgrade_backup_contract.py`, `upgrade_inventory.py`, `upgrade_backup.py`,
-`upgrade_restore_verify.py`, `upgrade_recovery.py` and reviewed
+`upgrade_restore_verify.py`, `upgrade_recovery.py`, `upgrade_manual_approval.py` and reviewed
 `release-source.json`. Missing or changed dependencies fail with
 `dependency_unavailable`, exit 69; there is no PATH/source fallback.
 
@@ -59,9 +63,9 @@ The source does not discover or configure either machine's service commands.
 
 An independently provisioned root policy may later bind exact backup, stop,
 start, legacy-check and a local readyz endpoint. This slice does not implement
-or accept a mini handoff verifier. A command that exits zero, or a JSON digest,
-cannot prove mini provenance, the current pin/release/deployment, fresh readyz
-or independent observation approval. No arbitrary command arguments are accepted
+or accept a production mini handoff adapter. S4 validates human-carried evidence
+for existing transactions. A command that exits zero, or a JSON digest, cannot
+authenticate mini provenance or prove an independent observer's identity. No arbitrary command arguments are accepted
 from the Dagu request or release pin.
 
 ## Admission and transaction
@@ -80,8 +84,8 @@ effects; incomplete or mismatched attempts fail explicitly. A failure or crash
 at/after stop retains the cold-window fence and requires explicit recovery. The
 private S3 component permits separately approved pre-start program/receipt recovery
 only while data still equals Tq; it never starts the old version. There is no automatic old
-binary rollback and no automatic timeout-based claim release. Post-observation
-finalization is deliberately unavailable here.
+binary rollback and no automatic timeout-based claim release. S4 acceptance only
+records the human decision for an already-running, fully evidenced transaction.
 
 Migration admission matches all three columns exactly: old full SHA, new full
 SHA and the entire sorted observed migration set. The checked-in registry is
@@ -211,7 +215,8 @@ missing contract. S3 exercises cold-window quiescence and pre-start recovery onl
 private synthetic components. Production invocation and accepted host recovery
 remain later work. The pin loader rejects unknown fields, wrong types, missing fields, duplicate
 JSON fields, and an unsafe ancestor directory. Production admission for mini handoff, complete backup coverage, consistency,
-observation approval and finalize remains unimplemented and refused by apply. Journal-aware forward recovery
+production acceptance integration remains unimplemented and refused by apply.
+S4's consumer tests do not constitute an end-to-end apply test. Journal-aware forward recovery
 is also unimplemented. Empty policy is an additional default refusal, not proof
 that every stage is implemented fail-closed. Do not remove these refusals just
 to obtain an upgrade success.
@@ -220,6 +225,7 @@ Tests use `scripts/ags-python.sh` followed by `scripts/test_upgrade.py`,
 `scripts/test_upgrade_safety.py`, `scripts/test_upgrade_inventory.py`,
 `scripts/test_upgrade_backup.py`, `scripts/test_upgrade_restore.py`,
 `scripts/test_upgrade_quiescence.py`, `scripts/test_upgrade_recovery.py`,
+`scripts/test_upgrade_manual_approval.py`,
 `scripts/test_install_v2.py` or `scripts/test_release_consumer.py`. Run with
 independent HOME/TMPDIR/cwd and remove inherited Python injection variables.
 Real cryptographic acceptance is separately run with
@@ -227,3 +233,55 @@ Real cryptographic acceptance is separately run with
 pre-downloaded evidence. It never installs or executes candidate binaries.
 A dispatch candidate does not establish tag-push certificate acceptance.
 See [release operations](releases.md) and [single-root runtime](user-runtime.md).
+
+## S4 manual acceptance
+
+`upgrade_manual_approval.py` consumes a human declaration, not a signature.
+A file must be a single-link regular file with mode 0600, owned by the executing
+UID. Its parent is private, and every ancestor must exclude group/world writes
+and symlinks. Unknown or duplicate fields, an expired declaration, a wrong phase,
+and mismatched request, process generation or packet digest all refuse completion.
+Same-UID and root writers remain trusted. The actor fields cannot prove a human
+identity, so the operator checks the private source out of band.
+
+The executor can publish a fixed evidence packet with `write_packet` and a
+`decision=pending` request with `write_request`. It never fills `approve`.
+The operator reviews the actual backup and restore reports, installation/runtime
+identity, business and Git reads, provider results, recovery items and limitations.
+The operator records the decision outside the executor. The closed field contract
+is in [backup and recovery](backup-recovery.md#s4-acceptance-file-contract).
+A recommendation to observe for at least ten minutes does not authorize a timer
+to approve. Hard failures cannot be listed as accepted limitations.
+
+`confirm` holds the same nonblocking `hostops.lock` as S3. It reads the original
+claim, retained window authorization, transaction journal, consumed startup token,
+S1 seal, S2 inventory and payload, independent restore report and publication
+record. It calls S3's evidence validator rather than trusting a success flag.
+It checks installed bytes and receipt, current runtime generation, and both local
+and service health before committing. Missing or unknown health refuses completion.
+The private host policy must provide `readyz` and `service_readyz`; S4 adds no
+host entries and does not provision either URL.
+
+One atomic `completed-<request-fingerprint>.json` record contains both the completed
+receipt and approval consumption. Its durable publication is the acceptance point.
+`pending` then moves to `accepted-<generation>` on the same filesystem. If the
+process crashes after publication, retry only finishes that archive and returns
+the same record. A different approval cannot replace it. A staged record is not
+accepted until fresh checks pass and its publication completes. No retry invokes
+stop, install, start or a later host. Historical acceptance is not a promise that
+the service remains healthy after completion.
+
+`status` and `reconcile` only read facts under the existing hostops lock. They do
+not create the lock, repair a journal, consume approval or replay any effect.
+The cold marker stays in place even after acceptance. S4 grants no manager restart
+authority and does not remove S3's one-shot startup fence. A later host integration
+must separately define normal restart admission.
+
+The human mini-to-imile package binds the completed mini record and raw evidence
+bytes, both machine-specific pins, a shared release key, mini generation and a
+fresh human health readback. The release key includes repository ID, Release ID
+and tag, runtime revision/tree, and both platform asset digests and control
+revisions. Pins need not be equal. The receiver validates the carried bytes,
+source declaration and readback within five minutes, but hashes do not authenticate
+transport or prove mini is still unchanged. imile needs its own approval and local
+backup evidence. Nothing sends this package or initiates imile automatically.

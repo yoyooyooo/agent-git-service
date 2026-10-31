@@ -236,6 +236,20 @@ def dual_smoke(old_binary, new_binary, old, new, registry, *, runner=smoke):
         return migrations
 
 
+def acceptance(command, root, binding, *, approval_path=None, packet_path=None,
+               pin=None, pin_sha=None, probe=None):
+    """Separate non-install dispatch. It cannot invoke Transaction or host effects."""
+    from upgrade_manual_approval import confirm, status
+    try:
+        if command in ('status', 'reconcile'):
+            return status(root, binding)
+        if command == 'confirm':
+            return confirm(root, binding, approval_path, packet_path, pin, pin_sha, probe)
+        raise Failure('invalid_request')
+    except (ContractError, OSError, KeyError, TypeError, ValueError):
+        raise Failure('transaction_state_unknown', command) from None
+
+
 class Transaction:
     def __init__(self, state, binding, authorization, effects):
         self.state, self.binding, self.authorization, self.effects = state, binding, authorization, effects
