@@ -220,3 +220,14 @@ mode; the legacy production-pin gate remains disabled. The [local upgrade entry]
 is source preparation. Empty policy and explicit unimplemented-contract refusals block apply before effects. Each machine upgrade requires separate operator
 approval, compatible verified installation, and its normal stop/start checks.
 Do not use successful publication as a signal to restart a managed runtime.
+
+### S5 admitted upgrade lifecycle
+
+S5 [private-package admission](local-upgrade.md#s5-two-layer-admission) connects
+S3's existing one-shot handoff, not a second runtime or installer. Root-owned
+adapter provisioning must route its fixed manager through this launcher. The
+writer probe and runtime stop evidence remain mandatory. Completed confirmation
+does not clear the cold marker or authorize a manager restart; missing/consumed
+handoff continues to refuse spawn. Restoring normal restarts and starting old
+AGS after pre-start recovery remain separately scoped. Source and synthetic
+manager tests are not a native launchd/systemd acceptance or deployment approval.

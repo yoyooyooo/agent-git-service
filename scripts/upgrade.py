@@ -36,7 +36,8 @@ EXIT_CODES = {'invalid_request': 64, 'invalid_host': 64, 'release_pin_invalid': 
               'claim_held': 73, 'claim_mismatch': 73, 'lock_held': 73,
               'forward_only_recovery_required': 81, 'transaction_state_unknown': 82,
               'journal_invalid': 82, 'host_transaction_failed': 82,
-              'backup_contract_unimplemented': 83, 'mini_handoff_contract_unimplemented': 84,
+              'backup_contract_unimplemented': 83, 'minimum_contract_unsatisfied': 83,
+              'mini_handoff_contract_unimplemented': 84,
               'observation_finalize_unimplemented': 85, 'awaiting_observation': 86}
 
 
@@ -208,16 +209,22 @@ def validate_pin(pin, *, source=None):
         raise Failure('release_pin_invalid') from None
 
 
-def require_apply_contracts(host):
-    # These contracts have no trusted implementation in this slice. Policy cannot
-    # opt in by adding a host or a command that merely exits successfully.
-    missing = ['backup_git_config_coverage_and_git_db_consistency',
-               'independent_observation_approval_and_finalize']
-    if host == 'imile-win':
-        missing.append('trusted_mini_handoff_bound_to_pin_release_deployment')
-    error = Failure('backup_contract_unimplemented')
-    error.missing_contracts = missing
-    raise error
+def require_apply_contracts(host, *, policy=None, package=None, binding=None):
+    """Capability gate only; future stage evidence is never demanded in advance."""
+    from upgrade_wireup import Admission
+    if type(package) is not Admission:
+        missing = ['private_host_package', 'backup_git_config_coverage_and_git_db_consistency',
+                   'independent_observation_approval_and_finalize']
+        if host == 'imile-win':
+            missing.append('trusted_mini_handoff_bound_to_pin_release_deployment')
+        error = Failure('backup_contract_unimplemented')
+        error.missing_contracts = missing
+        raise error
+    try:
+        from upgrade_backup_contract import ContractError
+        package.validate(host, binding)
+    except ContractError as error:
+        raise Failure('minimum_contract_unsatisfied', 'admission', 83) from error
 
 
 def result_exit(result):
@@ -260,7 +267,7 @@ def bundle_engine(bundle, expected_digest, *, owner=0):
                         'install-release.py', 'release-source.json', 'upgrade_smoke.py',
                         'upgrade_backup_contract.py', 'upgrade_inventory.py',
                         'upgrade_backup.py', 'upgrade_restore_verify.py', 'upgrade_recovery.py',
-                        'upgrade_manual_approval.py'} <= set(manifest['files'])):
+                        'upgrade_manual_approval.py', 'upgrade_wireup.py'} <= set(manifest['files'])):
             raise Failure('dependency_unavailable')
         for name, digest in manifest['files'].items():
             if not re.fullmatch(r'[A-Za-z0-9_.-]+', name) or not SHA256.fullmatch(digest):

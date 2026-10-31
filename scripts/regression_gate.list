@@ -19,3 +19,4 @@
 
 [shell]
 scripts/wiki_regression_gate.sh
+scripts/upgrade-regression.sh

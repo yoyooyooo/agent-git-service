@@ -93,13 +93,13 @@ def require_host_abi(target):
 
 
 class InstallClosed(ValueError):
-    """V2 replacement stays closed until backup, handoff and observation exist."""
+    """Direct v2 replacement remains closed; S5 only admits the upgrade transaction."""
     exit_code = 83
 
 
 def require_install_contracts():
-    # Same missing contracts as upgrade apply. A host entry or a command that
-    # exits zero is not an implementation, and this gate does not read either.
+    # Deliberately NOT the S5 apply gate. Direct install has no cold-window
+    # transaction or manual-acceptance chain and cannot borrow its admission.
     missing = ['backup_git_config_coverage_and_git_db_consistency',
                'independent_observation_approval_and_finalize',
                'trusted_mini_handoff_bound_to_pin_release_deployment']

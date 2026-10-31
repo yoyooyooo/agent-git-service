@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import sys
 import socket
 import sqlite3
@@ -263,14 +264,22 @@ class Transaction:
     def run(self):
         # Authorization is rechecked here, before claim, backup or service calls.
         authorize(self.authorization, self.binding)
-        require_apply_contracts(self.binding.get('host'))
+        package = getattr(self.effects, 'package', None)
+        policy = getattr(self.effects, 'policy', None)
+        require_apply_contracts(self.binding.get('host'), policy=policy, package=package, binding=self.binding)
         controlled_directory(self.state)
         fd = os.open(self.state / 'hostops.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'w') as lock:
+            info = os.fstat(lock.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600):
+                raise Failure('journal_invalid', 'hostops')
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise Failure('lock_held') from None
+            if package is not None:
+                self.effects.owner_fd = lock.fileno()
             if self.pending.exists():
                 try:
                     claim, _ = private_json(self.pending / 'claim.json')
@@ -285,6 +294,11 @@ class Transaction:
                 if self.journal.get('binding') != self.binding or any(type(self.journal.get(k)) is not bool for k in FLAGS):
                     raise Failure('journal_invalid')
                 if self.journal.get('phase') == 'awaiting_observation':
+                    if package is not None:
+                        try:
+                            self.effects.verify_waiting()
+                        except (ContractError, OSError, KeyError, TypeError, ValueError) as error:
+                            raise Failure('minimum_contract_unsatisfied', 'awaiting_observation', 83) from error
                     self.effects.health()
                     result, _ = private_json(self.pending / 'receipt.json')
                     return result
@@ -339,6 +353,9 @@ class Transaction:
                     raise Failure('minimum_contract_unsatisfied', self.journal['phase'], 83) from error
                 if isinstance(error, Failure) and error.exit_code == 83:
                     raise
+                if (package is not None and self.journal['stop_started']
+                        and isinstance(error, Failure) and error.exit_code == 77):
+                    raise Failure('minimum_contract_unsatisfied', self.journal['phase'], 83) from error
                 if self.journal['stop_started'] or self.journal['install_started']:
                     raise Failure('forward_only_recovery_required', self.journal['phase']) from error
                 raise

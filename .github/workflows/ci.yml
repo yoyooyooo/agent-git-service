@@ -65,26 +65,8 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_generation.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_public_ranges.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_casefold_policy.py
-          PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_release.py
-          scripts/ags-python.sh fork/scripts/test_release_binding.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_install_sh.py
-          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_single_root.py
-          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_install_v2.py
-          scripts/ags-python.sh scripts/test_upgrade.py -v
-          scripts/ags-python.sh scripts/test_upgrade_inventory.py -v
-          scripts/ags-python.sh scripts/test_upgrade_backup.py BackupTests -v
-          scripts/ags-python.sh scripts/test_upgrade_restore.py RestoreTests -v
-          scripts/ags-python.sh scripts/test_upgrade_backup_regressions.py -v
-          scripts/ags-python.sh scripts/test_upgrade_quiescence.py -v
-          scripts/ags-python.sh scripts/test_upgrade_recovery.py -v
-          s4_sandbox=$(mktemp -d "$HOME/ags-s4-ci-XXXXXXXX")
-          mkdir -m 700 "$s4_sandbox/home" "$s4_sandbox/tmp" "$s4_sandbox/cwd"
-          s4_entry="$PWD/scripts/ags-python.sh"
-          s4_test="$PWD/scripts/test_upgrade_manual_approval.py"
-          (cd "$s4_sandbox/cwd" && env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX -u PYTHONPATH -u BASH_ENV \
-            HOME="$s4_sandbox/home" TMPDIR="$s4_sandbox/tmp" "$s4_entry" "$s4_test" -v)
-          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_upgrade_safety.py
-          scripts/ags-python.sh scripts/test_release_consumer.py -v
+          bash scripts/upgrade-regression.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_deploy_handoff.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_deploy_probe.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_maintenance_window.py
