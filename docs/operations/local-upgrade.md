@@ -144,10 +144,16 @@ The stage layer then runs `stop → quiescent → backup → restore_verified �
 install_started → installed → start_attempted → health → awaiting_observation`.
 It never demands a future seal before stopping. S3 owns the durable marker,
 writer evidence, dual locks, S1 seal/S2 restore revalidation and one-shot start.
-Window authorization is reread before stop, installation and start; imile's
-handoff must still be fresh. Stage contract failures retain 83 plus stopped/unknown
-service state and recovery-required journal fields. Installation/start outcomes
-that are unknown keep 81/82. A stopped 83 is not proof that the old service is up.
+Window authorization is reread before installation and immediately before each
+manager stop or start call, after durable intent writes. These checks also validate
+the package and imile handoff freshness. An unreadable, missing, malformed or
+unsafe-permission stage authorization file is a contract failure, not an unknown
+installation outcome. Stage contract failures retain 83 plus stopped/unknown
+service state and recovery-required journal fields. A rejected start preserves
+`start_attempted`, the cold marker and the no-replay boundary. Installation/start
+outcomes that are unknown keep 81/82. Initial request, pin, bundle and execution
+identity errors keep their existing codes. A stopped 83 is not proof that the old
+service is up.
 
 Successful apply stops at 86. Only a separate S4 human `confirm` can return
 completed / 0 after validating its own full evidence and consumption chain.

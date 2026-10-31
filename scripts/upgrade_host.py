@@ -222,12 +222,15 @@ class Effects:
         # a second descriptor (which would self-conflict).
         self._cold.owner = self.owner_fd
         self._cold.begin()
-    def stop(self): self._window().stop()
+    def stop(self): self._window().stop(authorize=self._authorize_stage)
     def quiescent(self): self._window().quiescent()
     def restore(self): self._window().restore()
     def _authorize_stage(self):
         package = self.package
-        current, _ = private_json(self.root / 'config' / ('upgrade-authorization-' + self.binding['authorization_id'] + '.json'))
+        try:
+            current, _ = private_json(self.root / 'config' / ('upgrade-authorization-' + self.binding['authorization_id'] + '.json'))
+        except Failure as error:
+            raise Failure('minimum_contract_unsatisfied', 'authorization_read', 83) from error
         if current != package.authorization:
             raise Failure('minimum_contract_unsatisfied', 'authorization_changed', 83)
         try:
@@ -321,7 +324,7 @@ class Effects:
             raise Failure('host_transaction_failed', 'install') from None
 
     def start(self):
-        self._window().start()
+        self._window().start(authorize=self._authorize_stage)
 
     def verify_waiting(self):
         from upgrade_manual_approval import load_chain, check_running
