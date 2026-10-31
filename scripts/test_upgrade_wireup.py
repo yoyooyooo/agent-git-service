@@ -621,6 +621,76 @@ class WireupTests(WireFixture):
     def test_stage_authorization_malformed_keeps_83(self):
         self.stage_authorization_read_failure(lambda path: path.write_text('{broken'))
 
+    def stage_package_read_failure(self, point, *, unreadable=False):
+        reached = []
+        retained = self.root / 'retained-host-package.json'
+        def tamper(phase):
+            if phase == point:
+                reached.append(phase)
+                if unreadable:
+                    self.package_path.chmod(0o000)
+                else:
+                    self.package_path.rename(retained)
+        with patch.object(cold, 'checkpoint', tamper):
+            with self.assertRaises(upgrade.Failure) as error: self.invoke()
+        self.assertEqual(reached, [point])
+        journal, _ = upgrade.private_json(self.pending / 'journal.json')
+        starting = point == 'manager-start-intent'
+        self.assertEqual(journal['phase'], 'start_attempted' if starting else 'quiescent')
+        self.assertEqual(journal['service_state'], 'stopped_or_unknown')
+        self.assertTrue(journal['recovery_required'])
+        self.assertTrue(journal['stop_started'])
+        self.assertEqual(journal['install_started'], starting)
+        self.assertEqual(journal['start_attempted'], starting)
+        marker, window, _ = cold.read_window(self.root)
+        self.assertEqual(marker['generation'], window['generation'])
+        self.assertEqual(window['phase'], 'start_attempted' if starting else 'quiescent')
+        self.assertEqual(window['start_attempted'], starting)
+        if starting:
+            self.assertTrue(window['handoff']['manager_requested'])
+            self.assertFalse(window['handoff']['consumed'])
+            self.assertRegex(window['handoff']['token'], r'^[0-9a-f]{32}$')
+        self.assertEqual(self.manager.starts, 0)
+        self.assertEqual(self.binary.read_bytes(), self.new if starting else self.old)
+        # Snapshot the package's unreadable state without trying to read it.
+        if unreadable:
+            self.assertEqual(self.package_path.stat().st_mode & 0o777, 0)
+            self.package_path.chmod(0o600)
+            before = snapshot(self.root)
+            self.package_path.chmod(0o000)
+        else:
+            before = snapshot(self.root)
+        with self.assertRaises(upgrade.Failure) as replay: self.invoke()
+        self.assertEqual(replay.exception.exit_code, 83)
+        if unreadable:
+            self.assertEqual(self.package_path.stat().st_mode & 0o777, 0)
+            self.package_path.chmod(0o600)
+        self.assertEqual(snapshot(self.root), before)
+        self.assertEqual(self.manager.starts, 0)
+        # Restoring the contract must not authorize replay of the failed attempt.
+        if not unreadable:
+            retained.rename(self.package_path)
+        before = snapshot(self.root)
+        with self.assertRaises(upgrade.Failure) as repaired_replay: self.invoke()
+        self.assertEqual(repaired_replay.exception.exit_code, 81)
+        self.assertEqual(snapshot(self.root), before)
+        self.assertEqual(self.manager.starts, 0)
+        # Classification is checked after the durable fences and no-replay.
+        self.assertEqual((error.exception.code, error.exception.exit_code),
+                         ('minimum_contract_unsatisfied', 83))
+
+    def test_package_missing_after_quiescent_keeps_83(self):
+        self.stage_package_read_failure('quiescent')
+
+    def test_package_missing_after_manager_start_intent_keeps_83(self):
+        self.stage_package_read_failure('manager-start-intent')
+
+    def test_package_unreadable_after_quiescent_keeps_83(self):
+        self.stage_package_read_failure('quiescent', unreadable=True)
+
+    def test_package_unreadable_after_manager_start_intent_keeps_83(self):
+        self.stage_package_read_failure('manager-start-intent', unreadable=True)
+
     def test_real_apply_prestart_recovery_and_poststart_refusal(self):
         def interrupted(name):
             if name == 'installed': raise RuntimeError('fixture lost response')

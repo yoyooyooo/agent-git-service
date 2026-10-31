@@ -44,7 +44,11 @@ class Admission:
         validate_binding(self.backup_binding)
         validate_request(binding, self.backup_binding)
         check_pin(self.pin, binding['pin_sha256'], self.backup_binding)
-        require(file_digest(self.package_path) == self.package_sha256, 'private_package_changed')
+        try:
+            package_sha256 = file_digest(self.package_path)
+        except OSError:
+            raise ContractError('private_package_unreadable') from None
+        require(package_sha256 == self.package_sha256, 'private_package_changed')
         authorize(self.authorization, binding)
         require(self.authorization['authorization_id'] == binding['authorization_id']
                 and self.authorization['actor']['type'] == 'human', 'window_authorization_invalid')
