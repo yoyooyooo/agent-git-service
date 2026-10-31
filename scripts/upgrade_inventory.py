@@ -59,7 +59,7 @@ WIKI_TABLES = frozenset(('wiki_page_revisions', 'wiki_changesets', 'wiki_git_rep
 WIKI_COLUMNS = {
     'wiki_changesets': {'changeset_id', 'repository_id', 'synth_commit_sha', 'synth_format_ver', 'source'},
     'wiki_pages': {'page_id', 'repository_id', 'head_blob_sha', 'body_size', 'body_inline',
-                   'head_revision_id', 'head_changeset_id'},
+                   'head_revision_id', 'head_changeset_id', 'deleted_at'},
     'wiki_page_revisions': {'page_id', 'revision_id', 'changeset_id', 'blob_sha', 'body_size',
                             'body_inline', 'commit_sha', 'op'},
     'wiki_blob_refs': {'blob_sha', 'size'}, 'wiki_pending_blobs': {'blob_sha', 'size'},
@@ -251,6 +251,17 @@ def check_oid(repo, value, kind):
 
 def git_blob(body):
     return hashlib.sha1(b'blob ' + str(len(body)).encode() + b'\0' + body).hexdigest()
+
+
+def require_wiki_body(blob_sha, size, body, store):
+    """Inline bodies and CAS objects share one check; delete revisions do not."""
+    value = oid(blob_sha)
+    require(value is not None, 'wiki_blob_missing')
+    integer(size, 0, 64 * 1024 * 1024)
+    if size <= 4096:
+        require(type(body) is bytes and len(body) == size and git_blob(body) == value, 'wiki_inline_invalid')
+    else:
+        require(store['cas'].get(value) == size, 'wiki_cas_missing')
 
 
 def file_digest(path):
@@ -454,38 +465,48 @@ def database_inventory(path, root, reviewed_schema_sha256, limit=MAX_ENTRIES):
                 local_oid(row['repository_id'], value, wiki=True)
             else:
                 synthetic.add(('wiki_changesets', value))
-        for table, sha_column, size_column in (('wiki_pages', 'head_blob_sha', 'body_size'),
-                                               ('wiki_page_revisions', 'blob_sha', 'body_size')):
-            for row in all_rows[table]:
-                if table == 'wiki_pages':
-                    require(row['repository_id'] in repos, 'wiki_repository_missing')
-                else:
-                    require(row['changeset_id'] in changesets, 'wiki_changeset_missing')
-                    cs = changesets[row['changeset_id']]
-                    require(oid(row['commit_sha']) == oid(cs['synth_commit_sha']), 'wiki_commit_mismatch')
-                    revision_key = (row['page_id'], row['revision_id'])
-                    require(revision_key not in revisions, 'wiki_duplicate_revision')
-                    revisions[revision_key] = row
-                value = oid(row[sha_column])
-                if value is None:
-                    require(table == 'wiki_page_revisions' and decode(row['op']) == 'delete', 'wiki_blob_missing')
-                    continue
-                size, body = row[size_column], row['body_inline']
-                integer(size, 0, 64 * 1024 * 1024)
-                if size <= 4096:
-                    require(type(body) is bytes and len(body) == size and git_blob(body) == value,
-                            'wiki_inline_invalid')
-                else:
-                    require(store['cas'].get(value) == size, 'wiki_cas_missing')
+        for row in all_rows['wiki_pages']:
+            require(row['repository_id'] in repos, 'wiki_repository_missing')
+            require_wiki_body(row['head_blob_sha'], row['body_size'], row['body_inline'], store)
+        for row in all_rows['wiki_page_revisions']:
+            require(row['changeset_id'] in changesets, 'wiki_changeset_missing')
+            cs = changesets[row['changeset_id']]
+            require(oid(row['commit_sha']) == oid(cs['synth_commit_sha']), 'wiki_commit_mismatch')
+            revision_key = (row['page_id'], row['revision_id'])
+            require(revision_key not in revisions, 'wiki_duplicate_revision')
+            revisions[revision_key] = row
+            op = decode(row['op'])
+            if op == 'delete':
+                require(oid(row['blob_sha']) is None and row['body_size'] == 0 and row['body_inline'] is None,
+                        'wiki_delete_revision_invalid')
+            else:
+                require(op in ('create', 'update', 'rename', 'restore', 'compact'), 'wiki_revision_op_unknown')
+                require_wiki_body(row['blob_sha'], row['body_size'], row['body_inline'], store)
+        # applyDelete keeps the pre-delete body on the page and points head at an
+        # op=delete revision whose blob is empty. deleted_at selects that class.
+        # A live head must still match the page body exactly. A tombstone must
+        # prove its retained body came from an earlier content revision of the
+        # same page; skipping every deleted row would hide a forged body.
         for page in all_rows['wiki_pages']:
             revision = revisions.get((page['page_id'], page['head_revision_id']))
             require(revision is not None and revision['changeset_id'] == page['head_changeset_id'],
                     'wiki_head_revision_missing')
             cs = changesets[revision['changeset_id']]
-            require(cs['repository_id'] == page['repository_id']
-                    and revision['blob_sha'] == page['head_blob_sha']
-                    and revision['body_size'] == page['body_size']
-                    and revision['body_inline'] == page['body_inline'], 'wiki_head_revision_mismatch')
+            require(cs['repository_id'] == page['repository_id'], 'wiki_head_revision_mismatch')
+            deleted = page['deleted_at'] not in (None, b'', '')
+            if decode(revision['op']) == 'delete':
+                require(deleted, 'wiki_head_revision_mismatch')
+                require(any(item['page_id'] == page['page_id']
+                            and decode(item['op']) in ('create', 'update', 'rename', 'restore', 'compact')
+                            and item['blob_sha'] == page['head_blob_sha']
+                            and item['body_size'] == page['body_size']
+                            and item['body_inline'] == page['body_inline']
+                            for item in revisions.values()), 'wiki_tombstone_body_unproven')
+            else:
+                require(not deleted
+                        and revision['blob_sha'] == page['head_blob_sha']
+                        and revision['body_size'] == page['body_size']
+                        and revision['body_inline'] == page['body_inline'], 'wiki_head_revision_mismatch')
         for table in ('wiki_blob_refs', 'wiki_pending_blobs'):
             for row in all_rows[table]:
                 value = oid(row['blob_sha'])

@@ -65,7 +65,11 @@ The path helper uses the repository's full name, such as
 select a disk path. Existing Wiki repositories are siblings such as
 `sample/project.wiki.git`. The same Git root can also hold `.wikiblobs` CAS and
 persistent delivery/retirement auxiliary state. Complete recovery must preserve
-those as well as every bare Git object and DB-held root; see
+those as well as every bare Git object and DB-held root. A soft-deleted Wiki
+page is a tombstone: `applyDelete` keeps the previous body on `wiki_pages` and
+points `head_revision_id` at an `op=delete` revision. Inventory checks that
+retained body against an earlier content revision instead of expecting the
+delete revision's empty blob to equal the page; see
 [backup and recovery](../operations/backup-recovery.md).
 
 ### Merge (Regular)
