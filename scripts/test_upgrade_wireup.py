@@ -307,6 +307,26 @@ class WireupTests(WireFixture):
             self.assertEqual(snapshot(self.root), before)
             self.assertFalse(self.pending.exists())
 
+    def test_live_health_accepts_consumed_restart_fence_but_no_other_failed_check(self):
+        self.assertEqual(self.invoke()[0], 86)
+        now = datetime.now(timezone.utc).isoformat()
+        checks = {'upgrade_cold_window': 'blocked', 'binary': 'ok', 'installation': 'ok'}
+        path = self.root / 'state/startup-health.json'
+        engine.save(path, {'schema': 'ags.startup-health.v1', 'checked_at': now,
+                           'ready_to_start': False, 'checks': checks, 'check_details': {}})
+        class Opener:
+            def open(inner, url, timeout):
+                return io.StringIO(json.dumps({'status': 'ready', 'version': self.request['new']}))
+        with patch.object(host.urllib.request, 'build_opener', return_value=Opener()):
+            result = host.acceptance_health(self.root, self.entry, self.request)
+            self.assertEqual(result['running_revision'], self.request['new'])
+            for bad in ({**checks, 'binary': 'identity_drift'},
+                        {**checks, 'upgrade_cold_window': 'unknown'}, {}):
+                engine.save(path, {'schema': 'ags.startup-health.v1', 'checked_at': now,
+                                   'ready_to_start': False, 'checks': bad})
+                with self.subTest(checks=bad), self.assertRaises(upgrade.Failure):
+                    host.acceptance_health(self.root, self.entry, self.request)
+
     def test_two_logical_hosts_require_completed_mini_and_own_imile_approval(self):
         imile = WireFixture()
         imile.host_name = 'imile-win'

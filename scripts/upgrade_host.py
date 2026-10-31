@@ -363,9 +363,15 @@ def acceptance_health(root, entry, binding):
     runtime, _ = private_json(root / 'state/runtime.json')
     startup, _ = private_json(root / 'state/startup-health.json')
     from upgrade_backup_contract import timestamp
-    if (startup.get('schema') != 'ags.startup-health.v1' or startup.get('ready_to_start') is not True
-            or not startup.get('checks') or any(value != 'ok' for value in startup['checks'].values())
-            or timestamp(startup['checked_at']) > timestamp(runtime['started_at'])):
+    from datetime import datetime, timezone
+    checks = startup.get('checks', {})
+    # Periodic runtime inspection reports a consumed one-shot token as blocked:
+    # that denies a NEW spawn, not the already-running generation. All other
+    # startup checks must stay healthy. S4 separately verifies token/generation.
+    if (startup.get('schema') != 'ags.startup-health.v1' or type(checks) is not dict or not checks
+            or checks.get('upgrade_cold_window') not in ('ok', 'blocked')
+            or any(value != 'ok' for key, value in checks.items() if key != 'upgrade_cold_window')
+            or timestamp(startup['checked_at']) > datetime.now(timezone.utc)):
         raise Failure('host_transaction_failed', 'health')
     for key in ('pid', 'supervisor_pid'):
         pid = runtime.get(key)
