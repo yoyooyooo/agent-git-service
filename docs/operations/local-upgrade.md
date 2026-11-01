@@ -236,6 +236,12 @@ The fixed manager fixture suppresses restart, proves both exit statuses, no
 forced kill, matching runtime generation and an empty process group. A successful
 stop command alone is insufficient. S6.02 `upgrade_host_evidence.py` refuses
 that record when it still names a live writer before the existing S3 check.
+S6.03 `upgrade_adapter_launchd.py` accepts only the fixed launchctl forms
+for one reviewed domain and label. Disable must read back disabled with no pid.
+Bootout timeout, supervisor failure, leftover descendants and boot mismatch do
+not count as a normal stop. A consumed one-shot cannot start again. The native
+isolated job sequence is unverified unless a permitted disposable probe runs;
+this source test does not call a production launchd service.
 The reviewed writer probe must close every
 other writer; locks do not constrain unmanaged processes or malicious same-UID
 file edits. Writer/lock/unknown failures retain the fence, with no automatic start.
