@@ -4,11 +4,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import platform
 import plistlib
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 HERE = Path(__file__).resolve().parent
 
@@ -21,6 +20,16 @@ def service(root):
 
 
 class LaunchdBaseline(unittest.TestCase):
+    def test_permission_refusal_runs_without_skip_on_shared_runners(self):
+        case = LaunchdTests(
+            'test_native_isolation_is_explicitly_unverified_off_darwin_or_without_permission')
+        result = unittest.TestResult()
+        with patch('platform.system', return_value='Linux'):
+            case.run(result)
+        self.assertEqual(result.skipped, [])
+        self.assertEqual(result.expectedFailures, [])
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+
     def test_command_success_is_not_normal_stop_evidence(self):
         """Existing evidence gate. Exit zero without closure is the behavior red."""
         import upgrade_host_evidence as evidence
@@ -74,11 +83,11 @@ class LaunchdTests(unittest.TestCase):
                 self.assertFalse(record['closed'])
 
     def test_native_isolation_is_explicitly_unverified_off_darwin_or_without_permission(self):
-        if platform.system() != 'Darwin':
-            self.skipTest('launchd native sequence is Darwin-only and unverified here')
-        # Do not touch the operator service. An isolated label is optional evidence.
-        outcome = self.adapter.native_probe(self.service, permitted=False)
-        self.assertEqual(outcome, {'verified': False, 'reason': 'permission_unavailable'})
+        # Refusal is portable; neither platform is native execution evidence.
+        for system in ('Linux', 'Darwin'):
+            with self.subTest(system=system), patch('platform.system', return_value=system):
+                outcome = self.adapter.native_probe(self.service, permitted=False)
+                self.assertEqual(outcome, {'verified': False, 'reason': 'permission_unavailable'})
 
 
 if __name__ == '__main__':
