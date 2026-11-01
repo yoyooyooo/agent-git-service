@@ -58,6 +58,34 @@ class FullRestoreTests(BackupTests):
             with self.subTest(name=name), self.assertRaisesRegex(c.ContractError, 'audit_restore_forbidden'):
                 cli.plan({**self.request, 'group': group})
 
+    def test_libexec_tool_stays_in_the_complete_plan_for_separate_provision(self):
+        self.repo()
+        group = self.prepared_group()
+        bundle = self.root / 'libexec/ags-autodeploy'
+        bundle.mkdir(parents=True, mode=0o700)
+        tool = bundle / 'upgrade.py'
+        tool.write_bytes(b'synthetic tool bytes')
+        member = next(obj for obj in group['objects'] if obj['role'] == 'tool')
+        member.update(source=str(bundle), restore_target=str(bundle), kind='directory')
+        sealed = self.take(group)
+        restore.verify_sealed_backup(sealed['backup_dir'], group=group,
+            dsn='sqlite:' + str(self.dbpath), schema=self.admission, trash=lambda _: None)
+        request = {'kind': 'full-restore', 'start_attempted': True,
+            'backup_dir': str(sealed['backup_dir']), 'group': group,
+            'dsn': 'sqlite:' + str(self.dbpath), 'schema_sha256': self.admission}
+        before = snapshot(self.root)
+        try:
+            result = cli.plan(request)
+            self.assertEqual({item['id'] for item in result['members']},
+                             {obj['id'] for obj in group['objects']})
+            selected = next(item for item in result['members'] if item['id'] == member['id'])
+            self.assertEqual(selected['role'], 'tool')
+            self.assertEqual(selected['target'], str(bundle))
+            self.assertIs(selected['provision_separately'], True)
+            self.assertEqual(result['effects'], [])
+        finally:
+            self.assertEqual(snapshot(self.root), before)
+
     def test_nested_audit_members_reject_the_entire_sealed_group(self):
         self.repo()
         for name in ('claim.json', 'journal.json', 'completion.json', 'authority.json'):
