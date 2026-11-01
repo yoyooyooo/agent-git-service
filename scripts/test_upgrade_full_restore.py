@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Full-group offline plans; real S1/S2 SQLite/Git, no live switch capability."""
 import copy
+import json
 from pathlib import Path
 import unittest
 from unittest.mock import Mock
@@ -56,6 +57,33 @@ class FullRestoreTests(BackupTests):
             group['objects'][-1].update(source=str(self.root / name), restore_target=str(self.root / name))
             with self.subTest(name=name), self.assertRaisesRegex(c.ContractError, 'audit_restore_forbidden'):
                 cli.plan({**self.request, 'group': group})
+
+    def test_nested_audit_members_reject_the_entire_sealed_group(self):
+        self.repo()
+        for name in ('claim.json', 'journal.json', 'completion.json', 'authority.json'):
+            with self.subTest(name=name):
+                group = self.prepared_group()
+                external = self.root / ('external-' + name)
+                audit = external / 'state/ags-autodeploy/local-v2/accepted' / name
+                audit.parent.mkdir(parents=True, mode=0o700)
+                audit.write_text('{"synthetic_audit":true}')
+                group['objects'].append({'id': 'external', 'role': 'external_authority',
+                    'kind': 'directory', 'source': str(external),
+                    'restore_target': str(external), 'depends_on': []})
+                sealed = self.take(group, snapshot_id='nested-' + name)
+                restore.verify_sealed_backup(sealed['backup_dir'], group=group,
+                    dsn='sqlite:' + str(self.dbpath), schema=self.admission, trash=lambda _: None)
+                manifest = json.loads((Path(sealed['backup_dir']) / 'manifest.json').read_bytes())
+                self.assertIn(str(audit), [item['restore_target'] for item in manifest['entries']])
+                request = {'kind': 'full-restore', 'start_attempted': True,
+                    'backup_dir': str(sealed['backup_dir']), 'group': group,
+                    'dsn': 'sqlite:' + str(self.dbpath), 'schema_sha256': self.admission}
+                before = snapshot(self.root)
+                try:
+                    with self.assertRaisesRegex(c.ContractError, 'audit_restore_forbidden'):
+                        cli.plan(request)
+                finally:
+                    self.assertEqual(snapshot(self.root), before)
 
     def test_changed_payload_and_missing_restore_report_refuse(self):
         self.prepare()

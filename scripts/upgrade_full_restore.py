@@ -12,19 +12,27 @@ from upgrade_restore_verify import load_sealed, load_inventory, verify_dependenc
 from upgrade_inventory import safe_path
 
 
+def require_snapshot_target(target):
+    path = Path(target)
+    require(not any(part in ('ags-autodeploy', 'accepted', 'pending') for part in path.parts)
+            and path.name not in ('upgrade-cold.json', 'runtime-authority.json',
+                'runtime.json', 'runtime.lock', 'install.lock', 'hostops.lock',
+                'claim.json', 'journal.json', 'cold-journal.json', 'completion.json',
+                'authority.json', 'recovery-journal.json')
+            and not path.name.startswith(('upgrade-authorization-', 'recovery-approval-')),
+            'audit_restore_forbidden')
+
+
 def plan(request):
     group = request['group']
     objects = validate_group(group)
     for obj in objects.values():
-        path = Path(obj['restore_target'])
-        require(not any(part in ('ags-autodeploy', 'accepted', 'pending') for part in path.parts)
-                and path.name not in ('upgrade-cold.json', 'runtime-authority.json',
-                    'runtime.json', 'runtime.lock', 'install.lock', 'hostops.lock',
-                    'claim.json', 'journal.json', 'cold-journal.json', 'completion.json',
-                    'authority.json', 'recovery-journal.json')
-                and not path.name.startswith(('upgrade-authorization-', 'recovery-approval-')),
-                'audit_restore_forbidden')
+        require_snapshot_target(obj['restore_target'])
     sealed, manifest, receipt, _ = load_sealed(request['backup_dir'], group)
+    # S1 authenticates each target and its mapping within a directory member.
+    # Reject the whole group, never filter entries out of a complete snapshot.
+    for entry in manifest['entries']:
+        require_snapshot_target(entry['restore_target'])
     load_inventory(sealed, manifest, group, request['schema_sha256'], request['dsn'])
     verify_payload(sealed, manifest['entries'], auxiliary={'manifest.json', 'receipt.json',
         'inventory.json', 'recovery-group.json', 'restore-report.json', 'publication.json',
