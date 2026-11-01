@@ -35,6 +35,15 @@ class Admission:
     package_path: Path
     package_sha256: str
 
+    def current_handoff(self, now=None):
+        from upgrade_manual_approval import release_key
+        if type(self.handoff) is dict and self.handoff.get('schema') == 'ags.handoff-reference.v2':
+            from upgrade_handoff import load
+            return load(self.handoff, release_key(self.pin), self.request['pin_sha256'],
+                        self.request, self.backup_binding['transaction_id'],
+                        now or datetime.now(timezone.utc))
+        return self.handoff
+
     def validate(self, host, binding):
         from upgrade_manual_approval import check_pin, validate_request, validate_handoff, release_key
         require(host == self.request['host'] and binding == self.request, 'request_binding_mismatch')
@@ -53,7 +62,7 @@ class Admission:
         require(self.authorization['authorization_id'] == binding['authorization_id']
                 and self.authorization['actor']['type'] == 'human', 'window_authorization_invalid')
         if host == 'imile-win':
-            validate_handoff(self.handoff, release_key(self.pin), binding['pin_sha256'], datetime.now(timezone.utc))
+            validate_handoff(self.current_handoff(), release_key(self.pin), binding['pin_sha256'], datetime.now(timezone.utc))
         else:
             require(self.handoff is None, 'unexpected_handoff')
 
@@ -97,7 +106,8 @@ def load_admission(root, pin, policy, entry, binding, authorization, bundle):
         fields(package, ('schema', 'host', 'host_instance', 'deployment_id', 'transaction_id',
                          'authorization_id', 'pin_sha256', 'dsn', 'schema_sha256', 'recovery_group',
                          'adapter_module', 'mini_handoff'))
-        require(package['schema'] == 'ags.private-host-package.v1', 'package_schema_invalid')
+        require(package['schema'] in ('ags.private-host-package.v1', 'ags.private-host-package.v2'),
+                'package_schema_invalid')
         for key in ('host_instance', 'deployment_id', 'transaction_id', 'authorization_id'):
             identifier(package[key])
         for key in ('host', 'deployment_id', 'authorization_id', 'pin_sha256'):
@@ -149,7 +159,14 @@ def load_admission(root, pin, policy, entry, binding, authorization, bundle):
         handoff = package['mini_handoff']
         if binding['host'] == 'imile-win':
             from upgrade_manual_approval import validate_handoff, release_key
-            validate_handoff(handoff, release_key(pin), binding['pin_sha256'], datetime.now(timezone.utc))
+            if package['schema'] == 'ags.private-host-package.v2':
+                from upgrade_handoff import load
+                load(handoff, release_key(pin), binding['pin_sha256'], binding,
+                     package['transaction_id'], datetime.now(timezone.utc))
+            else:
+                require(type(handoff) is dict and handoff.get('schema') == 'ags.manual-mini-handoff.v1',
+                        'handoff_schema_invalid')
+                validate_handoff(handoff, release_key(pin), binding['pin_sha256'], datetime.now(timezone.utc))
         else:
             require(handoff is None, 'unexpected_handoff')
         if not pending.exists():

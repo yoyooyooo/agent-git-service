@@ -333,6 +333,9 @@ def validate_record(record, packet, approval, approval_sha, packet_sha):
 
 def validate_handoff(value, key, imile_pin_sha, now):
     """Human-carried private package, never a network/source authentication claim."""
+    if type(value) is dict and value.get('schema') == 'ags.manual-mini-handoff.v2':
+        from upgrade_handoff import validate
+        return validate(value, key, imile_pin_sha, now)
     fields(value, ('schema', 'mini_pin', 'mini_pin_sha256', 'imile_pin_sha256', 'mini_packet',
                    'mini_evidence_package_sha256', 'mini_completion', 'mini_completed_receipt_sha256',
                    'mini_approval', 'mini_approval_sha256', 'release_key', 'mini_generation',

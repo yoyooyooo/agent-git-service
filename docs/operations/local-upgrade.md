@@ -389,3 +389,31 @@ are still revalidated. A blocked restart fence never grants another spawn.
 
 S6.10 adds only a read-only [full-group recovery plan](backup-recovery.md#s610-offline-full-group-plan).
 It does not expose a live restore/apply or authorize an old-start.
+
+## S6.11 human handoff v2
+
+A private `ags.private-host-package.v2` selects an `ags.handoff-reference.v2`:
+immutable original v1 base, its canonical digest, exact imile request digest,
+transaction, accepted epoch, and an owner-private refresh directory. The carried
+base still retains the original pin/packet/approval/completion raw bytes. V1
+validation is unchanged; v2 validates that base at its original receipt time,
+then independently requires the latest human readback to be at most 300 seconds
+old. This is not a larger TTL or authenticated remote observation.
+
+The internal `upgrade_handoff.refresh` registers an existing 0600 single-link
+human file under hostops. It does not create approvals or contact mini. Readbacks
+are numbered, hash chained and bound to the same base/request/transaction/epoch;
+latest is atomically projected after the immutable row is durable. Replaced,
+rolled-back or orphaned sequences refuse; an orphan after crash needs manual
+reconciliation, not overwrite. Package/window bytes are never refreshed.
+`Admission.current_handoff()` resolves the latest chain; stage validation reloads
+it before effects. Evidence packets embed that exact chain, not a mutable
+reference. After observation expiry, create a new packet and independent accept.
+
+The current lifecycle implementation does not supply a verified durable chain
+from accepted epoch to a restarted mini generation. V2 therefore **refuses a
+changed generation**, rather than trusting a claimed lifecycle. Refresh does not
+resume the S3 transaction automatically: an expired checkpoint remains fenced;
+there is no public resume/start command in this slice. Complete restart-chain
+and checkpoint-resume effects remain unavailable. See
+[recovery boundaries](backup-recovery.md#s611-long-window-checkpoints).
