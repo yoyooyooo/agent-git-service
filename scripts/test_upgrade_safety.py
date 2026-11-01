@@ -212,9 +212,17 @@ class SafetyTests(unittest.TestCase):
         _, digest = upgrade.private_json(self.root / 'config/ags-deploy-release-pin.json')
         args = SimpleNamespace(deployment_id='fixture', ci_run_id='1', ci_run_attempt='1',
                                authorization_id='auth', pin_sha256=digest)
+        from test_upgrade_identity import facts, profile
+        from upgrade_identity import parse_profile
+        identity = parse_profile(json.dumps(profile(str(self.root.parent))).encode(),
+                                 facts(str(self.root.parent)))
+        from dataclasses import replace
+        identity = replace(identity, root=str(self.root))
+        (bundle / 'host-profile.json').write_bytes(json.dumps(profile(str(self.root.parent))).encode())
+        args.identity_sha256 = identity.sha256
         patches = [patch.object(host, 'BUNDLE', bundle),
-                   patch.object(host, 'execution_identity', return_value=self.root),
-                   patch.object(host.socket, 'gethostname', return_value='mini'),
+                   patch.object(host, 'resolve_identity', return_value=identity),
+                   patch.object(host, 'require_same', return_value=identity),
                    patch.object(host, 'bundle_engine')]
         with contextlib.ExitStack() as stack:
             for guard in patches: stack.enter_context(guard)
@@ -241,7 +249,8 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(effects.mock_calls, [])
         self.assertFalse(state.exists())
         argv = ['upgrade_host.py', 'apply', '--deployment-id', 'test', '--pin-sha256', 'a' * 64,
-                '--ci-run-id', '1', '--ci-run-attempt', '1', '--authorization-id', 'auth']
+                '--ci-run-id', '1', '--ci-run-attempt', '1', '--authorization-id', 'auth',
+                '--identity-sha256', 'a' * 64]
         with patch.object(sys, 'argv', argv), patch.object(host, 'context', return_value=(self.root, {}, {}, {}, binding)), patch.object(
                 host, 'private_json', return_value=(auth, 'digest')), patch.object(host, 'child') as command, patch.object(host, 'Effects') as adapter:
             with self.assertRaisesRegex(upgrade.Failure, 'backup_contract_unimplemented'):

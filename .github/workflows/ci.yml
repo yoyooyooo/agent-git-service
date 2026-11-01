@@ -66,6 +66,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_public_ranges.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_casefold_policy.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_install_sh.py
+          # Includes S6.01 identity tests through the same isolated local runner.
           bash scripts/upgrade-regression.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_deploy_handoff.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_deploy_probe.py

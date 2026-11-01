@@ -97,6 +97,12 @@ uncertain startup needs read-only diagnosis, not another start. The marker has
 no TTL and S3 never removes it or automatically restores restart policy.
 Direct installers also refuse a pending upgrade even after OS locks were lost.
 
+S6.01 cold-window admission also uses the
+[fixed host identity](local-upgrade.md#s601-fixed-host-identity). A missing or
+changed profile blocks token consumption and spawn before the recovery check.
+Startup dependency refusal remains exit 78. This does not provision a profile
+or grant a normal restart.
+
 Ordinary installations without pending upgrades retain the standalone launcher
 path. A launcher provisioned for the new cold-window protocol needs adjacent
 `upgrade_recovery.py` and its complete pinned dependency set; missing imports

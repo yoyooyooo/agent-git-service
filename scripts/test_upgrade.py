@@ -82,7 +82,8 @@ class UpgradeTests(unittest.TestCase):
     def test_host_plan_does_not_claim_backup_or_invoke_effects(self):
         with patch.object(sys, 'argv', ['upgrade_host.py', 'plan', '--deployment-id', 'fixture',
                                       '--pin-sha256', 'c' * 64, '--ci-run-id', '1',
-                                      '--ci-run-attempt', '1', '--authorization-id', 'auth1']), patch.object(
+                                      '--ci-run-attempt', '1', '--authorization-id', 'auth1',
+                                      '--identity-sha256', 'a' * 64]), patch.object(
                 host, 'context', return_value=(self.root, {}, {}, {}, self.binding)), patch.object(
                 host, 'Transaction', side_effect=AssertionError('plan cannot transact')), contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(host.main(), 0)
@@ -99,7 +100,9 @@ class UpgradeTests(unittest.TestCase):
                 engine.migration_admission(old, new, migrations, registry)
 
     def test_wrong_uid_is_refused_before_business(self):
-        with patch.object(upgrade.os, 'getuid', return_value=0):
+        from upgrade_identity import IdentityError
+        with patch.object(upgrade, 'resolve_identity',
+                          side_effect=IdentityError('wrong_execution_identity', 77)):
             with self.assertRaisesRegex(upgrade.Failure, 'wrong_execution_identity'):
                 upgrade.execution_identity('mini')
         self.assertFalse(self.state.exists())

@@ -93,8 +93,16 @@ class WireFixture(ColdFixture):
                      'upgrade_backup_contract.py', 'upgrade_inventory.py', 'upgrade_backup.py',
                      'upgrade_restore_verify.py', 'upgrade_recovery.py', 'upgrade_manual_approval.py',
                      'release_verify.py', 'release_contract.py', 'release_install_v2.py',
-                     'install-release.py', 'upgrade_smoke.py'):
+                     'install-release.py', 'upgrade_smoke.py', 'upgrade_identity.py'):
             (self.bundle / name).write_bytes((HERE / name).read_bytes())
+        from test_upgrade_identity import facts, profile
+        import upgrade_identity
+        self.host_identity = upgrade_identity.parse_profile(
+            json.dumps(profile(str(self.root.parent))).encode(), facts(str(self.root.parent)))
+        from dataclasses import replace
+        self.host_identity = replace(self.host_identity, logical_host=self.host_name,
+                                     root=str(self.root), host_instance='synthetic-mini')
+        (self.bundle / 'host-profile.json').write_text(json.dumps(profile(str(self.root.parent))))
         self.adapter = self.bundle / 'upgrade_adapter_fixture.py'
         self.adapter.write_text("SCHEMA = 'ags.upgrade-host-adapter.v1'\ndef create(root, package):\n"
                                 " import sys\n return sys.modules['__main__'].CAPABILITIES[str(root)]\n")
@@ -155,7 +163,8 @@ class WireFixture(ColdFixture):
         args = SimpleNamespace(command=command, deployment_id=self.request['deployment_id'],
                                pin_sha256=self.pin_sha, ci_run_id='1', ci_run_attempt='1',
                                authorization_id=self.request['authorization_id'],
-                               approval_file=None, evidence_packet=None)
+                               approval_file=None, evidence_packet=None,
+                               identity_sha256=self.host_identity.sha256)
         for key, value in kwargs.items(): setattr(args, key, value)
         original_bundle = upgrade.bundle_engine
         original_stat = Path.stat
@@ -169,8 +178,10 @@ class WireFixture(ColdFixture):
                 return original_bundle(bundle, digest, owner=os.getuid())
         with ExitStack() as stack:
             stack.enter_context(patch.object(host, 'BUNDLE', self.bundle))
-            stack.enter_context(patch.object(host, 'execution_identity', return_value=self.root))
-            stack.enter_context(patch.object(host.socket, 'gethostname', return_value=self.request['host']))
+            stack.enter_context(patch.object(host, 'resolve_identity', return_value=self.host_identity))
+            import upgrade_identity
+            stack.enter_context(patch.object(upgrade_identity, 'resolve_identity',
+                                             return_value=self.host_identity))
             stack.enter_context(patch.object(host, 'bundle_engine', side_effect=check_bundle))
             stack.enter_context(patch.object(host.argparse.ArgumentParser, 'parse_args', return_value=args))
             stack.enter_context(patch.object(host.Effects, 'preflight', lambda effects: self.preflight(effects)))

@@ -19,4 +19,5 @@
 
 [shell]
 scripts/wiki_regression_gate.sh
+# Includes scripts/test_upgrade_identity.py through the isolated shared runner.
 scripts/upgrade-regression.sh

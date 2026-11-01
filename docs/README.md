@@ -51,7 +51,7 @@ accepted direction, or incremental work that has not fully landed yet.
 - [Production Deployment](production-deployment.md)
 - [Reviewed Maintenance Windows](operations/maintenance-window.md) - opt-in executor admission, exact candidate import, complete startup recovery review and default forward repair.
 - [Startup Dependency Recovery](operations/startup-dependency-recovery.md) - isolated fault-injection evidence, restart idempotence and boundaries that still require a maintenance window.
-- [Local v2 Upgrade](operations/local-upgrade.md) - fixed entry, per-machine manual authorization, durable claim and S5 two-layer private-package admission; public policy stays closed.
+- [Local v2 Upgrade](operations/local-upgrade.md) - fixed entry, per-machine manual authorization, durable claim, S6.01 fixed host identity, and S5 two-layer private-package admission; public policy stays closed.
 - [Local Backup and Recovery](operations/backup-recovery.md) - S1 inventory, S2 offline backup/restore, S3 cold-window recovery and S4 manual acceptance/handoff and S5 wiring contracts; default apply remains closed.
 - [Single-root User Runtime](operations/user-runtime.md) - one installation under `~/.ags`, durable startup inputs, bounded logs and explicit migration.
 - [Automatic Git Maintenance](operations/git-maintenance.md) - primary-owned storage housekeeping, application object protection and explicit history-retirement boundaries.
