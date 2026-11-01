@@ -668,13 +668,8 @@ class InventoryTests(unittest.TestCase):
 
     def test_bundle_requires_both_s1_modules_by_exact_digest(self):
         bundle = self.root / 'bundle'; bundle.mkdir(mode=0o700)
-        names = ('upgrade_host.py', 'upgrade.py', 'upgrade_engine.py', 'upgrade_policy.json',
-                 'release_verify.py', 'release_contract.py', 'release_install_v2.py',
-                 'install-release.py', 'release-source.json', 'upgrade_smoke.py',
-                 'upgrade_backup_contract.py', 'upgrade_inventory.py',
-                 'upgrade_backup.py', 'upgrade_restore_verify.py', 'upgrade_recovery.py',
-                 'upgrade_manual_approval.py', 'upgrade_wireup.py',
-                 'upgrade_identity.py')
+        from upgrade_bundle import REQUIRED
+        names = REQUIRED
         hashes = {}
         for name in names:
             path = bundle / name; path.write_bytes(b'inert fixture'); path.chmod(0o600)

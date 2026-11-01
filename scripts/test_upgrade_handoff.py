@@ -88,6 +88,25 @@ class HandoffTests(ManualFixture):
             handoff.refresh(self.root, ref, path, self.base['release_key'], '1' * 64,
                             binding, ref['transaction_id'], self.later)
         self.assertEqual(snapshot(self.root), before)
+        later = self.later + timedelta(minutes=12)
+        second = copy.deepcopy(self.readback)
+        second.update(sequence=2, previous_sha256=c.fingerprint(self.readback),
+                      observed_at=later.isoformat(), received_at=later.isoformat())
+        engine.save(path, second)
+        previous_bytes = (Path(ref['refresh_directory']) / 'readback-0001.json').read_bytes()
+        handoff.refresh(self.root, ref, path, self.base['release_key'], '1' * 64,
+                        binding, ref['transaction_id'], later)
+        self.assertEqual((Path(ref['refresh_directory']) / 'readback-0001.json').read_bytes(), previous_bytes)
+        self.assertEqual(c.canonical(ref), package)
+        self.assertEqual(handoff.load(ref, self.base['release_key'], '1' * 64, binding,
+                         ref['transaction_id'], later)['readbacks'], [self.readback, second])
+        # Rolling latest back while the immutable second row remains is rejected.
+        engine.save(Path(ref['refresh_directory']) / 'latest.json',
+                    {'sequence': 1, 'sha256': c.fingerprint(self.readback)})
+        before = snapshot(self.root)
+        with self.assertRaisesRegex(c.ContractError, 'handoff_refresh_incomplete'):
+            handoff.load(ref, self.base['release_key'], '1' * 64, binding, ref['transaction_id'], later)
+        self.assertEqual(snapshot(self.root), before)
 
 
 if __name__ == '__main__':

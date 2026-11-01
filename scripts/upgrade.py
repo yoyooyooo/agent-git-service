@@ -271,7 +271,12 @@ def bundle_engine(bundle, expected_digest, *, owner=0):
                         'upgrade_backup_contract.py', 'upgrade_inventory.py',
                         'upgrade_backup.py', 'upgrade_restore_verify.py', 'upgrade_recovery.py',
                         'upgrade_manual_approval.py', 'upgrade_wireup.py',
-                        'upgrade_identity.py'} <= set(manifest['files'])):
+                        'upgrade_identity.py', 'upgrade', 'ags-python.sh', 'ags-runtime.py',
+                        'upgrade_bundle.py', 'upgrade_host_evidence.py', 'upgrade_bootstrap.py',
+                        'upgrade_adapter_launchd.py', 'upgrade_adapter_systemd.py',
+                        'upgrade_metadata.py', 'upgrade_trash.py', 'upgrade_lifecycle.py',
+                        'upgrade_recovery_cli.py', 'upgrade_forward_recovery.py',
+                        'upgrade_full_restore.py', 'upgrade_handoff.py', 'upgrade_pin.py'} <= set(manifest['files'])):
             raise Failure('dependency_unavailable')
         for name, digest in manifest['files'].items():
             if not re.fullmatch(r'[A-Za-z0-9_.-]+', name) or not SHA256.fullmatch(digest):

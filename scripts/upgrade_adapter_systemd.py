@@ -63,4 +63,6 @@ class Manager:
 
 
 def create(root, package):
-    return {'manager': Manager(package), 'writer_probe': lambda: None, 'trash': lambda path: None}
+    """Refuse before claim: native effects/observer have not been implemented."""
+    from upgrade_backup_contract import ContractError
+    raise ContractError('native_adapter_unavailable')

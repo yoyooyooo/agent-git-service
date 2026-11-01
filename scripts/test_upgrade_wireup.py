@@ -89,12 +89,12 @@ class WireFixture(ColdFixture):
                     'version': self.pin['version'], 'runtime': self.pin['runtime']})
         # Exact-digest bundle contains all actual implementation modules. The
         # sole private adapter is a fixed fixture factory, never a success argv.
-        for name in ('upgrade.py', 'upgrade_host.py', 'upgrade_engine.py', 'upgrade_wireup.py',
-                     'upgrade_backup_contract.py', 'upgrade_inventory.py', 'upgrade_backup.py',
-                     'upgrade_restore_verify.py', 'upgrade_recovery.py', 'upgrade_manual_approval.py',
-                     'release_verify.py', 'release_contract.py', 'release_install_v2.py',
-                     'install-release.py', 'upgrade_smoke.py', 'upgrade_identity.py'):
-            (self.bundle / name).write_bytes((HERE / name).read_bytes())
+        from upgrade_bundle import REQUIRED
+        for name in REQUIRED:
+            if name in ('upgrade_policy.json', 'release-source.json'):
+                continue  # Already written above with this synthetic fixture binding.
+            source = HERE.parent / 'fork/release-source.json' if name == 'release-source.json' else HERE / name
+            (self.bundle / name).write_bytes(source.read_bytes())
         from test_upgrade_identity import facts, profile
         import upgrade_identity
         self.host_identity = upgrade_identity.parse_profile(
@@ -199,7 +199,12 @@ class WireFixture(ColdFixture):
         observation = {'generation': runtime['generation'], 'started_at': runtime['started_at'],
                        'ended_at': now.isoformat(), 'reports': {key: {'status': 'pass', 'sha256': 'a' * 64}
                          for key in ('business', 'git', 'provider', 'recovery')}, 'unresolved_blockers': []}
-        packet = manual.make_packet(self.root, self.request, self.pin, self.pin_sha, observation, self.probe, handoff=self.package['mini_handoff'])
+        handoff = self.package['mini_handoff']
+        if self.package['schema'] == 'ags.private-host-package.v2':
+            from upgrade_handoff import load
+            handoff = load(handoff, manual.release_key(self.pin), self.pin_sha, self.request,
+                           self.package['transaction_id'], now)
+        packet = manual.make_packet(self.root, self.request, self.pin, self.pin_sha, observation, self.probe, handoff=handoff)
         packet_path = self.root / 'packet-s5.json'; manual.write_packet(packet_path, packet)
         approval_path = self.root / 'approval-s5.json'
         approval = manual.write_request(approval_path, packet)
@@ -339,6 +344,12 @@ class WireupTests(WireFixture):
                     host.acceptance_health(self.root, self.entry, self.request)
 
     def test_two_logical_hosts_require_completed_mini_and_own_imile_approval(self):
+        self.two_logical_hosts()
+
+    def test_v2_reference_two_hosts_apply_then_own_confirm_without_package_mutation(self):
+        self.two_logical_hosts(handoff_v2=True)
+
+    def two_logical_hosts(self, handoff_v2=False):
         imile = WireFixture()
         imile.host_name = 'imile-win'
         imile.setUp()
@@ -388,10 +399,33 @@ class WireupTests(WireFixture):
                 self.assertEqual(denied.exception.exit_code, 83)
                 self.assertEqual(snapshot(imile.root), before)
                 self.assertFalse(imile.pending.exists())
+            if handoff_v2:
+                from upgrade_handoff import refresh
+                reference = {'schema': 'ags.handoff-reference.v2', 'base': handoff,
+                    'base_sha256': c.fingerprint(handoff), 'imile_request_sha256': c.fingerprint(imile.request),
+                    'transaction_id': imile.package['transaction_id'], 'accepted_epoch': 1,
+                    'refresh_directory': str(imile.root / 'handoff-refresh')}
+                Path(reference['refresh_directory']).mkdir(mode=0o700)
+                fresh = datetime.now(timezone.utc)
+                readback = {key: reference[key] for key in ('base_sha256', 'imile_request_sha256',
+                            'transaction_id', 'accepted_epoch')}
+                readback.update(schema='ags.manual-mini-readback.v2', sequence=1, previous_sha256=None,
+                    actor={'type': 'human', 'id': 'fixture-human', 'source': 'carried-fixture'},
+                    observed_at=fresh.isoformat(), received_at=fresh.isoformat(),
+                    mini_generation=handoff['mini_generation'],
+                    health={'status': 'ready', 'release_key': handoff['release_key']},
+                    unresolved=[], confirmed=True)
+                carried = imile.root / 'human-readback.json'; engine.save(carried, readback)
+                refresh(imile.root, reference, carried, handoff['release_key'], imile.pin_sha,
+                        imile.request, imile.package['transaction_id'], fresh)
+                imile.package['schema'] = 'ags.private-host-package.v2'
+                handoff = reference
             imile.package['mini_handoff'] = handoff
             engine.save(imile.package_path, imile.package)
             imile.auth['evidence_sha256'] = hashlib.sha256(imile.package_path.read_bytes()).hexdigest()
             engine.save(imile.root / 'config/upgrade-authorization-window-auth.json', imile.auth)
+            package_bytes = imile.package_path.read_bytes()
+            authorization_bytes = (imile.root / 'config/upgrade-authorization-window-auth.json').read_bytes()
             self.assertEqual(imile.invoke()[0], 86)
             with self.assertRaises(upgrade.Failure) as missing: imile.invoke('confirm')
             self.assertEqual(missing.exception.exit_code, 86)
@@ -402,6 +436,9 @@ class WireupTests(WireFixture):
             self.assertEqual(wrong.exception.exit_code, 77)
             self.assertEqual(imile.accept()[0], 0)
             self.assertEqual(imile.manager.starts, 1)
+            self.assertEqual(imile.package_path.read_bytes(), package_bytes)
+            self.assertEqual((imile.root / 'config/upgrade-authorization-window-auth.json').read_bytes(),
+                             authorization_bytes)
         finally:
             imile.doCleanups()
 

@@ -52,6 +52,10 @@ class FullRestoreTests(BackupTests):
             'depends_on': []})
         with self.assertRaisesRegex(c.ContractError, 'audit_restore_forbidden'):
             cli.plan({**self.request, 'group': group})
+        for name in ('claim.json', 'journal.json', 'authority.json', 'completion.json'):
+            group['objects'][-1].update(source=str(self.root / name), restore_target=str(self.root / name))
+            with self.subTest(name=name), self.assertRaisesRegex(c.ContractError, 'audit_restore_forbidden'):
+                cli.plan({**self.request, 'group': group})
 
     def test_changed_payload_and_missing_restore_report_refuse(self):
         self.prepare()

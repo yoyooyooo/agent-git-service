@@ -19,7 +19,9 @@ def plan(request):
         path = Path(obj['restore_target'])
         require(not any(part in ('ags-autodeploy', 'accepted', 'pending') for part in path.parts)
                 and path.name not in ('upgrade-cold.json', 'runtime-authority.json',
-                    'runtime.json', 'runtime.lock', 'install.lock', 'hostops.lock')
+                    'runtime.json', 'runtime.lock', 'install.lock', 'hostops.lock',
+                    'claim.json', 'journal.json', 'cold-journal.json', 'completion.json',
+                    'authority.json', 'recovery-journal.json')
                 and not path.name.startswith(('upgrade-authorization-', 'recovery-approval-')),
                 'audit_restore_forbidden')
     sealed, manifest, receipt, _ = load_sealed(request['backup_dir'], group)

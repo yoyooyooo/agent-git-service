@@ -247,3 +247,15 @@ does not clear the cold marker or authorize a manager restart; missing/consumed
 handoff continues to refuse spawn. Restoring normal restarts and starting old
 AGS after pre-start recovery remain separately scoped. Source and synthetic
 manager tests are not a native launchd/systemd acceptance or deployment approval.
+
+### S6 source-only lifecycle limit
+
+`upgrade_lifecycle.py`, `upgrade_recovery_cli.py` and
+`upgrade_forward_recovery.py` currently validate in-memory planning contracts.
+They are not connected to this launcher's durable admission or spawn protocol.
+A returned `started=true` from the old-start helper is not a process observation.
+No new public lifecycle/recover command is available. Accepted upgrades still
+retain the one-shot cold fence. Normal restart, reboot and a second upgrade
+through new epoch authority are **not verified or enabled** by these modules.
+See [integration limits](local-upgrade.md#s613-source-integration-boundary) and
+[recovery matrix](backup-recovery.md#s613-fault-matrix).

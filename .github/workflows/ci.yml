@@ -33,7 +33,7 @@ jobs:
   checks:
     name: Source and governance
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,7 +66,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_public_ranges.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_casefold_policy.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_install_sh.py
-          # Includes S6.01 identity tests through the same isolated local runner.
+          # Includes S1–S6 source contracts through the same isolated sequential runner.
           bash scripts/upgrade-regression.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_deploy_handoff.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_deploy_probe.py
