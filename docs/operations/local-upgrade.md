@@ -386,3 +386,6 @@ Live health treats a consumed cold-window token as a restart refusal, not a
 failure of the running generation. Every other periodic startup check must be
 healthy; the current process, generation, installation and both health routes
 are still revalidated. A blocked restart fence never grants another spawn.
+
+S6.10 adds only a read-only [full-group recovery plan](backup-recovery.md#s610-offline-full-group-plan).
+It does not expose a live restore/apply or authorize an old-start.

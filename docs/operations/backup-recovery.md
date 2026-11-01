@@ -448,3 +448,23 @@ S5 and must not be inferred from completed/old_restored. Native Darwin/Linux
 full-chain, isolated VM and production-copy startup exercises remain outside
 this source evidence. Publication, installation, service configuration, actual
 windows, human decisions and recovery-material retirement require separate approval.
+
+## S6.10 offline full-group plan
+
+`upgrade_recovery_cli.plan` accepts `kind=full-restore` for an offline plan only.
+It requires the original complete S1 group and seal, unchanged payload,
+inventory/dependencies, and a published successful S2 restore report. A missing
+tool, secret dependency or member refuses the entire plan. Audit claims,
+authorizations, journals and runtime authority are not restore-group members.
+The result has `effects=[]`, `started=false`, `live_switch_supported=false`.
+There is no full-restore apply entry, live rename or manager capability.
+
+Before any separately approved implementation can switch live data, preserve
+the failed group including WAL/SHM, close every writer, materialize independent
+staging and rerun S2. Explicitly approve Tq data loss and reconcile external
+provider/Edge results. Journal every object switch; a mixed group remains fenced.
+Never merge old WAL/SHM into the restored database. Tool/manager restoration
+belongs to an independent frozen provisioner, never the running recovery tool.
+Old-start and incident acceptance require separate approval. This source slice
+provides neither those effects nor a claim that full live recovery was tested.
+See [provisioning](upgrade-provisioning.md) and [local upgrade](local-upgrade.md).

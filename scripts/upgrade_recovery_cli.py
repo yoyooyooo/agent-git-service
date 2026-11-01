@@ -18,6 +18,9 @@ class RecoveryError(ValueError):
 
 
 def plan(journal):
+    if journal.get('kind') == 'full-restore':
+        from upgrade_full_restore import plan as full_restore_plan
+        return full_restore_plan(journal)
     if journal.get('start_attempted') is True:
         raise RecoveryError('old_start_forbidden')
     return {'effects': ['restore-old-bytes'], 'started': False,
