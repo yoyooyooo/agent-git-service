@@ -120,6 +120,8 @@ identity mismatch, and missing observation permission stay open. The S3 field
 check is unchanged. `upgrade_bootstrap.py` refuses a legacy pid/time receipt;
 a same-binary launcher transition can admit a real generation receipt and does
 not upgrade the business binary. A crash at any bootstrap phase stays fenced.
+The launchd adapter is documented with the
+[local upgrade stop contract](local-upgrade.md#s3-private-cold-window-protocol).
 
 ## Runtime lifecycle
 
