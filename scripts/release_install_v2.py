@@ -57,6 +57,8 @@ def inventory(installer, release, version):
     rows = release.get('assets', [])
     if len(rows) != 9 or {r['name'] for r in rows} != names:
         raise ValueError('release_artifact_unverified')
+    if len({row.get('id') for row in rows if type(row.get('id')) is int}) != 9:
+        raise ValueError('release_digest_mismatch')
     for row in rows:
         maximum = installer.MAX_ARCHIVE if row['name'].endswith('.tar.gz') else 1024 * 1024
         if (type(row.get('id')) is not int or row['id'] <= 0 or type(row.get('size')) is not int

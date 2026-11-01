@@ -16,3 +16,14 @@ Root provision, helper installation, and the first launcher transition remain
 separate approved operations. See
 [local upgrade](local-upgrade.md#fixed-bundle-and-execution-identity) and
 [user runtime](user-runtime.md#cold-window-startup-fence).
+
+## S6.12 release inputs
+
+Use the [offline pin preparation contract](releases.md#s612-offline-pin-preparation)
+to check synthetic candidate bindings without generating an installable pin.
+Do not place its non-installable envelope at the deployment pin path. Only a
+separately accepted real immutable Release, both platform crypto/provenance,
+exact-source CI and host-specific policy/bundle digests can supply that pin.
+No provision, publication switch, release-source selection or host configuration
+is changed by preparation. Policy and manifest remain separate from package and
+pin so their hashes do not form a self-reference.
