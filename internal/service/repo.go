@@ -943,6 +943,15 @@ func (s *Service) DeleteRepo(ctx context.Context, fullName string) error {
 func (s *Service) deleteRepoCascade(tx *gorm.DB, repoID uint, fullName string) error {
 	del := func(stmt *gorm.DB) error { return stmt.Error }
 
+	if tx.Dialector.Name() == "sqlite" {
+		// SQLite ignores FOR UPDATE. Reserve its writer before any cascade
+		// reads: upgrading a deferred read transaction can fail immediately
+		// with SQLITE_BUSY when a background writer is waiting to commit.
+		if err := tx.Exec("UPDATE repositories SET id = id WHERE id = ?", repoID).Error; err != nil {
+			return err
+		}
+	}
+
 	orgID, err := repoOrganizationIDTx(tx, repoID)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
