@@ -318,6 +318,12 @@ The [S6.02 launcher transition](user-runtime.md#cold-window-startup-fence) descr
 under the cold-window fence is not
 that CLI: it only admits a same-binary generation receipt and cannot start a
 recovered service.
+
+S6.08 `upgrade_recovery_cli.py` does not change the S3 return. `plan` lists the
+old-byte effect and starts nothing. `old-start` requires a separate approval
+whose id is not the pre-start recovery approval. Data that differs from Tq,
+or a consumed token, refuses. A successful call returns `aborted_old_restored`
+and a new generation. It does not spawn a process.
 Post-start full DB/Git/CAS/config restore is not implemented or authorized.
 
 ## Verification boundary
