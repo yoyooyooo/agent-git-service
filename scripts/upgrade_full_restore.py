@@ -14,7 +14,13 @@ from upgrade_inventory import safe_path
 
 def require_snapshot_target(target):
     path = Path(target)
-    require(not any(part in ('ags-autodeploy', 'accepted', 'pending') for part in path.parts)
+    # libexec/ags-autodeploy supplies tools, unlike state/ags-autodeploy.
+    # Only exempt that component, not audit paths nested below the bundle.
+    audit_component = any(part in ('accepted', 'pending') or
+                          (part == 'ags-autodeploy' and
+                           (index == 0 or path.parts[index - 1] != 'libexec'))
+                          for index, part in enumerate(path.parts))
+    require(not audit_component
             and path.name not in ('upgrade-cold.json', 'runtime-authority.json',
                 'runtime.json', 'runtime.lock', 'install.lock', 'hostops.lock',
                 'claim.json', 'journal.json', 'cold-journal.json', 'completion.json',
