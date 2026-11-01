@@ -113,6 +113,14 @@ process-group-empty evidence. A fixed manager must separately prove supervisor
 exit and restart suppression; a stop command returning zero does not prove it.
 See [pre-start recovery](backup-recovery.md#s3-pre-start-recovery).
 
+S6.02 adds shared stop and writer evidence in `upgrade_host_evidence.py`.
+A manager command that exits zero while a writer pid is still alive is
+`normal_stop_unproven`. Forced kill, a surviving descendant, boot or process
+identity mismatch, and missing observation permission stay open. The S3 field
+check is unchanged. `upgrade_bootstrap.py` refuses a legacy pid/time receipt;
+a same-binary launcher transition can admit a real generation receipt and does
+not upgrade the business binary. A crash at any bootstrap phase stays fenced.
+
 ## Runtime lifecycle
 
 The launcher reads `config/runtime.env`, preserves ordinary authentication, starts

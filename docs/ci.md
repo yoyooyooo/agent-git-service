@@ -52,7 +52,7 @@ and `bun test scripts/release.test.ts` for event, identity, merged-PR and CI
 refusals, admission when the runtime PR has no human approval but the control PR does, ABI/archive checks, nine-asset publication, and uncertain-write readback.
 Synthetic fixtures do not replace real cryptographic platform acceptance.
 The legacy production-pin verifier stays disabled. The complete-checkout v2
-consumer, S1–S5 local upgrade contracts, and S6.01 identity tests run through `bash scripts/upgrade-regression.sh`,
+consumer, S1–S5 local upgrade contracts, S6.01 identity tests, and S6.02 evidence/bootstrap tests run through `bash scripts/upgrade-regression.sh`,
 shared by Fork CI and `scripts/regression_gate.list`. Each test gets independent
 HOME/TMPDIR/cwd, removes inherited Python injection variables and uses
 `scripts/ags-python.sh`. Public host/migration policy stays empty and default
