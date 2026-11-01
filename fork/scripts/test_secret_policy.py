@@ -21,9 +21,17 @@ class SecretPolicyTests(unittest.TestCase):
             target = root / "internal/snapshotstore/retention.go"
             target.parent.mkdir(parents=True)
             line = (
+                '\tif publishedOSMetadata(item) {\n'
+                '\t\tslog.Warn("skipping published snapshot OS metadata", "entry", key)\n'
+                '\t\tcontinue\n'
+                '\t}\n'
                 '\tif !item.IsDir() || !hexDirectoryKey(key) {\n'
                 '\t\treturn nil, errors.New("unexpected published snapshot entry")\n'
                 '\t}\n'
+                'func publishedOSMetadata(item os.DirEntry) bool {\n'
+                '\tname := item.Name()\n'
+                '\treturn name == ".DS_Store" || strings.HasPrefix(name, "._")\n'
+                '}\n'
                 'func hexDirectoryKey(key string) bool {\n'
                 '\tif len(key) != 64 {\n'
                 '\t\treturn false\n'

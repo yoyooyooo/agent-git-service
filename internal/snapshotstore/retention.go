@@ -3,9 +3,11 @@ package snapshotstore
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ngaut/agent-git-service/internal/edgeprotocol"
@@ -75,6 +77,14 @@ func (s *Store) ConfigureRetention(policy RetentionPolicy) error {
 	return nil
 }
 
+func publishedOSMetadata(item os.DirEntry) bool {
+	if !item.Type().IsRegular() {
+		return false
+	}
+	name := item.Name()
+	return name == ".DS_Store" || strings.HasPrefix(name, "._")
+}
+
 func hexDirectoryKey(key string) bool {
 	if len(key) != 64 {
 		return false
@@ -98,6 +108,10 @@ func (s *Store) inventoryLocked(ctx context.Context) ([]retainedInfo, error) {
 			return nil, err
 		}
 		key := item.Name()
+		if publishedOSMetadata(item) {
+			slog.Warn("skipping published snapshot OS metadata", "entry", key)
+			continue
+		}
 		if !item.IsDir() || !hexDirectoryKey(key) {
 			return nil, errors.New("unexpected published snapshot entry")
 		}
