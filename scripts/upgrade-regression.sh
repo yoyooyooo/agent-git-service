@@ -15,6 +15,7 @@ entries=(
   'scripts/test_upgrade_forward_recovery.py'
   'scripts/test_upgrade_full_restore.py FullRestoreTests'
   'scripts/test_upgrade_handoff.py HandoffTests'
+  'scripts/test_upgrade_pin.py PinTests'
   'scripts/test_upgrade.py' 'scripts/test_upgrade_safety.py'
   'scripts/test_upgrade_inventory.py' 'scripts/test_upgrade_backup.py BackupTests'
   'scripts/test_upgrade_restore.py RestoreTests' 'scripts/test_upgrade_backup_regressions.py'

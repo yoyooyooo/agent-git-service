@@ -490,3 +490,27 @@ Hashes and actor text do not authenticate the carrier. imile still needs its own
 local approval and recovery group. No transport, workflow dispatch, tag, Release
 or deployment is part of this package. See [manual acceptance](local-upgrade.md#s4-manual-acceptance)
 and [acceptance contracts](backup-recovery.md#s4-acceptance-file-contract).
+
+## S6.12 offline pin preparation
+
+`upgrade_pin.prepare(candidate, source_raw, release, asset_bytes)` checks the
+closed v2 candidate schema, exact C/R/T and tag binding, nine unique positive
+asset IDs, sizes/digests, source **original bytes**, SHA256SUMS and both platform
+build-info contracts. It performs no API writes, downloads, tag creation or
+workflow dispatch. Duplicate asset IDs now also fail the existing consumer's
+inventory check before I/O.
+
+Its only output is `ags.release-pin-preparation.v1`, `installable=false`.
+It never emits `ags.deploy-release-pin.v2`, even for a complete synthetic fixture.
+Input provenance claims are not verified certificates. Crypto, real tag-push,
+archive execution, immutable API readback and human control approval remain
+explicitly unverified. A syntactically valid candidate is not a production pin.
+The existing Release consumer and real crypto verifier remain required; this
+builder does not replace them or enable direct install.
+
+No new C/R/T/V, `fork/release-source.json` identity, tag or Release is selected by
+this slice. The later separately approved control PR still needs current exact
+CI and human APPROVED review. See [provisioning](upgrade-provisioning.md#s612-release-inputs)
+and [local upgrade](local-upgrade.md). A complete real-evidence-to-installable-pin
+emitter remains blocked pending that release acceptance; preparation is not
+publication readiness.

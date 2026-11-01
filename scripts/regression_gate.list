@@ -23,3 +23,4 @@ scripts/wiki_regression_gate.sh
 scripts/upgrade-regression.sh
 # S6.10 offline full-group contracts run inside scripts/upgrade-regression.sh.
 # S6.11 handoff v2 contracts run inside scripts/upgrade-regression.sh.
+# S6.12 non-installable pin preparation runs inside scripts/upgrade-regression.sh.
