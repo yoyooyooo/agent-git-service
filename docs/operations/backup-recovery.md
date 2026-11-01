@@ -324,6 +324,12 @@ old-byte effect and starts nothing. `old-start` requires a separate approval
 whose id is not the pre-start recovery approval. Data that differs from Tq,
 or a consumed token, refuses. A successful call returns `aborted_old_restored`
 and a new generation. It does not spawn a process.
+
+S6.09 `upgrade_forward_recovery.py` refuses an unknown spawn outcome with exit
+82, including a missing PID. A closed incident and a new same-version approval
+can mint another generation for the same binary. The function itself does not
+spawn. Reusing the old start token, an open writer, or a different binary
+refuses. A replacement candidate needs a separate release, pin, and backup.
 Post-start full DB/Git/CAS/config restore is not implemented or authorized.
 
 ## Verification boundary
