@@ -8,6 +8,8 @@ import (
 
 	"github.com/mattn/go-sqlite3"
 	"github.com/ngaut/agent-git-service/internal/db"
+	"github.com/ngaut/agent-git-service/internal/service"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -17,7 +19,7 @@ func TestReplicationRegistrationDeleteWithConcurrentProjectionWriter(t *testing.
 	f := newRegistrationFixture(t, true)
 	// Fail the competing writer immediately rather than waiting while the
 	// callback deliberately holds the cascade at its read/write boundary.
-	pool, err := sql.Open("sqlite3", f.server.cfg.DBdsn+"?_busy_timeout=0")
+	pool, err := sql.Open("sqlite3", f.server.cfg.DBdsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,18 +29,25 @@ func TestReplicationRegistrationDeleteWithConcurrentProjectionWriter(t *testing.
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), "PRAGMA busy_timeout = 0"); err != nil {
+		t.Fatal(err)
+	}
+	// An independent GORM handle shares the real application pool, but not
+	// its callback registry. Installing the injection cannot race live workers.
+	applicationPool, err := f.server.deps.DB.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cascadeDB, err := gorm.Open(sqlite.New(sqlite.Config{Conn: applicationPool}), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := service.ContextWithDB(f.ctx, cascadeDB)
 	var writer *sql.Tx
 	var writerErr error
 	injected := false
-	type cascadeContextKey struct{}
-	ctx := context.WithValue(f.ctx, cascadeContextKey{}, true)
 	callback := "test:concurrent_projection_writer"
-	if err := f.server.deps.DB.Callback().Query().After("gorm:query").Register(callback, func(tx *gorm.DB) {
-		// Other queries, including live background workers, must not access
-		// this synchronous injection's state.
-		if tx.Statement.Context.Value(cascadeContextKey{}) != true {
-			return
-		}
+	if err := cascadeDB.Callback().Query().After("gorm:query").Register(callback, func(tx *gorm.DB) {
 		if injected || tx.Statement.Table != "repositories" || tx.Statement.Selects == nil {
 			return
 		}
@@ -56,7 +65,7 @@ func TestReplicationRegistrationDeleteWithConcurrentProjectionWriter(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
-	defer f.server.deps.DB.Callback().Query().Remove(callback)
+	defer cascadeDB.Callback().Query().Remove(callback)
 	defer func() {
 		if writer != nil {
 			_ = writer.Rollback()
