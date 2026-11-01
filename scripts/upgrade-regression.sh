@@ -9,7 +9,7 @@ printf 'Upgrade regression sandbox: %s\n' "$sandbox"
 entries=(
   'scripts/test_upgrade_identity.py'
   'scripts/test_upgrade_host_evidence.py' 'scripts/test_upgrade_bootstrap.py'
-  'scripts/test_upgrade_adapter_launchd.py'
+  'scripts/test_upgrade_adapter_launchd.py' 'scripts/test_upgrade_adapter_systemd.py'
   'scripts/test_upgrade.py' 'scripts/test_upgrade_safety.py'
   'scripts/test_upgrade_inventory.py' 'scripts/test_upgrade_backup.py BackupTests'
   'scripts/test_upgrade_restore.py RestoreTests' 'scripts/test_upgrade_backup_regressions.py'
