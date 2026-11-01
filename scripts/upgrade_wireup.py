@@ -102,6 +102,15 @@ def load_admission(root, pin, policy, entry, binding, authorization, bundle):
             identifier(package[key])
         for key in ('host', 'deployment_id', 'authorization_id', 'pin_sha256'):
             require(package[key] == binding[key], 'package_binding_mismatch')
+        from upgrade_identity import IdentityError, resolve_identity, require_same
+        try:
+            identity = resolve_identity()
+            require_same(identity, root=root, host_instance=package['host_instance'])
+            if identity.logical_host != binding['host']:
+                raise IdentityError('host_machine_mismatch', 64)
+        except IdentityError as error:
+            from upgrade_identity import failure_from
+            raise failure_from(error) from None
         digest(package['schema_sha256']); digest(package['pin_sha256'])
         group = package['recovery_group']
         validate_group(group)

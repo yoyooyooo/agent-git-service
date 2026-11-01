@@ -50,9 +50,40 @@ Required files include the wrapper, host adapter, transaction engine, policy,
 installer, v2 consumer, verifier, shared archive contract, `upgrade_smoke.py`,
 `upgrade_backup_contract.py`, `upgrade_inventory.py`, `upgrade_backup.py`,
 `upgrade_restore_verify.py`, `upgrade_recovery.py`, `upgrade_manual_approval.py`,
-`upgrade_wireup.py` and reviewed
-`release-source.json`. Missing or changed dependencies fail with
+`upgrade_wireup.py`, `upgrade_identity.py` and reviewed
+`release-source.json`. `host-profile.json` is the fixed trust root beside the
+bundle and is bound by the resolved profile digest, not by guessing a host.
+Missing or changed dependencies fail with
 `dependency_unavailable`, exit 69; there is no PATH/source fallback.
+
+## S6.01 fixed host identity
+
+`upgrade_identity.py` resolves identity for the wrapper, host engine,
+private-package admission and cold-window runtime. It reads only
+`/usr/local/libexec/ags-autodeploy/host-profile.json` before the owner pin.
+A missing profile returns `dependency_unavailable` / 69 and does not fall back
+to hostname truncation, HOME, a request host, or an environment variable.
+
+The identity-only `ags.host-identity.v1` profile has exactly `schema`,
+`logical_host`, `host_instance`, `uid`, `gid`, `user`, `home`, `root`,
+`platform`, `arch`, `machine_id_kind`, `machine_id_sha256` and `aliases`.
+`logical_host` is `mini` or `imile-win`. The retained contracts are yoyo UID
+501 with Darwin arm64 for mini, and UID 1000 with Linux x86_64 for imile-win.
+Real and effective UID, GID, passwd name and passwd home must match. `root` is
+the canonical passwd home plus `/.ags`. These are source contracts, not a claim
+about a deployed machine. No real machine digest is stored in source.
+
+`aliases` is a nonempty explicit whitelist compared after ASCII case folding.
+A short name and a `.local` name are separate entries; the resolver does not
+truncate, strip a suffix, or call DNS. Duplicate aliases after normalization
+refuse the profile. Tests use `primary-mini` and `primary-mini.local`.
+Unknown aliases return `host_alias_unknown` / 64. Conflicting logical mappings
+return `host_mapping_conflict` / 64. A copied profile whose machine digest,
+platform, architecture or identifier kind does not match returns
+`host_machine_mismatch` / 64. Wrong UID, eUID, GID, user or home returns
+`wrong_execution_identity` / 77. Diagnostics do not echo the raw machine
+identifier. The wrapper passes `--identity-sha256`; the child re-resolves and
+refuses a changed parent before reading further effects.
 
 The execution identity gate runs before business actions: only the supported
 host and its designated yoyo UID are accepted. Wrong UID fails before claim.
@@ -262,7 +293,8 @@ conservative retained stop, not automatic rollback or continuous availability.
 Restoring normal manager lifecycle, post-start repair, full data restore and
 retiring recovery materials require separate design/approval. No claim is TTL-cleared.
 
-Tests use `scripts/ags-python.sh` followed by `scripts/test_upgrade.py`,
+Tests use `scripts/ags-python.sh` followed by `scripts/test_upgrade_identity.py`,
+`scripts/test_upgrade.py`,
 `scripts/test_upgrade_safety.py`, `scripts/test_upgrade_inventory.py`,
 `scripts/test_upgrade_backup.py`, `scripts/test_upgrade_restore.py`,
 `scripts/test_upgrade_quiescence.py`, `scripts/test_upgrade_recovery.py`,

@@ -17,12 +17,12 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import socket
 import sys
 import tempfile
 import urllib.request
 
-from upgrade import BUNDLE, Failure, bundle_engine, execution_identity, private_json, validate_pin, directory_fd, read_private_fd, require_apply_contracts, result_exit
+from upgrade import BUNDLE, Failure, bundle_engine, private_json, validate_pin, directory_fd, read_private_fd, require_apply_contracts, result_exit
+from upgrade_identity import IdentityError, failure_from, resolve_identity, require_same
 from upgrade_engine import Transaction, acceptance, authorize, child, dual_smoke, save
 from upgrade_recovery import ColdWindow, read_original_binding, checkpoint as cold_checkpoint
 
@@ -76,14 +76,21 @@ def load_installer():
 
 
 def context(args):
-    host = socket.gethostname().split('.')[0]
-    root = execution_identity(host)
+    try:
+        identity = resolve_identity()
+        require_same(identity, expected_sha256=args.identity_sha256)
+    except IdentityError as error:
+        raise failure_from(error) from None
+    args.host_identity = identity
+    host, root = identity.logical_host, Path(identity.root)
     pin, digest = private_json(root / 'config/ags-deploy-release-pin.json')
     validate_pin(pin)
     if digest != args.pin_sha256:
         raise Failure('release_pin_invalid')
     bundle_digest = pin.get('verification_policy', {}).get('tool_bundle_manifest_sha256', '')
     bundle_engine(BUNDLE, bundle_digest)
+    if hashlib.sha256((BUNDLE / 'host-profile.json').read_bytes()).hexdigest() != identity.profile_sha256:
+        raise Failure('dependency_unavailable')
     validate_pin(pin, source=json.loads((BUNDLE / 'release-source.json').read_bytes()))
     policy_raw = (BUNDLE / 'upgrade_policy.json').read_bytes()
     if hashlib.sha256(policy_raw).hexdigest() != pin['verification_policy']['policy_sha256']:
@@ -137,10 +144,16 @@ def context(args):
 
 class Effects:
     def __init__(self, root, pin, policy, entry, binding, scratch, *,
-                 package=None):
+                 package=None, identity=None):
         self.root, self.pin, self.policy = root, pin, policy
         self.entry, self.binding, self.scratch = entry, binding, scratch
         self.package = package
+        try:
+            self.identity = require_same(
+                identity, root=root,
+                host_instance=package.backup_binding['host_instance'])
+        except IdentityError as error:
+            raise failure_from(error) from None
         self.installer = load_installer()
 
     def preflight(self):
@@ -226,6 +239,11 @@ class Effects:
     def quiescent(self): self._window().quiescent()
     def restore(self): self._window().restore()
     def _authorize_stage(self):
+        try:
+            require_same(self.identity, root=self.root,
+                         host_instance=self.package.backup_binding['host_instance'])
+        except IdentityError as error:
+            raise failure_from(error) from None
         package = self.package
         try:
             current, _ = private_json(self.root / 'config' / ('upgrade-authorization-' + self.binding['authorization_id'] + '.json'))
@@ -401,6 +419,7 @@ def main():
     parser.add_argument('command', choices=['plan', 'apply', 'status', 'reconcile', 'confirm'])
     for name in ('deployment-id', 'pin-sha256', 'ci-run-id', 'ci-run-attempt', 'authorization-id'):
         parser.add_argument('--' + name, required=True)
+    parser.add_argument('--identity-sha256', required=True)
     parser.add_argument('--approval-file', type=Path)
     parser.add_argument('--evidence-packet', type=Path)
     args = parser.parse_args()
@@ -426,7 +445,8 @@ def main():
         package = load_admission(root, pin, policy, entry, binding, authorization, BUNDLE)
     require_apply_contracts(binding['host'], package=package, binding=binding)
     with tempfile.TemporaryDirectory(prefix='ags-upgrade-apply-') as directory:
-        effects = Effects(root, pin, policy, entry, binding, Path(directory), package=package)
+        effects = Effects(root, pin, policy, entry, binding, Path(directory),
+                          package=package, identity=args.host_identity)
         result = Transaction(state, binding, authorization, effects).run()
         print(json.dumps(result))
     return result_exit(result)
@@ -437,7 +457,7 @@ if __name__ == '__main__':
         sys.exit(main())
     except Failure as error:
         print(json.dumps({'schema': 'ags.upgrade-diagnostic.v2', 'status': 'failed',
-                          'code': error.code, 'phase': error.phase, 'host': socket.gethostname().split('.')[0],
+                          'code': error.code, 'phase': error.phase, 'host': None,
                           'deployment_id': None, 'attempt_id': None, 'journal_sha256': None,
                           'missing_contracts': getattr(error, 'missing_contracts', [])}))
         sys.exit(error.exit_code)

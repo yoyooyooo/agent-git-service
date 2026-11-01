@@ -253,7 +253,8 @@ class QuiescenceTests(ColdFixture):
             if '--version' not in args[0]:
                 observed.append(journal['handoff']['consumed'])
             return real_spawn(*args, **kwargs)
-        with patch.object(self.manager, 'start', side_effect=lambda: runtime.serve(self.root)):
+        with patch('upgrade_identity.runtime_identity'), \
+                patch.object(self.manager, 'start', side_effect=lambda: runtime.serve(self.root)):
             with patch.object(runtime.subprocess, 'Popen', side_effect=spawn):
                 self.window.start()
         self.assertTrue(observed)

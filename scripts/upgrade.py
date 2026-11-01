@@ -18,17 +18,16 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import pwd
 import re
-import socket
 import stat
 import subprocess
 import sys
 
+from upgrade_identity import IdentityError, failure_from, resolve_identity, require_same
+
 BUNDLE = Path('/usr/local/libexec/ags-autodeploy')
 SHA256 = re.compile(r'[0-9a-f]{64}')
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,95}')
-HOSTS = {'mini': 501, 'imile-win': 1000}
 EXIT_CODES = {'invalid_request': 64, 'invalid_host': 64, 'release_pin_invalid': 64,
               'dependency_unavailable': 69, 'wrong_execution_identity': 77,
               'not_approved': 77, 'authorization_invalid': 77, 'authorization_expired': 77,
@@ -236,12 +235,16 @@ def result_exit(result):
 
 
 def execution_identity(host):
-    if host not in HOSTS:
-        raise Failure('invalid_host')
-    uid = HOSTS[host]
-    if os.getuid() != uid or os.geteuid() != uid or pwd.getpwuid(uid).pw_name != 'yoyo':
-        raise Failure('wrong_execution_identity')
-    return Path(pwd.getpwuid(uid).pw_dir) / '.ags'
+    """Compatibility API. The observed alias must match the trusted profile."""
+    try:
+        identity = resolve_identity()
+        from upgrade_identity import alias
+        if alias(host) not in identity.aliases:
+            raise IdentityError('host_alias_unknown', 64)
+        require_same(identity)
+        return Path(identity.root)
+    except IdentityError as error:
+        raise failure_from(error) from None
 
 
 def bundle_engine(bundle, expected_digest, *, owner=0):
@@ -267,7 +270,8 @@ def bundle_engine(bundle, expected_digest, *, owner=0):
                         'install-release.py', 'release-source.json', 'upgrade_smoke.py',
                         'upgrade_backup_contract.py', 'upgrade_inventory.py',
                         'upgrade_backup.py', 'upgrade_restore_verify.py', 'upgrade_recovery.py',
-                        'upgrade_manual_approval.py', 'upgrade_wireup.py'} <= set(manifest['files'])):
+                        'upgrade_manual_approval.py', 'upgrade_wireup.py',
+                        'upgrade_identity.py'} <= set(manifest['files'])):
             raise Failure('dependency_unavailable')
         for name, digest in manifest['files'].items():
             if not re.fullmatch(r'[A-Za-z0-9_.-]+', name) or not SHA256.fullmatch(digest):
@@ -300,8 +304,12 @@ def main():
             or not re.fullmatch(r'[1-9][0-9]*', args.ci_run_id)
             or not re.fullmatch(r'[1-9][0-9]*', args.ci_run_attempt)):
         raise Failure('invalid_request')
-    host = socket.gethostname().split('.')[0]
-    root = execution_identity(host)
+    try:
+        identity = resolve_identity()
+        require_same(identity)
+    except IdentityError as error:
+        raise failure_from(error) from None
+    root = Path(identity.root)
     pin, digest = private_json(root / 'config/ags-deploy-release-pin.json')
     validate_pin(pin)
     if digest != args.pin_sha256:
@@ -311,8 +319,15 @@ def main():
         raise Failure('release_pin_invalid')
     engine = bundle_engine(BUNDLE, expected)
     validate_pin(pin, source=json.loads((BUNDLE / 'release-source.json').read_bytes()))
+    if hashlib.sha256((BUNDLE / 'host-profile.json').read_bytes()).hexdigest() != identity.profile_sha256:
+        raise Failure('dependency_unavailable')
+    try:
+        require_same(identity)
+    except IdentityError as error:
+        raise failure_from(error) from None
     # The wrapper owns no lock/claim. The pinned engine is their only writer.
-    command = [sys.executable, '-B', str(engine), *sys.argv[1:]]
+    command = [sys.executable, '-B', str(engine), *sys.argv[1:],
+               '--identity-sha256', identity.sha256]
     try:
         result = subprocess.run(command, cwd=root, env={
             'HOME': str(root.parent), 'USER': 'yoyo', 'LOGNAME': 'yoyo',
@@ -328,6 +343,6 @@ if __name__ == '__main__':
     except Failure as error:
         print(json.dumps({'schema': 'ags.upgrade-diagnostic.v2', 'status': 'failed',
                           'code': error.code, 'phase': error.phase,
-                          'host': socket.gethostname().split('.')[0],
+                          'host': None,
                           'deployment_id': None, 'attempt_id': None, 'journal_sha256': None}))
         sys.exit(error.exit_code)

@@ -31,6 +31,8 @@ def startup_permitted(root):
     if not cold_pending(root):
         return True
     try:
+        from upgrade_identity import runtime_identity
+        runtime_identity(root)
         from upgrade_recovery import startup_permitted as permitted
         return permitted(root)
     except (ImportError, OSError, ValueError):
@@ -40,6 +42,8 @@ def startup_permitted(root):
 def consume_start(root):
     if not cold_pending(root):
         return uuid.uuid4().hex
+    from upgrade_identity import runtime_identity
+    runtime_identity(root)
     from upgrade_recovery import consume_start as consume
     return consume(root)
 
@@ -289,6 +293,9 @@ class BoundedLog:
 
 
 def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock, generation=None) -> int:
+    if cold_pending(root):
+        from upgrade_identity import runtime_identity
+        runtime_identity(root)
     child = subprocess.Popen([str(root / 'bin/gh-server')], cwd=root, env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
     selector = None
@@ -366,6 +373,8 @@ def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock,
 
 
 def serve(root: Path) -> int:
+    if cold_pending(root) and not startup_permitted(root):
+        return 78
     os.umask(0o077)
     if (not root.is_dir() or root.is_symlink() or root.resolve() != root.absolute()
             or root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077):
