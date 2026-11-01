@@ -3,6 +3,7 @@ package snapshotstore
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -83,6 +84,10 @@ func (s *Store) saveRetentionAge() error {
 	}
 	saved := retentionClose{Version: 1, ClosedAt: s.now(), LastUse: make(map[string]time.Time, len(items))}
 	for _, item := range items {
+		if publishedOSMetadata(item) {
+			slog.Warn("skipping published snapshot OS metadata", "entry", item.Name())
+			continue
+		}
 		if !snapshotKeyString(item.Name()) || !item.IsDir() {
 			return errors.New("unexpected published snapshot entry")
 		}
