@@ -305,6 +305,10 @@ crashes, missing evidence, changed data, unknown phase, generation mismatch,
 missing approval or any durable `start_attempted` refuse restoration/replay.
 No timeout clears ownership facts. Restarting the old version requires a later
 separately admitted protocol; S3 supplies no recovery CLI or old-start command.
+The [S6.02 launcher transition](user-runtime.md#cold-window-startup-fence) described
+under the cold-window fence is not
+that CLI: it only admits a same-binary generation receipt and cannot start a
+recovered service.
 Post-start full DB/Git/CAS/config restore is not implemented or authorized.
 
 ## Verification boundary

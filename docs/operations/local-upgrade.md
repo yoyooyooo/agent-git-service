@@ -234,7 +234,9 @@ continues to take runtime EX then install SH, also nonblocking; no lock waits
 form a cycle. Install uses the same guard instead of reacquiring its own locks.
 The fixed manager fixture suppresses restart, proves both exit statuses, no
 forced kill, matching runtime generation and an empty process group. A successful
-stop command alone is insufficient. The reviewed writer probe must close every
+stop command alone is insufficient. S6.02 `upgrade_host_evidence.py` refuses
+that record when it still names a live writer before the existing S3 check.
+The reviewed writer probe must close every
 other writer; locks do not constrain unmanaged processes or malicious same-UID
 file edits. Writer/lock/unknown failures retain the fence, with no automatic start.
 
