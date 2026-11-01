@@ -468,3 +468,14 @@ belongs to an independent frozen provisioner, never the running recovery tool.
 Old-start and incident acceptance require separate approval. This source slice
 provides neither those effects nor a claim that full live recovery was tested.
 See [provisioning](upgrade-provisioning.md) and [local upgrade](local-upgrade.md).
+
+## S6.11 long-window checkpoints
+
+[Handoff v2](local-upgrade.md#s611-human-handoff-v2) separates immutable completion
+from append-only fresh manual observations. A backup or observation longer than
+five minutes requires another human readback; expiration never becomes success.
+Refresh registers evidence only. It neither clears claims nor rewinds
+`start_attempted`, and it does not enable blind apply replay. Existing S3 recovery
+remains the only effect owner. Explicit long-transaction resume and changed-mini-
+generation lifecycle proof are still blocked; do not use the pure S6.08/09
+planning helpers as production start commands.
