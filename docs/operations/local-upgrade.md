@@ -362,6 +362,13 @@ not create the lock, repair a journal, consume approval or replay any effect.
 The cold marker stays in place even after acceptance. S4 grants no manager restart
 authority and does not remove S3's one-shot startup fence. Normal restart admission remains separately scoped; S5 does not remove that fence.
 
+S6.07 `upgrade_lifecycle.py` keeps that fence. An accepted archive does not
+permit restart. `activate` consumes a separate `lifecycle-activate` approval and
+writes `ags.runtime-authority.v1`. Reusing the S4 approval id returns 77. A
+different completion digest stays fenced. A permitted restart mints a new
+generation and does not delete the marker or archive. No service is started by
+this module.
+
 The human mini-to-imile package binds the completed mini record and raw evidence
 bytes, both machine-specific pins, a shared release key, mini generation and a
 fresh human health readback. The release key includes repository ID, Release ID
