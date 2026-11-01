@@ -19,7 +19,7 @@
 
 [shell]
 scripts/wiki_regression_gate.sh
-# Includes scripts/test_upgrade_identity.py through the isolated shared runner.
+# Includes every test_upgrade_* suite and S6 source integration via isolated sequential runner.
 scripts/upgrade-regression.sh
 # S6.10 offline full-group contracts run inside scripts/upgrade-regression.sh.
 # S6.11 handoff v2 contracts run inside scripts/upgrade-regression.sh.

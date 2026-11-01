@@ -362,12 +362,12 @@ not create the lock, repair a journal, consume approval or replay any effect.
 The cold marker stays in place even after acceptance. S4 grants no manager restart
 authority and does not remove S3's one-shot startup fence. Normal restart admission remains separately scoped; S5 does not remove that fence.
 
-S6.07 `upgrade_lifecycle.py` keeps that fence. An accepted archive does not
-permit restart. `activate` consumes a separate `lifecycle-activate` approval and
-writes `ags.runtime-authority.v1`. Reusing the S4 approval id returns 77. A
-different completion digest stays fenced. A permitted restart mints a new
-generation and does not delete the marker or archive. No service is started by
-this module.
+S6.07 `upgrade_lifecycle.py` is an in-memory planning contract. `activate` checks
+a separate `lifecycle-activate` declaration and returns an authority-shaped
+dictionary; it does not write or consume durable authority. Reusing the S4
+approval id returns 77. A different completion digest refuses. A successful
+planning check returns a random generation, not permission recognized by the
+launcher. No marker is deleted and no service is started by this module.
 
 The human mini-to-imile package binds the completed mini record and raw evidence
 bytes, both machine-specific pins, a shared release key, mini generation and a
@@ -417,3 +417,30 @@ resume the S3 transaction automatically: an expired checkpoint remains fenced;
 there is no public resume/start command in this slice. Complete restart-chain
 and checkpoint-resume effects remain unavailable. See
 [recovery boundaries](backup-recovery.md#s611-long-window-checkpoints).
+
+## S6.13 source integration boundary
+
+The closed staging bundle now contains the actual wrapper, Python entry,
+launcher, complete S1–S6 local import closure, public empty policy and frozen
+release-source bytes. `bundle_engine` requires those dependencies by exact digest.
+Staging files remain non-executable and `installable=false`; provisioning needs
+separate ownership, profile and native capability acceptance.
+
+The source tests do **not** establish the full proposed production chain:
+S6.07 lifecycle and S6.08/09 recovery helpers are pure planning contracts, not
+wired durable runtime/CLI authority. Their returned generation or `started`
+field does not prove a spawn, token consumption, a successful restart or a
+second upgrade. The public wrapper still accepts only plan/apply/status/
+reconcile/confirm. Native adapter factories are unavailable pending real
+observer/service/helper integration; fixture Manager methods do not implement
+the production S3 no-argument effect contract. No private profile may use them
+as accepted production effects. S6.10 is offline plan only, S6.11 cannot resume
+an interrupted transaction, and S6.12 emits no installable pin.
+
+The shared regression runs each real test entry sequentially in a distinct
+HOME, TMPDIR and cwd under the invoking user's home. It removes inherited Python
+injection variables and uses `ags-python.sh`. Its synthetic apply86→confirm0
+flow retains real S1/S2/S4, SQLite, Git, locks and inert fixture processes. It
+cannot be reported as native manager, whole-group live restore or production
+acceptance. [Recovery matrix](backup-recovery.md#s613-fault-matrix) and
+[CI scope](../ci.md#s6-source-verification) define the remaining gates.

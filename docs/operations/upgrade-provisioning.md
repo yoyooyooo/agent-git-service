@@ -27,3 +27,19 @@ exact-source CI and host-specific policy/bundle digests can supply that pin.
 No provision, publication switch, release-source selection or host configuration
 is changed by preparation. Policy and manifest remain separate from package and
 pin so their hashes do not form a self-reference.
+
+## S6.13 dependency-complete staging
+
+The fixed member list now includes `upgrade`, `ags-runtime.py`, all S1–S6 local
+imports, consumer dependencies, `upgrade_policy.json` and the frozen
+`fork/release-source.json` bytes copied as `release-source.json`. No package,
+private profile or pin is discovered from the checkout. The manifest excludes
+itself and all private inputs. Every member is copied non-executable; this is a
+staging archive, not an installation.
+
+The AST import-closure regression checks actual staged source, not a synthetic
+member list. `bundle_engine` independently requires the full exact-digest set.
+This fixes the earlier staging builder's missing transitive dependencies but
+does not supply a native adapter, privileged helper or bootstrap authority.
+No factory may return a no-op Trash or writer probe as production capability.
+See [source integration](local-upgrade.md#s613-source-integration-boundary).

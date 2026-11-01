@@ -14,10 +14,16 @@ from pathlib import Path
 import stat
 
 REQUIRED = (
-    'upgrade.py', 'upgrade_host.py', 'upgrade_engine.py', 'upgrade_identity.py',
-    'upgrade_host_evidence.py', 'upgrade_bootstrap.py', 'upgrade_adapter_launchd.py',
-    'upgrade_adapter_systemd.py', 'upgrade_metadata.py', 'upgrade_trash.py',
-    'upgrade_bundle.py', 'ags-python.sh',
+    'upgrade', 'ags-python.sh', 'ags-runtime.py', 'upgrade.py', 'upgrade_host.py',
+    'upgrade_engine.py', 'upgrade_identity.py', 'upgrade_host_evidence.py',
+    'upgrade_bootstrap.py', 'upgrade_adapter_launchd.py', 'upgrade_adapter_systemd.py',
+    'upgrade_metadata.py', 'upgrade_trash.py', 'upgrade_bundle.py', 'upgrade_wireup.py',
+    'upgrade_backup_contract.py', 'upgrade_inventory.py', 'upgrade_backup.py',
+    'upgrade_restore_verify.py', 'upgrade_recovery.py', 'upgrade_manual_approval.py',
+    'upgrade_lifecycle.py', 'upgrade_recovery_cli.py', 'upgrade_forward_recovery.py',
+    'upgrade_full_restore.py', 'upgrade_handoff.py', 'upgrade_pin.py', 'upgrade_smoke.py',
+    'release_verify.py', 'release_contract.py', 'release_install_v2.py', 'install-release.py',
+    'upgrade_policy.json', 'release-source.json',
 )
 SCHEMA = 'ags.upgrade-tool-bundle.v2'
 
@@ -38,6 +44,8 @@ def build(source, staging):
     files = {}
     for name in REQUIRED:
         path = source / name
+        if name == 'release-source.json' and not path.exists():
+            path = source.parent / 'fork/release-source.json'
         if not path.is_file() or path.is_symlink():
             raise BundleError('member_missing')
         raw = path.read_bytes()

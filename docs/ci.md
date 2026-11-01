@@ -52,7 +52,7 @@ and `bun test scripts/release.test.ts` for event, identity, merged-PR and CI
 refusals, admission when the runtime PR has no human approval but the control PR does, ABI/archive checks, nine-asset publication, and uncertain-write readback.
 Synthetic fixtures do not replace real cryptographic platform acceptance.
 The legacy production-pin verifier stays disabled. The complete-checkout v2
-consumer, S1–S5 local upgrade contracts, S6.01 identity tests, and S6.02 evidence/bootstrap tests run through `bash scripts/upgrade-regression.sh`,
+consumer and S1–S6 source contracts run through `bash scripts/upgrade-regression.sh`,
 shared by Fork CI and `scripts/regression_gate.list`. Each test gets independent
 HOME/TMPDIR/cwd, removes inherited Python injection variables and uses
 `scripts/ags-python.sh`. Public host/migration policy stays empty and default
@@ -209,3 +209,23 @@ The following capabilities are intentionally outside the default public CI set:
 As additional suites become reliable, promote the smallest stable regressions
 into `scripts/regression_gate.list` first, then consider widening the required
 smoke or compatibility lanes.
+
+
+## S6 source verification
+
+`bash scripts/upgrade-regression.sh` is the shared sequential Python gate for
+all `test_upgrade_*` entries, install-v2, single-root, release-consumer and fork
+release/binding/installer-shell tests. New full-restore, handoff, pin and integration suites are
+included through `scripts/regression_gate.list` and the existing Fork CI step.
+The Source and governance job has a 30-minute bound for the expanded sequential
+source suites and owning Go checks. Each entry has isolated HOME/TMPDIR/cwd
+under the runner's home. The runner
+unsets PYTHONDONTWRITEBYTECODE, PYTHONPYCACHEPREFIX, PYTHONPATH and BASH_ENV before
+`scripts/ags-python.sh` establishes bytecode-free execution.
+
+S6 tests cover source contracts and real synthetic S1/S2/S4 integration. They do
+not prove the missing production lifecycle/recovery wiring. Native launchd and
+systemd chains, privileged metadata helper, native Trash, isolated VM,
+production-copy startup, imile behavior and new tag-push crypto remain separate
+unverified gates. A skip is not a pass. No candidate or publication workflow is
+dispatched by this gate. See [source limits](operations/local-upgrade.md#s613-source-integration-boundary).

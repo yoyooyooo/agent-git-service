@@ -69,6 +69,9 @@ def load(reference, key, pin_sha, binding, transaction_id, now):
         latest, _ = read_document(directory / 'latest.json')
         fields(latest, ('sequence', 'sha256'))
         integer(latest['sequence'], 1, 1024); digest(latest['sha256'])
+        require({p.name for p in directory.iterdir()} == {'latest.json'} |
+                {'readback-%04d.json' % n for n in range(1, latest['sequence'] + 1)},
+                'handoff_refresh_incomplete')
         rows = []
         for number in range(1, latest['sequence'] + 1):
             row, _ = read_document(directory / ('readback-%04d.json' % number))
@@ -86,6 +89,11 @@ def refresh(root, reference, readback_path, key, pin_sha, binding, transaction_i
     from upgrade import directory_fd
     from upgrade_backup import durable_bytes, publish
     from upgrade_engine import save
+    fields(reference, ('schema', 'base', 'base_sha256', 'imile_request_sha256',
+                       'transaction_id', 'accepted_epoch', 'refresh_directory'))
+    require(reference['schema'] == 'ags.handoff-reference.v2', 'handoff_schema_invalid')
+    directory = Path(reference['refresh_directory'])
+    require(directory.is_absolute(), 'handoff_directory_invalid')
     with hostops(root):
         directory = Path(reference['refresh_directory'])
         with directory_fd(directory, private=True):
@@ -102,6 +110,10 @@ def refresh(root, reference, readback_path, key, pin_sha, binding, transaction_i
                 rows = []
             require(reference['imile_request_sha256'] == fingerprint(binding)
                     and reference['transaction_id'] == transaction_id, 'handoff_binding_mismatch')
+            require({p.name for p in directory.iterdir()} ==
+                    ({'latest.json'} if rows else set()) |
+                    {'readback-%04d.json' % n for n in range(1, len(rows) + 1)},
+                    'handoff_refresh_incomplete')
             candidate, _ = read_document(readback_path)
             envelope = {name: reference[name] for name in ('base', 'base_sha256',
                 'imile_request_sha256', 'transaction_id', 'accepted_epoch')}

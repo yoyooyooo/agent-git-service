@@ -322,8 +322,10 @@ recovered service.
 S6.08 `upgrade_recovery_cli.py` does not change the S3 return. `plan` lists the
 old-byte effect and starts nothing. `old-start` requires a separate approval
 whose id is not the pre-start recovery approval. Data that differs from Tq,
-or a consumed token, refuses. A successful call returns `aborted_old_restored`
-and a new generation. It does not spawn a process.
+or a caller-declared consumed token, refuses. A successful in-memory call
+returns `aborted_old_restored` and a new generation. It does not persist token
+consumption, provide a CLI command, or spawn a process; its `started=true` is not
+a runtime fact.
 
 S6.09 `upgrade_forward_recovery.py` refuses an unknown spawn outcome with exit
 82, including a missing PID. A closed incident and a new same-version approval
@@ -479,3 +481,25 @@ Refresh registers evidence only. It neither clears claims nor rewinds
 remains the only effect owner. Explicit long-transaction resume and changed-mini-
 generation lifecycle proof are still blocked; do not use the pure S6.08/09
 planning helpers as production start commands.
+
+## S6.13 fault matrix
+
+| Durable state or failure | Source behavior | Not established |
+| --- | --- | --- |
+| Before claim, invalid identity or dependency | Early 64/69/77 contracts remain | Real host/profile acceptance |
+| Stop result unknown, writer open | Fence, no install/start replay | Native stop and namespace closure |
+| Backup/restore partial or missing member | S1/S2 refuse, failure copy retained | Root metadata copy and native Trash |
+| Install torn, no start_attempted | Existing S3 separately approved prestart restore only | Resumable per-object repair and old-start CLI |
+| start_attempted, missing PID or response | Unknown remains 82, old binary rollback refused | Durable same-version recovery execution |
+| Awaiting observation | Separate real S4 evidence/approval, 86 until accepted | Live long-tail business health |
+| Accepted, cold token consumed | Restart stays fenced | S6.07 planning authority is not launcher admission |
+| Full-group recovery requested | Read-only complete-seal/report plan, no effects | Live object switches, mixed-group startup and incident close |
+| Handoff older than 300 seconds | Refuse unless same-base fresh human v2 chain | Explicit checkpoint resume, changed-generation proof |
+| Release preparation | Nine-asset binding, non-installable output | Real tag-push crypto and final production pin |
+
+Fixture tests retain actual SQLite/WAL inventory, Git/CAS checks, files, locks,
+child processes, S1/S2 seals and S4 approval validators. OS manager, health and
+Release transport boundaries are synthetic. Neither pure helper outputs nor CI
+success proves two upgrades with a native restart between them. Darwin and Linux
+native chains, isolated VM, production-copy startup and imile behavior require
+separate approval and evidence. See [source integration](local-upgrade.md#s613-source-integration-boundary).

@@ -16,6 +16,7 @@ entries=(
   'scripts/test_upgrade_full_restore.py FullRestoreTests'
   'scripts/test_upgrade_handoff.py HandoffTests'
   'scripts/test_upgrade_pin.py PinTests'
+  'scripts/test_upgrade_integration.py'
   'scripts/test_upgrade.py' 'scripts/test_upgrade_safety.py'
   'scripts/test_upgrade_inventory.py' 'scripts/test_upgrade_backup.py BackupTests'
   'scripts/test_upgrade_restore.py RestoreTests' 'scripts/test_upgrade_backup_regressions.py'
@@ -23,6 +24,7 @@ entries=(
   'scripts/test_upgrade_manual_approval.py' 'scripts/test_upgrade_wireup.py'
   'scripts/test_install_v2.py' 'scripts/test_single_root.py' 'scripts/test_release_consumer.py'
   'fork/scripts/test_release.py' 'fork/scripts/test_release_binding.py'
+  'fork/scripts/test_install_sh.py'
 )
 for index in "${!entries[@]}"; do
   work="$sandbox/$index"

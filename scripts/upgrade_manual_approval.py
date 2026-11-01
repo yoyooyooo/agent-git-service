@@ -238,6 +238,8 @@ def make_packet(root, binding, pin, pin_sha, observation, probe, *, handoff=None
         validate_handoff(handoff, key, pin_sha, now)
     else:
         require(binding.get('host') == 'mini' and handoff is None, 'unexpected_handoff')
+    if binding.get('host') == 'imile-win':
+        check_handoff_receiver(handoff, binding, chain['backup_binding'])
     return {'schema': 'ags.manual-evidence.v1', **chain, 'running': running,
             'observation': copy.deepcopy(observation), 'release_key': key, 'handoff': copy.deepcopy(handoff)}
 
@@ -329,6 +331,13 @@ def validate_record(record, packet, approval, approval_sha, packet_sha):
     completed = timestamp(record['completed_at'])
     require(timestamp(approval['recorded_at']) <= completed < timestamp(approval['expires_at']),
             'completion_time_invalid')
+
+
+def check_handoff_receiver(value, binding, backup_binding):
+    if type(value) is dict and value.get('schema') == 'ags.manual-mini-handoff.v2':
+        require(value['imile_request_sha256'] == fingerprint(binding)
+                and value['transaction_id'] == backup_binding['transaction_id'],
+                'handoff_binding_mismatch')
 
 
 def validate_handoff(value, key, imile_pin_sha, now):
@@ -427,6 +436,7 @@ def _confirm(root, binding, approval_path, packet_path, pin, pin_sha, probe, clo
         if binding.get('host') == 'imile-win':
             require(chain['backup_binding']['target'] == 'linux_amd64', 'target_invalid')
             validate_handoff(packet['handoff'], key, pin_sha, now)
+            check_handoff_receiver(packet['handoff'], binding, chain['backup_binding'])
         else:
             require(binding.get('host') == 'mini' and packet['handoff'] is None, 'host_invalid')
         check_observation(packet['observation'], packet['running'], now)
@@ -438,6 +448,7 @@ def _confirm(root, binding, approval_path, packet_path, pin, pin_sha, probe, clo
         validate_approval(approval, packet, packet_sha, now)
         if binding.get('host') == 'imile-win':
             validate_handoff(packet['handoff'], key, pin_sha, now)
+            check_handoff_receiver(packet['handoff'], binding, chain['backup_binding'])
         record = {'schema': 'ags.manual-completion.v1', 'status': 'completed', 'binding': binding,
                   'generation': packet['generation'], 'approval_id': approval['approval_id'],
                   'approval_sha256': approval_sha, 'evidence_packet_sha256': packet_sha,

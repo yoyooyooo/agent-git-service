@@ -87,3 +87,17 @@ owns the contract and retained restart/recovery stops. No version, release-sourc
 identity, publication switch, deployment setting or accepted-generation receipt
 is updated by wiring. Native platform/VM/production-copy startup remain separate
 unverified acceptance surfaces. Source PR/CI is not permission to provision or deploy.
+
+
+## S6 source preparation limits
+
+The [source integration boundary](../docs/operations/local-upgrade.md#s613-source-integration-boundary)
+separates tested contracts from the incomplete native production chain. Offline
+full-group plans, append-only human handoff and non-installable pin preparation
+are not recovery execution or publication. The dependency-complete bundle is
+staging only. Lifecycle/recovery planning helpers are not durable launcher/CLI
+authority. Default deployments and migrations remain empty; public apply and
+direct install retain 83. Source CI grants no provision, restart, tag, Release,
+deployment or merge permission. [CI scope](../docs/ci.md#s6-source-verification)
+and the [recovery matrix](../docs/operations/backup-recovery.md#s613-fault-matrix)
+list unverified gates.

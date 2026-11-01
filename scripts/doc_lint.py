@@ -31,6 +31,12 @@ REQUIRED_FILES = [
 ]
 
 LINK_CHECK_DOCS = [
+    Path("docs/operations/local-upgrade.md"),
+    Path("docs/operations/backup-recovery.md"),
+    Path("docs/operations/user-runtime.md"),
+    Path("docs/operations/releases.md"),
+    Path("docs/operations/upgrade-provisioning.md"),
+    Path("fork/README.md"),
     Path("docs/ci.md"),
     Path("docs/README.md"),
     Path("docs/test-strategy.md"),
