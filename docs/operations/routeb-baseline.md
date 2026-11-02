@@ -2,19 +2,20 @@
 
 This page freezes the preparation inputs for moving the two running hosts
 from `0013aa744c8c90637ec54562ffc248a1bf7c9a52` to exact source
-`3a0c7e4f0ac5150d774efc66168907671061bcc5`. It is not a deployment approval
+`f63aa88e0c82b1e17174cf07f8033552457185b1`. It is not a deployment approval
 and not a release record.
 
 ## Frozen identities
 
 | Fact | Value | How it was read |
 |---|---|---|
-| Source branch | `fork/main.20260924` | `git rev-parse origin/fork/main.20260924` after `git fetch origin` on 2026-11-02 |
-| Candidate revision | `3a0c7e4f0ac5150d774efc66168907671061bcc5` | same command; tip matched the expected value |
-| Candidate tree | `a6fc9f08d5ca4c8d8fe4860dc8e551263455426f` | `git rev-parse 3a0c7e4f^{tree}` |
+| Source branch | `fork/main.20260924` | `git rev-parse origin/fork/main.20260924` after `git fetch origin` on 2026-11-03 |
+| Candidate revision | `f63aa88e0c82b1e17174cf07f8033552457185b1` | same command; tip matched this value |
+| Candidate tree | `8bf2c52ec3f7c7bc04850791b4e507bbc8261ab4` | `git rev-parse f63aa88e^{tree}` |
+| Previous preparation revision | `3a0c7e4f0ac5150d774efc66168907671061bcc5` | content baseline of the superseded preparation; tree `a6fc9f08d5ca4c8d8fe4860dc8e551263455426f` |
 | Running revision | `0013aa744c8c90637ec54562ffc248a1bf7c9a52` | read-only `/readyz` on mini and imile-win, recorded in the 2026-11-02 deploy check |
 | Running tree | `0c2d1cbf7507dc715e5f65253236f6bdecd97afb` | `git rev-parse 0013aa74^{tree}` |
-| Range size | 87 commits | `git rev-list --count 0013aa74..3a0c7e4f` |
+| Range size | 140 commits | `git rev-list --count 0013aa74..f63aa88e` |
 | Rollback target | `0013aa74` | live revision; `c980bb63` was never deployed |
 
 `c980bb63` remains a historical rehearsal revision only. Manuals must not
@@ -23,7 +24,7 @@ name it as the current target or as the rollback binary.
 ## Migration
 
 `internal/db/migration_pr_lifecycle.go` is the only migration file added in
-`0013aa74..3a0c7e4f`. `db.go` calls `MigratePRLifecycleColumns` during startup.
+`0013aa74..f63aa88e` (`3a0c7e4f..f63aa88e` adds none). `db.go` calls `MigratePRLifecycleColumns` during startup.
 The function adds three columns to `pull_requests` when the table exists and
 the column is absent:
 

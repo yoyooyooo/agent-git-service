@@ -1,14 +1,17 @@
 # Route B candidate build
 
 The deployment content baseline is exact source
-`3a0c7e4f0ac5150d774efc66168907671061bcc5`, tree
-`a6fc9f08d5ca4c8d8fe4860dc8e551263455426f`. It is not a Release. Do not tag
-it, publish it, or describe its provenance as a release.
+`f63aa88e0c82b1e17174cf07f8033552457185b1`, tree
+`8bf2c52ec3f7c7bc04850791b4e507bbc8261ab4`. It is not a Release. Do not tag
+it, publish it, or describe its provenance as a release. The earlier
+preparation baseline `3a0c7e4f0ac5150d774efc66168907671061bcc5` (tree
+`a6fc9f08d5ca4c8d8fe4860dc8e551263455426f`) is history; this page was
+rebased onto the later tip.
 
 `scripts/build-exact-source.sh` injects the checkout HEAD that it verifies,
 not a different revision. A binary built after this preparation change
 therefore reports that later full HEAD and its tree. The manifest records
-`baseline_revision=3a0c7e4f0ac5150d774efc66168907671061bcc5` separately so the
+`baseline_revision=f63aa88e0c82b1e17174cf07f8033552457185b1` separately so the
 content baseline is not confused with the built source identity.
 
 `scripts/build-exact-source.sh binary` injects all of:
@@ -42,7 +45,7 @@ GIT_SHA="$GIT_SHA" GIT_TREE="$GIT_TREE" \
 ```
 
 Accept the binary only when `--version` reports `version=source-$GIT_SHA`,
-`revision=$GIT_SHA` and `tree=$GIT_TREE`. `3a0c7e4f0ac5150d774efc66168907671061bcc5`
+`revision=$GIT_SHA` and `tree=$GIT_TREE`. `f63aa88e0c82b1e17174cf07f8033552457185b1`
 is the content baseline, not the built revision. Record `gh-server`, sha256,
 manifest, version JSON, `go version`, `otool -L`, and those two values. Keep
 the output outside the source checkout. Do not start it against `~/.ags`.

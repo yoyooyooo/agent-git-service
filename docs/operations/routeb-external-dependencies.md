@@ -11,7 +11,7 @@ data directory. Rollback of AGS remains the whole AGS cold backup to
 migration for `lifecycle_generation`, `forgejo_reopen_pending` or
 `forgejo_lifecycle_at`.
 
-Candidate source is `3a0c7e4f0ac5150d774efc66168907671061bcc5`.
+Candidate source is `f63aa88e0c82b1e17174cf07f8033552457185b1`.
 `/readyz` does not prove these dependencies. `forgejo_authority_policy` is
 `diagnostic_only`. `/readyz` is not a webhook proof.
 

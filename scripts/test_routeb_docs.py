@@ -18,7 +18,7 @@ DOCS = [
     ROOT / "docs/operations/routeb-external-dependencies.md",
 ]
 
-CURRENT_REVISION = "3a0c7e4f0ac5150d774efc66168907671061bcc5"
+CURRENT_REVISION = "f63aa88e0c82b1e17174cf07f8033552457185b1"
 ROLLBACK_REVISION = "0013aa744c8c90637ec54562ffc248a1bf7c9a52"
 HISTORICAL_REHEARSAL = "c980bb63"
 
@@ -94,10 +94,10 @@ class RouteBBuildCommandTest(unittest.TestCase):
         build = (ROOT / "docs/operations/routeb-build.md").read_text(encoding="utf-8")
         mini = (ROOT / "docs/operations/routeb-runbook-mini.md").read_text(encoding="utf-8")
         linux = (ROOT / "docs/operations/routeb-linux-build-input.md").read_text(encoding="utf-8")
-        baseline = "3a0c7e4f0ac5150d774efc66168907671061bcc5"
+        baseline = "f63aa88e0c82b1e17174cf07f8033552457185b1"
         self.assertIn("version=source-<built revision>", mini)
         self.assertIn("tree=<built tree>", mini)
-        self.assertIn("a6fc9f08d5ca4c8d8fe4860dc8e551263455426f", mini)
+        self.assertIn("8bf2c52ec3f7c7bc04850791b4e507bbc8261ab4", mini)
         self.assertNotIn(f"GIT_SHA={baseline}", fenced_block(build))
         self.assertNotIn(f"GIT_SHA={baseline}", fenced_block(linux))
         env = os.environ.copy()

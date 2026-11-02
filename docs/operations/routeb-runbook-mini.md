@@ -1,8 +1,8 @@
 # mini preparation runbook
 
 Common rules: [route B runbook](routeb-runbook.md).
-Candidate `3a0c7e4f0ac5150d774efc66168907671061bcc5`,
-tree `a6fc9f08d5ca4c8d8fe4860dc8e551263455426f`.
+Candidate `f63aa88e0c82b1e17174cf07f8033552457185b1`,
+tree `8bf2c52ec3f7c7bc04850791b4e507bbc8261ab4`.
 Rollback remains `0013aa744c8c90637ec54562ffc248a1bf7c9a52` by restoring the
 whole cold backup. There is no down migration.
 
@@ -18,8 +18,8 @@ target.
   checkout: `version=source-<built revision>`, `revision=<built revision>`,
   `tree=<built tree>`. The built revision is `git rev-parse HEAD` of the
   reviewed checkout passed as `GIT_SHA`. Content baseline
-  `3a0c7e4f0ac5150d774efc66168907671061bcc5` (tree
-  `a6fc9f08d5ca4c8d8fe4860dc8e551263455426f`) is not that built identity.
+  `f63aa88e0c82b1e17174cf07f8033552457185b1` (tree
+  `8bf2c52ec3f7c7bc04850791b4e507bbc8261ab4`) is not that built identity.
   The copyable command is in [routeb-build.md](routeb-build.md).
 
 The 2026-11-02 read-only deploy check recorded mini `/readyz` as ready on
