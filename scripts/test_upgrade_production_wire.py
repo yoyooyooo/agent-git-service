@@ -27,7 +27,8 @@ class ProductionWireTests(unittest.TestCase):
         state = self.root / 'state'
         pending = state / 'pending'
         pending.mkdir(parents=True, mode=0o700)
-        binding = {'host': 'fixture', 'old': 'a' * 40, 'new': 'b' * 40}
+        binding = {'host': 'fixture', 'host_instance': 'fixture-host', 'identity_sha256': 'c' * 64,
+                   'old': 'a' * 40, 'new': 'b' * 40}
         journal = {'schema': 'ags.local-upgrade-journal.v2', 'binding': binding,
                    'phase': 'admission', 'stop_started': False, 'install_started': False,
                    'backup_created': False, 'start_attempted': False}

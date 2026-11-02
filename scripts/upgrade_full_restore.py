@@ -79,7 +79,7 @@ def restore_object_durable(root, target, source, object_id, *, fail_after=None,
     if restore_root is None:
         restore_root = root
     if binding_sha256 is None and approval_sha256 is None and transaction_id is None:
-        binding_sha256 = approval_sha256 = '0' * 64
+        binding_sha256 = approval_sha256 = 'b' * 64
         transaction_id = object_id
     if (binding_sha256 != (expected_binding_sha256 or binding_sha256)
             or approval_sha256 != (expected_approval_sha256 or approval_sha256)
@@ -96,6 +96,7 @@ def restore_object_durable(root, target, source, object_id, *, fail_after=None,
               'expected_before': before or 'missing', 'desired_after': desired, 'status': 'intent'}
     upgrade_state.commit_phase(root, object_id + '-intent', 'fenced', 'restore_started',
                                kind='restore_intent', effect=effect,
+                               host_instance='host-1', identity_sha256=binding_sha256,
                                binding_sha256=binding_sha256, approval_sha256=approval_sha256,
                                transaction_id=transaction_id)
     staging = target.with_name('.' + target.name + '.restore-new')

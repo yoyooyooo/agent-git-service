@@ -39,6 +39,32 @@ class HostBindingTests(unittest.TestCase):
             upgrade_state.load_verified(self.root)
         self.assertEqual(caught.exception.args[0], 'state_host_mismatch')
 
+    def test_later_event_host_drift_is_refused(self):
+        first = upgrade_state.commit_event(self.root, event('host-1'))
+        drifted = event('host-2')
+        drifted['event_id'] = 'ev-second'
+        drifted['operation_id'] = 'op-2'
+        drifted['sequence'] = 2
+        drifted['previous_sha256'] = first['sha256']
+        events = self.root / 'state/ags-autodeploy/local-v2/control/events'
+        raw = (json.dumps(drifted, sort_keys=True, separators=(',', ':')) + '\n').encode()
+        path = events / '00000000000000000002.json'
+        path.write_bytes(raw)
+        os.chmod(path, 0o600)
+        real = upgrade_state._check_event
+        def skip_writer_check(value, previous):
+            saved = value['host_instance']
+            value['host_instance'] = previous['host_instance'] if previous else saved
+            try:
+                return real(value, previous)
+            finally:
+                value['host_instance'] = saved
+        upgrade_state._check_event = skip_writer_check
+        self.addCleanup(lambda: setattr(upgrade_state, '_check_event', real))
+        with self.assertRaises(upgrade_state.StateError) as caught:
+            upgrade_state.load_verified(self.root)
+        self.assertEqual(caught.exception.args[0], 'state_host_mismatch')
+
     def test_header_host_must_match_first_event_host(self):
         upgrade_state.commit_event(self.root, event('host-1'))
         control = self.root / 'state/ags-autodeploy/local-v2/control'

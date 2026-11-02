@@ -377,12 +377,26 @@ def recover_local(root):
 
 
 def commit_phase(root, operation_id, before_phase, after_phase, *, kind=None,
-                 host_instance='host-1', identity_sha256='0' * 64,
-                 epoch=1, expected_epoch=None, transaction_id=None, binding_sha256='0' * 64,
+                 host_instance=None, identity_sha256=None,
+                 epoch=1, expected_epoch=None, transaction_id=None, binding_sha256=None,
                  effect=None, approval_sha256=None, evidence_sha256=None):
-    """Record a phase or an effect observation without performing the effect."""
+    """Record a phase or an effect observation without performing the effect.
+
+    The first event must carry a real host and identity. Later events inherit
+    them from the verified chain. host-1 and a zero digest are not defaults.
+    """
     if kind is None:
         kind = operation_id
+    if host_instance is None or identity_sha256 is None or binding_sha256 is None:
+        loaded = load_verified(root)
+        if not loaded['events']:
+            raise StateError('state_host_mismatch')
+        previous = loaded['events'][-1]
+        host_instance = host_instance or previous['host_instance']
+        identity_sha256 = identity_sha256 or previous['identity_sha256']
+        binding_sha256 = binding_sha256 or previous['binding_sha256']
+    if not host_instance or identity_sha256 in (None, '0' * 64) or binding_sha256 in (None, '0' * 64):
+        raise StateError('state_host_mismatch')
     event_id = f'{operation_id}-{after_phase}'
     return commit_event(root, {
         'event_id': event_id, 'operation_id': operation_id, 'kind': kind,
