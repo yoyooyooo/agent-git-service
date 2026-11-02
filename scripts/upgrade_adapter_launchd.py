@@ -67,6 +67,18 @@ def native_probe(service, *, permitted):
 
 
 def create(root, package):
-    """Refuse before claim: native effects/observer have not been implemented."""
-    from upgrade_backup_contract import ContractError
-    raise ContractError('native_adapter_unavailable')
+    """Build a fixed, injected native capability; no implicit launchctl call."""
+    profile = package.get('native_profile') if isinstance(package, dict) else None
+    runner = package.get('native_runner') if isinstance(package, dict) else None
+    if not profile or not callable(runner):
+        from upgrade_backup_contract import ContractError
+        raise ContractError('native_adapter_unavailable')
+    service = dict(profile)
+    service.setdefault('root', str(root))
+    manager = Manager(service, runner=runner)
+    def writer_probe():
+        return runner(['launchctl', 'print', service['domain'] + '/' + service['label']])
+    def trash(path):
+        return runner(['/usr/bin/trash', str(path)])
+    return {'manager': manager, 'writer_probe': writer_probe, 'trash': trash,
+            'native_verified': False, 'unverified_reason': 'native_probe_not_run'}
