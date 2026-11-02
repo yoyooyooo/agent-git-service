@@ -45,17 +45,17 @@ def old_start_durable(root, restored, approval, observer):
     effect = {'effect_id': result['generation'], 'type': 'spawn',
               'expected_before': 'old_restored', 'desired_after': result['generation'], 'status': 'intent'}
     upgrade_state.commit_phase(root, 'start-' + approval['approval_id'], 'old_restored',
-                               'start_attempted', kind='start_intent', effect=effect,
+                               'start_attempted', kind='start_intent', effect=effect, epoch=1,
                                host_instance=approval.get('host_instance') or restored.get('host_instance') or 'host-1',
                                identity_sha256=restored.get('data_sha256') or 'a' * 64,
                                binding_sha256=restored.get('data_sha256') or 'b' * 64)
     observed = observer()
     if not isinstance(observed, dict) or observed.get('started') is not True or not observed.get('pid') or not observed.get('boot_id'):
         upgrade_state.commit_phase(root, 'observe-' + approval['approval_id'], 'start_attempted',
-                                   'blocked', kind='start_blocked', effect={**effect, 'status': 'blocked'})
+                                   'blocked', kind='start_blocked', effect={**effect, 'status': 'blocked'}, epoch=1)
         raise RecoveryError('start_observation_unknown')
     upgrade_state.commit_phase(root, 'observe-' + approval['approval_id'], 'start_attempted',
-                               'running', kind='start_observed', effect={**effect, 'desired_after': observed.get('generation', result['generation']), 'status': 'observed'})
+                               'running', kind='start_observed', epoch=1, effect={**effect, 'desired_after': observed.get('generation', result['generation']), 'status': 'observed'})
     return observed
 
 

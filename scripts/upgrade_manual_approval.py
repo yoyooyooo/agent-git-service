@@ -500,7 +500,7 @@ def _record_s4_completed(root, binding, record, approval_sha):
     bound = (previous or {}).get('binding_sha256') or fingerprint(binding)
     upgrade_state.commit_phase(
         root, 's4-completion-' + record['approval_id'], 'awaiting_observation', 'completed',
-        kind='s4_completed', approval_sha256=approval_sha,
+        kind='s4_completed', approval_sha256=approval_sha, epoch=1,
         host_instance=host, identity_sha256=identity,
         binding_sha256=bound, transaction_id=record['generation'])
 

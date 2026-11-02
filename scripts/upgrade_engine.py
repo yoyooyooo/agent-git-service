@@ -278,11 +278,11 @@ class Transaction:
         if not host or not identity:
             return
         transaction = self.authorization.get('authorization_id') or self.binding.get('authorization_id')
-        operation = 'engine-' + phase
+        operation = 'txn-' + str(transaction) + '-' + phase
         binding_sha = hashlib.sha256(json.dumps(self.binding, sort_keys=True).encode()).hexdigest()
         try:
             upgrade_state.commit_phase(
-                root, operation, before or 'none', phase, kind='engine_' + phase,
+                root, operation, before or 'none', phase, kind='engine_' + phase, epoch=1,
                 host_instance=self.binding.get('host_instance') or self.binding.get('host'),
                 identity_sha256=self.binding.get('identity_sha256'),
                 transaction_id=transaction,

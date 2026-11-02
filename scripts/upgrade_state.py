@@ -206,13 +206,21 @@ def _check_event(value, previous):
     else:
         if sequence != previous['sequence'] + 1 or value['previous_sha256'] != previous['sha256']:
             raise StateError('state_chain_broken')
-    if (previous is not None and value['expected_epoch'] is not None
-            and previous['epoch'] is not None and value['expected_epoch'] != previous['epoch']):
-        raise StateError('state_epoch_conflict')
+    if type(value.get('epoch')) is not int or value['epoch'] < 1:
+        raise StateError('state_epoch_required')
     if previous is not None and value['host_instance'] != previous['host_instance']:
         raise StateError('state_host_mismatch')
-    if value['epoch'] is not None and previous is not None and previous['epoch'] is not None:
+    if previous is not None and previous.get('epoch') is not None:
+        expected = value.get('expected_epoch')
+        if expected is None:
+            expected = previous['epoch']
+        if expected != previous['epoch']:
+            raise StateError('state_epoch_conflict')
         if value['epoch'] < previous['epoch']:
+            raise StateError('state_epoch_conflict')
+        if value['epoch'] > previous['epoch'] and value.get('kind') != 'authority_activated':
+            raise StateError('state_epoch_conflict')
+        if value['epoch'] > previous['epoch'] + 1:
             raise StateError('state_epoch_conflict')
     for name in ('event_id', 'operation_id', 'kind', 'host_instance'):
         identifier(value[name])
@@ -399,13 +407,16 @@ def recover_local(root):
 
 def commit_phase(root, operation_id, before_phase, after_phase, *, kind=None,
                  host_instance=None, identity_sha256=None,
-                 epoch=1, expected_epoch=None, transaction_id=None, binding_sha256=None,
+                 epoch=None, expected_epoch=None, transaction_id=None, binding_sha256=None,
                  effect=None, approval_sha256=None, evidence_sha256=None):
     """Record a phase or an effect observation without performing the effect.
 
     The first event must carry a real host and identity. Later events inherit
     them from the verified chain. host-1 and a zero digest are not defaults.
+    epoch is required. There is no epoch=1 default for a production caller.
     """
+    if type(epoch) is not int or epoch < 1:
+        raise StateError('state_epoch_required')
     if kind is None:
         kind = operation_id
     if host_instance is None or identity_sha256 is None or binding_sha256 is None:
