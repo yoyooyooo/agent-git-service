@@ -14,19 +14,37 @@ from upgrade import validate_pin, Failure
 from upgrade_backup_contract import strict_json
 
 
+def _evidence_fields(evidence, version):
+    """Structure check only. Does not call GitHub, cosign, or a Release API."""
+    digest = evidence.get('digest')
+    bundle = evidence.get('cosign_bundle')
+    if (evidence.get('source') != 'workflow_run'
+            or evidence.get('event') != 'push'
+            or evidence.get('verified') is not True
+            or evidence.get('signer_workflow') != 'release-control'
+            or evidence.get('runner_environment') != 'github-hosted'
+            or evidence.get('build_trigger') != 'push'
+            or evidence.get('source_ref') != 'refs/tags/' + version
+            or type(digest) is not str or len(digest) != 71 or not digest.startswith('sha256:')
+            or any(char not in '0123456789abcdef' for char in digest[7:])
+            or type(bundle) is not str or not bundle.startswith('application/vnd.dev.sigstore.bundle')):
+        raise ValueError('release_attestation_unverified')
+
+
 def emit_verified(candidate, source_raw, release, asset_bytes, *, attestations):
-    """Emit only after caller supplies both verified tag-push attestations."""
+    """Emit only after caller supplies both push-workflow attestations.
+
+    Evidence is structurally checked and still untrusted as a real Release.
+    Output stays installable=false. No GitHub, cosign, or Release call.
+    """
     targets = set(candidate.get('targets', {}))
-    if targets != {'darwin_arm64', 'linux_amd64'}:
+    if targets != {'darwin_arm64', 'linux_amd64'} or not isinstance(attestations, dict):
         raise ValueError('release_attestation_unverified')
     for target in sorted(targets):
-        evidence = attestations.get(target) if isinstance(attestations, dict) else None
-        if (not isinstance(evidence, dict) or evidence.get('verified') is not True
-                or evidence.get('signer_workflow') != 'release-control'
-                or evidence.get('runner_environment') != 'github-hosted'
-                or evidence.get('build_trigger') != 'push'
-                or evidence.get('source_ref') != 'refs/tags/' + candidate.get('version', '')):
+        evidence = attestations.get(target)
+        if not isinstance(evidence, dict):
             raise ValueError('release_attestation_unverified')
+        _evidence_fields(evidence, candidate.get('version', ''))
     envelope = prepare(candidate, source_raw, release, asset_bytes)
     return {'schema': 'ags.deploy-release-pin.v2', 'installable': False,
             'candidate': candidate, 'proof_sha256': hashlib.sha256(
