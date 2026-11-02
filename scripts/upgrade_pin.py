@@ -7,6 +7,7 @@ Release and a cryptographic verifier. Only a verifier that returns True is
 accepted; any other return value or any exception is a refusal.
 """
 import hashlib
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -49,6 +50,21 @@ def verify_bundle(digest_value, signature, *, bundle=None):
     return True
 
 
+def _accepts_bundle_keyword(signature):
+    """True only when the callable can be invoked with a bundle keyword.
+
+    Signature inspection selects the call shape before any execution. A
+    TypeError raised by the verifier body is never treated as incompatibility.
+    """
+    parameters = signature.parameters.values()
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+        return True
+    bundle = signature.parameters.get('bundle')
+    if bundle is None:
+        return False
+    return bundle.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+
+
 def emit_verified(candidate, source_raw, release, asset_bytes, *, attestations, verifier=None):
     """Emit only after both platform digests match and the verifier accepts.
 
@@ -70,12 +86,19 @@ def emit_verified(candidate, source_raw, release, asset_bytes, *, attestations, 
             raise ValueError('release_attestation_unverified')
         if 'run_id' not in evidence or 'run_attempt' not in evidence:
             raise ValueError('release_attestation_unverified')
+        digest = evidence.get('digest')
+        signature = evidence.get('signature')
+        bundle = evidence.get('bundle_bytes')
         try:
-            try:
-                accepted = verifier(evidence.get('digest'), evidence.get('signature'),
-                                    bundle=evidence.get('bundle_bytes'))
-            except TypeError:
-                accepted = verifier(evidence.get('digest'), evidence.get('signature'))
+            signature_probe = inspect.signature(verifier)
+            accepts_bundle = _accepts_bundle_keyword(signature_probe)
+        except (TypeError, ValueError):
+            accepts_bundle = False
+        try:
+            if accepts_bundle:
+                accepted = verifier(digest, signature, bundle=bundle)
+            else:
+                accepted = verifier(digest, signature)
         except Exception:
             raise ValueError('release_attestation_unverified') from None
         if accepted is not True:
