@@ -41,5 +41,6 @@ The AST import-closure regression checks actual staged source, not a synthetic
 member list. `bundle_engine` independently requires the full exact-digest set.
 This fixes the earlier staging builder's missing transitive dependencies but
 does not supply a native adapter, privileged helper or bootstrap authority.
+S6b.09 preserves this boundary: metadata and Trash operations require explicit provisioned callbacks and fail before claim when absent. A fixture readback cannot become ownership or deletion evidence.
 No factory may return a no-op Trash or writer probe as production capability.
 See [source integration](local-upgrade.md#s613-source-integration-boundary).

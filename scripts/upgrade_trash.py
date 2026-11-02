@@ -25,12 +25,17 @@ def allow(argv):
     return tuple(argv)
 
 
-def move(path, *, eligible, readback, space_ok=True):
+def move(path, *, eligible, readback, space_ok=True, mover=None):
     path = Path(path)
+    if mover is None:
+        raise TrashError('trash_unavailable')
     if not eligible or not space_ok:
         raise TrashError('not_eligible' if not eligible else 'space_insufficient')
     if path.is_symlink():
         raise TrashError('symlink_rejected')
-    if readback.get('source_gone') is not True or not readback.get('trash_entry'):
+    result = mover(path)
+    if not isinstance(result, dict):
+        raise TrashError('trash_readback_invalid')
+    if result.get('source_gone') is not True or not result.get('trash_entry'):
         return {'status': 'unknown', 'path': str(path)}
-    return {'status': 'trashed', 'entry': readback['trash_entry']}
+    return {'status': 'trashed', 'entry': result['trash_entry']}
