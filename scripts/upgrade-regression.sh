@@ -12,6 +12,7 @@ entries=(
   'scripts/test_upgrade_adapter_launchd.py' 'scripts/test_upgrade_adapter_systemd.py'
   'scripts/test_upgrade_metadata.py' 'scripts/test_upgrade_bundle.py'
   'scripts/test_upgrade_state.py' 'scripts/test_upgrade_journal.py'
+  'scripts/test_upgrade_durable_wiring.py'
   'scripts/test_upgrade_lifecycle.py' 'scripts/test_upgrade_recovery_cli.py'
   'scripts/test_upgrade_forward_recovery.py'
   'scripts/test_upgrade_full_restore.py FullRestoreTests'

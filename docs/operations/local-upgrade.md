@@ -430,6 +430,8 @@ S6b.01 records the current boundary in `scripts/test_upgrade_state.py` and does 
 
 S6b.02 adds `scripts/upgrade_state.py`, the owner-only `ags.upgrade-event.v1` chain and projection repair. Published events are the commit point; staging files and a lagging projection grant no effect. `recover_local` is local-only and never calls a manager or service. The journal remains separate from S3/S4 facts and does not make native adapters or restart authority available.
 
+S6b.03 exposes only `commit_phase`, which publishes an intent or observation to that journal before any caller-owned effect. It does not replace S3/S4 journals or infer a process result; an observation must explicitly close the same effect id.
+
 The source tests do **not** establish the full proposed production chain:
 S6.07 lifecycle and S6.08/09 recovery helpers are pure planning contracts, not
 wired durable runtime/CLI authority. Their returned generation or `started`
