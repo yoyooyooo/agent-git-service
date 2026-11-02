@@ -17,6 +17,8 @@ import re
 import stat
 import sys
 
+import routeb_dependency_readback
+
 ISOLATION_MARK = ".ags-isolated-rehearsal"
 TRANSACTION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -139,6 +141,7 @@ def parse(argv: list[str]) -> argparse.Namespace:
         command.add_argument("--restore", required=True)
         command.add_argument("--manager-dir", required=True)
         command.add_argument("--audit", required=True)
+        command.add_argument("--external-contract", required=True)
 
     plan = sub.add_parser("plan")
     add_common(plan)
@@ -275,7 +278,18 @@ def request_paths(args: argparse.Namespace) -> tuple[Path, Path, dict, dict]:
     if not binary.is_file() or file_digest(binary) != digest or window.get("candidate_sha256") != digest:
         raise Failure("candidate_rejected", 78)
     safe_transaction_id(window.get("transaction_id", ""))
+    require_external_contract(Path(args.external_contract), admitted)
     return root, restore, manifest, window
+
+
+def require_external_contract(path: Path, root: Path) -> None:
+    refuse_effect_path(root, path, "contract_inside_root")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise Failure("external_contract_rejected", 78) from error
+    if routeb_dependency_readback.evaluate(payload):
+        raise Failure("external_contract_rejected", 78)
 
 
 def mark(root: Path, journal: dict, phase: str, fault: str) -> None:
@@ -404,7 +418,11 @@ def status(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str]) -> int:
-    args = parse(argv)
+    try:
+        args = parse(argv)
+    except SystemExit as error:
+        code = error.code
+        return code if isinstance(code, int) else 2
     try:
         refuse_root(Path(args.root))
         if args.command == "plan":
