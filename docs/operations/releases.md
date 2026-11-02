@@ -12,6 +12,8 @@ and `build-info.json`. Each executable supports an exact standalone `--version`
 reading `.env`, starting a listener or accessing a database. Development binaries
 report `development`/`unknown`; they are not release artifacts.
 
+S6b.11 also stamps exact-source binary and Docker paths with `server.gitSHA`, `buildinfo.Version`, `buildinfo.Revision` and `buildinfo.Tree`. Docker remains an Alpine/CGO-disabled build and is not native Release ABI evidence.
+
 The release manifest binds the version, complete source SHA/tree, platform, Go
 version, CGO choice, binary hashes and smoke-test results. No credentials, private
 network inventory, runtime configuration, databases or deployment receipts are

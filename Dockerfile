@@ -18,7 +18,7 @@ RUN case "${GIT_SHA}" in (*[!0-9a-f]*|'') echo "GIT_SHA must be lowercase 40-hex
     && test "${#GIT_TREE}" -eq 40 \
     && test "$(cat .ags-source-revision)" = "${GIT_SHA}" \
     && test "$(cat .ags-source-tree)" = "${GIT_TREE}" \
-    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/ngaut/agent-git-service/server.gitSHA=${GIT_SHA}" -o gh-server ./cmd/gh-server
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/ngaut/agent-git-service/server.gitSHA=${GIT_SHA} -X github.com/ngaut/agent-git-service/internal/buildinfo.Version=source-${GIT_SHA} -X github.com/ngaut/agent-git-service/internal/buildinfo.Revision=${GIT_SHA} -X github.com/ngaut/agent-git-service/internal/buildinfo.Tree=${GIT_TREE}" -o gh-server ./cmd/gh-server
 
 # ---- Runtime stage ----
 FROM alpine:3.21
