@@ -74,18 +74,29 @@ def restore_object_durable(root, target, source, object_id, *, fail_after=None,
                            transaction_id=None, expected_binding_sha256=None,
                            expected_approval_sha256=None, expected_transaction_id=None,
                            effect_ledger=None):
-    """Switch one approved file inside restore_root. Refuse before any write."""
+    """Switch one approved file inside the deployment root. Refuse before any write.
+
+    Approval, binding and transaction must be supplied. They are not invented,
+    and expected_* cannot be filled from the same caller values. restore_root
+    cannot leave the deployment root.
+    """
     import upgrade_state
+    if not approval_sha256 or not binding_sha256 or not transaction_id:
+        raise RestoreError('restore_approval_required')
+    if (expected_binding_sha256 is None or expected_approval_sha256 is None
+            or expected_transaction_id is None
+            or binding_sha256 != expected_binding_sha256
+            or approval_sha256 != expected_approval_sha256
+            or transaction_id != expected_transaction_id
+            or transaction_id != object_id):
+        raise RestoreError('restore_binding_mismatch')
     if restore_root is None:
         restore_root = root
-    if binding_sha256 is None and approval_sha256 is None and transaction_id is None:
-        binding_sha256 = approval_sha256 = 'b' * 64
-        transaction_id = object_id
-    if (binding_sha256 != (expected_binding_sha256 or binding_sha256)
-            or approval_sha256 != (expected_approval_sha256 or approval_sha256)
-            or transaction_id != (expected_transaction_id or transaction_id)
-            or not binding_sha256 or not approval_sha256 or transaction_id != object_id):
-        raise RestoreError('restore_binding_mismatch')
+    else:
+        try:
+            Path(restore_root).resolve(strict=True).relative_to(Path(root).resolve(strict=True))
+        except (OSError, ValueError):
+            raise RestoreError('restore_root_outside') from None
     target = _contained(target, restore_root, 'restore_target_outside')
     source = _contained(source, restore_root, 'restore_source_outside')
     if target == source:

@@ -41,6 +41,30 @@ class RestoreContainmentTests(unittest.TestCase):
             self.root, target, source, 'obj-1', **kwargs)
 
 
+    def test_missing_approval_is_refused_before_any_write(self):
+        with self.assertRaises(upgrade_full_restore.RestoreError) as caught:
+            upgrade_full_restore.restore_object_durable(self.root, self.target, self.source, 'obj-1')
+        self.assertEqual(caught.exception.code, 'restore_approval_required')
+        self.assertEqual(self.target.read_bytes(), b'old')
+        self.assertFalse((self.root / 'state/ags-autodeploy/local-v2/control/events').exists())
+
+    def test_caller_cannot_move_restore_root_outside_deployment(self):
+        outside = Path(tempfile.mkdtemp(dir=self.root.parent, prefix='s6b-b1-sibling-'))
+        self.addCleanup(lambda: None)
+        sibling_old = outside / 'old'
+        sibling_new = outside / 'new'
+        sibling_old.write_bytes(b'old')
+        sibling_new.write_bytes(b'new')
+        with self.assertRaises(upgrade_full_restore.RestoreError) as caught:
+            upgrade_full_restore.restore_object_durable(
+                self.root, sibling_old, sibling_new, 'obj-1', restore_root=outside,
+                approval_sha256=self.approval, binding_sha256=self.binding,
+                transaction_id='obj-1', expected_binding_sha256=self.binding,
+                expected_approval_sha256=self.approval, expected_transaction_id='obj-1')
+        self.assertEqual(caught.exception.code, 'restore_root_outside')
+        self.assertEqual(sibling_old.read_bytes(), b'old')
+        self.assertFalse((self.root / 'state/ags-autodeploy/local-v2/control/events').exists())
+
     def test_outside_target_is_refused_before_any_write(self):
         outside = Path(tempfile.mkdtemp(dir=Path.home(), prefix='s6b-b1-tgt-'))
         self.addCleanup(lambda: outside.rmdir() if outside.exists() and not any(outside.iterdir()) else None)
