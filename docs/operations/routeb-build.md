@@ -28,17 +28,24 @@ for the Darwin or Linux binary.
 
 ## mini Darwin/arm64
 
-Build on Darwin/arm64 with `GOTOOLCHAIN=go1.26.8` and `CGO_ENABLED=1`:
+Build the reviewed checkout, not the content baseline, on Darwin/arm64
+with `GOTOOLCHAIN=go1.26.8` and `CGO_ENABLED=1`. Export `GIT_SHA` from that
+checkout and pass the same value to the script:
 
 ```sh
-GIT_SHA=3a0c7e4f0ac5150d774efc66168907671061bcc5 \
+export GIT_SHA=$(git rev-parse HEAD)
+export GIT_TREE=$(git rev-parse 'HEAD^{tree}')
+test "$GIT_SHA" = "$(git rev-parse HEAD)"
+GIT_SHA="$GIT_SHA" GIT_TREE="$GIT_TREE" \
   GOTOOLCHAIN=go1.26.8 CGO_ENABLED=1 \
   scripts/build-exact-source.sh binary --output /path/outside/repo/gh-server
 ```
 
-Record `gh-server`, sha256, manifest, version JSON, `go version`, `otool -L`,
-and the source revision and tree. Keep the output outside the source checkout.
-Do not start it against `~/.ags`.
+Accept the binary only when `--version` reports `version=source-$GIT_SHA`,
+`revision=$GIT_SHA` and `tree=$GIT_TREE`. `3a0c7e4f0ac5150d774efc66168907671061bcc5`
+is the content baseline, not the built revision. Record `gh-server`, sha256,
+manifest, version JSON, `go version`, `otool -L`, and those two values. Keep
+the output outside the source checkout. Do not start it against `~/.ags`.
 
 ## imile-win Linux/amd64
 
