@@ -19,6 +19,7 @@ entries=(
   'scripts/test_native_factories.py' 'scripts/test_native_systemd_contract.py'
   'scripts/test_upgrade_helpers.py' 'scripts/test_upgrade_epoch_chain.py'
   'scripts/test_buildinfo_binding.py' 'scripts/test_upgrade_pin_emitter.py'
+  'scripts/test_upgrade_pin_evidence.py'
   'scripts/test_s6b_ci_inventory.py'
   'scripts/test_upgrade_lifecycle.py' 'scripts/test_upgrade_recovery_cli.py'
   'scripts/test_upgrade_forward_recovery.py'
