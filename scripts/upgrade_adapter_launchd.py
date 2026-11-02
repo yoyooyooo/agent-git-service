@@ -59,11 +59,33 @@ class Manager:
         return {'started': True}
 
 
-def native_probe(service, *, permitted):
-    """Never calls launchctl unless an isolated permission was explicitly granted."""
+def native_probe(service, *, permitted, label=None, runner=None, one_shot=True):
+    """Run the fixed bootstrap/print/bootout sequence only when explicitly permitted.
+
+    The runner is injected. This function does not call launchctl itself. A
+    successful injected sequence is still native_os_unverified.
+    """
     if not permitted:
         return {'verified': False, 'reason': 'permission_unavailable'}
-    return {'verified': False, 'reason': 'native_sequence_not_run'}
+    if not one_shot or not label or 'once' not in label or label != service.get('label'):
+        raise AdapterError('label_not_one_shot')
+    if not callable(runner):
+        return {'verified': False, 'reason': 'native_sequence_not_run'}
+    domain = service['domain'] + '/' + label
+    plist = label + '.plist'
+    steps = (
+        ['launchctl', 'bootstrap', service['domain'], plist],
+        ['launchctl', 'print', domain],
+        ['launchctl', 'bootout', domain],
+    )
+    rollback = (['launchctl', 'bootout', domain],)
+    try:
+        from upgrade_native_runner import run_sequence, RunnerError
+        run_sequence(runner, steps, rollback=rollback)
+    except RunnerError as error:
+        raise AdapterError('native_probe_failed') from error
+    return {'verified': False, 'reason': 'native_os_unverified',
+            'sequence': [step[1] for step in steps], 'label': label}
 
 
 def create(root, package):

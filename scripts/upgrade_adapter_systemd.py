@@ -68,6 +68,38 @@ class Manager:
         return {'started': readback.get('active') is True}
 
 
+def native_probe(unit, *, permitted, label=None, runner=None, one_shot=True):
+    """Run enable/start/status/stop/disable only through an injected runner.
+
+    Real systemctl is not called. Success stays native_os_unverified.
+    """
+    if not permitted:
+        return {'verified': False, 'reason': 'permission_unavailable'}
+    if not one_shot or not label or 'once' not in label or label != unit.get('name'):
+        raise AdapterError('label_not_one_shot')
+    if not callable(runner):
+        return {'verified': False, 'reason': 'native_sequence_not_run'}
+    scope = '--' + unit['scope']
+    steps = (
+        ['systemctl', scope, 'enable', label],
+        ['systemctl', scope, 'start', label],
+        ['systemctl', scope, 'status', label],
+        ['systemctl', scope, 'stop', label],
+        ['systemctl', scope, 'disable', label],
+    )
+    rollback = (
+        ['systemctl', scope, 'stop', label],
+        ['systemctl', scope, 'disable', label],
+    )
+    try:
+        from upgrade_native_runner import run_sequence, RunnerError
+        run_sequence(runner, steps, rollback=rollback)
+    except RunnerError as error:
+        raise AdapterError('native_probe_failed') from error
+    return {'verified': False, 'reason': 'native_os_unverified',
+            'sequence': [step[2] for step in steps], 'label': label}
+
+
 def create(root, package):
     """Build a fixed, injected native capability; missing runner is unverified."""
     profile = package.get('native_profile') if isinstance(package, dict) else None
