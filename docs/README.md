@@ -49,6 +49,7 @@ accepted direction, or incremental work that has not fully landed yet.
 
 - [Fork Governance](../fork/README.md) - GitHub source workflow, upstream generations, capability review and publication gates.
 - [Production Deployment](production-deployment.md)
+- [S6b Upgrade Recovery Design](design/s6b-upgrade-recovery.md) - durable journal, recovery boundaries, native adapter evidence and non-installable pin/build identity work.
 - [Reviewed Maintenance Windows](operations/maintenance-window.md) - opt-in executor admission, exact candidate import, complete startup recovery review and default forward repair.
 - [Startup Dependency Recovery](operations/startup-dependency-recovery.md) - isolated fault-injection evidence, restart idempotence and boundaries that still require a maintenance window.
 - [Local v2 Upgrade](operations/local-upgrade.md) - fixed entry, per-machine manual authorization, durable claim, S1–S6 source contracts, identity and private-package admission; public policy stays closed. See its source integration limits.
