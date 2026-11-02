@@ -37,7 +37,9 @@ S6b-fix B2 把 durable seam 以迁移期 shim 接入现有生产写者，而不�
 
 launchd 与 systemd 工厂只接受固定 profile 和显式注入 runner；不从请求读取任意 argv。systemd 命令使用 `systemctl --system` 或 `systemctl --user`，不可混 scope。能力在真实隔离 probe 前标记 `native_verified=false`。缺少 provisioned metadata helper 或 Trash mover 时在 claim 前拒绝；fixture readback 不是生产证据。
 
-S6b-fix B3 增加固定命令、一次性 label/unit 名、超时、输出上限和环境清洗的 runner，以及 launchd bootstrap/print/bootout、systemd enable/start/status/stop/disable 的 probe 序列。factory 返回的 Manager 接受无参数 suppress_restart/stop/start，并用注入 runner 读回；systemd factory 把 runner 注入 Manager。调用者传入的 facts 被拒绝。默认关闭。本仓库测试只用注入 runner，不调用真实 launchctl/systemctl。真实 OS probe 仍是 UNVERIFIED。
+S6b-fix B3 增加固定命令、一次性 label/unit 名、超时、输出上限和环境清洗的 runner，以及 launchd bootstrap/print/bootout、systemd enable/start/status/stop/disable 的 probe 序列。factory 返回的 Manager 接受无参数 suppress_restart/stop/start，并用注入 runner 读回；systemd factory 把 runner 注入 Manager。调用者传入的 facts 被拒绝。默认关闭。
+
+S6b-fix6 B3 已接线：probe 要求固定绝对 plist 或 unit 路径，相对路径在调用 runner 前拒绝。`upgrade_native_parse.py` 解析录制的 `launchctl print` 与 `systemctl show` stdout，取出 manager、PID、plist/cgroup 与 boot/invocation。PID 变化、boot 变化、后代残留和畸形输出分别拒绝或区分。测试只用注入 runner 和录制文本。真实 launchctl/systemctl、真实进程观察、metadata helper 的现场 Trash 读回仍是 UNVERIFIED；本机没有调用这些命令。
 
 S6b-fix3 B6 把 Native adapter isolation 从 Fork CI 移到 [`.github/workflows/native-adapter.yml`](../../.github/workflows/native-adapter.yml)。它不属于 release required evidence：`fork/scripts/release.py` 与 `scripts/upgrade_host.py` 仍要求审查过的 12 个 Fork CI job 成功。清单外的 skipped job 不计入成功，也不使 inventory 失败。该 workflow 仅在 `workflow_dispatch` 且 `native_probe=true` 时运行注入序列，默认关闭，不使用私有 runner 或 secret，也不调用 launchctl/systemctl。未运行或 skipped 都是 UNVERIFIED，不是 pass。
 

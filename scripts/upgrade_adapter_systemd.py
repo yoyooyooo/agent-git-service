@@ -96,6 +96,9 @@ def native_probe(unit, *, permitted, label=None, runner=None, one_shot=True):
         raise AdapterError('label_not_one_shot')
     if not callable(runner):
         return {'verified': False, 'reason': 'native_sequence_not_run'}
+    unit_path = unit.get('unit_path')
+    if not isinstance(unit_path, str) or not unit_path.startswith('/') or not unit_path.endswith('.service'):
+        raise AdapterError('unit_not_absolute')
     scope = '--' + unit['scope']
     steps = (
         ['systemctl', scope, 'enable', label],
@@ -110,11 +113,20 @@ def native_probe(unit, *, permitted, label=None, runner=None, one_shot=True):
     )
     try:
         from upgrade_native_runner import run_sequence, RunnerError
-        run_sequence(runner, steps, rollback=rollback)
+        done = run_sequence(runner, steps, rollback=rollback)
     except RunnerError as error:
         raise AdapterError('native_probe_failed') from error
+    shown = next((item for argv, item in done if argv[2] == 'status'), None)
+    readback = None
+    if isinstance(shown, dict) and isinstance(shown.get('stdout'), str):
+        from upgrade_native_parse import parse_systemctl_show, ParseError
+        try:
+            readback = parse_systemctl_show(shown['stdout'])
+        except ParseError as error:
+            raise AdapterError('manager_output_malformed') from error
     return {'verified': False, 'reason': 'native_os_unverified',
-            'sequence': [step[2] for step in steps], 'label': label}
+            'sequence': [step[2] for step in steps], 'label': label,
+            'unit_path': unit_path, 'readback': readback}
 
 
 def create(root, package):
