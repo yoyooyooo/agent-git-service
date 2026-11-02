@@ -308,7 +308,7 @@ class ManualTests(ManualFixture):
 
     def assert_retained_fragment(self, fragment):
         retained = [p for p in self.pending.parent.rglob('*') if p.is_file()
-                    and p.name != 'hostops.lock' and p.read_bytes() == fragment]
+                    and p.name not in ('hostops.lock', 'state.lock') and p.read_bytes() == fragment]
         self.assertEqual(len(retained), 1, retained)
         return retained[0]
 

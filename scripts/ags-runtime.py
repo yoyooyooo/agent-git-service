@@ -30,7 +30,8 @@ def cold_pending(root):
 def startup_permitted(root):
     control = root / 'state/ags-autodeploy/local-v2/control'
     events = control / 'events'
-    journal_present = control.exists() or (events.exists() and any(events.iterdir()))
+    published = events.exists() and not events.is_symlink() and any(events.iterdir())
+    journal_present = (control / 'format.json').exists() or published
     if journal_present:
         format_path = control / 'format.json'
         if not format_path.is_file() or format_path.is_symlink():
@@ -40,7 +41,7 @@ def startup_permitted(root):
             loaded = upgrade_state.load_verified(root)
             projection = loaded.get('projection') or {}
             authority = projection.get('authority')
-            if authority is None or authority.get('state') != 'active':
+            if authority is not None and authority.get('state') != 'active':
                 return False
             if projection.get('pending_effects'):
                 return False
@@ -58,10 +59,13 @@ def startup_permitted(root):
 
 
 def consume_start(root):
+    if cold_pending(root):
+        from upgrade_identity import runtime_identity
+        runtime_identity(root)
+    if not startup_permitted(root):
+        raise CheckFailure('start_refused')
     if not cold_pending(root):
-        raise CheckFailure('start_marker_missing')
-    from upgrade_identity import runtime_identity
-    runtime_identity(root)
+        return None
     from upgrade_recovery import consume_start as consume
     return consume(root)
 
