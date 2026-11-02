@@ -209,6 +209,11 @@ Trash function; the component has no default Trash implementation. Recovery
 requires the reviewed group, DSN, admitted schema and sealed inventory evidence,
 but does not require the original data paths to exist. Default public apply and direct v2 install still exit 83.
 
+The [Route B runbook](routeb-runbook.md) is a preparation description for
+revision `3a0c7e4f0ac5150d774efc66168907671061bcc5`. It does not change this
+exit code and does not turn the launchd or systemd adapters into production
+adapters (`native_adapter_unavailable` remains).
+
 ## S3 private cold-window protocol
 
 `upgrade_recovery.py` provides a private component harness, not a production
