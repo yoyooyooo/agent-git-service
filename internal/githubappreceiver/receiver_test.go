@@ -124,6 +124,61 @@ func TestReceiverLimitsBodyTo10MiB(t *testing.T) {
 	}
 }
 
+// overflowThenErrorReader returns MaxBodyBytes+1 bytes and a read error from
+// the same Read call that crosses the limit.
+type overflowThenErrorReader struct {
+	remaining int
+	err       error
+}
+
+func (r *overflowThenErrorReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, r.err
+	}
+	n := len(p)
+	if n > r.remaining {
+		n = r.remaining
+	}
+	for i := 0; i < n; i++ {
+		p[i] = 'x'
+	}
+	r.remaining -= n
+	if r.remaining == 0 {
+		return n, r.err
+	}
+	return n, nil
+}
+
+func TestReceiverOverflowWithReadErrorIs413(t *testing.T) {
+	store := NewMemoryStore()
+	var logs bytes.Buffer
+	receiver := Receiver{
+		AppID:  "123456",
+		Secret: "fixture-secret",
+		Store:  store,
+		Log:    slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+	req := httptest.NewRequest(http.MethodPost, Path, &overflowThenErrorReader{
+		remaining: MaxBodyBytes + 1,
+		err:       errors.New("connection reset by peer"),
+	})
+	req.Header.Set(headerDelivery, "delivery-overflow-reset")
+	rec := httptest.NewRecorder()
+	receiver.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "payload exceeds 10 MiB") {
+		t.Fatalf("body %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "connection reset") || strings.Contains(logs.String(), "connection reset") || strings.Contains(logs.String(), "payload read failed") {
+		t.Fatalf("response or log leaked the read error: body %s log %s", rec.Body.String(), logs.String())
+	}
+	if _, ok := store.Body("123456", "delivery-overflow-reset"); ok {
+		t.Fatal("oversized body was stored")
+	}
+}
+
 type failReader struct {
 	payload []byte
 	err     error
