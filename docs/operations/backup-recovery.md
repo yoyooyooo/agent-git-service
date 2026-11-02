@@ -451,7 +451,9 @@ full-chain, isolated VM and production-copy startup exercises remain outside
 this source evidence. Publication, installation, service configuration, actual
 windows, human decisions and recovery-material retirement require separate approval.
 
-## S6.10 offline full-group plan
+## S6b.06 adds the local `restore_object_durable` seam for an already-approved object switch. It records per-object intent before rename and only closes the same effect after hash readback; a post-rename unknown result is blocked and does not select old or new bytes. This does not authorize live full-group restore or service start.
+
+S6.10 offline full-group plan
 
 `upgrade_recovery_cli.plan` accepts `kind=full-restore` for an offline plan only.
 It requires the original complete S1 group and seal, unchanged payload,
