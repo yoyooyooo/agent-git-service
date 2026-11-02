@@ -65,6 +65,13 @@ class TransactionTest(unittest.TestCase):
         (self.manager / "control.json").write_text(json.dumps({
             "suppress": "ok", "stop": "ok", "start": "ok", "writers": 0,
         }), encoding="utf-8")
+        self.admit_root()
+
+    def admit_root(self) -> None:
+        self.root.chmod(0o700)
+        marker = self.root / ".ags-isolated-rehearsal"
+        marker.write_text("isolated\n", encoding="utf-8")
+        os.chmod(marker, 0o600)
 
     def args(self, command: str, *extra: str) -> list[str]:
         base = [
@@ -166,6 +173,65 @@ class TransactionTest(unittest.TestCase):
             "--restore", str(self.restore), "--manager-dir", str(self.manager),
             "--audit", str(self.audit), "--execute",
         ]), 78)
+
+    def test_refuses_protected_secondary_paths(self) -> None:
+        self.admit_root()
+        production = Path.home() / ".ags"
+        sentinel = production / "routeb-b1-secondary-sentinel"
+        before = sentinel.exists()
+        code = txn.main([
+            "plan", "--host", "mini", "--root", str(self.root),
+            "--candidate", str(self.manifest), "--window", str(self.window),
+            "--restore", str(production / "restore"),
+            "--manager-dir", str(production / "manager"),
+            "--audit", str(production / "audit"),
+        ])
+        self.assertEqual(code, 78)
+        self.assertEqual(sentinel.exists(), before)
+        self.assertFalse((self.root / "state").exists())
+
+    def test_refuses_absolute_and_parent_transaction_id(self) -> None:
+        self.admit_root()
+        for transaction in (str(self.base / "escaped-backup"), "../../../../escaped-backup", "txn/nested", "txn\\nested"):
+            self.window.write_text(json.dumps({
+                "schema": "ags.routeb-window.v1",
+                "decision": "approve",
+                "host": "mini",
+                "transaction_id": transaction,
+                "candidate_sha256": digest(self.candidate_bin),
+            }), encoding="utf-8")
+            code = txn.main(self.args("plan"))
+            self.assertEqual(code, 78, transaction)
+            self.assertFalse((self.root / "state").exists())
+
+    def test_refuses_internal_symlink_to_external_sentinel(self) -> None:
+        self.admit_root()
+        sentinel = self.base / "sentinel"
+        sentinel.write_bytes(b"sentinel")
+        current = self.root / "bin" / "current"
+        current.symlink_to(sentinel)
+        code = txn.main(self.args("plan"))
+        self.assertEqual(code, 78)
+        self.assertEqual(sentinel.read_bytes(), b"sentinel")
+        self.assertTrue(current.is_symlink())
+
+    def test_refuses_symlink_write_targets(self) -> None:
+        self.admit_root()
+        sentinel = self.base / "sentinel"
+        sentinel.write_bytes(b"sentinel")
+        (self.root / "state").mkdir()
+        (self.root / "state" / "journal.json.tmp").symlink_to(sentinel)
+        (self.root / "data" / "linked.txt").symlink_to(sentinel)
+        code = txn.main(self.args("run"))
+        self.assertEqual(code, 78)
+        self.assertEqual(sentinel.read_bytes(), b"sentinel")
+
+    def test_refuses_root_without_isolation_admission(self) -> None:
+        (self.root / ".ags-isolated-rehearsal").unlink()
+        self.root.chmod(0o755)
+        code = txn.main(self.args("plan"))
+        self.assertEqual(code, 78)
+        self.assertFalse((self.root / "state").exists())
 
     def test_entry_refuses_production_root(self) -> None:
         entry = Path(__file__).with_name("ags-maintenance-transaction")
