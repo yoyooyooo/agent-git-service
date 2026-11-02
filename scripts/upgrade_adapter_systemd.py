@@ -100,10 +100,12 @@ def native_probe(unit, *, permitted, label=None, runner=None, one_shot=True):
     if not isinstance(unit_path, str) or not unit_path.startswith('/') or not unit_path.endswith('.service'):
         raise AdapterError('unit_not_absolute')
     scope = '--' + unit['scope']
+    show = ['systemctl', scope, 'show',
+            '--property=MainPID,ControlGroup,InvocationID', label]
     steps = (
         ['systemctl', scope, 'enable', label],
         ['systemctl', scope, 'start', label],
-        ['systemctl', scope, 'status', label],
+        show,
         ['systemctl', scope, 'stop', label],
         ['systemctl', scope, 'disable', label],
     )
@@ -116,7 +118,7 @@ def native_probe(unit, *, permitted, label=None, runner=None, one_shot=True):
         done = run_sequence(runner, steps, rollback=rollback)
     except RunnerError as error:
         raise AdapterError('native_probe_failed') from error
-    shown = next((item for argv, item in done if argv[2] == 'status'), None)
+    shown = next((item for argv, item in done if argv[2] == 'show'), None)
     readback = None
     if isinstance(shown, dict) and isinstance(shown.get('stdout'), str):
         from upgrade_native_parse import parse_systemctl_show, ParseError
