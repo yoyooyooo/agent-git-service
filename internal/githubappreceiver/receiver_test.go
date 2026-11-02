@@ -2,16 +2,20 @@ package githubappreceiver
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func sign(secret string, body []byte) string {
@@ -112,9 +116,140 @@ func TestReceiverLimitsBodyTo10MiB(t *testing.T) {
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status %d", rec.Code)
 	}
+	if !strings.Contains(rec.Body.String(), "payload exceeds 10 MiB") {
+		t.Fatalf("body %s", rec.Body.String())
+	}
 	if _, ok := store.Body("123456", "delivery-large"); ok {
 		t.Fatal("oversized body was stored")
 	}
+}
+
+type failReader struct {
+	payload []byte
+	err     error
+	n       int
+}
+
+func (r *failReader) Read(p []byte) (int, error) {
+	if r.n < len(r.payload) {
+		n := copy(p, r.payload[r.n:])
+		r.n += n
+		return n, nil
+	}
+	return 0, r.err
+}
+
+func TestReceiverReadFailuresAreNotOversized(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{name: "unexpected eof", err: io.ErrUnexpectedEOF},
+		{name: "deadline", err: context.DeadlineExceeded},
+		{name: "timeout", err: timeoutError{}},
+		{name: "closed", err: net.ErrClosed},
+		{name: "reset", err: errors.New("read tcp 127.0.0.1:443: connection reset by peer")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewMemoryStore()
+			var logs bytes.Buffer
+			receiver := Receiver{
+				AppID:  "123456",
+				Secret: "fixture-secret",
+				Store:  store,
+				Log:    slog.New(slog.NewTextHandler(&logs, nil)),
+			}
+			body := []byte(`{"action":"opened"}`)
+			req := httptest.NewRequest(http.MethodPost, Path, &failReader{payload: body, err: tc.err})
+			req.Header.Set(headerDelivery, "delivery-read-fail")
+			req.Header.Set(headerSignature, sign("fixture-secret", body))
+			rec := httptest.NewRecorder()
+			receiver.Handler().ServeHTTP(rec, req)
+			if rec.Code == http.StatusRequestEntityTooLarge {
+				t.Fatalf("read error classified as 413: %s", rec.Body.String())
+			}
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "payload read failed") {
+				t.Fatalf("body %s", rec.Body.String())
+			}
+			if _, ok := store.Body("123456", "delivery-read-fail"); ok {
+				t.Fatal("failed read was stored")
+			}
+			if !strings.Contains(logs.String(), "payload read failed") || !strings.Contains(logs.String(), "bytes") {
+				t.Fatalf("log %s", logs.String())
+			}
+		})
+	}
+}
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "i/o timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
+
+func TestReceiverSlowSmallBodyTimesOutAsReadFailure(t *testing.T) {
+	store := NewMemoryStore()
+	receiver := Receiver{AppID: "123456", Secret: "fixture-secret", Store: store, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	server := httptest.NewUnstartedServer(receiver.Handler())
+	server.Config.ReadTimeout = 200 * time.Millisecond
+	server.Start()
+	defer server.Close()
+
+	body := []byte(`{"action":"opened"}`)
+	req, err := http.NewRequest(http.MethodPost, server.URL+Path, &slowReader{payload: body, delay: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(headerDelivery, "delivery-slow")
+	req.Header.Set(headerSignature, sign("fixture-secret", body))
+	req.ContentLength = int64(len(body))
+	client := &http.Client{Timeout: 3 * time.Second}
+	started := time.Now()
+	resp, err := client.Do(req)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	if resp.StatusCode == http.StatusRequestEntityTooLarge {
+		t.Fatalf("slow body classified as 413 after %s: %s", elapsed, raw)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status %d after %s body %s", resp.StatusCode, elapsed, raw)
+	}
+	if !strings.Contains(string(raw), "payload read failed") {
+		t.Fatalf("body %s", raw)
+	}
+	if elapsed < 150*time.Millisecond || elapsed > 900*time.Millisecond {
+		t.Fatalf("elapsed %s, want near the read deadline", elapsed)
+	}
+	if _, ok := store.Body("123456", "delivery-slow"); ok {
+		t.Fatal("timed out body was stored")
+	}
+}
+
+type slowReader struct {
+	payload []byte
+	delay   time.Duration
+	n       int
+}
+
+func (r *slowReader) Read(p []byte) (int, error) {
+	if r.n >= len(r.payload) {
+		return 0, io.EOF
+	}
+	time.Sleep(r.delay)
+	n := copy(p, r.payload[r.n:])
+	r.n += n
+	return n, nil
 }
 
 func TestReceiverDeliveryIsIdempotentAndDetectsConflict(t *testing.T) {
