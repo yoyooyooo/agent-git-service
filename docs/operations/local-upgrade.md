@@ -426,6 +426,8 @@ release-source bytes. `bundle_engine` requires those dependencies by exact diges
 Staging files remain non-executable and `installable=false`; provisioning needs
 separate ownership, profile and native capability acceptance.
 
+S6b.01 records the current boundary in `scripts/test_upgrade_state.py` and does not add a writer. `activate` still returns `ags.runtime-authority.v1` and writes nothing under `control/`. `old_start` still returns `started=true` with no pid or boot id. A leftover `upgrade-cold.json` still refuses the next claim and is not archived. `scripts/build-exact-source.sh` and `Dockerfile` still pass only `server.gitSHA`. Later S6b slices own the durable journal, the launcher fence and the four buildinfo stamps. The reproduction is part of [the shared regression runner](../../scripts/upgrade-regression.sh).
+
 The source tests do **not** establish the full proposed production chain:
 S6.07 lifecycle and S6.08/09 recovery helpers are pure planning contracts, not
 wired durable runtime/CLI authority. Their returned generation or `started`
