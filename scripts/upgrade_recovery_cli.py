@@ -27,6 +27,24 @@ def plan(journal):
             'phase': journal.get('phase')}
 
 
+def old_start_durable(root, restored, approval, observer):
+    """Persist spawn intent, then require an explicit observer result."""
+    import upgrade_state
+    result = old_start(restored, approval)
+    effect = {'effect_id': result['generation'], 'type': 'spawn',
+              'expected_before': 'old_restored', 'desired_after': result['generation'], 'status': 'intent'}
+    upgrade_state.commit_phase(root, 'start-' + approval['approval_id'], 'old_restored',
+                               'start_attempted', kind='start_intent', effect=effect)
+    observed = observer()
+    if not isinstance(observed, dict) or observed.get('started') is not True or not observed.get('pid') or not observed.get('boot_id'):
+        upgrade_state.commit_phase(root, 'observe-' + approval['approval_id'], 'start_attempted',
+                                   'blocked', kind='start_blocked', effect={**effect, 'status': 'blocked'})
+        raise RecoveryError('start_observation_unknown')
+    upgrade_state.commit_phase(root, 'observe-' + approval['approval_id'], 'start_attempted',
+                               'running', kind='start_observed', effect={**effect, 'desired_after': observed.get('generation', result['generation']), 'status': 'observed'})
+    return observed
+
+
 def old_start(restored, approval, *, consumed=False):
     if restored.get('status') != 'old_restored' or restored.get('started') is not False:
         raise RecoveryError('not_restored')
