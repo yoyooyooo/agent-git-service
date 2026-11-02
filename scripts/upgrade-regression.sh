@@ -14,7 +14,7 @@ entries=(
   'scripts/test_upgrade_state.py' 'scripts/test_upgrade_journal.py'
   'scripts/test_upgrade_durable_wiring.py' 'scripts/test_upgrade_activation.py'
   'scripts/test_upgrade_resume.py' 'scripts/test_upgrade_restore_intent.py'
-  'scripts/test_native_factories.py'
+  'scripts/test_native_factories.py' 'scripts/test_native_systemd_contract.py'
   'scripts/test_upgrade_lifecycle.py' 'scripts/test_upgrade_recovery_cli.py'
   'scripts/test_upgrade_forward_recovery.py'
   'scripts/test_upgrade_full_restore.py FullRestoreTests'

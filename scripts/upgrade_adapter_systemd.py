@@ -12,6 +12,12 @@ sys.pycache_prefix = None
 SCHEMA = 'ags.upgrade-host-adapter.v1'
 
 
+def command(unit, action):
+    if unit.get('scope') not in ('system', 'user'):
+        raise AdapterError('scope_rejected')
+    return ['systemctl', '--' + unit['scope'], action, unit['name']]
+
+
 class AdapterError(ValueError):
     def __init__(self, reason, exit_code=83):
         super().__init__(reason)
@@ -71,7 +77,7 @@ def create(root, package):
     unit = dict(profile)
     manager = Manager(unit)
     def writer_probe():
-        return runner(['systemctl', unit['scope'], 'show', unit['name']])
+        return runner(command(unit, 'show'))
     def trash(path):
         return runner(['/usr/bin/trash', str(path)])
     return {'manager': manager, 'writer_probe': writer_probe, 'trash': trash,
