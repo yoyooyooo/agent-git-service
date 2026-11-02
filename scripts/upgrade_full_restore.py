@@ -5,11 +5,49 @@ S2's sealed payload and complete restore report remain mandatory. Audit state
 is never snapshot data. Root tools require a separately approved provisioner.
 """
 from pathlib import Path
+import hashlib
+import os
+import shutil
+import tempfile
+
+
+class RestoreError(ValueError):
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
 
 from upgrade_backup_contract import require, validate_group, validate_restore_report, strict_json
 from upgrade_backup import verify_payload
 from upgrade_restore_verify import load_sealed, load_inventory, verify_dependencies
 from upgrade_inventory import safe_path
+
+
+def restore_object_durable(root, target, source, object_id, *, fail_after=None):
+    """Switch one already-approved file with durable intent and readback."""
+    import upgrade_state
+    target, source = Path(target), Path(source)
+    if target.is_symlink() or source.is_symlink() or not source.is_file():
+        raise RestoreError('restore_target_invalid')
+    before = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
+    desired = hashlib.sha256(source.read_bytes()).hexdigest()
+    effect = {'effect_id': object_id, 'type': 'restore-file',
+              'expected_before': before or 'missing', 'desired_after': desired, 'status': 'intent'}
+    upgrade_state.commit_phase(root, object_id + '-intent', 'fenced', 'restore_started',
+                               kind='restore_intent', effect=effect)
+    staging = target.with_name('.' + target.name + '.restore-new')
+    shutil.copyfile(source, staging)
+    os.chmod(staging, target.stat().st_mode & 0o777 if target.exists() else 0o600)
+    os.replace(staging, target)
+    if fail_after == 'rename':
+        upgrade_state.commit_phase(root, object_id + '-blocked', 'restore_started', 'blocked',
+                                   kind='restore_blocked', effect={**effect, 'status': 'blocked'})
+        raise RestoreError('restore_observation_unknown')
+    observed = hashlib.sha256(target.read_bytes()).hexdigest()
+    if observed != desired:
+        raise RestoreError('restore_readback_mismatch')
+    upgrade_state.commit_phase(root, object_id + '-observed', 'restore_started', 'restored',
+                               kind='restore_observed', effect={**effect, 'status': 'observed'})
+    return {'object_id': object_id, 'status': 'observed', 'sha256': observed}
 
 
 def require_snapshot_target(target):
