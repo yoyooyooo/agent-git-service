@@ -86,3 +86,12 @@ integrity, foreign keys and a logical digest, `git fsck`, refs and OIDs, and
 Wiki CAS to database body mapping. An unsupported metadata field is a refusal.
 Tar success is not a pass. Online copy and the earlier rehearsal are not the
 production Tq.
+
+## Synthetic readback
+
+`scripts/routeb_dependency_readback.py <contract.json>` checks one
+caller-supplied contract for owner, object scope, version, ACL digest, mtime,
+content hash, stop order, restore order, exact-effect readback and
+`unknown=stop`. It does not open live configuration. Shared dependencies must
+set `rolls_back_with_ags` false. A missing field or hash mismatch refuses the
+claim. Real backup and restore remain a separate window.
