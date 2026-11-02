@@ -18,6 +18,7 @@ class DurableWiringTests(unittest.TestCase):
     def test_phase_event_is_replayable_and_effect_is_intent_only(self):
         result = upgrade_state.commit_phase(
             self.root, 'install_started', 'restore_verified', 'install_started',
+            host_instance='fixture-host', identity_sha256='a' * 64, binding_sha256='b' * 64,
             effect={'effect_id': 'install-1', 'type': 'file-transaction',
                     'expected_before': 'a' * 64, 'desired_after': 'b' * 64, 'status': 'intent'})
         self.assertEqual(result['sequence'], 1)
@@ -31,6 +32,7 @@ class DurableWiringTests(unittest.TestCase):
     def test_observation_closes_the_same_effect_without_external_calls(self):
         upgrade_state.commit_phase(
             self.root, 'start_intent', 'installed', 'start_attempted',
+            host_instance='fixture-host', identity_sha256='a' * 64, binding_sha256='b' * 64,
             effect={'effect_id': 'start-1', 'type': 'spawn',
                     'expected_before': 'stopped', 'desired_after': 'generation-1', 'status': 'intent'})
         result = upgrade_state.commit_phase(
