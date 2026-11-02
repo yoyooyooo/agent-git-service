@@ -434,6 +434,8 @@ S6b.03 exposes only `commit_phase`, which publishes an intent or observation to 
 
 S6b.04 adds `activate_durable`: it validates a lifecycle approval independently of S4, publishes `authority_activated` before any launcher effect, and returns the same projected authority on a retry. It does not grant startup by itself; missing or suspended authority remains fenced.
 
+S6b.05 adds `old_start_durable`: it records a spawn intent before the observer callback, records an observed generation only when pid and boot identity are present, and records `start_blocked` for an unknown result. It never converts an unknown result into a successful start and never reuses the old recovery approval.
+
 The source tests do **not** establish the full proposed production chain:
 S6.07 lifecycle and S6.08/09 recovery helpers are pure planning contracts, not
 wired durable runtime/CLI authority. Their returned generation or `started`
