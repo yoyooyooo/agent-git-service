@@ -73,7 +73,8 @@ def create(root, package):
     profile = package.get('native_profile') if isinstance(package, dict) else None
     runner = package.get('native_runner') if isinstance(package, dict) else None
     if not profile or not callable(runner):
-        raise AdapterError('native_probe_unverified')
+        from upgrade_backup_contract import ContractError
+        raise ContractError('native_adapter_unavailable')
     unit = dict(profile)
     manager = Manager(unit)
     def writer_probe():
