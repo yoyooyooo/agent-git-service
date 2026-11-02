@@ -78,7 +78,7 @@ class TransactionTest(unittest.TestCase):
             command, "--host", "mini", "--root", str(self.root),
             "--candidate", str(self.manifest), "--window", str(self.window),
             "--restore", str(self.restore), "--manager-dir", str(self.manager),
-            "--audit", str(self.audit),
+            "--audit", str(self.audit), "--external-contract", str(self.external_contract()),
         ]
         if command in {"run", "recover-prestart"}:
             base.append("--execute")
@@ -91,7 +91,7 @@ class TransactionTest(unittest.TestCase):
             "plan", "--host", "mini", "--root", str(production),
             "--candidate", str(self.manifest), "--window", str(self.window),
             "--restore", str(self.restore), "--manager-dir", str(self.manager),
-            "--audit", str(self.audit),
+            "--audit", str(self.audit), "--external-contract", str(self.external_contract()),
         ])
         self.assertEqual(code, 78)
         self.assertFalse(marker.exists())
@@ -102,7 +102,7 @@ class TransactionTest(unittest.TestCase):
                 "plan", "--host", "mini", "--root", str(root),
                 "--candidate", str(self.manifest), "--window", str(self.window),
                 "--restore", str(self.restore), "--manager-dir", str(self.manager),
-                "--audit", str(self.audit),
+                "--audit", str(self.audit), "--external-contract", str(self.external_contract()),
             ]), 78)
 
     def test_refuses_symlink_root(self) -> None:
@@ -112,7 +112,7 @@ class TransactionTest(unittest.TestCase):
             "plan", "--host", "mini", "--root", str(link),
             "--candidate", str(self.manifest), "--window", str(self.window),
             "--restore", str(self.restore), "--manager-dir", str(self.manager),
-            "--audit", str(self.audit),
+            "--audit", str(self.audit), "--external-contract", str(self.external_contract()),
         ]), 78)
 
     def test_refuses_fault_hook_without_test_env(self) -> None:
@@ -160,7 +160,8 @@ class TransactionTest(unittest.TestCase):
             "recover-prestart", "--host", "mini", "--root", str(self.root),
             "--candidate", str(self.manifest), "--window", str(self.window),
             "--restore", str(self.restore), "--manager-dir", str(self.manager),
-            "--audit", str(self.audit), "--execute",
+            "--audit", str(self.audit), "--external-contract", str(self.external_contract()),
+            "--execute",
         ]), 0)
         self.assertEqual((self.root / "bin" / "current").read_bytes(), b"old-binary")
         shutil.copyfile(self.candidate_bin, self.root / "bin" / "current")
@@ -171,8 +172,45 @@ class TransactionTest(unittest.TestCase):
             "recover-prestart", "--host", "mini", "--root", str(self.root),
             "--candidate", str(self.manifest), "--window", str(self.window),
             "--restore", str(self.restore), "--manager-dir", str(self.manager),
-            "--audit", str(self.audit), "--execute",
+            "--audit", str(self.audit), "--external-contract", str(self.external_contract()),
+            "--execute",
         ]), 78)
+
+    def external_contract(self, contracts: list[dict] | None = None) -> Path:
+        path = self.base / "external.json"
+        if contracts is None:
+            contracts = [{
+                "name": name,
+                "owner": f"{name}-owner",
+                "objects": ["synthetic-object"],
+                "version": "synthetic-1",
+                "acl_digest": "a" * 64,
+                "mtime_ns": 1,
+                "content_sha256": "b" * 64,
+                "expected_sha256": "b" * 64,
+                "stop_before": ["writers"],
+                "restore_order": 1,
+                "readback": ["exact-effect"],
+                "unknown": "stop",
+                "rolls_back_with_ags": False,
+            } for name in ("forgejo", "multica", "caddy", "tailscale", "service-manager")]
+        path.write_text(json.dumps(contracts), encoding="utf-8")
+        return path
+
+    def test_plan_refuses_missing_external_contract(self) -> None:
+        argv = [item for item in self.args("plan") if item != "--external-contract" and not item.endswith("external.json")]
+        code = txn.main(argv)
+        self.assertEqual(code, 2)
+        self.assertFalse((self.root / "state").exists())
+
+    def test_plan_refuses_invalid_external_contract(self) -> None:
+        contracts = json.loads(self.external_contract().read_text())
+        contracts[0]["owner"] = ""
+        contracts[1]["content_sha256"] = "c" * 64
+        contracts[0]["rolls_back_with_ags"] = True
+        code = txn.main(self.args("plan")[:-1] + [str(self.external_contract(contracts))])
+        self.assertEqual(code, 78)
+        self.assertFalse((self.root / "state").exists())
 
     def test_refuses_protected_secondary_paths(self) -> None:
         self.admit_root()
@@ -185,6 +223,7 @@ class TransactionTest(unittest.TestCase):
             "--restore", str(production / "restore"),
             "--manager-dir", str(production / "manager"),
             "--audit", str(production / "audit"),
+            "--external-contract", str(self.external_contract()),
         ])
         self.assertEqual(code, 78)
         self.assertEqual(sentinel.exists(), before)
@@ -239,7 +278,7 @@ class TransactionTest(unittest.TestCase):
             [str(entry), "plan", "--host", "mini", "--root", str(Path.home() / ".ags"),
              "--candidate", str(self.manifest), "--window", str(self.window),
              "--restore", str(self.restore), "--manager-dir", str(self.manager),
-             "--audit", str(self.audit)],
+             "--audit", str(self.audit), "--external-contract", str(self.external_contract())],
             check=False, text=True, capture_output=True,
         )
         self.assertEqual(completed.returncode, 78)
