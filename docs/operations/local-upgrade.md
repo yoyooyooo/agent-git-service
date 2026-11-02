@@ -240,7 +240,7 @@ S6.03 `upgrade_adapter_launchd.py` accepts only the fixed launchctl forms
 for one reviewed domain and label. Disable must read back disabled with no pid.
 Bootout timeout, supervisor failure, leftover descendants and boot mismatch do
 not count as a normal stop. A consumed one-shot cannot start again. The native
-isolated job sequence is unverified unless a permitted disposable probe runs;
+isolated job sequence is UNVERIFIED unless a permitted disposable probe runs;
 this source test does not call a production launchd service.
 S6.04 `upgrade_adapter_systemd.py` is an inferred Linux contract, not an imile
 finding. System and user scopes cannot be mixed. A stop exit of zero with a
