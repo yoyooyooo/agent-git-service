@@ -483,6 +483,11 @@ def _confirm(root, binding, approval_path, packet_path, pin, pin_sha, probe, clo
             os.fsync(parent)
         checkpoint('completion-durable')
         archive_claim(state, record)
+        import upgrade_state
+        upgrade_state.commit_phase(
+            root, 's4-completion-' + record['approval_id'], 'awaiting_observation', 'completed',
+            kind='s4_completed', approval_sha256=approval_sha,
+            binding_sha256=fingerprint(binding), transaction_id=record['generation'])
         return record
 
 

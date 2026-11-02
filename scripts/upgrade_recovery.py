@@ -248,9 +248,15 @@ class ColdWindow:
         require(name in TRANSITIONS.get(self.journal['phase'], set()), 'cold_phase_invalid')
         if self.journal['start_attempted']:
             require(name == 'start_attempted', 'prestart_recovery_refused')
+        before = self.journal['phase']
         self.journal.update(phase=name, **values)
         replace_json(self.pending / 'cold-journal.json', self.journal)
         checkpoint(name)
+        import upgrade_state
+        upgrade_state.commit_phase(
+            self.root, 'cold-' + name, before, name, kind='cold_' + name,
+            transaction_id=self.journal['generation'],
+            binding_sha256=self.journal['binding_sha256'])
 
     def stop(self, *, authorize=None):
         require(self.journal['phase'] == 'stop' and not self.journal.get('stop_called'), 'cold_phase_invalid')
@@ -432,6 +438,24 @@ class ColdWindow:
         if authorize is not None:
             authorize()
         self.manager.start()
+
+
+def launcher_spawn(root, *, runner, epoch):
+    """Read durable authority before any runner. Suspended or missing authority is fenced.
+
+    The runner is injected. This function does not start a process, download, or recover.
+    """
+    import upgrade_state
+    loaded = upgrade_state.load_verified(root)
+    authority = (loaded.get('projection') or {}).get('authority')
+    if authority is None or authority.get('state') != 'active' or authority.get('epoch') != epoch:
+        raise Failure('restart_fenced')
+    effect = {'effect_id': 'spawn-' + str(epoch), 'type': 'spawn',
+              'expected_before': 'active', 'desired_after': 'intent', 'status': 'intent'}
+    upgrade_state.commit_phase(root, 'launcher-spawn-' + str(epoch), 'active', 'spawn_intent',
+                               kind='spawn_intent', epoch=epoch, effect=effect,
+                               binding_sha256=authority['binding_sha256'])
+    return {'status': 'spawn_intent', 'runner_called': False, 'epoch': epoch}
 
 
 def recover_prestart(window, approval_path, *, now=None):

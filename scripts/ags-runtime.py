@@ -28,6 +28,16 @@ def cold_pending(root):
 
 
 def startup_permitted(root):
+    control = root / 'state/ags-autodeploy/local-v2/control/format.json'
+    if control.exists() or control.is_symlink():
+        try:
+            import upgrade_state
+            loaded = upgrade_state.load_verified(root)
+            authority = (loaded.get('projection') or {}).get('authority')
+            if authority is not None and authority.get('state') != 'active':
+                return False
+        except Exception:
+            return False
     if not cold_pending(root):
         return True
     try:

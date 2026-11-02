@@ -45,6 +45,14 @@ def old_start_durable(root, restored, approval, observer):
     return observed
 
 
+def production_old_start(root, restored, approval, observer):
+    """Production recovery entry. It records the durable intent, then the observation.
+
+    No process is spawned here. The caller supplies the observer.
+    """
+    return old_start_durable(root, restored, approval, observer)
+
+
 def old_start(restored, approval, *, consumed=False):
     if restored.get('status') != 'old_restored' or restored.get('started') is not False:
         raise RecoveryError('not_restored')
