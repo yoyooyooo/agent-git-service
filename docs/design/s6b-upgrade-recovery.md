@@ -35,7 +35,9 @@ S6b-fix B2 把 durable seam 以迁移期 shim 接入现有生产写者，而不�
 
 launchd 与 systemd 工厂只接受固定 profile 和显式注入 runner；不从请求读取任意 argv。systemd 命令使用 `systemctl --system` 或 `systemctl --user`，不可混 scope。能力在真实隔离 probe 前标记 `native_verified=false`。缺少 provisioned metadata helper 或 Trash mover 时在 claim 前拒绝；fixture readback 不是生产证据。
 
-S6b-fix B3 增加固定命令、一次性 label/unit 名、超时、输出上限和环境清洗的 runner，以及 launchd bootstrap/print/bootout、systemd enable/start/status/stop/disable 的 probe 序列。manager facts 由 probe 自己读取，不接受调用者提供的 facts。默认关闭；只有显式批准参数加一次性 label 才会进入序列。本仓库测试只用注入 runner 和假 manager，不调用真实 launchctl/systemctl。Fork CI 的 `native-isolated` job 仅在 `workflow_dispatch` 且 `native_probe=true` 时运行注入序列，默认关闭，不改变现有 job 结论，也不使用私有 runner 或 secret。
+S6b-fix B3 增加固定命令、一次性 label/unit 名、超时、输出上限和环境清洗的 runner，以及 launchd bootstrap/print/bootout、systemd enable/start/status/stop/disable 的 probe 序列。manager facts 由 probe 自己读取，不接受调用者提供的 facts。默认关闭；只有显式批准参数加一次性 label 才会进入序列。本仓库测试只用注入 runner 和假 manager，不调用真实 launchctl/systemctl。
+
+S6b-fix3 B6 把 Native adapter isolation 从 Fork CI 移到 [`.github/workflows/native-adapter.yml`](../../.github/workflows/native-adapter.yml)。它不属于 release required evidence：`fork/scripts/release.py` 与 `scripts/upgrade_host.py` 仍要求审查过的 12 个 Fork CI job 成功。清单外的 skipped job 不计入成功，也不使 inventory 失败。该 workflow 仅在 `workflow_dispatch` 且 `native_probe=true` 时运行注入序列，默认关闭，不使用私有 runner 或 secret，也不调用 launchctl/systemctl。未运行或 skipped 都是 UNVERIFIED，不是 pass。
 
 已验证：注入 runner 下的序列、顺序、清理和失败回滚。UNVERIFIED：真实 Darwin launchd、Linux systemd/D-Bus/cgroup、ACL/xattr、root helper、native Trash、隔离 VM、生产副本、掉电、正常 reboot 或 imile 实机行为。这些不是 skip pass。
 
