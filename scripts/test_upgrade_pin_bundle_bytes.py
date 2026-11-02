@@ -50,6 +50,21 @@ class BundleBytesTests(EmitterEvidenceTests):
         with self.assertRaisesRegex(ValueError, 'release_attestation_unverified'):
             self.emit(self.good, verifier=odd)
 
+    def test_internal_bundle_typeerror_refuses_without_retry(self):
+        """A TypeError inside a bundle-capable verifier is refusal, not a retry."""
+        calls = []
+        raw = with_bundle(self.good)
+
+        def verifier(digest_value, signature, *, bundle=None):
+            calls.append(bundle is not None)
+            if bundle is not None:
+                raise TypeError('malformed bundle decoder')
+            return True
+
+        with self.assertRaisesRegex(ValueError, 'release_attestation_unverified'):
+            self.emit(raw, verifier=verifier)
+        self.assertEqual(calls, [True])
+
 
 if __name__ == '__main__':
     unittest.main()

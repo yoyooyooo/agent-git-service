@@ -32,3 +32,4 @@ scripts/upgrade-regression.sh
 # S6b-fix8 B2 epoch=2 runtime/engine writers run inside scripts/upgrade-regression.sh.
 # S6b-fix8 B3 systemd show readback runs inside scripts/upgrade-regression.sh.
 # S6b-fix8 B7 bundle-byte pin emission runs inside scripts/upgrade-regression.sh.
+# S6b-fix9 B7 internal verifier TypeError refusal runs inside scripts/upgrade-regression.sh.
