@@ -28,13 +28,21 @@ def cold_pending(root):
 
 
 def startup_permitted(root):
-    control = root / 'state/ags-autodeploy/local-v2/control/format.json'
-    if control.exists() or control.is_symlink():
+    control = root / 'state/ags-autodeploy/local-v2/control'
+    events = control / 'events'
+    journal_present = control.exists() or (events.exists() and any(events.iterdir()))
+    if journal_present:
+        format_path = control / 'format.json'
+        if not format_path.is_file() or format_path.is_symlink():
+            return False
         try:
             import upgrade_state
             loaded = upgrade_state.load_verified(root)
-            authority = (loaded.get('projection') or {}).get('authority')
-            if authority is not None and authority.get('state') != 'active':
+            projection = loaded.get('projection') or {}
+            authority = projection.get('authority')
+            if authority is None or authority.get('state') != 'active':
+                return False
+            if projection.get('pending_effects'):
                 return False
         except Exception:
             return False
@@ -51,7 +59,7 @@ def startup_permitted(root):
 
 def consume_start(root):
     if not cold_pending(root):
-        return uuid.uuid4().hex
+        raise CheckFailure('start_marker_missing')
     from upgrade_identity import runtime_identity
     runtime_identity(root)
     from upgrade_recovery import consume_start as consume
@@ -302,6 +310,14 @@ class BoundedLog:
             self.fd = None
 
 
+def _journal_effect(root, operation, before, after, kind, effect):
+    control = root / 'state/ags-autodeploy/local-v2/control/format.json'
+    if not control.is_file() or control.is_symlink():
+        return
+    import upgrade_state
+    upgrade_state.commit_phase(root, operation, before, after, kind=kind, effect=effect)
+
+
 def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock, generation=None) -> int:
     if cold_pending(root):
         from upgrade_identity import runtime_identity
@@ -333,6 +349,10 @@ def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock,
                    'generation': generation or uuid.uuid4().hex,
                    'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'root': str(root), 'build': build}
         atomic_json(root / 'state/runtime.json', current)
+        _journal_effect(root, 'supervise-spawn-' + current['generation'], 'active', 'running',
+                        'generation_spawned',
+                        {'effect_id': current['generation'], 'type': 'spawn', 'expected_before': 'stopped',
+                         'desired_after': current['generation'], 'status': 'observed'})
         install_lock.close()
         selector = selectors.DefaultSelector()
         selector.register(child.stdout, selectors.EVENT_READ)
@@ -366,6 +386,10 @@ def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock,
                        stop_requested=stop_deadline is not None,
                        stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())
         atomic_json(root / 'state/runtime.json', current)
+        _journal_effect(root, 'supervise-exit-' + current['generation'], 'running', 'exited',
+                        'generation_exited',
+                        {'effect_id': current['generation'], 'type': 'exit', 'expected_before': 'running',
+                         'desired_after': 'exited', 'status': 'observed'})
         return code
     finally:
         if selector is not None:

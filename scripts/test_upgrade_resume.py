@@ -26,6 +26,24 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual([row['kind'] for row in rows], ['start_intent', 'start_observed'])
         self.assertEqual(upgrade_state.load_verified(self.root)['projection']['pending_effects'], [])
 
+    def test_retry_reads_back_the_same_generation(self):
+        calls = {'n': 0}
+
+        def observer():
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise RuntimeError('crash-before-observe')
+            return {'generation': 'g-retry', 'pid': 9, 'boot_id': 'boot', 'started': True}
+
+        with self.assertRaises(RuntimeError):
+            upgrade_recovery_cli.old_start_durable(self.root, self.restored, self.approval, observer)
+        first = upgrade_state.load_verified(self.root)['events'][0]['effect']['desired_after']
+        result = upgrade_recovery_cli.old_start_durable(self.root, self.restored, self.approval, observer)
+        self.assertEqual(result['generation'], 'g-retry')
+        rows = upgrade_state.load_verified(self.root)['events']
+        self.assertEqual(rows[0]['effect']['desired_after'], first)
+        self.assertEqual([row['kind'] for row in rows], ['start_intent', 'start_observed'])
+
     def test_unknown_observation_is_fenced_and_not_replayed(self):
         with self.assertRaises(upgrade_recovery_cli.RecoveryError) as caught:
             upgrade_recovery_cli.old_start_durable(self.root, self.restored, self.approval,

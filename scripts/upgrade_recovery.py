@@ -253,10 +253,11 @@ class ColdWindow:
         replace_json(self.pending / 'cold-journal.json', self.journal)
         checkpoint(name)
         import upgrade_state
+        operation = 'cold-' + self.journal['generation'] + '-' + name
         upgrade_state.commit_phase(
-            self.root, 'cold-' + name, before, name, kind='cold_' + name,
-            host_instance=self.binding.get('host_instance') or self.binding.get('host'),
-            identity_sha256=self.binding.get('identity_sha256'),
+            self.root, operation, before, name, kind='cold_' + name,
+            host_instance=self.backup_binding.get('host_instance') or self.binding.get('host_instance') or self.binding.get('host'),
+            identity_sha256=self.backup_binding.get('new_binary_sha256') or self.binding.get('identity_sha256'),
             transaction_id=self.journal['generation'],
             binding_sha256=self.journal['binding_sha256'])
 
@@ -454,12 +455,26 @@ def launcher_spawn(root, *, runner, epoch):
         raise Failure('restart_fenced')
     effect = {'effect_id': 'spawn-' + str(epoch), 'type': 'spawn',
               'expected_before': 'active', 'desired_after': 'intent', 'status': 'intent'}
+    host = (loaded.get('format') or {}).get('host_instance')
     upgrade_state.commit_phase(root, 'launcher-spawn-' + str(epoch), 'active', 'spawn_intent',
                                kind='spawn_intent', epoch=epoch, effect=effect,
-                               host_instance=(loaded.get('format') or {}).get('host_instance'),
+                               host_instance=host,
                                identity_sha256=authority['binding_sha256'],
                                binding_sha256=authority['binding_sha256'])
-    return {'status': 'spawn_intent', 'runner_called': False, 'epoch': epoch}
+    observed = runner([str(Path(root) / 'bin/gh-server')])
+    if not isinstance(observed, dict) or observed.get('pid') is None or not observed.get('boot_id'):
+        blocked = {**effect, 'status': 'blocked'}
+        upgrade_state.commit_phase(root, 'launcher-observe-' + str(epoch), 'spawn_intent', 'blocked',
+                                   kind='spawn_blocked', epoch=epoch, effect=blocked,
+                                   host_instance=host, identity_sha256=authority['binding_sha256'],
+                                   binding_sha256=authority['binding_sha256'])
+        raise Failure('start_observation_unknown')
+    observed_effect = {**effect, 'status': 'observed', 'desired_after': observed.get('generation', effect['effect_id'])}
+    upgrade_state.commit_phase(root, 'launcher-observe-' + str(epoch), 'spawn_intent', 'running',
+                               kind='generation_spawned', epoch=epoch, effect=observed_effect,
+                               host_instance=host, identity_sha256=authority['binding_sha256'],
+                               binding_sha256=authority['binding_sha256'])
+    return {'status': 'spawned', 'runner_called': True, 'epoch': epoch, 'observed': observed}
 
 
 def recover_prestart(window, approval_path, *, now=None):

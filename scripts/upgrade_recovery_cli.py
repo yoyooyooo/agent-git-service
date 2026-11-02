@@ -28,9 +28,20 @@ def plan(journal):
 
 
 def old_start_durable(root, restored, approval, observer):
-    """Persist spawn intent, then require an explicit observer result."""
+    """Persist spawn intent, then require an explicit observer result.
+
+    A retry of the same approval reads the generation already published. It does
+    not mint another UUID.
+    """
     import upgrade_state
-    result = old_start(restored, approval)
+    loaded = upgrade_state.load_verified(root)
+    existing = next((row for row in loaded['events']
+                     if row['operation_id'] == 'start-' + approval['approval_id']), None)
+    if existing is not None:
+        generation = existing['effect']['desired_after']
+    else:
+        generation = old_start(restored, approval)['generation']
+    result = {'generation': generation}
     effect = {'effect_id': result['generation'], 'type': 'spawn',
               'expected_before': 'old_restored', 'desired_after': result['generation'], 'status': 'intent'}
     upgrade_state.commit_phase(root, 'start-' + approval['approval_id'], 'old_restored',
