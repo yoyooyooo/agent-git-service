@@ -1,9 +1,15 @@
 # Route B candidate build
 
-The preparation candidate is exact source
+The deployment content baseline is exact source
 `3a0c7e4f0ac5150d774efc66168907671061bcc5`, tree
 `a6fc9f08d5ca4c8d8fe4860dc8e551263455426f`. It is not a Release. Do not tag
 it, publish it, or describe its provenance as a release.
+
+`scripts/build-exact-source.sh` injects the checkout HEAD that it verifies,
+not a different revision. A binary built after this preparation change
+therefore reports that later full HEAD and its tree. The manifest records
+`baseline_revision=3a0c7e4f0ac5150d774efc66168907671061bcc5` separately so the
+content baseline is not confused with the built source identity.
 
 `scripts/build-exact-source.sh binary` injects all of:
 

@@ -30,11 +30,12 @@ It was not deployed. It is not the current target and not the rollback target.
 | Candidate | `3a0c7e4f0ac5150d774efc66168907671061bcc5` |
 | Running and rollback | `0013aa744c8c90637ec54562ffc248a1bf7c9a52` |
 
-`--version` for a preparation candidate must show `version=source-3a0c7e4f0ac5150d774efc66168907671061bcc5`,
-`revision=3a0c7e4f0ac5150d774efc66168907671061bcc5`, and
-`tree=a6fc9f08d5ca4c8d8fe4860dc8e551263455426f`, plus `goos`, `goarch` and
-`go_version`. `development` is not an acceptable candidate version.
-The build slice freezes the string. This page does not claim a Release.
+`--version` must show `version=source-<built revision>`, `revision=<built revision>`,
+and `tree=<built tree>`, plus `goos`, `goarch` and `go_version`.
+`development` is not an acceptable candidate version. The builder stamps the
+clean checkout it verified. After the build-script change, that checkout is
+no longer `3a0c7e4f0ac5150d774efc66168907671061bcc5`; the manifest keeps that
+baseline revision beside the built identity. This page does not claim a Release.
 
 ## 2. What changed for operators
 
