@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import re
+import subprocess
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -72,6 +74,66 @@ class RouteBDocsTest(unittest.TestCase):
             joined,
             re.compile(r"upgrade_adapter_(?:launchd|systemd)\.py`? (?:is|provides) (?:the |a )?production"),
         )
+
+
+def fenced_block(text: str) -> str:
+    match = re.search(r"```sh\n(.*?)```", text, re.S)
+    if match is None:
+        raise AssertionError("missing sh block")
+    return match.group(1)
+
+
+class RouteBBuildCommandTest(unittest.TestCase):
+    def test_documented_commands_bind_checkout_head(self) -> None:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True, text=True, capture_output=True,
+        ).stdout.strip()
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT, check=True, text=True, capture_output=True,
+        ).stdout.strip()
+        build = (ROOT / "docs/operations/routeb-build.md").read_text(encoding="utf-8")
+        mini = (ROOT / "docs/operations/routeb-runbook-mini.md").read_text(encoding="utf-8")
+        linux = (ROOT / "docs/operations/routeb-linux-build-input.md").read_text(encoding="utf-8")
+        baseline = "3a0c7e4f0ac5150d774efc66168907671061bcc5"
+        self.assertIn("version=source-<built revision>", mini)
+        self.assertIn("tree=<built tree>", mini)
+        self.assertIn("a6fc9f08d5ca4c8d8fe4860dc8e551263455426f", mini)
+        self.assertNotIn(f"GIT_SHA={baseline}", fenced_block(build))
+        self.assertNotIn(f"GIT_SHA={baseline}", fenced_block(linux))
+        env = os.environ.copy()
+        env.pop("GIT_SHA", None)
+        env.pop("GIT_TREE", None)
+        env["REVIEWED_HEAD"] = head
+
+        def run_block(text: str) -> subprocess.CompletedProcess[str]:
+            script = fenced_block(text)
+            script = "\n".join(
+                line for line in script.splitlines()
+                if not line.startswith(("git fetch", "git checkout", "test \"$(git status"))
+            ) + "\n"
+            needle = "GIT_SHA=\"$GIT_SHA\" GIT_TREE=\"$GIT_TREE\" \\\n"
+            if needle not in script:
+                raise AssertionError("documented command does not pass GIT_SHA and GIT_TREE")
+            script = script.replace(needle, "", 1)
+            script = script.replace(
+                "scripts/build-exact-source.sh binary",
+                'python3 -c "import os; print(\'seen=%s tree=%s\' % (os.environ[\'GIT_SHA\'], os.environ[\'GIT_TREE\']))"; true',
+            )
+            script = script.replace(
+                'mkdir -p "$HOME/ags-routeb-linux-candidate"\n',
+                "mkdir() { :; }\n",
+            )
+            wrapper = 'set -eu\ncd "$1"\n' + script
+            return subprocess.run(
+                ["/bin/sh", "-c", wrapper, "probe", str(ROOT)],
+                check=False, text=True, capture_output=True, env=env,
+            )
+
+        for label, page in (("build", build), ("linux", linux)):
+            completed = run_block(page)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn(f"seen={head} tree={tree}", completed.stdout, label)
+
 
 
 if __name__ == "__main__":
