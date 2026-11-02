@@ -91,8 +91,8 @@ unverified acceptance surfaces. Source PR/CI is not permission to provision or d
 
 ## S6 source preparation limits
 
-The [S6b source design](../docs/design/s6b-upgrade-recovery.md) records durable recovery, native evidence and non-installable pin/build identity boundaries. The [source integration boundary](../docs/operations/local-upgrade.md#s613-source-integration-boundary)
-separates tested contracts from the incomplete native production chain. Offline
+The [S6b source design](../docs/design/s6b-upgrade-recovery.md) records durable recovery, native evidence and non-installable pin/build identity boundaries, including the S6b-fix containment, host-binding, production-shim, injected native sequence and structural pin-evidence checks. The [source integration boundary](../docs/operations/local-upgrade.md#s613-source-integration-boundary)
+separates those source wires from live host recovery and real OS probes, which remain UNVERIFIED. An installable pin requires a separately approved real Release. Offline
 full-group plans, append-only human handoff and non-installable pin preparation
 are not recovery execution or publication. The dependency-complete bundle is
 staging only. Lifecycle/recovery planning helpers are not durable launcher/CLI

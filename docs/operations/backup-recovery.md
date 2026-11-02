@@ -453,6 +453,8 @@ windows, human decisions and recovery-material retirement require separate appro
 
 ## S6b.06 adds the local `restore_object_durable` seam for an already-approved object switch. It records per-object intent before rename and only closes the same effect after hash readback; a post-rename unknown result is blocked and does not select old or new bytes. This does not authorize live full-group restore or service start.
 
+S6b-fix B1 contains that switch. Both `target` and `source` must stay inside the approved `restore_root`. Symlink traversal, `..` escape, hard links, and paths outside the root are refused before any write, with `restore_target_outside` or `restore_source_outside`. An object that does not match the approval, binding, and transaction is refused with `restore_binding_mismatch` before copy or rename. The staging file and the destination parent directory are fsynced after the switch. `fail_after='rename'` records an unknown observation only; it is not power-loss evidence. Negative tests assert that an outside path is not written and that the effect ledger records no out-of-root call.
+
 S6.10 offline full-group plan
 
 `upgrade_recovery_cli.plan` accepts `kind=full-restore` for an offline plan only.

@@ -16,17 +16,28 @@ S6b 在一个线性分支中补齐 14 个内部施工切片：
 
 `commit_phase` 只写 intent 或 observation，不执行外部效果。效果必须先有 intent，之后以相同 effect id 由独立读回关闭。`recover_local` 只修投影、忽略未发布 staging，不调用 manager、网络、服务或业务数据库。S3/S4 的既有事实格式和拥有者保持不变。
 
+S6b-fix B4 恢复了 journal header 的 host binding：`format.json` 的 `host_instance_sha256` 必须等于 `host_instance` 的摘要，且首个 event 的 host 必须与 header host 一致；不一致拒绝，错误码 `state_host_mismatch`。这是源码校验，不是主机身份现场验收。
+
 ## 生命周期与恢复
 
 `activate_durable` 独立校验 lifecycle approval，先写 `authority_activated`，重试返回同一投影。`old_start_durable` 先写 spawn intent；只有同时具有 pid、boot identity 和 started observation 才写 `start_observed`，未知结果写 `start_blocked`，不重发 token。`suspend_durable` 后，第二个 epoch 必须使用严格更新的 epoch 和新的批准。恢复对象切换使用 [`restore_object_durable`](../../scripts/upgrade_full_restore.py)：先写每对象 intent，rename 后 hash readback；结果未知保持 blocked，不在 old/new 间猜选。
+
+S6b-fix B1 要求 `target` 与 `source` 都位于经批准的 `restore_root` 内，拒绝 symlink 穿越、`..` 逃逸、硬链接和仓外路径；object 与 approval、binding、transaction 不一致时在任何写入之前拒绝。staging 文件与目标父目录在切换后 fsync。`fail_after='rename'` 只模拟未知观察，不是掉电语义证据。
+
+S6b-fix B2 把 durable seam 以迁移期 shim 接入现有生产写者，而不是替换 S3/S4 事实格式：
+
+- 已接线：`upgrade_engine.checkpoint`、`upgrade_recovery.ColdWindow` 阶段切换、`upgrade_manual_approval` 的 S4 completion，在保留旧 journal/checkpoint 的同时调用 `commit_phase`。`upgrade_recovery.launcher_spawn` 在调用注入 runner 之前读取 durable authority，epoch 不匹配或 authority 非 active 时拒绝，且不调用 runner。`upgrade_recovery_cli.production_old_start` 走 `old_start_durable`。`ags-runtime.startup_permitted` 只在 durable control 文件已存在时读取 journal；authority 非 active 或 journal 不可验证时拒绝启动。源码测试覆盖 engine 镜像、launcher fence、suspended authority 和 old-start 观察顺序。
+- 未接线：`ags-runtime.py` 的真实 spawn 路径没有调用 `launcher_spawn`，也没有把一次真实启动写成 durable event。S4 completion 的 durable 写入有源码顺序断言，没有在本修复中跑完整 S4 confirm 集成。没有真实主机上的恢复执行、服务重启、掉电或第二次升级。默认 policy 仍为空，公开 apply 仍退出 83，直接 install 仍在自身 gate 退出 83。接线不引入默认启动、自动 recover、网络下载或对真实服务的效果。
 
 这些接口不授予默认启动、apply、恢复或服务重启权。默认 policy 为空，公开 apply 仍为 83，直接 v2 install 仍为 83，离线 preparation 仍 `installable=false`。
 
 ## 原生适配器
 
-launchd 与 systemd 工厂只接受固定 profile 和显式注入 runner；不从请求读取任意 argv，不在测试中调用真实 launchctl/systemctl。systemd 命令使用 `systemctl --system` 或 `systemctl --user`，不可混 scope。能力在真实隔离 probe 前标记 `native_verified=false`。缺少 provisioned metadata helper 或 Trash mover 时在 claim 前拒绝；fixture readback 不是生产证据。
+launchd 与 systemd 工厂只接受固定 profile 和显式注入 runner；不从请求读取任意 argv。systemd 命令使用 `systemctl --system` 或 `systemctl --user`，不可混 scope。能力在真实隔离 probe 前标记 `native_verified=false`。缺少 provisioned metadata helper 或 Trash mover 时在 claim 前拒绝；fixture readback 不是生产证据。
 
-本机未验证 Darwin launchd、Linux systemd/D-Bus/cgroup、ACL/xattr/fsync、root helper、native Trash、隔离 VM、生产副本、掉电、正常 reboot 或 imile 实机行为。这些是 `UNVERIFIED`，不是 skip pass。
+S6b-fix B3 增加固定命令、一次性 label/unit 名、超时、输出上限和环境清洗的 runner，以及 launchd bootstrap/print/bootout、systemd enable/start/status/stop/disable 的 probe 序列。manager facts 由 probe 自己读取，不接受调用者提供的 facts。默认关闭；只有显式批准参数加一次性 label 才会进入序列。本仓库测试只用注入 runner 和假 manager，不调用真实 launchctl/systemctl。Fork CI 的 `native-isolated` job 仅在 `workflow_dispatch` 且 `native_probe=true` 时运行注入序列，默认关闭，不改变现有 job 结论，也不使用私有 runner 或 secret。
+
+已验证：注入 runner 下的序列、顺序、清理和失败回滚。UNVERIFIED：真实 Darwin launchd、Linux systemd/D-Bus/cgroup、ACL/xattr、root helper、native Trash、隔离 VM、生产副本、掉电、正常 reboot 或 imile 实机行为。这些不是 skip pass。
 
 ## Buildinfo 与 pin emitter
 
@@ -39,7 +50,7 @@ exact-source binary 和 Docker 构建统一写入：
 
 Docker 的 Alpine/CGO-disabled ABI 仍不等于原生 Release 证据。
 
-`upgrade_pin.emit_verified` 只在调用者提供两平台、tag-push、hosted-runner、`release-control` provenance 时继续，并复用现有 preparation 校验。它不调用 GitHub、cosign、manager，不安装 pin，不发 Release，不打 tag；返回的 `ags.deploy-release-pin.v2` 是 `installable=false` 的源码准备 envelope。dispatch 证书、缺平台、非 push、重复或过期证据必须拒绝。真实 immutable Release、九资产、签名、tag-push、control approval 和生产 pin 仍需另批。
+`upgrade_pin.emit_verified` 在源码范围内校验调用者 evidence 的结构与来源字段：来源必须是 `workflow_run` 且 event 为 `push`，并带 `sha256:` digest 与 cosign bundle 媒体类型字段，同时要求两平台、hosted-runner、`release-control` provenance。缺字段、非 push、dispatch 或 caller 来源拒绝，错误码 `release_attestation_unverified`。它不调用 GitHub、cosign、manager，不安装 pin，不发 Release，不打 tag，也不把字段存在当作签名已验证。返回的 `ags.deploy-release-pin.v2` 固定 `installable=false`。可安装 pin 需另批的真实 Release。
 
 ## 验证与交叉引用
 

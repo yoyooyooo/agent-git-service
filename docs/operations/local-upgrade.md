@@ -442,14 +442,16 @@ S6b.08 makes systemd command construction explicit with `systemctl --system` or 
 
 S6b.10 adds durable epoch suspension and reactivation. A second epoch requires a strictly newer epoch and a new lifecycle approval after the prior authority is suspended; an old active epoch cannot be reactivated.
 
+S6b-fix B2 wires a migration shim, not a replacement of the old fact writers. `upgrade_engine.checkpoint` and cold-window phase changes keep the old journal and also publish `commit_phase`. S4 completion publishes `s4_completed` after its existing durable checkpoint. `upgrade_recovery.launcher_spawn` reads durable authority and refuses a suspended or wrong epoch before the injected runner is called. `ags-runtime.startup_permitted` reads that journal only when `control/format.json` already exists; a non-active authority or an unreadable journal returns false. The runtime spawn path does not call `launcher_spawn`. Source tests cover the engine mirror, the launcher fence, and the old-start observation order. They do not execute a live host recovery. No service is started, no automatic recover runs, and no network download is added. Default policy stays empty. Public apply and direct v2 install still exit 83.
+
+S6b-fix B4 restores journal host binding. `load_verified` rejects a `format.json` whose `host_instance_sha256` does not match `host_instance`, and rejects a first event whose host differs from the header. The error is `state_host_mismatch`.
+
 The source tests do **not** establish the full proposed production chain:
 S6.07 lifecycle and S6.08/09 recovery helpers are pure planning contracts, not
 wired durable runtime/CLI authority. Their returned generation or `started`
 field does not prove a spawn, token consumption, a successful restart or a
 second upgrade. The public wrapper still accepts only plan/apply/status/
-reconcile/confirm. Native adapter factories are unavailable pending real
-observer/service/helper integration; fixture Manager methods do not implement
-the production S3 no-argument effect contract. No private profile may use them
+reconcile/confirm. S6b-fix B3 runs launchd and systemd probe sequences only through an injected runner and a fake manager. The sequence is off unless an explicit approval and a one-shot label are both present. Real launchctl/systemctl, Darwin launchd, and Linux systemd/D-Bus/cgroup remain UNVERIFIED. The hosted `native-isolated` job is workflow_dispatch-only and default off; it does not change existing job conclusions and does not run a real manager. Fixture Manager methods do not implement the production S3 no-argument effect contract. No private profile may use them
 as accepted production effects. S6.10 is offline plan only, S6.11 cannot resume
 an interrupted transaction, and S6.12 emits no installable pin.
 
