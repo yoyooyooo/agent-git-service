@@ -14,7 +14,7 @@ report `development`/`unknown`; they are not release artifacts.
 
 S6b.11 also stamps exact-source binary and Docker paths with `server.gitSHA`, `buildinfo.Version`, `buildinfo.Revision` and `buildinfo.Tree`. Docker remains an Alpine/CGO-disabled build and is not native Release ABI evidence.
 
-S6b.12 adds an evidence-bounded `upgrade_pin.emit_verified` seam. S6b-fix requires the caller evidence to be a push-triggered `workflow_run` with digest and cosign bundle fields, plus both platform hosted `release-control` provenance. Missing fields, dispatch evidence, a caller source, or a non-push event are refused. The check is structural only: it does not call GitHub, cosign, or a Release API. It returns `ags.deploy-release-pin.v2` only as a non-installable preparation envelope. An installable pin requires a separately approved real Release.
+S6b.12 adds an evidence-bounded `upgrade_pin.emit_verified` seam. S6b-fix3 B7 requires each platform digest to match the candidate asset, a run id and attempt, and an injected verifier over the signature bytes. A forged digest or a rejecting verifier is refused. It does not call GitHub, cosign, or a Release API. Immutable API readback is UNVERIFIED. It returns `ags.deploy-release-pin.v2` only as a non-installable preparation envelope. An installable pin requires a separately approved real Release.
 
 The release manifest binds the version, complete source SHA/tree, platform, Go
 version, CGO choice, binary hashes and smoke-test results. No credentials, private
