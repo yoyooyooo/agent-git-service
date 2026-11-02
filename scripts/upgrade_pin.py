@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Offline release/pin preparation, not a crypto verifier or publisher.
 
-Always emits a non-installable envelope, never ags.deploy-release-pin.v2. Actual
-pin publication needs a separately approved real Release and crypto verifier.
+emit_verified returns schema ags.deploy-release-pin.v2 with installable=false.
+That envelope is not publication. A real pin still needs a separately approved
+Release and a cryptographic verifier. Only a verifier that returns True is
+accepted; any other return value or any exception is a refusal.
 """
 import hashlib
 import json
@@ -69,22 +71,27 @@ def emit_verified(candidate, source_raw, release, asset_bytes, *, attestations, 
         if 'run_id' not in evidence or 'run_attempt' not in evidence:
             raise ValueError('release_attestation_unverified')
         try:
-            verifier(evidence.get('digest'), evidence.get('signature'),
-                     bundle=evidence.get('bundle_bytes'))
-        except TypeError:
             try:
-                verifier(evidence.get('digest'), evidence.get('signature'))
-            except Exception:
-                raise ValueError('release_attestation_unverified') from None
+                accepted = verifier(evidence.get('digest'), evidence.get('signature'),
+                                    bundle=evidence.get('bundle_bytes'))
+            except TypeError:
+                accepted = verifier(evidence.get('digest'), evidence.get('signature'))
         except Exception:
             raise ValueError('release_attestation_unverified') from None
+        if accepted is not True:
+            raise ValueError('release_attestation_unverified')
     envelope = prepare(candidate, source_raw, release, asset_bytes)
     proof_input = {}
     for target, evidence in sorted(attestations.items()):
-        row = {key: value for key, value in evidence.items() if key != 'signature'}
+        row = {key: value for key, value in evidence.items()
+               if key not in ('signature', 'bundle_bytes')}
         signature = evidence.get('signature')
         if isinstance(signature, (bytes, bytearray)):
             row['signature_sha256'] = hashlib.sha256(signature).hexdigest()
+        bundle = evidence.get('bundle_bytes')
+        if isinstance(bundle, (bytes, bytearray)):
+            row['bundle_sha256'] = hashlib.sha256(bundle).hexdigest()
+            row['bundle_length'] = len(bundle)
         proof_input[target] = row
     return {'schema': 'ags.deploy-release-pin.v2', 'installable': False,
             'candidate': candidate, 'proof_sha256': hashlib.sha256(
