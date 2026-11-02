@@ -14,6 +14,28 @@ from upgrade import validate_pin, Failure
 from upgrade_backup_contract import strict_json
 
 
+def emit_verified(candidate, source_raw, release, asset_bytes, *, attestations):
+    """Emit only after caller supplies both verified tag-push attestations."""
+    targets = set(candidate.get('targets', {}))
+    if targets != {'darwin_arm64', 'linux_amd64'}:
+        raise ValueError('release_attestation_unverified')
+    for target in sorted(targets):
+        evidence = attestations.get(target) if isinstance(attestations, dict) else None
+        if (not isinstance(evidence, dict) or evidence.get('verified') is not True
+                or evidence.get('signer_workflow') != 'release-control'
+                or evidence.get('runner_environment') != 'github-hosted'
+                or evidence.get('build_trigger') != 'push'
+                or evidence.get('source_ref') != 'refs/tags/' + candidate.get('version', '')):
+            raise ValueError('release_attestation_unverified')
+    envelope = prepare(candidate, source_raw, release, asset_bytes)
+    return {'schema': 'ags.deploy-release-pin.v2', 'installable': False,
+            'candidate': candidate, 'proof_sha256': hashlib.sha256(
+                json.dumps(attestations, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+            'preparation': envelope,
+            'verification': {'both_platforms': True, 'tag_push': True,
+                             'install': 'not_performed', 'manager': 'not_performed'}}
+
+
 def prepare(candidate, source_raw, release, asset_bytes):
     """Validate exact nine-asset bytes and candidate binding without effects."""
     try:
