@@ -248,7 +248,11 @@ handoff continues to refuse spawn. Restoring normal restarts and starting old
 AGS after pre-start recovery remain separately scoped. Source and synthetic
 manager tests are not a native launchd/systemd acceptance or deployment approval.
 
-### S6 source-only lifecycle limit
+### S6b source-only lifecycle limit
+
+The S6b durable journal, activation and start-observation seams are documented in the [S6b design](../design/s6b-upgrade-recovery.md). They do not grant default startup or convert an unknown process result into success; native manager behavior remains UNVERIFIED until an isolated Darwin/Linux probe.
+
+## S6 source-only lifecycle limit
 
 `upgrade_lifecycle.py`, `upgrade_recovery_cli.py` and
 `upgrade_forward_recovery.py` currently validate in-memory planning contracts.
