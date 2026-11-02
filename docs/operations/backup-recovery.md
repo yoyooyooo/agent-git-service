@@ -455,6 +455,8 @@ windows, human decisions and recovery-material retirement require separate appro
 
 S6b-fix B1 contains that switch. Both `target` and `source` must stay inside the approved `restore_root`. Symlink traversal, `..` escape, hard links, and paths outside the root are refused before any write, with `restore_target_outside` or `restore_source_outside`. The staging file and the destination parent directory are fsynced after the switch. `fail_after='rename'` records an unknown observation only; it is not power-loss evidence. Negative tests assert that an outside path is not written and that the effect ledger records no out-of-root call.
 
+S6b-fix6 B4 reads the host from `control/host.json`, which must say `verified=true`. The approval record's host must match that record. `host-1` is refused. The object inode fsync and the parent-directory fsync are separate; dropping either one fails `test_each_fsync_is_required_on_its_own`. This is still source verification, not a live host identity check.
+
 S6b-fix6 B1 stops treating caller summaries as the decision. The caller passes `approval_ref` only. `restore_object_durable` reads `control/approvals/<digest>.json`, checks the raw bytes, and derives the transaction, binding, approved target group, object digest and host identity from that record. A self-consistent caller digest set that disagrees with the record is `restore_approval_mismatch` before any write. A record that names `host-1` or uses the binding digest as identity is rejected. Real host approval and power loss remain UNVERIFIED.
 
 S6.10 offline full-group plan

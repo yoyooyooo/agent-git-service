@@ -132,15 +132,48 @@ def _load_restore_decision(root, approval_ref, object_id, target, source, caller
     desired = hashlib.sha256(Path(source).read_bytes()).hexdigest()
     if record.get('before_digest') != before or record.get('object_digest') != desired:
         raise RestoreError('restore_approval_mismatch')
+    binding = record.get('binding_sha256')
+    if not isinstance(binding, str) or len(binding) != 64:
+        raise RestoreError('restore_decision_rejected')
+    host_record = _verified_host(root)
+    if host_record['host_instance'] in (None, 'host-1'):
+        raise RestoreError('restore_host_unverified')
+    if host_record['identity_sha256'] in (None, binding, '0' * 64):
+        raise RestoreError('restore_host_unverified')
+    if record.get('host_instance') != host_record['host_instance']:
+        raise RestoreError('restore_host_unverified')
+    return {'approval_sha256': approval_ref, 'binding_sha256': binding,
+            'transaction_id': record['transaction_id'],
+            'host_instance': host_record['host_instance'],
+            'identity_sha256': host_record['identity_sha256'],
+            'object_digest': desired, 'before_digest': before}
+
+
+def _verified_host(root):
+    """Read the host record. A constant string is not a host."""
+    path = Path(root) / 'state/ags-autodeploy/local-v2/control/host.json'
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise RestoreError('restore_host_unverified')
+        info = path.lstat()
+        if info.st_nlink != 1 or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            raise RestoreError('restore_host_unverified')
+        raw = path.read_bytes()
+    except OSError as error:
+        raise RestoreError('restore_host_unverified') from error
+    try:
+        record = json.loads(raw)
+    except ValueError as error:
+        raise RestoreError('restore_host_unverified') from error
+    if not isinstance(record, dict) or record.get('schema') != 'ags.host-record.v1':
+        raise RestoreError('restore_host_unverified')
+    if record.get('verified') is not True:
+        raise RestoreError('restore_host_unverified')
     host = record.get('host_instance')
     identity = record.get('identity_sha256')
-    binding = record.get('binding_sha256')
-    if (host in (None, 'host-1') or identity in (None, binding, '0' * 64)
-            or not isinstance(binding, str) or len(binding) != 64):
-        raise RestoreError('restore_decision_rejected')
-    return {'approval_sha256': approval_ref, 'binding_sha256': binding,
-            'transaction_id': record['transaction_id'], 'host_instance': host,
-            'identity_sha256': identity, 'object_digest': desired, 'before_digest': before}
+    if not isinstance(host, str) or not isinstance(identity, str) or len(identity) != 64:
+        raise RestoreError('restore_host_unverified')
+    return {'host_instance': host, 'identity_sha256': identity}
 
 
 def restore_object_durable(root, target, source, object_id, *, fail_after=None,
