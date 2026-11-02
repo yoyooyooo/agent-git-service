@@ -263,10 +263,18 @@ class Transaction:
         save(self.pending / 'journal.json', self.journal)
         root = self.state.parent if self.state.name == 'state' else self.state.parents[3]
         import upgrade_state
-        upgrade_state.commit_phase(
-            root, 'engine-' + phase, before or 'none', phase, kind='engine_' + phase,
-            transaction_id=self.binding.get('authorization_id'),
-            binding_sha256=hashlib.sha256(json.dumps(self.binding, sort_keys=True).encode()).hexdigest())
+        try:
+            upgrade_state.commit_phase(
+                root, 'engine-' + phase, before or 'none', phase, kind='engine_' + phase,
+                transaction_id=self.binding.get('authorization_id'),
+                binding_sha256=hashlib.sha256(json.dumps(self.binding, sort_keys=True).encode()).hexdigest())
+        except upgrade_state.StateError as error:
+            if error.args[0] != 'state_operation_conflict':
+                raise
+            loaded = upgrade_state.load_verified(root)
+            if not any(row['operation_id'] == 'engine-' + phase and row['after_phase'] == phase
+                       for row in loaded['events']):
+                raise
 
     def run(self):
         # Authorization is rechecked here, before claim, backup or service calls.
