@@ -11,6 +11,10 @@ on:
         description: Run every root package, client contracts and race checks
         type: boolean
         default: true
+      native_probe:
+        description: Run the injected native sequence. Default off; not a real service probe.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -231,3 +235,21 @@ jobs:
           go-version-file: .go-version
       - name: Exercise real Forgejo with generated fixture credentials only
         run: python3 scripts/test-forgejo-projection.py
+
+  native-isolated:
+    name: Native adapter isolation
+    # Default off. One-shot label only. Real launchctl/systemctl stays UNVERIFIED.
+    if: github.event_name == 'workflow_dispatch' && inputs.native_probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Run injected native sequence only
+        env:
+          NATIVE_LABEL: ags-s6b-once-${{ github.run_id }}
+        run: |
+          test "${NATIVE_LABEL#*once}" != "$NATIVE_LABEL"
+          python3 scripts/test_native_probe_sequence.py -q
