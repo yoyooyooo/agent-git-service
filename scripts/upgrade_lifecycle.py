@@ -50,16 +50,30 @@ def activate_durable(root, accepted, approval):
     import upgrade_state
     existing = upgrade_state.load_verified(root)
     for row in existing['events']:
-        if row['kind'] == 'authority_activated':
-            if row['approval_sha256'] == _approval_sha(approval) and row['epoch'] == accepted['epoch']:
-                return existing['projection']['authority']
-            raise LifecycleError('authority_already_bound')
+        if row['kind'] == 'authority_activated' and row['approval_sha256'] == _approval_sha(approval) and row['epoch'] == accepted['epoch']:
+            return existing['projection']['authority']
+    current = (existing['projection'] or {}).get('authority')
+    if current is not None and (current.get('state') != 'suspended' or accepted['epoch'] <= current.get('epoch', 0)):
+        raise LifecycleError('authority_already_bound')
     result = upgrade_state.commit_phase(
         root, 'activation-' + approval['approval_id'], 'accepted', 'active',
         kind='authority_activated', epoch=accepted['epoch'],
         identity_sha256=accepted['completion_sha256'],
         approval_sha256=_approval_sha(approval),
         binding_sha256=accepted['completion_sha256'])
+    return result['projection']['authority']
+
+
+def suspend_durable(root, epoch):
+    import upgrade_state
+    loaded = upgrade_state.load_verified(root)
+    authority = loaded['projection'].get('authority')
+    if authority is None or authority.get('epoch') != epoch or authority.get('state') != 'active':
+        raise LifecycleError('authority_not_active')
+    result = upgrade_state.commit_phase(root, 'suspend-' + str(epoch), 'active', 'suspended',
+                                        kind='authority_suspended', epoch=epoch,
+                                        identity_sha256=authority['binding_sha256'],
+                                        binding_sha256=authority['binding_sha256'])
     return result['projection']['authority']
 
 
