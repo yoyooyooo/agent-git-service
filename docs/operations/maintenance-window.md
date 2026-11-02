@@ -7,7 +7,7 @@ SHA-256 pinned before import. The repository does not distribute host bindings,
 private configuration, binaries, deployment receipts or credentials. Source CI
 and a merged PR never authorize a deployment. The
 [Route B preparation runbook](routeb-runbook.md) describes the 0013aa74 to
-3a0c7e4f candidate only and does not admit this executor.
+f63aa88e candidate only and does not admit this executor.
 
 The adapter defaults to `isolated`, which delegates to the pinned executor's
 original CLI, evidence checks and recovery ledger. A run created in maintenance

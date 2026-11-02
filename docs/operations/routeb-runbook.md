@@ -1,8 +1,8 @@
 # Route B preparation runbook
 
 This runbook updates the c980bb63 rehearsal notes to exact source
-`3a0c7e4f0ac5150d774efc66168907671061bcc5`
-(tree `a6fc9f08d5ca4c8d8fe4860dc8e551263455426f`).
+`f63aa88e0c82b1e17174cf07f8033552457185b1`
+(tree `8bf2c52ec3f7c7bc04850791b4e507bbc8261ab4`).
 It describes preparation facts and the separate deployment window.
 It does not authorize either window.
 
@@ -27,14 +27,14 @@ It was not deployed. It is not the current target and not the rollback target.
 
 | Role | Revision |
 |---|---|
-| Candidate | `3a0c7e4f0ac5150d774efc66168907671061bcc5` |
+| Candidate | `f63aa88e0c82b1e17174cf07f8033552457185b1` |
 | Running and rollback | `0013aa744c8c90637ec54562ffc248a1bf7c9a52` |
 
 `--version` must show `version=source-<built revision>`, `revision=<built revision>`,
 and `tree=<built tree>`, plus `goos`, `goarch` and `go_version`.
 `development` is not an acceptable candidate version. The builder stamps the
 clean checkout it verified. After the build-script change, that checkout is
-no longer `3a0c7e4f0ac5150d774efc66168907671061bcc5`; the manifest keeps that
+no longer `f63aa88e0c82b1e17174cf07f8033552457185b1`; the manifest keeps that
 baseline revision beside the built identity. This page does not claim a Release.
 
 ## 2. What changed for operators

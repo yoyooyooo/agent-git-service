@@ -5,7 +5,7 @@ Linux binary is not a native artifact and must not be copied into
 `imile-linux-amd64/`.
 
 Run on Linux x86_64 from a clean detached checkout of the reviewed built HEAD.
-`3a0c7e4f0ac5150d774efc66168907671061bcc5` is only the content baseline. Export
+`f63aa88e0c82b1e17174cf07f8033552457185b1` is only the content baseline. Export
 `GIT_SHA` and pass that same value into the build:
 
 ```sh
