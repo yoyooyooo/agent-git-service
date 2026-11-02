@@ -31,12 +31,30 @@ def _evidence_fields(evidence, version):
         raise ValueError('release_attestation_unverified')
 
 
-def emit_verified(candidate, source_raw, release, asset_bytes, *, attestations, verifier=None):
-    """Emit only after both platform digests match the candidate and a verifier accepts.
+def verify_bundle(digest_value, signature, *, bundle=None):
+    """Source verifier. A missing or non-matching bundle is a refusal.
 
-    The verifier is injected. This function does not call GitHub or cosign.
-    Output stays installable=false.
+    This does not call cosign or GitHub. The caller supplies the bundle bytes
+    and the expected digest. A production caller that has no bundle must not
+    pass a substitute.
     """
+    if not isinstance(bundle, (bytes, bytearray)) or not bundle:
+        raise ValueError('release_attestation_unverified')
+    if not isinstance(signature, (bytes, bytearray)) or signature not in bundle:
+        raise ValueError('release_attestation_unverified')
+    if not isinstance(digest_value, str) or digest_value.encode() not in bundle:
+        raise ValueError('release_attestation_unverified')
+    return True
+
+
+def emit_verified(candidate, source_raw, release, asset_bytes, *, attestations, verifier=None):
+    """Emit only after both platform digests match and the verifier accepts.
+
+    verifier is required. Omitting it is a refusal, not a success.
+    This function does not call GitHub or cosign. Output stays installable=false.
+    """
+    if not callable(verifier):
+        raise ValueError('release_attestation_unverified')
     targets = set(candidate.get('targets', {}))
     if targets != {'darwin_arm64', 'linux_amd64'} or not isinstance(attestations, dict):
         raise ValueError('release_attestation_unverified')
@@ -50,11 +68,16 @@ def emit_verified(candidate, source_raw, release, asset_bytes, *, attestations, 
             raise ValueError('release_attestation_unverified')
         if 'run_id' not in evidence or 'run_attempt' not in evidence:
             raise ValueError('release_attestation_unverified')
-        if verifier is not None:
+        try:
+            verifier(evidence.get('digest'), evidence.get('signature'),
+                     bundle=evidence.get('bundle_bytes'))
+        except TypeError:
             try:
                 verifier(evidence.get('digest'), evidence.get('signature'))
             except Exception:
                 raise ValueError('release_attestation_unverified') from None
+        except Exception:
+            raise ValueError('release_attestation_unverified') from None
     envelope = prepare(candidate, source_raw, release, asset_bytes)
     proof_input = {}
     for target, evidence in sorted(attestations.items()):
