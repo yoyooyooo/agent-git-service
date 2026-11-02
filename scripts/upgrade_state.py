@@ -56,18 +56,39 @@ def _private_dir(path):
     return path
 
 
+def _journal_paths(root):
+    state = Path(root) / 'state'
+    base = state / 'ags-autodeploy/local-v2'
+    control = base / 'control'
+    return state, base, control, control / 'events'
+
+
 def layout(root):
-    state = _private_dir(Path(root) / 'state')
-    autodeploy = state / 'ags-autodeploy'
-    if not autodeploy.exists():
-        autodeploy.mkdir(mode=0o700)
-    _private_dir(autodeploy)
-    base_path = autodeploy / 'local-v2'
-    if not base_path.exists():
-        base_path.mkdir(mode=0o700)
-    base = _private_dir(base_path)
-    control = _private_dir(base / 'control')
-    events = _private_dir(control / 'events')
+    """Read an existing journal. Missing directories are not a journal and are not created."""
+    state, base, control, events = _journal_paths(root)
+    if not control.exists() and not control.is_symlink():
+        return base, control, events
+    _private_dir(state)
+    _private_dir(state / 'ags-autodeploy')
+    _private_dir(base)
+    _private_dir(control)
+    if events.exists() or events.is_symlink():
+        _private_dir(events)
+    for name in ('approvals', 'evidence'):
+        path = control / name
+        if path.exists() or path.is_symlink():
+            _private_dir(path)
+    return base, control, events
+
+
+def ensure_layout(root):
+    """Create the journal directories for a commit. Readers must use layout."""
+    state, base, control, events = _journal_paths(root)
+    _private_dir(state)
+    _private_dir(state / 'ags-autodeploy')
+    _private_dir(base)
+    _private_dir(control)
+    _private_dir(events)
     _private_dir(control / 'approvals')
     _private_dir(control / 'evidence')
     return base, control, events
@@ -237,7 +258,7 @@ def load_verified(root):
     base, control, events = layout(root)
     format_path = control / 'format.json'
     if not format_path.exists():
-        if any(events.iterdir()):
+        if events.exists() and any(events.iterdir()):
             raise StateError('state_format_missing')
         return {'schema': FORMAT, 'events': [], 'projection': None, 'root': str(base)}
     header = _object(_read_file(format_path))
@@ -310,7 +331,7 @@ def _commit_event_locked(root, event):
     raw = canonical(value)
     if len(raw) > MAX_EVENT:
         raise StateError('state_event_too_large')
-    base, control, events = layout(root)
+    base, control, events = ensure_layout(root)
     if not (control / 'format.json').exists():
         host = value['host_instance']
         header = canonical({'schema': FORMAT, 'min_reader': 1, 'host_instance': host,
@@ -416,7 +437,7 @@ class StateLock:
         self.fd = None
 
     def __enter__(self):
-        base, _, _ = layout(self.root)
+        base, _, _ = ensure_layout(self.root)
         fd = os.open(base / 'state.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid() or info.st_mode & 0o077:

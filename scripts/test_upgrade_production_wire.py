@@ -201,7 +201,7 @@ class ProductionWireTests(unittest.TestCase):
         header.rename(saved)
         self.assertFalse(runtime.startup_permitted(self.root))
         saved.rename(header)
-        self.assertFalse(runtime.startup_permitted(self.root))
+        self.assertTrue(runtime.startup_permitted(self.root))
         upgrade_lifecycle.activate_durable(
             self.root,
             {'completion_sha256': 'a' * 64, 's4_approval_id': 's4', 'epoch': 1, 'host_instance': 'host-1'},
@@ -215,6 +215,26 @@ class ProductionWireTests(unittest.TestCase):
         self.assertFalse(runtime.startup_permitted(self.root))
         with self.assertRaises(runtime.CheckFailure):
             runtime.consume_start(self.root)
+        self.assertIsNone(runtime.consume_start(self.root.parent))
+
+    def test_cold_pending_is_not_a_journal_and_does_not_create_control(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'ags_runtime_cold_read', Path(upgrade_state.__file__).resolve().parent / 'ags-runtime.py')
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        pending = self.root / 'state/ags-autodeploy/local-v2/pending'
+        pending.mkdir(parents=True, mode=0o700)
+        for path in (self.root, self.root / 'state', self.root / 'state/ags-autodeploy',
+                     pending.parent, pending):
+            path.chmod(0o700)
+        before = {path.relative_to(self.root).as_posix()
+                  for path in self.root.rglob('*')}
+        self.assertFalse(runtime.startup_permitted(self.root))
+        after = {path.relative_to(self.root).as_posix()
+                 for path in self.root.rglob('*')}
+        self.assertEqual(after, before)
+        self.assertFalse((pending.parent / 'control').exists())
 
     def test_s4_completion_source_calls_durable_phase(self):
         source = Path(upgrade_state.__file__).resolve().parents[0].joinpath(
