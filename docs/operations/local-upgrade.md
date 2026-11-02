@@ -436,6 +436,8 @@ S6b.04 adds `activate_durable`: it validates a lifecycle approval independently 
 
 S6b.05 adds `old_start_durable`: it records a spawn intent before the observer callback, records an observed generation only when pid and boot identity are present, and records `start_blocked` for an unknown result. It never converts an unknown result into a successful start and never reuses the old recovery approval.
 
+S6b.07 replaces the unconditional launchd factory failure with an injected, fixed-profile capability. The factory returns manager/writer/trash seams only when a runner is supplied; it marks the capability `native_verified=false` until a real isolated probe runs. This machine did not run launchctl.
+
 The source tests do **not** establish the full proposed production chain:
 S6.07 lifecycle and S6.08/09 recovery helpers are pure planning contracts, not
 wired durable runtime/CLI authority. Their returned generation or `started`
