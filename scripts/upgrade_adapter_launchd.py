@@ -90,7 +90,9 @@ def native_probe(service, *, permitted, label=None, runner=None, one_shot=True):
     if not callable(runner):
         return {'verified': False, 'reason': 'native_sequence_not_run'}
     domain = service['domain'] + '/' + label
-    plist = label + '.plist'
+    plist = service.get('plist')
+    if not isinstance(plist, str) or not plist.startswith('/') or not plist.endswith('.plist'):
+        raise AdapterError('plist_not_absolute')
     steps = (
         ['launchctl', 'bootstrap', service['domain'], plist],
         ['launchctl', 'print', domain],
@@ -99,11 +101,22 @@ def native_probe(service, *, permitted, label=None, runner=None, one_shot=True):
     rollback = (['launchctl', 'bootout', domain],)
     try:
         from upgrade_native_runner import run_sequence, RunnerError
-        run_sequence(runner, steps, rollback=rollback)
+        done = run_sequence(runner, steps, rollback=rollback)
     except RunnerError as error:
         raise AdapterError('native_probe_failed') from error
+    printed = next((item for argv, item in done if argv[1] == 'print'), None)
+    readback = None
+    if isinstance(printed, dict) and isinstance(printed.get('stdout'), str):
+        from upgrade_native_parse import parse_launchctl_print, ParseError
+        try:
+            readback = parse_launchctl_print(printed['stdout'])
+        except ParseError as error:
+            raise AdapterError('manager_output_malformed') from error
+        if readback['plist'] != plist:
+            raise AdapterError('plist_mismatch')
     return {'verified': False, 'reason': 'native_os_unverified',
-            'sequence': [step[1] for step in steps], 'label': label}
+            'sequence': [step[1] for step in steps], 'label': label,
+            'plist': plist, 'readback': readback}
 
 
 def create(root, package):
