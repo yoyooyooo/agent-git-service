@@ -24,7 +24,7 @@ class NativeFactoryTests(unittest.TestCase):
         self.assertEqual(capabilities['unverified_reason'], 'native_probe_not_run')
 
     def test_systemd_factory_rejects_missing_native_runner_without_effect(self):
-        with self.assertRaisesRegex(ValueError, 'native_probe_unverified'):
+        with self.assertRaisesRegex(ValueError, 'native_adapter_unavailable'):
             systemd.create(self.root, {'native_profile': {'scope': 'system', 'name': 'fixture.service'}})
 
 
