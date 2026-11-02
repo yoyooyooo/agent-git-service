@@ -30,8 +30,11 @@ def cold_pending(root):
 def startup_permitted(root):
     control = root / 'state/ags-autodeploy/local-v2/control'
     events = control / 'events'
-    published = events.exists() and not events.is_symlink() and any(events.iterdir())
-    journal_present = (control / 'format.json').exists() or published
+    published = events.exists() and not events.is_symlink() and any(
+        path for path in events.iterdir() if not path.name.startswith('.'))
+    # Only the durable control journal fences startup. A cold-window claim is
+    # handled below and is not itself an authority projection.
+    journal_present = ((control / 'format.json').is_file() and not (control / 'format.json').is_symlink()) or published
     if journal_present:
         format_path = control / 'format.json'
         if not format_path.is_file() or format_path.is_symlink():
