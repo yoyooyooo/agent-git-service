@@ -266,6 +266,9 @@ class ManualTests(ManualFixture):
         self.assertTrue(self.pending.exists())
         with patch.object(self, 'probe', side_effect=AssertionError('no replay')):
             self.assertEqual(self.confirm(), expected)
+        import upgrade_state
+        rows = upgrade_state.load_verified(self.root)['events']
+        self.assertEqual(sum(row['kind'] == 's4_completed' for row in rows), 1)
 
     def snapshot(self):
         return {str(p.relative_to(self.root)): (p.stat().st_mode, p.stat().st_mtime_ns,

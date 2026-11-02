@@ -65,6 +65,39 @@ def activate_durable(root, accepted, approval):
     return result['projection']['authority']
 
 
+def production_activate(root, accepted, approval):
+    """Production activation. The caller must already hold a verified host identity.
+
+    Missing host or identity is a refusal, not a host-1 default.
+    """
+    if not accepted.get('host_instance') or not accepted.get('completion_sha256'):
+        raise LifecycleError('host_identity_required', 77)
+    return activate_durable(root, accepted, approval)
+
+
+def historize_marker(root, epoch):
+    """Move an accepted cold marker into the epoch history directory. Never delete it."""
+    import os
+    from pathlib import Path
+    root = Path(root)
+    marker = root / 'state/upgrade-cold.json'
+    if not marker.is_file() or marker.is_symlink():
+        raise LifecycleError('marker_missing')
+    history = root / 'state/ags-autodeploy/local-v2/history' / ('epoch-' + str(epoch))
+    history.mkdir(mode=0o700, parents=True, exist_ok=True)
+    destination = history / 'upgrade-cold.json'
+    if destination.exists() or destination.is_symlink():
+        raise LifecycleError('marker_already_historized')
+    os.replace(marker, destination)
+    for parent in (marker.parent, destination.parent):
+        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    return {'status': 'historized', 'path': str(destination), 'epoch': epoch}
+
+
 def suspend_durable(root, epoch):
     import upgrade_state
     loaded = upgrade_state.load_verified(root)

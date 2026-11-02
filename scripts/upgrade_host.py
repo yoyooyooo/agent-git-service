@@ -258,7 +258,13 @@ class Effects:
         # a second descriptor (which would self-conflict).
         self._cold.owner = self.owner_fd
         self._cold.begin()
-    def stop(self): self._window().stop(authorize=self._authorize_stage)
+    def stop(self):
+        import upgrade_lifecycle
+        import upgrade_state
+        authority = (upgrade_state.load_verified(self.root)['projection'] or {}).get('authority')
+        if authority is not None and authority.get('state') == 'active':
+            upgrade_lifecycle.suspend_durable(self.root, authority['epoch'])
+        self._window().stop(authorize=self._authorize_stage)
     def quiescent(self): self._window().quiescent()
     def restore(self): self._window().restore()
     def _authorize_stage(self):

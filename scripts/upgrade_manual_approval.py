@@ -427,6 +427,7 @@ def _confirm(root, binding, approval_path, packet_path, pin, pin_sha, probe, clo
             # A durable completion is historical acceptance. Current health is
             # not reinterpreted and no upgrade effect is repeated after a crash.
             archive_claim(state, record)
+            _record_s4_completed(root, binding, record, approval_sha)
             return record
         validate_approval(approval, packet, packet_sha, now)
         chain = load_chain(root, binding)
@@ -483,14 +484,25 @@ def _confirm(root, binding, approval_path, packet_path, pin, pin_sha, probe, clo
             os.fsync(parent)
         checkpoint('completion-durable')
         archive_claim(state, record)
-        import upgrade_state
-        upgrade_state.commit_phase(
-            root, 's4-completion-' + record['approval_id'], 'awaiting_observation', 'completed',
-            kind='s4_completed', approval_sha256=approval_sha,
-            host_instance=binding.get('host_instance') or binding.get('host'),
-            identity_sha256=fingerprint(binding),
-            binding_sha256=fingerprint(binding), transaction_id=record['generation'])
+        _record_s4_completed(root, binding, record, approval_sha)
         return record
+
+
+def _record_s4_completed(root, binding, record, approval_sha):
+    """Idempotent journal mirror. A retry after the completion file is already
+    durable still publishes the missing s4_completed event.
+    """
+    import upgrade_state
+    loaded = upgrade_state.load_verified(root)
+    previous = loaded['events'][-1] if loaded['events'] else None
+    host = (previous or {}).get('host_instance') or binding.get('host_instance') or binding.get('host')
+    identity = (previous or {}).get('identity_sha256') or fingerprint(binding)
+    bound = (previous or {}).get('binding_sha256') or fingerprint(binding)
+    upgrade_state.commit_phase(
+        root, 's4-completion-' + record['approval_id'], 'awaiting_observation', 'completed',
+        kind='s4_completed', approval_sha256=approval_sha,
+        host_instance=host, identity_sha256=identity,
+        binding_sha256=bound, transaction_id=record['generation'])
 
 
 def confirm(root, binding, approval_path, packet_path, pin, pin_sha, probe, *, now=None):

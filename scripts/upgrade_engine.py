@@ -251,6 +251,16 @@ def acceptance(command, root, binding, *, approval_path=None, packet_path=None,
         raise Failure('transaction_state_unknown', command) from None
 
 
+def _deployment_root(state):
+    """state is <root>/state or <root>/state/ags-autodeploy/local-v2."""
+    state = Path(state)
+    if state.name == 'local-v2' and state.parent.name == 'ags-autodeploy' and state.parent.parent.name == 'state':
+        return state.parent.parent.parent
+    if state.name == 'state':
+        return state.parent
+    raise Failure('invalid_host')
+
+
 class Transaction:
     def __init__(self, state, binding, authorization, effects):
         self.state, self.binding, self.authorization, self.effects = state, binding, authorization, effects
@@ -261,21 +271,27 @@ class Transaction:
         before = self.journal.get('phase')
         self.journal.update(phase=phase, **fields)
         save(self.pending / 'journal.json', self.journal)
-        root = self.state.parent if self.state.name == 'state' else self.state.parents[3]
+        root = _deployment_root(self.state)
         import upgrade_state
+        transaction = self.authorization.get('authorization_id') or self.binding.get('authorization_id')
+        operation = 'engine-' + phase
+        binding_sha = hashlib.sha256(json.dumps(self.binding, sort_keys=True).encode()).hexdigest()
         try:
             upgrade_state.commit_phase(
-                root, 'engine-' + phase, before or 'none', phase, kind='engine_' + phase,
+                root, operation, before or 'none', phase, kind='engine_' + phase,
                 host_instance=self.binding.get('host_instance') or self.binding.get('host'),
                 identity_sha256=self.binding.get('identity_sha256'),
-                transaction_id=self.binding.get('authorization_id'),
-                binding_sha256=hashlib.sha256(json.dumps(self.binding, sort_keys=True).encode()).hexdigest())
+                transaction_id=transaction,
+                binding_sha256=binding_sha)
         except upgrade_state.StateError as error:
             if error.args[0] != 'state_operation_conflict':
                 raise
             loaded = upgrade_state.load_verified(root)
-            if not any(row['operation_id'] == 'engine-' + phase and row['after_phase'] == phase
-                       for row in loaded['events']):
+            same = [row for row in loaded['events']
+                    if row['operation_id'] == operation and row['after_phase'] == phase
+                    and row['transaction_id'] == transaction
+                    and row['binding_sha256'] == binding_sha]
+            if not same:
                 raise
 
     def run(self):
