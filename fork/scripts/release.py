@@ -427,9 +427,20 @@ def reviewed_commit(sha, number=None, *, require_human_review=True):
 
 
 def validate_jobs(rows, expected, attempt):
-    if (len(rows) != len(expected) or {row.get('name') for row in rows} != expected
+    """Required jobs must be an exact success set.
+
+    A completed skipped job outside that set is not evidence and does not
+    fail the inventory. A skipped required job still fails.
+    """
+    required = []
+    for row in rows:
+        name = row.get('name')
+        if name not in expected and row.get('conclusion') == 'skipped' and row.get('status') == 'completed':
+            continue
+        required.append(row)
+    if (len(required) != len(expected) or {row.get('name') for row in required} != expected
             or any(row.get('status') != 'completed' or row.get('conclusion') != 'success'
-                   or row.get('run_attempt') != attempt for row in rows)):
+                   or row.get('run_attempt') != attempt for row in required)):
         raise ValueError('exact_ci_jobs_required')
 
 
