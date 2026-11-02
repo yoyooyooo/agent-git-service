@@ -21,7 +21,7 @@ REQUIRED = (
     'upgrade_backup_contract.py', 'upgrade_inventory.py', 'upgrade_backup.py',
     'upgrade_restore_verify.py', 'upgrade_recovery.py', 'upgrade_manual_approval.py',
     'upgrade_lifecycle.py', 'upgrade_recovery_cli.py', 'upgrade_forward_recovery.py',
-    'upgrade_full_restore.py', 'upgrade_handoff.py', 'upgrade_pin.py', 'upgrade_smoke.py',
+    'upgrade_full_restore.py', 'upgrade_state.py', 'upgrade_handoff.py', 'upgrade_pin.py', 'upgrade_smoke.py',
     'release_verify.py', 'release_contract.py', 'release_install_v2.py', 'install-release.py',
     'upgrade_policy.json', 'release-source.json',
 )
