@@ -1,0 +1,5 @@
+#!/bin/sh
+# Isolated maintenance transaction entry. Direct python is not the guaranteed entry.
+set -eu
+here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+exec "$here/ags-python.sh" "$here/maintenance_transaction.py" "$@"
