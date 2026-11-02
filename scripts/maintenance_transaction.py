@@ -13,7 +13,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import stat
 import sys
+
+ISOLATION_MARK = ".ags-isolated-rehearsal"
+TRANSACTION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 PHASES = (
     "identity",
@@ -36,9 +41,13 @@ class Failure(Exception):
 
 
 def atomic_write(path: Path, text: str) -> None:
+    if path.is_symlink():
+        raise Failure("symlink_refused", 78)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if temporary.exists() or temporary.is_symlink():
+        raise Failure("symlink_refused", 78)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         os.write(fd, text.encode("utf-8"))
         os.fsync(fd)
@@ -52,13 +61,70 @@ def atomic_write(path: Path, text: str) -> None:
         os.close(directory)
 
 
+def production_root() -> Path:
+    return (Path.home() / ".ags").resolve(strict=False)
+
+
+def overlaps_production(path: Path) -> bool:
+    production = production_root()
+    candidate = path.resolve(strict=False)
+    return candidate == production or production in candidate.parents or candidate in production.parents
+
+
 def refuse_root(root: Path) -> None:
     if root.is_symlink():
         raise Failure("symlink_root_refused", 78)
-    production = (Path.home() / ".ags").resolve(strict=False)
-    candidate = root.resolve(strict=False)
-    if candidate == production or production in candidate.parents or candidate in production.parents:
+    if overlaps_production(root):
         raise Failure("production_root_refused", 78)
+
+
+def safe_transaction_id(value: object) -> str:
+    if not isinstance(value, str) or not TRANSACTION_ID.fullmatch(value) or value in {".", ".."}:
+        raise Failure("transaction_id_rejected", 78)
+    return value
+
+
+def require_regular(path: Path, code: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise Failure(code, 78)
+
+
+def reject_tree_symlinks(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink():
+        raise Failure("symlink_refused", 78)
+    if path.is_dir():
+        for child in path.rglob("*"):
+            if child.is_symlink():
+                raise Failure("symlink_refused", 78)
+
+
+def admit_rehearsal(root: Path) -> Path:
+    """Fail closed unless root is an owner-only isolated rehearsal directory."""
+    if root.is_symlink() or not root.is_dir():
+        raise Failure("rehearsal_refused", 78)
+    info = root.lstat()
+    if stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != os.getuid():
+        raise Failure("rehearsal_refused", 78)
+    marker = root / ISOLATION_MARK
+    require_regular(marker, "rehearsal_refused")
+    if marker.lstat().st_uid != os.getuid() or stat.S_IMODE(marker.lstat().st_mode) & 0o077:
+        raise Failure("rehearsal_refused", 78)
+    if marker.read_text(encoding="utf-8").strip() != "isolated":
+        raise Failure("rehearsal_refused", 78)
+    return root.resolve(strict=True)
+
+
+def refuse_effect_path(root: Path, path: Path, code: str) -> Path:
+    if path.is_symlink():
+        raise Failure("symlink_refused", 78)
+    resolved = path.resolve(strict=False)
+    if overlaps_production(resolved):
+        raise Failure("production_path_refused", 78)
+    if resolved == root or root in resolved.parents:
+        raise Failure(code, 78)
+    return resolved
 
 
 def parse(argv: list[str]) -> argparse.Namespace:
@@ -100,20 +166,30 @@ def read_json(path: Path) -> dict:
 
 
 def outside(root: Path, path: Path, code: str) -> Path:
-    resolved = path.resolve(strict=False)
-    if resolved == root or root in resolved.parents:
-        raise Failure(code, 78)
-    return resolved
+    return refuse_effect_path(root, path, code)
 
 
 def file_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def replace_regular(dst: Path) -> None:
+    if dst.is_symlink():
+        raise Failure("symlink_refused", 78)
+    if dst.exists():
+        if not dst.is_file():
+            raise Failure("symlink_refused", 78)
+        dst.unlink()
+
+
 def copy_file(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    require_regular(src, "symlink_refused")
+    replace_regular(dst)
+    parent = dst.parent
+    if parent.is_symlink() or not parent.is_dir():
+        raise Failure("symlink_refused", 78)
     data = src.read_bytes()
-    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, src.stat().st_mode & 0o777)
+    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, src.stat().st_mode & 0o777)
     try:
         os.write(fd, data)
         os.fsync(fd)
@@ -122,12 +198,18 @@ def copy_file(src: Path, dst: Path) -> None:
 
 
 def copy_tree(src: Path, dst: Path) -> None:
-    if dst.exists():
+    if src.is_symlink() or not src.is_dir():
+        raise Failure("symlink_refused", 78)
+    reject_tree_symlinks(src)
+    if dst.exists() or dst.is_symlink():
         raise Failure("backup_exists", 78)
+    dst.mkdir(parents=True)
     for path in sorted(src.rglob("*")):
+        if path.is_symlink():
+            raise Failure("symlink_refused", 78)
         target = dst / path.relative_to(src)
         if path.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
+            target.mkdir(parents=True)
             continue
         if path.is_file():
             copy_file(path, target)
@@ -173,10 +255,13 @@ def write_fence(root: Path) -> None:
 
 def request_paths(args: argparse.Namespace) -> tuple[Path, Path, dict, dict]:
     root = Path(args.root)
-    if not root.is_dir():
+    if root.is_symlink() or not root.is_dir():
         raise Failure("root_missing", 78)
-    restore = outside(root.resolve(), Path(args.restore), "restore_inside_root")
-    outside(root.resolve(), Path(args.audit), "audit_inside_root")
+    admitted = admit_rehearsal(root)
+    reject_tree_symlinks(root)
+    restore = outside(admitted, Path(args.restore), "restore_inside_root")
+    outside(admitted, Path(args.audit), "audit_inside_root")
+    outside(admitted, Path(args.manager_dir), "manager_inside_root")
     manifest = read_json(Path(args.candidate))
     window = read_json(Path(args.window))
     if args.host not in {"mini", "imile-win"} or window.get("host") != args.host:
@@ -189,9 +274,7 @@ def request_paths(args: argparse.Namespace) -> tuple[Path, Path, dict, dict]:
     digest = str(manifest.get("sha256", ""))
     if not binary.is_file() or file_digest(binary) != digest or window.get("candidate_sha256") != digest:
         raise Failure("candidate_rejected", 78)
-    transaction = str(window.get("transaction_id", ""))
-    if not transaction:
-        raise Failure("window_rejected", 78)
+    safe_transaction_id(window.get("transaction_id", ""))
     return root, restore, manifest, window
 
 
