@@ -29,6 +29,8 @@ class ProductionWireTests(unittest.TestCase):
         state = self.root / 'state/ags-autodeploy/local-v2'
         pending = state / 'pending'
         pending.mkdir(parents=True, mode=0o700)
+        for path in (self.root, self.root / 'state', self.root / 'state/ags-autodeploy', state, pending):
+            path.chmod(0o700)
         binding = {'host': 'fixture', 'host_instance': 'fixture-host', 'identity_sha256': 'c' * 64,
                    'authorization_id': 'auth-layout', 'old': 'a' * 40, 'new': 'b' * 40}
         journal = {'schema': 'ags.local-upgrade-journal.v2', 'binding': binding, 'phase': 'admission'}
