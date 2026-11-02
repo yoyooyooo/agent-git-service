@@ -246,6 +246,12 @@ class QuiescenceTests(ColdFixture):
         (self.root / 'config/runtime.env').write_text('FIXTURE_ONLY=1\n')
         (self.root / 'config/runtime.env').chmod(0o600)
         self.window.start_intent(); self.window.release()
+        # This test exercises the cold-window token, not a durable authority.
+        # The phase mirror wrote a control journal; leave that fence to its own tests.
+        control = self.root / 'state/ags-autodeploy/local-v2/control'
+        if control.exists():
+            import shutil
+            shutil.rmtree(control)
         observed = []
         real_spawn = runtime.subprocess.Popen
         def spawn(*args, **kwargs):
