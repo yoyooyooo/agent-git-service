@@ -45,7 +45,8 @@ class MetadataTests(unittest.TestCase):
         dest.write_bytes(b'fixture')
         expected = {'uid': 0, 'gid': 0, 'owner': 0}
         result = self.metadata.materialize(source, dest, expected, role='tool',
-                                           transaction='tx', staging=self.staging)
+                                           transaction='tx', staging=self.staging,
+                                           helper=lambda *_: {'applied': True})
         self.assertEqual(result['uid'], 0)
         outside = self.root / 'live'
         outside.write_bytes(b'live')
@@ -73,11 +74,12 @@ class MetadataTests(unittest.TestCase):
         for argv in (['/usr/bin/trash'], ['/usr/bin/trash', '--', str(target)], ['rm', str(target)]):
             with self.subTest(argv=argv), self.assertRaises(self.trash.TrashError):
                 self.trash.allow(argv)
+        mover = lambda path: {'source_gone': False}
         self.assertEqual(self.trash.move(target, eligible=True,
-                                         readback={'source_gone': False})['status'], 'unknown')
+                                         readback={}, mover=mover)['status'], 'unknown')
+        mover = lambda path: {'source_gone': True, 'trash_entry': 'id'}
         self.assertEqual(self.trash.move(target, eligible=True,
-                                         readback={'source_gone': True, 'trash_entry': 'id'})['status'],
-                         'trashed')
+                                         readback={}, mover=mover)['status'], 'trashed')
         with self.assertRaises(self.trash.TrashError):
             self.trash.move(target, eligible=False, readback={'source_gone': True, 'trash_entry': 'id'})
         with self.assertRaises(self.trash.TrashError):
