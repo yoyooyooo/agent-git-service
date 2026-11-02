@@ -258,8 +258,15 @@ class Transaction:
         self.journal = None
 
     def checkpoint(self, phase, **fields):
+        before = self.journal.get('phase')
         self.journal.update(phase=phase, **fields)
         save(self.pending / 'journal.json', self.journal)
+        root = self.state.parent if self.state.name == 'state' else self.state.parents[3]
+        import upgrade_state
+        upgrade_state.commit_phase(
+            root, 'engine-' + phase, before or 'none', phase, kind='engine_' + phase,
+            transaction_id=self.binding.get('authorization_id'),
+            binding_sha256=hashlib.sha256(json.dumps(self.binding, sort_keys=True).encode()).hexdigest())
 
     def run(self):
         # Authorization is rechecked here, before claim, backup or service calls.
@@ -346,9 +353,10 @@ class Transaction:
                 self.checkpoint('awaiting_observation')
                 return result
             except Exception as error:
-                self.checkpoint(self.journal['phase'], failed=True,
+                self.journal.update(failed=True,
                                 service_state='stopped_or_unknown' if self.journal['stop_started'] else 'unchanged',
                                 recovery_required=self.journal['stop_started'])
+                save(self.pending / 'journal.json', self.journal)
                 if isinstance(error, ContractError):
                     raise Failure('minimum_contract_unsatisfied', self.journal['phase'], 83) from error
                 if isinstance(error, Failure) and error.exit_code == 83:
