@@ -17,7 +17,7 @@ REQUIRED = (
     'upgrade', 'ags-python.sh', 'ags-runtime.py', 'upgrade.py', 'upgrade_host.py',
     'upgrade_engine.py', 'upgrade_identity.py', 'upgrade_host_evidence.py',
     'upgrade_bootstrap.py', 'upgrade_adapter_launchd.py', 'upgrade_adapter_systemd.py',
-    'upgrade_native_runner.py',
+    'upgrade_native_runner.py', 'upgrade_native_parse.py',
     'upgrade_metadata.py', 'upgrade_trash.py', 'upgrade_bundle.py', 'upgrade_wireup.py',
     'upgrade_backup_contract.py', 'upgrade_inventory.py', 'upgrade_backup.py',
     'upgrade_restore_verify.py', 'upgrade_recovery.py', 'upgrade_manual_approval.py',
