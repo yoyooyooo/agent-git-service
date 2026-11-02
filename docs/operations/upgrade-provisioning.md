@@ -44,3 +44,5 @@ does not supply a native adapter, privileged helper or bootstrap authority.
 S6b.09 preserves this boundary: metadata and Trash operations require explicit provisioned callbacks and fail before claim when absent. A fixture readback cannot become ownership or deletion evidence.
 No factory may return a no-op Trash or writer probe as production capability.
 See [source integration](local-upgrade.md#s613-source-integration-boundary).
+Candidate build identity for the Route B preparation is in
+[route B build](routeb-build.md); that page is not an installable pin.
