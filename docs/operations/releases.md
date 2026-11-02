@@ -14,7 +14,7 @@ report `development`/`unknown`; they are not release artifacts.
 
 S6b.11 also stamps exact-source binary and Docker paths with `server.gitSHA`, `buildinfo.Version`, `buildinfo.Revision` and `buildinfo.Tree`. Docker remains an Alpine/CGO-disabled build and is not native Release ABI evidence.
 
-S6b.12 adds an evidence-bounded `upgrade_pin.emit_verified` seam. It requires both platform tag-push attestations from the hosted release-control workflow and rejects dispatch evidence, missing targets, or non-push provenance. It returns `ags.deploy-release-pin.v2` only as a non-installable preparation envelope; it never installs bytes, calls a manager, or claims a real Release/pin.
+S6b.12 adds an evidence-bounded `upgrade_pin.emit_verified` seam. S6b-fix requires the caller evidence to be a push-triggered `workflow_run` with digest and cosign bundle fields, plus both platform hosted `release-control` provenance. Missing fields, dispatch evidence, a caller source, or a non-push event are refused. The check is structural only: it does not call GitHub, cosign, or a Release API. It returns `ags.deploy-release-pin.v2` only as a non-installable preparation envelope. An installable pin requires a separately approved real Release.
 
 The release manifest binds the version, complete source SHA/tree, platform, Go
 version, CGO choice, binary hashes and smoke-test results. No credentials, private
@@ -517,4 +517,5 @@ this slice. The later separately approved control PR still needs current exact
 CI and human APPROVED review. See [provisioning](upgrade-provisioning.md#s612-release-inputs)
 and [local upgrade](local-upgrade.md). A complete real-evidence-to-installable-pin
 emitter remains blocked pending that release acceptance; preparation is not
-publication readiness.
+publication readiness. Structural evidence checks do not verify a signature or
+create a Release. An installable pin requires a separately approved real Release.

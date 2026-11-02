@@ -250,7 +250,7 @@ manager tests are not a native launchd/systemd acceptance or deployment approval
 
 ### S6b source-only lifecycle limit
 
-The S6b durable journal, activation and start-observation seams are documented in the [S6b design](../design/s6b-upgrade-recovery.md). They do not grant default startup or convert an unknown process result into success; native manager behavior remains UNVERIFIED until an isolated Darwin/Linux probe.
+The S6b durable journal, activation and start-observation seams are documented in the [S6b design](../design/s6b-upgrade-recovery.md). S6b-fix B2 makes `startup_permitted` read the durable journal when `control/format.json` exists and refuse a non-active authority. `upgrade_recovery.launcher_spawn` is the tested fence: it reads approval authority and epoch before an injected runner and does not call that runner when the fence fails. The runtime spawn path does not call `launcher_spawn`, so this is not a live start. It does not grant default startup and does not convert an unknown process result into success. Native manager behavior remains UNVERIFIED; this machine did not run launchctl or systemctl.
 
 ## S6 source-only lifecycle limit
 

@@ -223,9 +223,6 @@ under the runner's home. The runner
 unsets PYTHONDONTWRITEBYTECODE, PYTHONPYCACHEPREFIX, PYTHONPATH and BASH_ENV before
 `scripts/ags-python.sh` establishes bytecode-free execution.
 
-S6 tests cover source contracts and real synthetic S1/S2/S4 integration. They do
-not prove the missing production lifecycle/recovery wiring. S6b portable inventory checks run through the same sequential runner. Native launchd and
-systemd chains, privileged metadata helper, native Trash, isolated VM,
-production-copy startup, imile behavior and new tag-push crypto remain separate
-unverified gates. A skip is not a pass. No candidate or publication workflow is
-dispatched by this gate. See [source limits](operations/local-upgrade.md#s613-source-integration-boundary).
+S6 tests cover source contracts and real synthetic S1/S2/S4 integration. S6b-fix B2 adds source tests that engine and cold-window writers mirror the durable journal, and that `launcher_spawn` consumes approval authority and the epoch fence before an injected runner. `ags-runtime.startup_permitted` only consults that journal when its control file exists. Those tests do not prove a live host recovery, and the runtime spawn path is not wired to `launcher_spawn`. S6b portable inventory checks, pin evidence structure checks, and the injected native sequence run through the same sequential runner.
+
+The `native-isolated` job is defined on this workflow and stays off unless the run is `workflow_dispatch` with `native_probe=true`. It uses a one-shot label and the injected sequence only. It does not use a private runner or a secret, and its default-off state does not change the conclusion of the existing jobs. Real launchd and systemd chains, privileged metadata helper, native Trash, isolated VM, production-copy startup, imile behavior and tag-push crypto remain UNVERIFIED. A skip is not a pass. No candidate or publication workflow is dispatched by this gate. See [source limits](operations/local-upgrade.md#s613-source-integration-boundary).
