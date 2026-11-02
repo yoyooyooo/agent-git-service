@@ -6,8 +6,10 @@ is never snapshot data. Root tools require a separately approved provisioner.
 """
 from pathlib import Path
 import hashlib
+import json
 import os
 import shutil
+import stat
 import tempfile
 
 
@@ -69,27 +71,94 @@ def _fsync_dir(path):
         os.close(fd)
 
 
+def _load_restore_decision(root, approval_ref, object_id, target, source, caller):
+    """Derive the restore decision from independently read approval bytes.
+
+    The caller may name the record. Digests, the target group and the host
+    come from that record. Comparing caller-supplied summaries to each other
+    is not a decision.
+    """
+    if not isinstance(approval_ref, str) or len(approval_ref) != 64 or any(
+            char not in '0123456789abcdef' for char in approval_ref):
+        raise RestoreError('restore_approval_required')
+    supplied = ('approval_sha256', 'binding_sha256', 'transaction_id',
+                'expected_approval_sha256', 'expected_binding_sha256',
+                'expected_transaction_id')
+    if any(caller.get(name) not in (None, approval_ref if name.endswith('approval_sha256') else None)
+           and caller.get(name) is not None for name in supplied):
+        # A caller summary is never evidence. If one is present it must still
+        # be checked against the record below, not against the other summaries.
+        pass
+    path = Path(root) / 'state/ags-autodeploy/local-v2/control/approvals' / (approval_ref + '.json')
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise RestoreError('restore_approval_required')
+        info = path.lstat()
+        if info.st_nlink != 1 or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            raise RestoreError('restore_approval_required')
+        raw = path.read_bytes()
+    except OSError as error:
+        raise RestoreError('restore_approval_required') from error
+    if hashlib.sha256(raw).hexdigest() != approval_ref:
+        raise RestoreError('restore_approval_mismatch')
+    try:
+        record = json.loads(raw)
+    except ValueError as error:
+        raise RestoreError('restore_approval_required') from error
+    if not isinstance(record, dict) or record.get('schema') != 'ags.restore-approval.v1':
+        raise RestoreError('restore_approval_required')
+    if record.get('decision') != 'approve':
+        raise RestoreError('restore_decision_rejected')
+    for name in supplied:
+        given = caller.get(name)
+        if given is None:
+            continue
+        expected = {
+            'approval_sha256': approval_ref,
+            'expected_approval_sha256': approval_ref,
+            'binding_sha256': record.get('binding_sha256'),
+            'expected_binding_sha256': record.get('binding_sha256'),
+            'transaction_id': record.get('transaction_id'),
+            'expected_transaction_id': record.get('transaction_id'),
+        }[name]
+        if given != expected:
+            raise RestoreError('restore_approval_mismatch')
+    if record.get('object_id') != object_id or record.get('transaction_id') != object_id:
+        raise RestoreError('restore_approval_mismatch')
+    group = record.get('target_group')
+    if not isinstance(group, list) or str(target) not in group:
+        raise RestoreError('restore_decision_rejected')
+    before = hashlib.sha256(Path(target).read_bytes()).hexdigest()
+    desired = hashlib.sha256(Path(source).read_bytes()).hexdigest()
+    if record.get('before_digest') != before or record.get('object_digest') != desired:
+        raise RestoreError('restore_approval_mismatch')
+    host = record.get('host_instance')
+    identity = record.get('identity_sha256')
+    binding = record.get('binding_sha256')
+    if (host in (None, 'host-1') or identity in (None, binding, '0' * 64)
+            or not isinstance(binding, str) or len(binding) != 64):
+        raise RestoreError('restore_decision_rejected')
+    return {'approval_sha256': approval_ref, 'binding_sha256': binding,
+            'transaction_id': record['transaction_id'], 'host_instance': host,
+            'identity_sha256': identity, 'object_digest': desired, 'before_digest': before}
+
+
 def restore_object_durable(root, target, source, object_id, *, fail_after=None,
-                           restore_root=None, approval_sha256=None, binding_sha256=None,
-                           transaction_id=None, expected_binding_sha256=None,
-                           expected_approval_sha256=None, expected_transaction_id=None,
-                           effect_ledger=None):
+                           restore_root=None, approval_ref=None, approval_sha256=None,
+                           binding_sha256=None, transaction_id=None,
+                           expected_binding_sha256=None, expected_approval_sha256=None,
+                           expected_transaction_id=None, effect_ledger=None):
     """Switch one approved file inside the deployment root. Refuse before any write.
 
-    Approval, binding and transaction must be supplied. They are not invented,
-    and expected_* cannot be filled from the same caller values. restore_root
-    cannot leave the deployment root.
+    The caller locates an approval record. Digests, the approved target group
+    and the host identity are read from that record. Caller summaries are not
+    compared with each other, and host-1 is not a host.
     """
     import upgrade_state
-    if not approval_sha256 or not binding_sha256 or not transaction_id:
+    if approval_ref is None and not approval_sha256:
         raise RestoreError('restore_approval_required')
-    if (expected_binding_sha256 is None or expected_approval_sha256 is None
-            or expected_transaction_id is None
-            or binding_sha256 != expected_binding_sha256
-            or approval_sha256 != expected_approval_sha256
-            or transaction_id != expected_transaction_id
-            or transaction_id != object_id):
-        raise RestoreError('restore_binding_mismatch')
+    if approval_ref is None:
+        raise RestoreError('restore_approval_required')
     if restore_root is None:
         restore_root = root
     else:
@@ -101,15 +170,22 @@ def restore_object_durable(root, target, source, object_id, *, fail_after=None,
     source = _contained(source, restore_root, 'restore_source_outside')
     if target == source:
         raise RestoreError('restore_target_invalid')
-    before = hashlib.sha256(target.read_bytes()).hexdigest()
-    desired = hashlib.sha256(source.read_bytes()).hexdigest()
+    decision = _load_restore_decision(root, approval_ref, object_id, target, source, {
+        'approval_sha256': approval_sha256, 'binding_sha256': binding_sha256,
+        'transaction_id': transaction_id, 'expected_approval_sha256': expected_approval_sha256,
+        'expected_binding_sha256': expected_binding_sha256,
+        'expected_transaction_id': expected_transaction_id})
+    before = decision['before_digest']
+    desired = decision['object_digest']
     effect = {'effect_id': object_id, 'type': 'restore-file',
               'expected_before': before or 'missing', 'desired_after': desired, 'status': 'intent'}
     upgrade_state.commit_phase(root, object_id + '-intent', 'fenced', 'restore_started',
-                               kind='restore_intent', effect=effect,
-                               host_instance='host-1', identity_sha256=binding_sha256,
-                               binding_sha256=binding_sha256, approval_sha256=approval_sha256,
-                               transaction_id=transaction_id)
+                               kind='restore_intent', effect=effect, epoch=1, expected_epoch=None,
+                               host_instance=decision['host_instance'],
+                               identity_sha256=decision['identity_sha256'],
+                               binding_sha256=decision['binding_sha256'],
+                               approval_sha256=decision['approval_sha256'],
+                               transaction_id=decision['transaction_id'])
     staging = target.with_name('.' + target.name + '.restore-new')
     if staging.exists() or staging.is_symlink() or not _inside(staging, restore_root):
         raise RestoreError('restore_target_invalid')
@@ -121,19 +197,22 @@ def restore_object_durable(root, target, source, object_id, *, fail_after=None,
     os.replace(staging, target)
     _fsync_dir(target.parent)
     if fail_after == 'rename':
-        # Unknown observation only. This is not evidence of power-loss durability.
         upgrade_state.commit_phase(root, object_id + '-blocked', 'restore_started', 'blocked',
                                    kind='restore_blocked', effect={**effect, 'status': 'blocked'},
-                                   binding_sha256=binding_sha256, approval_sha256=approval_sha256,
-                                   transaction_id=transaction_id)
+                                   epoch=1,
+                                   binding_sha256=decision['binding_sha256'],
+                                   approval_sha256=decision['approval_sha256'],
+                                   transaction_id=decision['transaction_id'])
         raise RestoreError('restore_observation_unknown')
     observed = hashlib.sha256(target.read_bytes()).hexdigest()
     if observed != desired:
         raise RestoreError('restore_readback_mismatch')
     upgrade_state.commit_phase(root, object_id + '-observed', 'restore_started', 'restored',
                                kind='restore_observed', effect={**effect, 'status': 'observed'},
-                               binding_sha256=binding_sha256, approval_sha256=approval_sha256,
-                               transaction_id=transaction_id)
+                               epoch=1,
+                               binding_sha256=decision['binding_sha256'],
+                               approval_sha256=decision['approval_sha256'],
+                               transaction_id=decision['transaction_id'])
     return {'object_id': object_id, 'status': 'observed', 'sha256': observed}
 
 

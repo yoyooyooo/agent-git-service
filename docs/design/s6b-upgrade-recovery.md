@@ -22,7 +22,9 @@ S6b-fix B4 恢复了 journal header 的 host binding：`format.json` 的 `host_i
 
 `activate_durable` 独立校验 lifecycle approval，先写 `authority_activated`，重试返回同一投影。`old_start_durable` 先写 spawn intent；只有同时具有 pid、boot identity 和 started observation 才写 `start_observed`，未知结果写 `start_blocked`，不重发 token。`suspend_durable` 后，第二个 epoch 必须使用严格更新的 epoch 和新的批准。恢复对象切换使用 [`restore_object_durable`](../../scripts/upgrade_full_restore.py)：先写每对象 intent，rename 后 hash readback；结果未知保持 blocked，不在 old/new 间猜选。
 
-S6b-fix B1 要求 `target` 与 `source` 都位于经批准的 `restore_root` 内，拒绝 symlink 穿越、`..` 逃逸、硬链接和仓外路径。approval、binding 与 transaction 缺失即拒绝，不用零摘要或调用者的 expected_* 自证；调用者不能把 restore_root 指到部署根外。staging 文件与目标父目录在切换后 fsync。`fail_after='rename'` 只模拟未知观察，不是掉电语义证据。固定离线工具、锁与完整组验证路径本轮未接线。
+S6b-fix B1 要求 `target` 与 `source` 都位于经批准的 `restore_root` 内，拒绝 symlink 穿越、`..` 逃逸、硬链接和仓外路径。调用者不能把 restore_root 指到部署根外。staging 文件与目标父目录在切换后 fsync。`fail_after='rename'` 只模拟未知观察，不是掉电语义证据。固定离线工具、锁与完整组验证路径本轮未接线。
+
+S6b-fix6 B1 改变恢复决定的来源。调用者只提供 `approval_ref`，用来定位 `control/approvals/<digest>.json`。函数独立读取该文件的原始 bytes，校验 SHA-256、owner-only 与非链接，再从记录派生 transaction、binding、已批准目标组、对象摘要和 host identity。调用者传入的 approval/binding/transaction 摘要只能与这份记录比较；自洽但与记录不符的组合在任何写入前拒绝，错误码 `restore_approval_mismatch`。记录中的 `host-1` 或把 binding digest 当 identity 都拒绝。这仍是源码校验：真实主机批准与掉电未验证，标 UNVERIFIED。
 
 S6b-fix B2 把 durable seam 以迁移期 shim 接入现有生产写者，而不是替换 S3/S4 事实格式：
 
