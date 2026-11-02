@@ -39,13 +39,28 @@ entries=(
   'fork/scripts/test_release.py' 'fork/scripts/test_release_binding.py'
   'fork/scripts/test_install_sh.py'
 )
+failed=0
 for index in "${!entries[@]}"; do
   work="$sandbox/$index"
   mkdir -m 700 "$work" "$work/home" "$work/tmp" "$work/cwd"
   read -r -a args <<< "${entries[$index]}"
   args[0]="$root/${args[0]}"
   printf '\n==> %s\n' "${entries[$index]}"
+  start=$(date +%s)
+  set +e
   (cd "$work/cwd" && env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX -u PYTHONPATH -u BASH_ENV \
     HOME="$work/home" TMPDIR="$work/tmp" "$root/scripts/ags-python.sh" "${args[@]}" -v)
+  status=$?
+  set -e
+  printf 'ENTRY %s exit=%s seconds=%s\n' "${entries[$index]}" "$status" "$(( $(date +%s) - start ))"
+  if [[ "$status" -ne 0 ]]; then
+    failed=1
+    break
+  fi
 done
+if [[ "$failed" -ne 0 ]]; then
+  printf '\nUpgrade regression failed. Sandbox retained: %s\n' "$sandbox"
+  exit 1
+fi
 printf '\nUpgrade regression passed (%s entries). Sandbox retained: %s\n' "${#entries[@]}" "$sandbox"
+exit 0

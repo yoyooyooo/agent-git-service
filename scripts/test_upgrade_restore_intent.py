@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import hashlib
+import json
+import os
 import tempfile
 from pathlib import Path
 import unittest
@@ -13,13 +16,35 @@ class RestoreIntentTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve(); (self.root / 'state').mkdir(mode=0o700)
 
+    def _approve(self, old, new, object_id):
+        body = {
+            'schema': 'ags.restore-approval.v1', 'decision': 'approve',
+            'transaction_id': object_id, 'object_id': object_id,
+            'host_instance': 'fixture-host', 'identity_sha256': 'a' * 64,
+            'binding_sha256': 'b' * 64, 'target_group': [str(old)],
+            'object_digest': hashlib.sha256(new.read_bytes()).hexdigest(),
+            'before_digest': hashlib.sha256(old.read_bytes()).hexdigest(),
+        }
+        raw = json.dumps(body, sort_keys=True, separators=(',', ':')).encode()
+        approvals = self.root / 'state/ags-autodeploy/local-v2/control/approvals'
+        approvals.mkdir(parents=True, mode=0o700)
+        for path in (self.root / 'state', self.root / 'state/ags-autodeploy',
+                     self.root / 'state/ags-autodeploy/local-v2', approvals.parent, approvals):
+            os.chmod(path, 0o700)
+        digest = hashlib.sha256(raw).hexdigest()
+        path = approvals / (digest + '.json')
+        path.write_bytes(raw)
+        os.chmod(path, 0o600)
+        host = approvals.parent / 'host.json'
+        host.write_bytes(json.dumps({'schema': 'ags.host-record.v1', 'verified': True,
+                                     'host_instance': 'fixture-host', 'identity_sha256': 'a' * 64},
+                                    sort_keys=True, separators=(',', ':')).encode())
+        os.chmod(host, 0o600)
+        return digest
+
     def _restore(self, old, new, object_id, **extra):
-        digest = 'b' * 64
         return upgrade_full_restore.restore_object_durable(
-            self.root, old, new, object_id,
-            approval_sha256=digest, binding_sha256=digest, transaction_id=object_id,
-            expected_approval_sha256=digest, expected_binding_sha256=digest,
-            expected_transaction_id=object_id, **extra)
+            self.root, old, new, object_id, approval_ref=self._approve(old, new, object_id), **extra)
 
     def test_each_object_switch_is_intent_then_observed(self):
         old = self.root / 'old'; new = self.root / 'new'
