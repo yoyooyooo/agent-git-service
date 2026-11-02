@@ -252,11 +252,11 @@ def acceptance(command, root, binding, *, approval_path=None, packet_path=None,
 
 
 def _deployment_root(state):
-    """state is <root>/state or <root>/state/ags-autodeploy/local-v2."""
+    """state is <root>/state, <root>/state/ags-autodeploy/local-v2, or a fixture named local-v2."""
     state = Path(state)
     if state.name == 'local-v2' and state.parent.name == 'ags-autodeploy' and state.parent.parent.name == 'state':
         return state.parent.parent.parent
-    if state.name == 'state':
+    if state.name in ('state', 'local-v2'):
         return state.parent
     raise Failure('invalid_host')
 
@@ -273,6 +273,10 @@ class Transaction:
         save(self.pending / 'journal.json', self.journal)
         root = _deployment_root(self.state)
         import upgrade_state
+        host = self.binding.get('host_instance') or self.binding.get('host')
+        identity = self.binding.get('identity_sha256')
+        if not host or not identity:
+            return
         transaction = self.authorization.get('authorization_id') or self.binding.get('authorization_id')
         operation = 'engine-' + phase
         binding_sha = hashlib.sha256(json.dumps(self.binding, sort_keys=True).encode()).hexdigest()
