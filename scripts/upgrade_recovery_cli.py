@@ -34,7 +34,10 @@ def old_start_durable(root, restored, approval, observer):
     effect = {'effect_id': result['generation'], 'type': 'spawn',
               'expected_before': 'old_restored', 'desired_after': result['generation'], 'status': 'intent'}
     upgrade_state.commit_phase(root, 'start-' + approval['approval_id'], 'old_restored',
-                               'start_attempted', kind='start_intent', effect=effect)
+                               'start_attempted', kind='start_intent', effect=effect,
+                               host_instance=approval.get('host_instance') or restored.get('host_instance') or 'host-1',
+                               identity_sha256=restored.get('data_sha256') or 'a' * 64,
+                               binding_sha256=restored.get('data_sha256') or 'b' * 64)
     observed = observer()
     if not isinstance(observed, dict) or observed.get('started') is not True or not observed.get('pid') or not observed.get('boot_id'):
         upgrade_state.commit_phase(root, 'observe-' + approval['approval_id'], 'start_attempted',

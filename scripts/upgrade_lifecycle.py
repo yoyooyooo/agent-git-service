@@ -58,6 +58,7 @@ def activate_durable(root, accepted, approval):
     result = upgrade_state.commit_phase(
         root, 'activation-' + approval['approval_id'], 'accepted', 'active',
         kind='authority_activated', epoch=accepted['epoch'],
+        host_instance=accepted.get('host_instance') or approval.get('host_instance') or 'host-1',
         identity_sha256=accepted['completion_sha256'],
         approval_sha256=_approval_sha(approval),
         binding_sha256=accepted['completion_sha256'])

@@ -97,11 +97,13 @@ class RestoreContainmentTests(unittest.TestCase):
         self.assertEqual(self.ledger.mock_calls, [])
 
     def test_approved_switch_fsyncs_and_records_only_inside_root(self):
-        calls = []
+        import stat
+        watched = []
         real_fsync = os.fsync
 
         def watch(fd):
-            calls.append(fd)
+            info = os.fstat(fd)
+            watched.append((info.st_dev, info.st_ino, stat.S_ISDIR(info.st_mode)))
             return real_fsync(fd)
 
         os.fsync = watch
@@ -109,7 +111,10 @@ class RestoreContainmentTests(unittest.TestCase):
         result = self._call(self.target, self.source)
         self.assertEqual(result['status'], 'observed')
         self.assertEqual(self.target.read_bytes(), b'new')
-        self.assertGreaterEqual(len(calls), 2)
+        target_info = self.target.stat()
+        parent_info = self.target.parent.stat()
+        self.assertIn((target_info.st_dev, target_info.st_ino, False), watched)
+        self.assertIn((parent_info.st_dev, parent_info.st_ino, True), watched)
         rows = upgrade_state.load_verified(self.root)['events']
         self.assertEqual(rows[0]['binding_sha256'], self.binding)
         self.assertEqual(rows[0]['approval_sha256'], self.approval)

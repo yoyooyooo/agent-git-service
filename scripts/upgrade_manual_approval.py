@@ -487,6 +487,8 @@ def _confirm(root, binding, approval_path, packet_path, pin, pin_sha, probe, clo
         upgrade_state.commit_phase(
             root, 's4-completion-' + record['approval_id'], 'awaiting_observation', 'completed',
             kind='s4_completed', approval_sha256=approval_sha,
+            host_instance=binding.get('host_instance') or binding.get('host'),
+            identity_sha256=fingerprint(binding),
             binding_sha256=fingerprint(binding), transaction_id=record['generation'])
         return record
 

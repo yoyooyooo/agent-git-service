@@ -255,6 +255,8 @@ class ColdWindow:
         import upgrade_state
         upgrade_state.commit_phase(
             self.root, 'cold-' + name, before, name, kind='cold_' + name,
+            host_instance=self.binding.get('host_instance') or self.binding.get('host'),
+            identity_sha256=self.binding.get('identity_sha256'),
             transaction_id=self.journal['generation'],
             binding_sha256=self.journal['binding_sha256'])
 
@@ -454,6 +456,8 @@ def launcher_spawn(root, *, runner, epoch):
               'expected_before': 'active', 'desired_after': 'intent', 'status': 'intent'}
     upgrade_state.commit_phase(root, 'launcher-spawn-' + str(epoch), 'active', 'spawn_intent',
                                kind='spawn_intent', epoch=epoch, effect=effect,
+                               host_instance=(loaded.get('format') or {}).get('host_instance'),
+                               identity_sha256=authority['binding_sha256'],
                                binding_sha256=authority['binding_sha256'])
     return {'status': 'spawn_intent', 'runner_called': False, 'epoch': epoch}
 

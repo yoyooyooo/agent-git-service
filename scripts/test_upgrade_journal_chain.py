@@ -74,7 +74,9 @@ class JournalChainTests(unittest.TestCase):
         self.assertTrue(leftover.exists())
 
     def test_recorded_at_is_not_the_fixed_sentinel(self):
-        state.commit_phase(self.root, 'op-time', 'none', 'noted', kind='note')
+        state.commit_phase(self.root, 'op-time', 'none', 'noted', kind='note',
+                           host_instance='host-1', identity_sha256='a' * 64,
+                           binding_sha256='b' * 64)
         recorded = state.load_verified(self.root)['events'][0]['recorded_at']
         self.assertNotEqual(recorded, '2026-11-02T00:00:00+00:00')
         self.assertIn('T', recorded)

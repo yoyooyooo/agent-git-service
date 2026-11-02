@@ -266,6 +266,8 @@ class Transaction:
         try:
             upgrade_state.commit_phase(
                 root, 'engine-' + phase, before or 'none', phase, kind='engine_' + phase,
+                host_instance=self.binding.get('host_instance') or self.binding.get('host'),
+                identity_sha256=self.binding.get('identity_sha256'),
                 transaction_id=self.binding.get('authorization_id'),
                 binding_sha256=hashlib.sha256(json.dumps(self.binding, sort_keys=True).encode()).hexdigest())
         except upgrade_state.StateError as error:
