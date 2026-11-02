@@ -26,6 +26,7 @@ def allow(argv, service):
         ['launchctl', 'disable', domain],
         ['launchctl', 'bootout', domain],
         ['launchctl', 'bootstrap', service['domain'], service['label'] + '.plist'],
+        ['launchctl', 'bootstrap', service['domain'], service.get('plist', service['label'] + '.plist')],
     )
     if argv not in permitted:
         raise AdapterError('argv_rejected')
@@ -38,25 +39,42 @@ class Manager:
         self.runner = runner
         self.consumed = False
 
-    def suppress_restart(self, readback):
-        if readback.get('disabled') is not True or readback.get('pid') is not None:
+    def _run(self, argv):
+        if not callable(self.runner):
+            raise AdapterError('native_runner_missing')
+        allow(argv, self.service)
+        return self.runner(argv)
+
+    def suppress_restart(self, readback=None):
+        if readback is not None:
+            raise AdapterError('external_facts_rejected')
+        domain = self.service['domain'] + '/' + self.service['label']
+        self._run(['launchctl', 'disable', domain])
+        readback = self._run(['launchctl', 'print-disabled', self.service['domain']])
+        if not isinstance(readback, dict) or readback.get('exit') != 0:
             raise AdapterError('disable_not_read_back')
-        return {'disabled': True}
+        return {'disabled': True, 'readback': readback}
 
-    def stop(self, facts):
-        closed = (facts.get('command_exit') == 0 and not facts.get('timed_out')
-                  and facts.get('forced_kill') is False and not facts.get('descendants')
-                  and facts.get('supervisor_exit_code') == 0 and facts.get('boot_id') == self.service.get('boot_id'))
-        return {'closed': bool(closed), 'facts': {key: facts.get(key) for key in
-                ('command_exit', 'timed_out', 'forced_kill', 'supervisor_exit_code')}}
+    def stop(self, facts=None):
+        if facts is not None:
+            raise AdapterError('external_facts_rejected')
+        domain = self.service['domain'] + '/' + self.service['label']
+        result = self._run(['launchctl', 'bootout', domain])
+        if not isinstance(result, dict) or result.get('exit') != 0:
+            raise AdapterError('stop_not_observed')
+        return {'closed': True, 'readback': result}
 
-    def start(self, readback):
-        if self.consumed or readback.get('consumed') is True:
+    def start(self, readback=None):
+        if readback is not None:
+            raise AdapterError('external_facts_rejected')
+        if self.consumed:
             raise AdapterError('oneshot_consumed')
-        if readback.get('pid') is None:
+        plist = self.service.get('plist') or (self.service['label'] + '.plist')
+        result = self._run(['launchctl', 'bootstrap', self.service['domain'], plist])
+        if not isinstance(result, dict) or result.get('exit') != 0:
             raise AdapterError('start_not_observed')
         self.consumed = True
-        return {'started': True}
+        return {'started': True, 'readback': result}
 
 
 def native_probe(service, *, permitted, label=None, runner=None, one_shot=True):

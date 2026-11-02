@@ -23,6 +23,30 @@ class NativeFactoryTests(unittest.TestCase):
         self.assertEqual(capabilities['native_verified'], False)
         self.assertEqual(capabilities['unverified_reason'], 'native_probe_not_run')
 
+    def test_factory_managers_accept_no_argument_calls(self):
+        calls = []
+
+        def runner(argv):
+            calls.append(list(argv))
+            return {'exit': 0, 'stdout': 'pid = 1\nboot = boot-1\n'}
+
+        launchd_cap = launchd.create(self.root, {
+            'native_profile': {'domain': 'gui/501', 'label': 'com.example.once',
+                               'plist': '/Library/LaunchDaemons/com.example.once.plist'},
+            'native_runner': runner,
+        })
+        for method in ('suppress_restart', 'stop', 'start'):
+            getattr(launchd_cap['manager'], method)()
+        systemd_cap = systemd.create(self.root, {
+            'native_profile': {'scope': 'user', 'name': 'fixture-once.service', 'expected_uid': 501},
+            'native_runner': runner,
+        })
+        for method in ('suppress_restart', 'stop', 'start'):
+            getattr(systemd_cap['manager'], method)()
+        self.assertTrue(calls)
+        self.assertFalse(launchd_cap['native_verified'])
+        self.assertFalse(systemd_cap['native_verified'])
+
     def test_systemd_factory_rejects_missing_native_runner_without_effect(self):
         with self.assertRaisesRegex(ValueError, 'native_adapter_unavailable'):
             systemd.create(self.root, {'native_profile': {'scope': 'system', 'name': 'fixture.service'}})
