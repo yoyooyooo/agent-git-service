@@ -14,6 +14,8 @@ report `development`/`unknown`; they are not release artifacts.
 
 S6b.11 also stamps exact-source binary and Docker paths with `server.gitSHA`, `buildinfo.Version`, `buildinfo.Revision` and `buildinfo.Tree`. Docker remains an Alpine/CGO-disabled build and is not native Release ABI evidence.
 
+S6b.12 adds an evidence-bounded `upgrade_pin.emit_verified` seam. It requires both platform tag-push attestations from the hosted release-control workflow and rejects dispatch evidence, missing targets, or non-push provenance. It returns `ags.deploy-release-pin.v2` only as a non-installable preparation envelope; it never installs bytes, calls a manager, or claims a real Release/pin.
+
 The release manifest binds the version, complete source SHA/tree, platform, Go
 version, CGO choice, binary hashes and smoke-test results. No credentials, private
 network inventory, runtime configuration, databases or deployment receipts are
