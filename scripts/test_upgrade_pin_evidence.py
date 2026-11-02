@@ -39,9 +39,18 @@ class EmitterEvidenceTests(unittest.TestCase):
             'linux_amd64': evidence(self.pin, 'linux_amd64'),
         }
 
-    def emit(self, attestations):
+    def emit(self, attestations, verifier=None):
+        if verifier is None:
+            def verifier(digest_value, signature, bundle=None):
+                return True
         return upgrade_pin.emit_verified(
-            self.pin, self.raw, self.release, self.files, attestations=attestations)
+            self.pin, self.raw, self.release, self.files, attestations=attestations,
+            verifier=verifier)
+
+    def test_missing_verifier_is_refused(self):
+        with self.assertRaisesRegex(ValueError, 'release_attestation_unverified'):
+            upgrade_pin.emit_verified(
+                self.pin, self.raw, self.release, self.files, attestations=self.good)
 
     def test_complete_push_workflow_evidence_stays_not_installable(self):
         result = self.emit(self.good)
@@ -69,8 +78,19 @@ class EmitterEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'release_attestation_unverified'):
             self.emit(forged)
 
+    def test_forged_signature_and_missing_bundle_are_refused(self):
+        digest = self.pin['targets']['darwin_arm64']['asset']['digest']
+        bundle = b'bundle ' + digest.encode() + b' good-signature'
+        with self.assertRaisesRegex(ValueError, 'release_attestation_unverified'):
+            upgrade_pin.verify_bundle(digest, b'forged', bundle=bundle)
+        with self.assertRaisesRegex(ValueError, 'release_attestation_unverified'):
+            upgrade_pin.verify_bundle(digest, b'good-signature', bundle=None)
+        with self.assertRaisesRegex(ValueError, 'release_attestation_unverified'):
+            upgrade_pin.verify_bundle('sha256:' + 'ff' * 32, b'good-signature', bundle=bundle)
+        self.assertTrue(upgrade_pin.verify_bundle(digest, b'good-signature', bundle=bundle))
+
     def test_verifier_rejection_refuses_the_envelope(self):
-        def reject(material, signature):
+        def reject(material, signature, bundle=None):
             raise ValueError('bad signature')
 
         with self.assertRaisesRegex(ValueError, 'release_attestation_unverified'):

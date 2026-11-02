@@ -20,12 +20,14 @@ class EmitterTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             upgrade_pin.emit_verified(pin, self.raw, self.release, self.files,
                                      attestations={'darwin_arm64': {'verified': True, 'signer_workflow':'dispatch'},
-                                                   'linux_amd64': {'verified': True, 'signer_workflow':'release'}})
+                                                   'linux_amd64': {'verified': True, 'signer_workflow':'release'}},
+                                     verifier=lambda *args, **kwargs: True)
         self.assertIn('release_attestation_unverified', str(caught.exception))
         self.assertEqual(snapshot(self.root), before)
     def test_verified_emitter_requires_all_targets(self):
         with self.assertRaisesRegex(ValueError,'release_attestation_unverified'):
             upgrade_pin.emit_verified(self.candidate(), self.raw, self.release, self.files,
-                                      attestations={'darwin_arm64': {'verified': True}})
+                                      attestations={'darwin_arm64': {'verified': True}},
+                                      verifier=lambda *args, **kwargs: True)
 
 if __name__=='__main__': unittest.main()
