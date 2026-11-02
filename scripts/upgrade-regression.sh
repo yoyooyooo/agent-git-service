@@ -17,6 +17,7 @@ entries=(
   'scripts/test_upgrade_resume.py' 'scripts/test_upgrade_restore_intent.py'
   'scripts/test_upgrade_restore_containment.py' 'scripts/test_upgrade_host_binding.py'
   'scripts/test_upgrade_production_wire.py' 'scripts/test_upgrade_two_chain.py'
+  'scripts/test_upgrade_epoch2_writer.py'
   'scripts/test_native_probe_sequence.py' 'scripts/test_native_manager_parse.py'
   'scripts/test_native_factories.py' 'scripts/test_native_systemd_contract.py'
   'scripts/test_upgrade_helpers.py' 'scripts/test_upgrade_epoch_chain.py'

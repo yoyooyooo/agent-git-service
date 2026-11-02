@@ -280,9 +280,21 @@ class Transaction:
         transaction = self.authorization.get('authorization_id') or self.binding.get('authorization_id')
         operation = 'txn-' + str(transaction) + '-' + phase
         binding_sha = hashlib.sha256(json.dumps(self.binding, sort_keys=True).encode()).hexdigest()
+        loaded = upgrade_state.load_verified(root)
+        authority = (loaded.get('projection') or {}).get('authority')
+        # No active authority yet: the first chain still records epoch=1 without
+        # a CAS expectation. An active authority supplies both values.
+        if not isinstance(authority, dict) or authority.get('state') != 'active':
+            epoch, expected = 1, None
+        else:
+            epoch = authority.get('epoch')
+            if type(epoch) is not int or epoch < 1:
+                raise upgrade_state.StateError('state_epoch_conflict')
+            expected = epoch
         try:
             upgrade_state.commit_phase(
-                root, operation, before or 'none', phase, kind='engine_' + phase, epoch=1,
+                root, operation, before or 'none', phase, kind='engine_' + phase,
+                epoch=epoch, expected_epoch=expected,
                 host_instance=self.binding.get('host_instance') or self.binding.get('host'),
                 identity_sha256=self.binding.get('identity_sha256'),
                 transaction_id=transaction,
