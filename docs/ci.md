@@ -224,7 +224,7 @@ unsets PYTHONDONTWRITEBYTECODE, PYTHONPYCACHEPREFIX, PYTHONPATH and BASH_ENV bef
 `scripts/ags-python.sh` establishes bytecode-free execution.
 
 S6 tests cover source contracts and real synthetic S1/S2/S4 integration. They do
-not prove the missing production lifecycle/recovery wiring. Native launchd and
+not prove the missing production lifecycle/recovery wiring. S6b portable inventory checks run through the same sequential runner. Native launchd and
 systemd chains, privileged metadata helper, native Trash, isolated VM,
 production-copy startup, imile behavior and new tag-push crypto remain separate
 unverified gates. A skip is not a pass. No candidate or publication workflow is
