@@ -8,6 +8,13 @@ import sys
 sys.dont_write_bytecode = True
 sys.pycache_prefix = None
 import uuid
+from pathlib import Path
+
+
+def _approval_sha(approval):
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps(approval, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
 class LifecycleError(ValueError):
@@ -28,6 +35,32 @@ def restart_permitted(accepted, authority):
     if authority.get('approval_id') == accepted.get('s4_approval_id'):
         raise LifecycleError('s4_approval_reused', 77)
     return {'permitted': True, 'generation': uuid.uuid4().hex}
+
+
+def activate_durable(root, accepted, approval):
+    """Commit activation authority before any launcher effect; retries read it back."""
+    if approval.get('purpose') != 'lifecycle-activate' or approval.get('decision') != 'approve':
+        raise LifecycleError('approval_invalid', 77)
+    if approval.get('approval_id') == accepted.get('s4_approval_id'):
+        raise LifecycleError('s4_approval_reused', 77)
+    if approval.get('completion_sha256') != accepted.get('completion_sha256'):
+        raise LifecycleError('completion_mismatch')
+    if not isinstance(accepted.get('completion_sha256'), str) or len(accepted['completion_sha256']) != 64:
+        raise LifecycleError('completion_mismatch')
+    import upgrade_state
+    existing = upgrade_state.load_verified(root)
+    for row in existing['events']:
+        if row['kind'] == 'authority_activated':
+            if row['approval_sha256'] == _approval_sha(approval) and row['epoch'] == accepted['epoch']:
+                return existing['projection']['authority']
+            raise LifecycleError('authority_already_bound')
+    result = upgrade_state.commit_phase(
+        root, 'activation-' + approval['approval_id'], 'accepted', 'active',
+        kind='authority_activated', epoch=accepted['epoch'],
+        identity_sha256=accepted['completion_sha256'],
+        approval_sha256=_approval_sha(approval),
+        binding_sha256=accepted['completion_sha256'])
+    return result['projection']['authority']
 
 
 def activate(accepted, approval):
