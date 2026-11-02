@@ -28,3 +28,4 @@ scripts/upgrade-regression.sh
 # S6b-fix B1 containment, B4 host binding, B2 production shim and B3 injected native sequence also run inside scripts/upgrade-regression.sh.
 # S6b-fix3 B6 CI inventory regression runs inside scripts/upgrade-regression.sh.
 # S6b-fix3 B5 journal chain and append race run inside scripts/upgrade-regression.sh.
+# S6b-fix6 B2 two-upgrade chain and cross-process phase replay run inside scripts/upgrade-regression.sh.

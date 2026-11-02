@@ -44,9 +44,14 @@ class JournalChainTests(unittest.TestCase):
 
     def test_expected_epoch_is_a_cas_against_the_published_epoch(self):
         state.commit_event(self.root, event())
+        state.commit_event(self.root, event('raised', operation='op-raise'))
+        # The second published event stays at epoch 1. A later writer that names
+        # epoch 2 as the expected value is stale even though 2 is a legal epoch.
+        published = state.load_verified(self.root)
+        self.assertEqual(published['projection']['epoch'], 1)
         later = event('second', operation='op-2')
-        later['expected_epoch'] = 0
-        later['epoch'] = 0
+        later['expected_epoch'] = 2
+        later['epoch'] = 1
         with self.assertRaises(state.StateError) as caught:
             state.commit_event(self.root, later)
         self.assertEqual(caught.exception.args[0], 'state_epoch_conflict')
@@ -74,7 +79,7 @@ class JournalChainTests(unittest.TestCase):
         self.assertTrue(leftover.exists())
 
     def test_recorded_at_is_not_the_fixed_sentinel(self):
-        state.commit_phase(self.root, 'op-time', 'none', 'noted', kind='note',
+        state.commit_phase(self.root, 'op-time', 'none', 'noted', kind='note', epoch=1,
                            host_instance='host-1', identity_sha256='a' * 64,
                            binding_sha256='b' * 64)
         recorded = state.load_verified(self.root)['events'][0]['recorded_at']

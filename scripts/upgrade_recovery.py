@@ -255,7 +255,7 @@ class ColdWindow:
         import upgrade_state
         operation = 'cold-' + self.journal['generation'] + '-' + name
         upgrade_state.commit_phase(
-            self.root, operation, before, name, kind='cold_' + name,
+            self.root, operation, before, name, kind='cold_' + name, epoch=1,
             host_instance=self.backup_binding.get('host_instance') or self.binding.get('host_instance') or self.binding.get('host'),
             identity_sha256=self.backup_binding.get('new_binary_sha256') or self.binding.get('identity_sha256'),
             transaction_id=self.journal['generation'],

@@ -45,18 +45,15 @@ class ProductionWireTests(unittest.TestCase):
         other = upgrade_engine.Transaction(state, other_binding,
                                            {'authorization_id': 'auth-other'}, object())
         other.journal = {'phase': 'admission'}
-        try:
-            other.checkpoint('prepare')
-        except upgrade_state.StateError as error:
-            self.assertEqual(error.args[0], 'state_operation_conflict')
-        else:
-            rows = upgrade_state.load_verified(self.root)['events']
-            self.assertEqual([row['transaction_id'] for row in rows], ['auth-layout'],
-                             [row['operation_id'] for row in rows])
+        other.checkpoint('prepare')
+        rows = upgrade_state.load_verified(self.root)['events']
+        self.assertEqual(sorted(row['transaction_id'] for row in rows), ['auth-layout', 'auth-other'])
+        self.assertEqual(len({row['operation_id'] for row in rows}), 2)
+        self.assertTrue(all(not row['operation_id'].startswith('engine-') for row in rows))
         again = upgrade_engine.Transaction(state, binding, {'authorization_id': 'auth-layout'}, object())
         again.journal = {'phase': 'admission'}
         again.checkpoint('prepare')
-        self.assertEqual(len(upgrade_state.load_verified(self.root)['events']), 1)
+        self.assertEqual(len(upgrade_state.load_verified(self.root)['events']), 2)
 
     def test_production_stop_suspends_authority_before_manager_stop(self):
         accepted = {'completion_sha256': 'a' * 64, 's4_approval_id': 's4', 'epoch': 1,
@@ -201,14 +198,14 @@ class ProductionWireTests(unittest.TestCase):
         header.rename(saved)
         self.assertFalse(runtime.startup_permitted(self.root))
         saved.rename(header)
-        self.assertTrue(runtime.startup_permitted(self.root))
+        self.assertFalse(runtime.startup_permitted(self.root))
         upgrade_lifecycle.activate_durable(
             self.root,
             {'completion_sha256': 'a' * 64, 's4_approval_id': 's4', 'epoch': 1, 'host_instance': 'host-1'},
             {'purpose': 'lifecycle-activate', 'decision': 'approve', 'approval_id': 'life-1',
              'completion_sha256': 'a' * 64, 'host_instance': 'host-1'})
         upgrade_state.commit_phase(
-            self.root, 'pending-spawn', 'active', 'spawn_intent', kind='spawn_intent',
+            self.root, 'pending-spawn', 'active', 'spawn_intent', kind='spawn_intent', epoch=1,
             host_instance='host-1', identity_sha256='a' * 64, binding_sha256='b' * 64,
             effect={'effect_id': 'spawn-1', 'type': 'spawn', 'expected_before': 'stopped',
                     'desired_after': 'new', 'status': 'intent'})

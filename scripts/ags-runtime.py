@@ -41,7 +41,8 @@ def startup_permitted(root):
             loaded = upgrade_state.load_verified(root)
             projection = loaded.get('projection') or {}
             authority = projection.get('authority')
-            if authority is not None and authority.get('state') != 'active':
+            # A journal with no authority projection is fenced. Absence is not permission.
+            if authority is None or authority.get('state') != 'active':
                 return False
             if projection.get('pending_effects'):
                 return False
@@ -319,7 +320,7 @@ def _journal_effect(root, operation, before, after, kind, effect):
     if not control.is_file() or control.is_symlink():
         return
     import upgrade_state
-    upgrade_state.commit_phase(root, operation, before, after, kind=kind, effect=effect)
+    upgrade_state.commit_phase(root, operation, before, after, kind=kind, effect=effect, epoch=1)
 
 
 def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock, generation=None) -> int:

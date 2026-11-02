@@ -28,8 +28,8 @@ S6b-fix6 B1 改变恢复决定的来源。调用者只提供 `approval_ref`，�
 
 S6b-fix B2 把 durable seam 以迁移期 shim 接入现有生产写者，而不是替换 S3/S4 事实格式：
 
-- 已接线：`upgrade_engine.checkpoint` 按 `root/state` 或 `root/state/ags-autodeploy/local-v2` 定位部署根，并以 transaction 与 binding 区分同阶段冲突。`ColdWindow` 阶段、S4 completion 重试、`launcher_spawn`、`supervise` 的 spawn/exit 和 `Effects.stop` 前的 `suspend_durable` 都写 durable event。`startup_permitted` 在新日志存在但 format 缺失、authority 为空或仍有 spawn intent 时拒绝。`old_start_durable` 重试读回同一 generation。
-- 未接线或 UNVERIFIED：没有跨进程重入，也没有真实两次升级链、主机恢复、服务重启或掉电。默认 policy 仍为空，公开 apply 仍退出 83，直接 install 仍退出 83。
+- 已接线：`upgrade_engine.checkpoint` 按 `root/state` 或 `root/state/ags-autodeploy/local-v2` 定位部署根。operation key 是 `txn-<authorization>-<phase>`，不是 `engine-<phase>`。同一事务同内容重放视为已完成；不同事务各自推进。`ColdWindow` 阶段、S4 completion 重试、`launcher_spawn`、`supervise` 的 spawn/exit 和 `Effects.stop` 前的 `suspend_durable` 都写 durable event。`startup_permitted` 在新日志存在但 format 缺失、authority 缺失或不是 active、或仍有 spawn intent 时拒绝。authority 缺失本身就是 fence。`commit_phase` 没有默认 epoch；生产调用者必须显式传入。状态转换要求 expected epoch 等于已发布 epoch，只有 `authority_activated` 可以把 epoch 增加 1。`old_start_durable` 重试读回同一 generation。仓内 `test_upgrade_two_chain.py` 用真实 `local-v2` 目录跑 A→confirm→activate→restart→B，并用第二个进程重入同一阶段。
+- 未接线或 UNVERIFIED：没有主机恢复、服务重启或掉电。默认 policy 仍为空，公开 apply 仍退出 83，直接 install 仍退出 83。仓内两次链不是现场两次升级。
 
 这些接口不授予默认启动、apply、恢复或服务重启权。默认 policy 为空，公开 apply 仍为 83，直接 v2 install 仍为 83，离线 preparation 仍 `installable=false`。
 

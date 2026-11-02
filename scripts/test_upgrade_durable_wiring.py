@@ -17,7 +17,7 @@ class DurableWiringTests(unittest.TestCase):
 
     def test_phase_event_is_replayable_and_effect_is_intent_only(self):
         result = upgrade_state.commit_phase(
-            self.root, 'install_started', 'restore_verified', 'install_started',
+            self.root, 'install_started', 'restore_verified', 'install_started', epoch=1,
             host_instance='fixture-host', identity_sha256='a' * 64, binding_sha256='b' * 64,
             effect={'effect_id': 'install-1', 'type': 'file-transaction',
                     'expected_before': 'a' * 64, 'desired_after': 'b' * 64, 'status': 'intent'})
@@ -31,16 +31,40 @@ class DurableWiringTests(unittest.TestCase):
 
     def test_observation_closes_the_same_effect_without_external_calls(self):
         upgrade_state.commit_phase(
-            self.root, 'start_intent', 'installed', 'start_attempted',
+            self.root, 'start_intent', 'installed', 'start_attempted', epoch=1,
             host_instance='fixture-host', identity_sha256='a' * 64, binding_sha256='b' * 64,
             effect={'effect_id': 'start-1', 'type': 'spawn',
                     'expected_before': 'stopped', 'desired_after': 'generation-1', 'status': 'intent'})
         result = upgrade_state.commit_phase(
-            self.root, 'start_observed', 'start_attempted', 'running',
+            self.root, 'start_observed', 'start_attempted', 'running', epoch=1,
             effect={'effect_id': 'start-1', 'type': 'spawn',
                     'expected_before': 'stopped', 'desired_after': 'generation-1', 'status': 'observed'})
         self.assertEqual(result['projection']['pending_effects'], [])
         self.assertEqual(upgrade_state.load_verified(self.root)['projection']['generation'], 'generation-1')
+
+    def test_epoch_cas_rejects_a_stale_expected_epoch_and_an_unapproved_jump(self):
+        upgrade_state.commit_phase(
+            self.root, 'epoch-base', 'none', 'noted', kind='note', epoch=1, expected_epoch=None,
+            host_instance='fixture-host', identity_sha256='a' * 64, binding_sha256='b' * 64)
+        with self.assertRaises(upgrade_state.StateError) as stale:
+            upgrade_state.commit_phase(
+                self.root, 'epoch-stale', 'noted', 'still', kind='note', epoch=1, expected_epoch=0,
+                host_instance='fixture-host', identity_sha256='a' * 64, binding_sha256='b' * 64)
+        self.assertEqual(stale.exception.args[0], 'state_epoch_conflict')
+        with self.assertRaises(upgrade_state.StateError) as jumped:
+            upgrade_state.commit_phase(
+                self.root, 'epoch-jump', 'noted', 'later', kind='note', epoch=2, expected_epoch=1,
+                host_instance='fixture-host', identity_sha256='a' * 64, binding_sha256='b' * 64)
+        self.assertEqual(jumped.exception.args[0], 'state_epoch_conflict')
+        self.assertEqual(len(upgrade_state.load_verified(self.root)['events']), 1)
+
+    def test_commit_phase_refuses_a_missing_epoch(self):
+        with self.assertRaises(upgrade_state.StateError) as caught:
+            upgrade_state.commit_phase(
+                self.root, 'missing-epoch', 'none', 'noted', kind='note',
+                host_instance='fixture-host', identity_sha256='a' * 64, binding_sha256='b' * 64)
+        self.assertEqual(caught.exception.args[0], 'state_epoch_required')
+        self.assertFalse((self.root / 'state/ags-autodeploy/local-v2/control/events').exists())
 
 
 if __name__ == '__main__':
