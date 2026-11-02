@@ -29,6 +29,21 @@ class RestoreContainmentTests(unittest.TestCase):
         self.transaction = 'obj-1'
         self.ledger = Mock()
         self.published = self._publish_approval()
+        self._publish_host()
+
+    def _publish_host(self):
+        import json
+        control = self.root / 'state/ags-autodeploy/local-v2/control'
+        control.mkdir(parents=True, mode=0o700, exist_ok=True)
+        for path in (self.root / 'state', self.root / 'state/ags-autodeploy',
+                     self.root / 'state/ags-autodeploy/local-v2', control):
+            os.chmod(path, 0o700)
+        raw = json.dumps({'schema': 'ags.host-record.v1', 'verified': True,
+                          'host_instance': 'fixture-host', 'identity_sha256': 'a' * 64},
+                         sort_keys=True, separators=(',', ':')).encode()
+        path = control / 'host.json'
+        path.write_bytes(raw)
+        os.chmod(path, 0o600)
 
     def _call(self, target, source, **extra):
         kwargs = dict(restore_root=self.approved, approval_ref=self.published,
@@ -217,6 +232,31 @@ class RestoreContainmentTests(unittest.TestCase):
         self.assertTrue(self.ledger.mock_calls)
         for call in self.ledger.mock_calls:
             self.assertTrue(all(str(arg).startswith(str(self.approved)) for arg in call.args[1:]))
+
+    def test_each_fsync_is_required_on_its_own(self):
+        import upgrade_full_restore as restore
+        real_file = restore._fsync_path
+        real_dir = restore._fsync_dir
+        calls = []
+
+        def file_sync(path):
+            calls.append(('file', Path(path).stat().st_ino))
+            return real_file(path)
+
+        def dir_sync(path):
+            calls.append(('dir', Path(path)))
+            return real_dir(path)
+
+        restore._fsync_path = file_sync
+        restore._fsync_dir = dir_sync
+        self.addCleanup(lambda: setattr(restore, '_fsync_path', real_file))
+        self.addCleanup(lambda: setattr(restore, '_fsync_dir', real_dir))
+        self._call(self.target, self.source)
+        target_inode = self.target.stat().st_ino
+        file_hits = [inode for kind, inode in calls if kind == 'file' and inode == target_inode]
+        dir_hits = [path for kind, path in calls if kind == 'dir' and path == self.target.parent]
+        self.assertEqual(len(file_hits), 1)
+        self.assertEqual(len(dir_hits), 1)
 
 
 if __name__ == '__main__':
