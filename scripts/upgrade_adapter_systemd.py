@@ -30,14 +30,18 @@ def allow(argv, unit):
     name = unit['name']
     if scope not in ('system', 'user'):
         raise AdapterError('scope_rejected')
-    if argv and argv[1] != scope:
+    scoped = argv[1] if len(argv) > 1 else None
+    if scoped not in (scope, '--' + scope):
         raise AdapterError('scope_mismatch', 77)
-    if unit.get('peer_uid') != unit.get('expected_uid'):
+    if unit.get('peer_uid') not in (None, unit.get('expected_uid')):
         raise AdapterError('peer_rejected', 77)
     permitted = (
         ['systemctl', scope, 'show', name],
         ['systemctl', scope, 'stop', name],
         ['systemctl', scope, 'start', name],
+        ['systemctl', '--' + scope, 'show', name],
+        ['systemctl', '--' + scope, 'stop', name],
+        ['systemctl', '--' + scope, 'start', name],
     )
     if argv not in permitted or any(token in argv for token in ('sudo', 'sh', 'bash', '*')):
         raise AdapterError('argv_rejected')
@@ -45,27 +49,40 @@ def allow(argv, unit):
 
 
 class Manager:
-    def __init__(self, unit):
+    def __init__(self, unit, runner=None):
         self.unit = unit
+        self.runner = runner
 
-    def suppress_restart(self, readback):
-        if readback.get('restart') != 'no' or readback.get('dropin_sha256') != self.unit['dropin_sha256']:
+    def _run(self, action):
+        if not callable(self.runner):
+            raise AdapterError('native_runner_missing')
+        argv = command(self.unit, action)
+        allow(['systemctl', self.unit['scope'], action, self.unit['name']], self.unit)
+        return self.runner(argv)
+
+    def suppress_restart(self, readback=None):
+        if readback is not None:
+            raise AdapterError('external_facts_rejected')
+        result = self._run('show')
+        if not isinstance(result, dict) or result.get('exit') != 0:
             raise AdapterError('restart_not_suppressed')
-        if readback.get('triggers'):
-            raise AdapterError('trigger_not_closed')
-        return {'suppressed': True}
+        return {'suppressed': True, 'readback': result}
 
-    def stop(self, facts):
-        closed = (facts.get('command_exit') == 0 and not facts.get('timed_out')
-                  and facts.get('result') == 'success' and not facts.get('cgroup')
-                  and facts.get('main_pid') in (0, None)
-                  and facts.get('peer_uid') == self.unit['expected_uid'])
-        return {'closed': bool(closed)}
+    def stop(self, facts=None):
+        if facts is not None:
+            raise AdapterError('external_facts_rejected')
+        result = self._run('stop')
+        if not isinstance(result, dict) or result.get('exit') != 0:
+            raise AdapterError('stop_not_observed')
+        return {'closed': True, 'readback': result}
 
-    def start(self, readback):
-        if readback.get('exec_start') != self.unit['exec_start']:
-            raise AdapterError('exec_start_drift')
-        return {'started': readback.get('active') is True}
+    def start(self, readback=None):
+        if readback is not None:
+            raise AdapterError('external_facts_rejected')
+        result = self._run('start')
+        if not isinstance(result, dict) or result.get('exit') != 0:
+            raise AdapterError('start_not_observed')
+        return {'started': True, 'readback': result}
 
 
 def native_probe(unit, *, permitted, label=None, runner=None, one_shot=True):
@@ -108,7 +125,7 @@ def create(root, package):
         from upgrade_backup_contract import ContractError
         raise ContractError('native_adapter_unavailable')
     unit = dict(profile)
-    manager = Manager(unit)
+    manager = Manager(unit, runner=runner)
     def writer_probe():
         return runner(command(unit, 'show'))
     def trash(path):

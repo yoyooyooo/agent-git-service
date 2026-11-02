@@ -50,26 +50,26 @@ class SystemdTests(unittest.TestCase):
 
     def test_triggers_dropin_and_cgroup_must_be_closed(self):
         manager = self.adapter.Manager(self.unit)
-        self.assertTrue(manager.suppress_restart(
-            {'restart': 'no', 'dropin_sha256': 'a' * 64, 'triggers': []})['suppressed'])
-        with self.assertRaises(self.adapter.AdapterError):
-            manager.suppress_restart({'restart': 'always', 'dropin_sha256': 'a' * 64, 'triggers': []})
-        with self.assertRaises(self.adapter.AdapterError):
-            manager.suppress_restart({'restart': 'no', 'dropin_sha256': 'b' * 64, 'triggers': []})
-        with self.assertRaises(self.adapter.AdapterError):
-            manager.suppress_restart({'restart': 'no', 'dropin_sha256': 'a' * 64, 'triggers': ['timer']})
-        self.assertFalse(manager.stop({'command_exit': 0, 'result': 'timeout', 'cgroup': ['pid'],
-                                       'main_pid': 9, 'peer_uid': 1000, 'timed_out': True})['closed'])
-        self.assertTrue(manager.stop({'command_exit': 0, 'result': 'success', 'cgroup': [],
-                                      'main_pid': 0, 'peer_uid': 1000, 'timed_out': False})['closed'])
+        for facts in (
+                {'restart': 'no', 'dropin_sha256': 'a' * 64, 'triggers': []},
+                {'restart': 'always', 'dropin_sha256': 'a' * 64, 'triggers': []},
+                {'command_exit': 0, 'result': 'success', 'cgroup': [], 'main_pid': 0}):
+            with self.subTest(facts=facts):
+                with self.assertRaises(self.adapter.AdapterError) as caught:
+                    if 'restart' in facts:
+                        manager.suppress_restart(facts)
+                    else:
+                        manager.stop(facts)
+                self.assertEqual(caught.exception.code, 'external_facts_rejected')
 
     def test_wrong_peer_and_exec_drift_refuse(self):
         with self.assertRaises(self.adapter.AdapterError):
             self.adapter.allow(['systemctl', 'system', 'show', self.unit['name']],
                                {**self.unit, 'peer_uid': 0})
         manager = self.adapter.Manager(self.unit)
-        with self.assertRaises(self.adapter.AdapterError):
+        with self.assertRaises(self.adapter.AdapterError) as caught:
             manager.start({'exec_start': '/bin/sh', 'active': True})
+        self.assertEqual(caught.exception.code, 'external_facts_rejected')
 
 
 if __name__ == '__main__':

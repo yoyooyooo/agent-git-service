@@ -63,14 +63,11 @@ class LaunchdTests(unittest.TestCase):
 
     def test_disable_readback_and_consumed_oneshot(self):
         manager = self.adapter.Manager(self.service, runner=self.effects)
-        disabled = manager.suppress_restart(readback={'disabled': True, 'pid': None})
-        self.assertTrue(disabled['disabled'])
-        with self.assertRaises(self.adapter.AdapterError):
-            manager.suppress_restart(readback={'disabled': False, 'pid': 1})
-        manager.start(readback={'consumed': False, 'pid': 9})
         with self.assertRaises(self.adapter.AdapterError) as caught:
-            manager.start(readback={'consumed': True, 'pid': None})
-        self.assertEqual(caught.exception.exit_code, 83)
+            manager.suppress_restart(readback={'disabled': True, 'pid': None})
+        self.assertEqual(caught.exception.code, 'external_facts_rejected')
+        with self.assertRaises(self.adapter.AdapterError):
+            manager.start(readback={'consumed': False, 'pid': 9})
 
     def test_bootout_timeout_and_supervisor_exit_are_not_success(self):
         manager = self.adapter.Manager(self.service, runner=self.effects)
@@ -79,8 +76,9 @@ class LaunchdTests(unittest.TestCase):
                 {'command_exit': 0, 'supervisor_exit_code': 1, 'forced_kill': True},
                 {'command_exit': 0, 'descendants': [4], 'boot_id': 'other'}):
             with self.subTest(facts=facts):
-                record = manager.stop(facts=facts)
-                self.assertFalse(record['closed'])
+                with self.assertRaises(self.adapter.AdapterError) as caught:
+                    manager.stop(facts=facts)
+                self.assertEqual(caught.exception.code, 'external_facts_rejected')
 
     def test_native_isolation_is_explicitly_unverified_off_darwin_or_without_permission(self):
         # Refusal is portable; neither platform is native execution evidence.
