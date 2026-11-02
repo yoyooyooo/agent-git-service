@@ -440,6 +440,8 @@ S6b.07 replaces the unconditional launchd factory failure with an injected, fixe
 
 S6b.08 makes systemd command construction explicit with `systemctl --system` or `systemctl --user`; scope mixing and shell/wildcard input remain rejected. The injected factory also remains `native_verified=false` until an isolated systemd/D-Bus probe runs. This machine did not run systemctl.
 
+S6b.10 adds durable epoch suspension and reactivation. A second epoch requires a strictly newer epoch and a new lifecycle approval after the prior authority is suspended; an old active epoch cannot be reactivated.
+
 The source tests do **not** establish the full proposed production chain:
 S6.07 lifecycle and S6.08/09 recovery helpers are pure planning contracts, not
 wired durable runtime/CLI authority. Their returned generation or `started`
