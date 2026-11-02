@@ -215,10 +215,14 @@ def load_verified(root):
     header = _object(_read_file(format_path))
     if header.get('schema') != FORMAT or header.get('min_reader') != 1:
         raise StateError('state_schema_invalid')
-    digest(header.get('host_instance_sha256', '0' * 64)) if False else None
-    if type(header.get('host_instance')) is not str:
+    host = header.get('host_instance')
+    if type(host) is not str or not host:
         raise StateError('state_schema_invalid')
+    if header.get('host_instance_sha256') != _sha(host.encode()):
+        raise StateError('state_host_mismatch')
     rows = _scan(events)
+    if rows and rows[0]['host_instance'] != host:
+        raise StateError('state_host_mismatch')
     return {'schema': FORMAT, 'format': header, 'events': rows,
             'projection': _projection(rows), 'root': str(base)}
 
