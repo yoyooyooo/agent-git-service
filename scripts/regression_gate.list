@@ -24,4 +24,4 @@ scripts/upgrade-regression.sh
 # S6.10 offline full-group contracts run inside scripts/upgrade-regression.sh.
 # S6.11 handoff v2 contracts run inside scripts/upgrade-regression.sh.
 # S6.12 non-installable pin preparation runs inside scripts/upgrade-regression.sh.
-# S6b.01 boundary reproduction runs inside scripts/upgrade-regression.sh.
+# S6b.01 boundary reproduction and S6b.02 journal tests run inside scripts/upgrade-regression.sh.

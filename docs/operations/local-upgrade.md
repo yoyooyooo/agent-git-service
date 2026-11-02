@@ -428,6 +428,8 @@ separate ownership, profile and native capability acceptance.
 
 S6b.01 records the current boundary in `scripts/test_upgrade_state.py` and does not add a writer. `activate` still returns `ags.runtime-authority.v1` and writes nothing under `control/`. `old_start` still returns `started=true` with no pid or boot id. A leftover `upgrade-cold.json` still refuses the next claim and is not archived. `scripts/build-exact-source.sh` and `Dockerfile` still pass only `server.gitSHA`. Later S6b slices own the durable journal, the launcher fence and the four buildinfo stamps. The reproduction is part of [the shared regression runner](../../scripts/upgrade-regression.sh).
 
+S6b.02 adds `scripts/upgrade_state.py`, the owner-only `ags.upgrade-event.v1` chain and projection repair. Published events are the commit point; staging files and a lagging projection grant no effect. `recover_local` is local-only and never calls a manager or service. The journal remains separate from S3/S4 facts and does not make native adapters or restart authority available.
+
 The source tests do **not** establish the full proposed production chain:
 S6.07 lifecycle and S6.08/09 recovery helpers are pure planning contracts, not
 wired durable runtime/CLI authority. Their returned generation or `started`
