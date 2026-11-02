@@ -38,6 +38,30 @@ CI_JOBS = {
 }
 
 
+def required_jobs(rows, expected, attempt):
+    """Same inventory rule as fork/scripts/release.py validate_jobs.
+
+    A skipped job outside the reviewed set does not replace a required success.
+    Native adapter isolation is not release-required evidence.
+    """
+    by_name = {}
+    for row in rows:
+        name = row.get('name')
+        if name in by_name:
+            raise Failure('release_artifact_unverified', 'source_verify', 65)
+        by_name[name] = row
+    if set(expected) - set(by_name):
+        raise Failure('release_artifact_unverified', 'source_verify', 65)
+    for name, row in by_name.items():
+        required = name in expected
+        conclusion = row.get('conclusion')
+        if (row.get('status') != 'completed' or row.get('run_attempt') != attempt
+                or (required and conclusion != 'success')
+                or (not required and conclusion != 'skipped')):
+            raise Failure('release_artifact_unverified', 'source_verify', 65)
+    return sorted(expected)
+
+
 def exact_ci(installer, revision):
     rows = installer.api('repos/' + installer.REPO + '/actions/runs?head_sha=' + revision + '&per_page=100')
     if rows.get('total_count', 101) > 100:
@@ -59,10 +83,9 @@ def exact_ci(installer, revision):
         jobs = installer.api('repos/' + installer.REPO + '/actions/runs/' + str(current['id'])
                              + '/attempts/' + str(current['run_attempt']) + '/jobs?per_page=100')
         actual = jobs.get('jobs', [])
-        if (jobs.get('total_count') != len(actual) or len(actual) != len(expected)
-                or {j['name'] for j in actual} != expected
-                or any(j.get('conclusion') != 'success' or j.get('run_attempt') != current['run_attempt'] for j in actual)):
+        if jobs.get('total_count') != len(actual):
             raise Failure('release_artifact_unverified', 'source_verify', 65)
+        required_jobs(actual, expected, current['run_attempt'])
         evidence.append({'run_id': current['id'], 'run_attempt': current['run_attempt']})
     return evidence
 

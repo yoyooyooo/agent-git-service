@@ -26,3 +26,4 @@ scripts/upgrade-regression.sh
 # S6.12 non-installable pin preparation runs inside scripts/upgrade-regression.sh.
 # S6b.01–S6b.13 boundary, journal, wiring, activation, resume, restore, native adapter, helper, epoch-chain, buildinfo, pin-emitter, pin-evidence and CI-inventory tests run inside scripts/upgrade-regression.sh.
 # S6b-fix B1 containment, B4 host binding, B2 production shim and B3 injected native sequence also run inside scripts/upgrade-regression.sh.
+# S6b-fix3 B6 CI inventory regression runs inside scripts/upgrade-regression.sh.
