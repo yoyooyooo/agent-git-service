@@ -323,7 +323,20 @@ def _journal_effect(root, operation, before, after, kind, effect):
     if not control.is_file() or control.is_symlink():
         return
     import upgrade_state
-    upgrade_state.commit_phase(root, operation, before, after, kind=kind, effect=effect, epoch=1)
+    loaded = upgrade_state.load_verified(root)
+    authority = (loaded.get('projection') or {}).get('authority')
+    # Before the first activation there is no authority to CAS against.
+    # Keep the historical epoch=1 write. After activation, the verified epoch
+    # is both the written epoch and the expected epoch.
+    if not isinstance(authority, dict) or authority.get('state') != 'active':
+        epoch, expected = 1, None
+    else:
+        epoch = authority.get('epoch')
+        if type(epoch) is not int or epoch < 1:
+            raise upgrade_state.StateError('state_epoch_conflict')
+        expected = epoch
+    upgrade_state.commit_phase(root, operation, before, after, kind=kind, effect=effect,
+                               epoch=epoch, expected_epoch=expected)
 
 
 def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock, generation=None) -> int:
