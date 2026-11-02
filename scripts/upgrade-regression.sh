@@ -24,6 +24,7 @@ entries=(
   'scripts/test_upgrade_helpers.py' 'scripts/test_upgrade_epoch_chain.py'
   'scripts/test_buildinfo_binding.py' 'scripts/test_upgrade_pin_emitter.py'
   'scripts/test_upgrade_pin_evidence.py'
+  'scripts/test_upgrade_pin_bundle_bytes.py'
   'scripts/test_s6b_ci_inventory.py'
   'scripts/test_upgrade_ci_inventory.py'
   'scripts/test_upgrade_lifecycle.py' 'scripts/test_upgrade_recovery_cli.py'
