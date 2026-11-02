@@ -63,7 +63,7 @@ class NativeProbeSequenceTests(unittest.TestCase):
         result = systemd.native_probe(unit, permitted=True, label='fixture-once.service', runner=runner)
         self.assertEqual(result['reason'], 'native_os_unverified')
         self.assertEqual([item[2] for item in calls],
-                         ['enable', 'start', 'status', 'stop', 'disable'])
+                         ['enable', 'start', 'show', 'stop', 'disable'])
         self.assertTrue(all(item[:2] == ['systemctl', '--user'] for item in calls))
 
     def test_systemd_failure_disables_after_stop(self):
@@ -71,7 +71,7 @@ class NativeProbeSequenceTests(unittest.TestCase):
 
         def runner(argv):
             calls.append(list(argv))
-            if argv[2] == 'status':
+            if argv[2] == 'show':
                 return {'exit': 1, 'ActiveState': 'failed'}
             return {'exit': 0}
 

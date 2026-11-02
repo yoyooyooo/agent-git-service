@@ -19,6 +19,7 @@ entries=(
   'scripts/test_upgrade_production_wire.py' 'scripts/test_upgrade_two_chain.py'
   'scripts/test_upgrade_epoch2_writer.py'
   'scripts/test_native_probe_sequence.py' 'scripts/test_native_manager_parse.py'
+  'scripts/test_systemd_show_readback.py'
   'scripts/test_native_factories.py' 'scripts/test_native_systemd_contract.py'
   'scripts/test_upgrade_helpers.py' 'scripts/test_upgrade_epoch_chain.py'
   'scripts/test_buildinfo_binding.py' 'scripts/test_upgrade_pin_emitter.py'
