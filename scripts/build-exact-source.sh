@@ -110,8 +110,13 @@ verify_checkout_unchanged() {
 case "$mode" in
   binary)
     [[ -n $output ]] || output=$repo_root/gh-server
-    (cd "$source_dir" && CGO_ENABLED=${CGO_ENABLED:-1} go build -trimpath \
-      -ldflags="-X github.com/ngaut/agent-git-service/server.gitSHA=${source_sha} -X github.com/ngaut/agent-git-service/internal/buildinfo.Version=source-${source_sha} -X github.com/ngaut/agent-git-service/internal/buildinfo.Revision=${source_sha} -X github.com/ngaut/agent-git-service/internal/buildinfo.Tree=${source_tree}" \
+    version_stamp="source-${source_sha}"
+    ldflags="-X github.com/ngaut/agent-git-service/server.gitSHA=${source_sha}"
+    ldflags+=" -X github.com/ngaut/agent-git-service/internal/buildinfo.Version=${version_stamp}"
+    ldflags+=" -X github.com/ngaut/agent-git-service/internal/buildinfo.Revision=${source_sha}"
+    ldflags+=" -X github.com/ngaut/agent-git-service/internal/buildinfo.Tree=${source_tree}"
+    (cd "$source_dir" && CGO_ENABLED=${CGO_ENABLED:-1} go build -mod=readonly -buildvcs=false -trimpath \
+      -ldflags="${ldflags}" \
       -o "$audit_root/gh-server" ./cmd/gh-server)
     verify_checkout_unchanged
     install -m 0755 "$audit_root/gh-server" "$output"
