@@ -244,7 +244,7 @@ def _projection(rows):
         if row['kind'] == 'authority_suspended':
             if current['authority'] is not None:
                 current['authority'] = {**current['authority'], 'state': 'suspended'}
-        if row['kind'] == 'generation_spawned' and effect and effect['status'] == 'observed':
+        if row['kind'] in ('generation_spawned', 'start_observed') and effect and effect['status'] == 'observed':
             current['generation'] = effect['desired_after']
     return current
 
@@ -334,6 +334,24 @@ def recover_local(root):
     return {'schema': 'ags.upgrade-state-recovery.v1', 'effects': [],
             'sequence': 0 if projected is None else projected['sequence'],
             'ignored_staging': sorted(staging), 'projection': projected}
+
+
+def commit_phase(root, operation_id, before_phase, after_phase, *, kind=None,
+                 host_instance='host-1', identity_sha256='0' * 64,
+                 epoch=1, transaction_id=None, binding_sha256='0' * 64,
+                 effect=None, approval_sha256=None, evidence_sha256=None):
+    """Record a phase or an effect observation without performing the effect."""
+    if kind is None:
+        kind = operation_id
+    event_id = f'{operation_id}-{after_phase}'
+    return commit_event(root, {
+        'event_id': event_id, 'operation_id': operation_id, 'kind': kind,
+        'host_instance': host_instance, 'identity_sha256': identity_sha256,
+        'expected_epoch': epoch, 'epoch': epoch, 'transaction_id': transaction_id,
+        'binding_sha256': binding_sha256, 'before_phase': before_phase,
+        'after_phase': after_phase, 'approval_sha256': approval_sha256,
+        'evidence_sha256': evidence_sha256, 'effect': effect,
+        'recorded_at': '2026-11-02T00:00:00+00:00'})
 
 
 class StateLock:
