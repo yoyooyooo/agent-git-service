@@ -175,11 +175,14 @@ func (e *bodyReadError) Unwrap() error { return e.err }
 func readBody(src io.Reader) ([]byte, error) {
 	limited := io.LimitReader(src, MaxBodyBytes+1)
 	body, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, &bodyReadError{bytes: len(body), err: err}
-	}
+	// Bytes already past the cap are oversized even when the same Read also
+	// failed (for example connection reset). Classify that as 413 before a
+	// transport error, which stays a 400 only while the body is still in cap.
 	if len(body) > MaxBodyBytes {
 		return nil, errBodyTooLarge
+	}
+	if err != nil {
+		return nil, &bodyReadError{bytes: len(body), err: err}
 	}
 	return body, nil
 }
