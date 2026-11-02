@@ -214,7 +214,7 @@ smoke or compatibility lanes.
 ## S6 source verification
 
 `bash scripts/upgrade-regression.sh` is the shared sequential Python gate for
-all `test_upgrade_*` entries, install-v2, single-root, release-consumer and fork
+all `test_upgrade_*` entries, including the S6b.01 boundary reproduction, install-v2, single-root, release-consumer and fork
 release/binding/installer-shell tests. New full-restore, handoff, pin and integration suites are
 included through `scripts/regression_gate.list` and the existing Fork CI step.
 The Source and governance job has a 30-minute bound for the expanded sequential
