@@ -18,8 +18,10 @@ class MetadataError(ValueError):
         self.exit_code = exit_code
 
 
-def materialize(source, destination, expected, *, role, transaction, staging):
+def materialize(source, destination, expected, *, role, transaction, staging, helper=None):
     source, destination, staging = Path(source), Path(destination), Path(staging)
+    if helper is None:
+        raise MetadataError('helper_unavailable')
     if role not in ('tool', 'launcher', 'manager') or expected.get('owner') != 0:
         raise MetadataError('role_or_owner_rejected')
     if transaction is None or source == destination:
@@ -32,7 +34,8 @@ def materialize(source, destination, expected, *, role, transaction, staging):
     info = destination.stat()
     if (info.st_uid, info.st_gid) == (expected['uid'], expected['gid']):
         return {'applied': False, 'matched': True}
-    # The client records the requested metadata. A real privileged helper is a
-    # separate provisioned binary; this source function does not gain root.
+    result = helper(source, destination, expected, role, transaction)
+    if not isinstance(result, dict) or result.get('applied') is not True:
+        raise MetadataError('helper_readback_invalid')
     return {'applied': True, 'uid': expected['uid'], 'gid': expected['gid'],
             'role': role, 'transaction': transaction}
