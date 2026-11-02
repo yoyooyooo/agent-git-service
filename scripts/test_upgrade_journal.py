@@ -128,17 +128,21 @@ class JournalTests(unittest.TestCase):
         held = self.state.StateLock(self.root)
         held.__enter__()
         self.addCleanup(held.__exit__, None, None, None)
-        probe = subprocess.run(
+        probe = subprocess.Popen(
             [sys.executable, '-B', '-c',
-             'import sys; from upgrade_state import StateLock, StateError\n'
-             'try:\n'
-             '    StateLock(sys.argv[1]).__enter__()\n'
-             'except StateError as error:\n'
-             '    print(error.args[0]); raise SystemExit(0)\n'
-             'raise SystemExit(1)', str(self.root)],
-            cwd=Path(__file__).resolve().parent, capture_output=True, text=True)
-        self.assertEqual(probe.returncode, 0, probe.stderr)
-        self.assertEqual(probe.stdout.strip(), 'state_lock_held')
+             'import sys,time; from upgrade_state import StateLock\n'
+             'started=time.monotonic(); StateLock(sys.argv[1]).__enter__();\n'
+             'print(int((time.monotonic()-started)*1000)); raise SystemExit(0)',
+             str(self.root)],
+            cwd=Path(__file__).resolve().parent, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        import time
+        time.sleep(0.2)
+        self.assertIsNone(probe.poll())
+        held.__exit__(None, None, None)
+        stdout, stderr = probe.communicate(timeout=15)
+        self.assertEqual(probe.returncode, 0, stderr)
+        self.assertGreaterEqual(int(stdout.strip()), 100)
 
 
 if __name__ == '__main__':

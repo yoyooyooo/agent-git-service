@@ -8,12 +8,14 @@ Same-UID or root replacement of the whole tree is outside this trust boundary.
 import sys
 sys.dont_write_bytecode = True
 sys.pycache_prefix = None
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import stat
+import uuid
 
 from upgrade import Failure, directory_fd
 from upgrade_backup_contract import canonical, digest, identifier, require
@@ -92,22 +94,40 @@ def _write_exclusive(directory, name, raw, mode=0o600):
     info = os.statvfs(directory)
     if info.f_bavail * info.f_frsize < MIN_FREE + len(raw):
         raise StateError('state_space_insufficient', 83)
+    staging = '.' + uuid.uuid4().hex + '.' + name + '.new'
+    fd = None
+    published = False
     try:
         with directory_fd(directory, private=True) as parent:
-            staging = '.' + name + '.new'
-            fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                         mode, dir_fd=parent)
             try:
+                os.lstat(name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+            else:
+                raise StateError('state_already_published')
+            try:
+                fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             mode, dir_fd=parent)
                 written = os.write(fd, raw)
                 if written != len(raw):
                     raise StateError('state_write_incomplete')
                 os.fsync(fd)
-            except BaseException:
                 os.close(fd)
+                fd = None
+                os.link(staging, name, src_dir_fd=parent, dst_dir_fd=parent)
+                published = True
+                os.unlink(staging, dir_fd=parent)
+                os.fsync(parent)
+            except BaseException:
+                if not published:
+                    try:
+                        os.unlink(staging, dir_fd=parent)
+                    except OSError:
+                        pass
                 raise
-            os.close(fd)
-            os.replace(staging, name, src_dir_fd=parent, dst_dir_fd=parent)
-            os.fsync(parent)
+            finally:
+                if fd is not None:
+                    os.close(fd)
     except FileExistsError as error:
         raise StateError('state_already_published') from error
     except OSError as error:
@@ -165,6 +185,14 @@ def _check_event(value, previous):
     else:
         if sequence != previous['sequence'] + 1 or value['previous_sha256'] != previous['sha256']:
             raise StateError('state_chain_broken')
+    if (previous is not None and value['expected_epoch'] is not None
+            and previous['epoch'] is not None and value['expected_epoch'] != previous['epoch']):
+        raise StateError('state_epoch_conflict')
+    if previous is not None and value['host_instance'] != previous['host_instance']:
+        raise StateError('state_host_mismatch')
+    if value['epoch'] is not None and previous is not None and previous['epoch'] is not None:
+        if value['epoch'] < previous['epoch']:
+            raise StateError('state_epoch_conflict')
     for name in ('event_id', 'operation_id', 'kind', 'host_instance'):
         identifier(value[name])
     digest(value['identity_sha256'])
@@ -221,8 +249,9 @@ def load_verified(root):
     if header.get('host_instance_sha256') != _sha(host.encode()):
         raise StateError('state_host_mismatch')
     rows = _scan(events)
-    if rows and rows[0]['host_instance'] != host:
-        raise StateError('state_host_mismatch')
+    for row in rows:
+        if row['host_instance'] != host or _sha(row['host_instance'].encode()) != header.get('host_instance_sha256'):
+            raise StateError('state_host_mismatch')
     return {'schema': FORMAT, 'format': header, 'events': rows,
             'projection': _projection(rows), 'root': str(base)}
 
@@ -254,7 +283,12 @@ def _projection(rows):
 
 
 def commit_event(root, event):
-    """Publish one event, then rebuild the projection. No effect runs here."""
+    """Publish one event under StateLock. No effect runs here."""
+    with StateLock(root):
+        return _commit_event_locked(root, event)
+
+
+def _commit_event_locked(root, event):
     loaded = load_verified(root)
     rows = loaded['events']
     previous = rows[-1] if rows else None
@@ -265,10 +299,9 @@ def commit_event(root, event):
     _check_event(value, previous)
     for row in rows:
         if row['operation_id'] == value['operation_id']:
-            comparable = {key: row[key] for key in EVENT_FIELDS if key not in ('sequence', 'previous_sha256')}
-            requested = {key: value[key] for key in EVENT_FIELDS if key not in ('sequence', 'previous_sha256')}
+            comparable = {key: row[key] for key in EVENT_FIELDS if key not in ('sequence', 'previous_sha256', 'recorded_at')}
+            requested = {key: value[key] for key in EVENT_FIELDS if key not in ('sequence', 'previous_sha256', 'recorded_at')}
             if comparable == requested:
-                raw = canonical({key: row[key] for key in EVENT_FIELDS if key != 'sha256'})
                 return {'sequence': row['sequence'], 'sha256': row['sha256'],
                         'projection': loaded['projection']}
             raise StateError('state_operation_conflict')
@@ -295,9 +328,12 @@ def commit_event(root, event):
 
 
 def _replace(directory, name, raw):
+    """Replace a projection only. Event sequence names never use this path."""
     _reject_name(name)
+    if name[:1].isdigit():
+        raise StateError('state_already_published')
     with directory_fd(directory, private=True) as parent:
-        staging = '.' + name + '.replace'
+        staging = '.' + uuid.uuid4().hex + '.' + name + '.replace'
         fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
         try:
             if os.write(fd, raw) != len(raw):
@@ -342,7 +378,7 @@ def recover_local(root):
 
 def commit_phase(root, operation_id, before_phase, after_phase, *, kind=None,
                  host_instance='host-1', identity_sha256='0' * 64,
-                 epoch=1, transaction_id=None, binding_sha256='0' * 64,
+                 epoch=1, expected_epoch=None, transaction_id=None, binding_sha256='0' * 64,
                  effect=None, approval_sha256=None, evidence_sha256=None):
     """Record a phase or an effect observation without performing the effect."""
     if kind is None:
@@ -351,11 +387,11 @@ def commit_phase(root, operation_id, before_phase, after_phase, *, kind=None,
     return commit_event(root, {
         'event_id': event_id, 'operation_id': operation_id, 'kind': kind,
         'host_instance': host_instance, 'identity_sha256': identity_sha256,
-        'expected_epoch': epoch, 'epoch': epoch, 'transaction_id': transaction_id,
+        'expected_epoch': expected_epoch, 'epoch': epoch, 'transaction_id': transaction_id,
         'binding_sha256': binding_sha256, 'before_phase': before_phase,
         'after_phase': after_phase, 'approval_sha256': approval_sha256,
         'evidence_sha256': evidence_sha256, 'effect': effect,
-        'recorded_at': '2026-11-02T00:00:00+00:00'})
+        'recorded_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+00:00')})
 
 
 class StateLock:
@@ -372,11 +408,7 @@ class StateLock:
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid() or info.st_mode & 0o077:
             os.close(fd)
             raise StateError('state_lock_unsafe')
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            os.close(fd)
-            raise StateError('state_lock_held', 73) from error
+        fcntl.flock(fd, fcntl.LOCK_EX)
         self.fd = fd
         return self
 
