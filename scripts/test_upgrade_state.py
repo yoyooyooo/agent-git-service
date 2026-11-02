@@ -104,19 +104,16 @@ class BoundaryReproduction(unittest.TestCase):
         self.assertNotIn('boot_id', result)
         self.assertEqual(self.ledger.mock_calls, [])
 
-    def test_default_buildinfo_is_not_attributable(self):
-        """An unstamped binary prints development/unknown. The builder omits the stamps."""
-        source = (ROOT / 'internal/buildinfo/buildinfo.go').read_text()
-        self.assertIn('var Version = "development"', source)
+    def test_buildinfo_binding_is_present_in_exact_source_and_docker_builders(self):
+        """S6b.11 prevents ordinary attributable builds from losing identity."""
         builder = (HERE / 'build-exact-source.sh').read_text()
-        self.assertIn('-X github.com/ngaut/agent-git-service/server.gitSHA=', builder)
-        # Current defect: the ordinary exact-source builder stamps only server.gitSHA.
-        self.assertNotIn('internal/buildinfo.Version', builder)
-        self.assertNotIn('internal/buildinfo.Revision', builder)
-        self.assertNotIn('internal/buildinfo.Tree', builder)
+        for value in ('server.gitSHA', 'internal/buildinfo.Version',
+                      'internal/buildinfo.Revision', 'internal/buildinfo.Tree'):
+            self.assertIn(value, builder)
         dockerfile = (ROOT / 'Dockerfile').read_text()
-        self.assertNotIn('internal/buildinfo.Version', dockerfile)
-        self.assertNotIn('internal/buildinfo.Tree', dockerfile)
+        for value in ('server.gitSHA', 'internal/buildinfo.Version',
+                      'internal/buildinfo.Revision', 'internal/buildinfo.Tree'):
+            self.assertIn(value, dockerfile)
 
 
 if __name__ == '__main__':
