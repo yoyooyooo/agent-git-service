@@ -365,7 +365,9 @@ format. Acceptance reads the original private
 `config/upgrade-authorization-<authorization_id>.json` and checks it against the
 awaiting receipt. It validates the historical authorization window at issue time,
 not as a new permission to run any upgrade effect.
-Default public apply and backup remain `backup_contract_unimplemented` / 83;
+Default public apply and backup remain `backup_contract_unimplemented` / 83.
+The [Route B external dependency contract](routeb-external-dependencies.md)
+does not implement backup either; it only names owner, scope and readback.
 S5 private-package admission is distinct from the S4 acceptance evidence chain.
 Direct v2 install remains `install_contracts_unimplemented` / 83.
 
