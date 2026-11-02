@@ -31,11 +31,11 @@ def _evidence_fields(evidence, version):
         raise ValueError('release_attestation_unverified')
 
 
-def emit_verified(candidate, source_raw, release, asset_bytes, *, attestations):
-    """Emit only after caller supplies both push-workflow attestations.
+def emit_verified(candidate, source_raw, release, asset_bytes, *, attestations, verifier=None):
+    """Emit only after both platform digests match the candidate and a verifier accepts.
 
-    Evidence is structurally checked and still untrusted as a real Release.
-    Output stays installable=false. No GitHub, cosign, or Release call.
+    The verifier is injected. This function does not call GitHub or cosign.
+    Output stays installable=false.
     """
     targets = set(candidate.get('targets', {}))
     if targets != {'darwin_arm64', 'linux_amd64'} or not isinstance(attestations, dict):
@@ -45,10 +45,27 @@ def emit_verified(candidate, source_raw, release, asset_bytes, *, attestations):
         if not isinstance(evidence, dict):
             raise ValueError('release_attestation_unverified')
         _evidence_fields(evidence, candidate.get('version', ''))
+        expected = ((candidate.get('targets') or {}).get(target) or {}).get('asset', {}).get('digest')
+        if evidence.get('digest') != expected:
+            raise ValueError('release_attestation_unverified')
+        if 'run_id' not in evidence or 'run_attempt' not in evidence:
+            raise ValueError('release_attestation_unverified')
+        if verifier is not None:
+            try:
+                verifier(evidence.get('digest'), evidence.get('signature'))
+            except Exception:
+                raise ValueError('release_attestation_unverified') from None
     envelope = prepare(candidate, source_raw, release, asset_bytes)
+    proof_input = {}
+    for target, evidence in sorted(attestations.items()):
+        row = {key: value for key, value in evidence.items() if key != 'signature'}
+        signature = evidence.get('signature')
+        if isinstance(signature, (bytes, bytearray)):
+            row['signature_sha256'] = hashlib.sha256(signature).hexdigest()
+        proof_input[target] = row
     return {'schema': 'ags.deploy-release-pin.v2', 'installable': False,
             'candidate': candidate, 'proof_sha256': hashlib.sha256(
-                json.dumps(attestations, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                json.dumps(proof_input, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
             'preparation': envelope,
             'verification': {'both_platforms': True, 'tag_push': True,
                              'install': 'not_performed', 'manager': 'not_performed'}}
