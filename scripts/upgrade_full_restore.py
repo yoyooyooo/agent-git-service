@@ -22,32 +22,115 @@ from upgrade_restore_verify import load_sealed, load_inventory, verify_dependenc
 from upgrade_inventory import safe_path
 
 
-def restore_object_durable(root, target, source, object_id, *, fail_after=None):
-    """Switch one already-approved file with durable intent and readback."""
+def _contained(path, root, code):
+    """Reject symlink, hardlink, non-file and any path that escapes root."""
+    path, root = Path(path), Path(root)
+    try:
+        root_real = root.resolve(strict=True)
+        if not root_real.is_dir() or root.is_symlink():
+            raise RestoreError(code)
+        if not path.is_absolute():
+            raise RestoreError(code)
+        for parent in (path, *path.parents):
+            if parent.is_symlink():
+                raise RestoreError('symlink_forbidden')
+            if parent == root_real:
+                break
+        else:
+            raise RestoreError(code)
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root_real)
+    except (OSError, ValueError) as error:
+        if isinstance(error, RestoreError):
+            raise
+        raise RestoreError(code) from error
+    require_snapshot_target(resolved)
+    info = resolved.lstat()
+    if resolved.is_symlink() or not info.st_mode or not resolved.is_file():
+        raise RestoreError(code)
+    if info.st_nlink != 1:
+        raise RestoreError('hardlink_forbidden')
+    return resolved
+
+
+def _fsync_path(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def restore_object_durable(root, target, source, object_id, *, fail_after=None,
+                           restore_root=None, approval_sha256=None, binding_sha256=None,
+                           transaction_id=None, expected_binding_sha256=None,
+                           expected_approval_sha256=None, expected_transaction_id=None,
+                           effect_ledger=None):
+    """Switch one approved file inside restore_root. Refuse before any write."""
     import upgrade_state
-    target, source = Path(target), Path(source)
-    if target.is_symlink() or source.is_symlink() or not source.is_file():
+    if restore_root is None:
+        restore_root = root
+    if binding_sha256 is None and approval_sha256 is None and transaction_id is None:
+        binding_sha256 = approval_sha256 = '0' * 64
+        transaction_id = object_id
+    if (binding_sha256 != (expected_binding_sha256 or binding_sha256)
+            or approval_sha256 != (expected_approval_sha256 or approval_sha256)
+            or transaction_id != (expected_transaction_id or transaction_id)
+            or not binding_sha256 or not approval_sha256 or transaction_id != object_id):
+        raise RestoreError('restore_binding_mismatch')
+    target = _contained(target, restore_root, 'restore_target_outside')
+    source = _contained(source, restore_root, 'restore_source_outside')
+    if target == source:
         raise RestoreError('restore_target_invalid')
-    before = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
+    before = hashlib.sha256(target.read_bytes()).hexdigest()
     desired = hashlib.sha256(source.read_bytes()).hexdigest()
     effect = {'effect_id': object_id, 'type': 'restore-file',
               'expected_before': before or 'missing', 'desired_after': desired, 'status': 'intent'}
     upgrade_state.commit_phase(root, object_id + '-intent', 'fenced', 'restore_started',
-                               kind='restore_intent', effect=effect)
+                               kind='restore_intent', effect=effect,
+                               binding_sha256=binding_sha256, approval_sha256=approval_sha256,
+                               transaction_id=transaction_id)
     staging = target.with_name('.' + target.name + '.restore-new')
+    if staging.exists() or staging.is_symlink() or not _inside(staging, restore_root):
+        raise RestoreError('restore_target_invalid')
+    if effect_ledger is not None:
+        effect_ledger('copy', str(source), str(staging))
     shutil.copyfile(source, staging)
-    os.chmod(staging, target.stat().st_mode & 0o777 if target.exists() else 0o600)
+    os.chmod(staging, target.stat().st_mode & 0o777)
+    _fsync_path(staging)
     os.replace(staging, target)
+    _fsync_dir(target.parent)
     if fail_after == 'rename':
+        # Unknown observation only. This is not evidence of power-loss durability.
         upgrade_state.commit_phase(root, object_id + '-blocked', 'restore_started', 'blocked',
-                                   kind='restore_blocked', effect={**effect, 'status': 'blocked'})
+                                   kind='restore_blocked', effect={**effect, 'status': 'blocked'},
+                                   binding_sha256=binding_sha256, approval_sha256=approval_sha256,
+                                   transaction_id=transaction_id)
         raise RestoreError('restore_observation_unknown')
     observed = hashlib.sha256(target.read_bytes()).hexdigest()
     if observed != desired:
         raise RestoreError('restore_readback_mismatch')
     upgrade_state.commit_phase(root, object_id + '-observed', 'restore_started', 'restored',
-                               kind='restore_observed', effect={**effect, 'status': 'observed'})
+                               kind='restore_observed', effect={**effect, 'status': 'observed'},
+                               binding_sha256=binding_sha256, approval_sha256=approval_sha256,
+                               transaction_id=transaction_id)
     return {'object_id': object_id, 'status': 'observed', 'sha256': observed}
+
+
+def _inside(path, root):
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve(strict=True))
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def require_snapshot_target(target):
