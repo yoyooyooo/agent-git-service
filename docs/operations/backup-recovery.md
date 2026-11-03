@@ -281,7 +281,7 @@ An exact-source seal is accepted by the same independent checker. The checker
 rereads the sealed manifest, inventory and metadata digests; it does not trust
 a producer flag. Darwin ACL and xattr values must survive the independent copy.
 A report is not published until the report file and its parent directory have
-been fsynced. A failed backup is not counted as one of the five verified copies.
+been fsynced. A failed backup is not counted as one of the five verified copies. Trash occupancy is subtracted from the live free-space reading before a new backup or restore copy is admitted. A failed or incomplete directory is retained and is not one of the five verified copies.
 
 It never starts AGS or contacts providers. New-version startup can migrate data
 and resume business. After `start_attempted`, a binary-only rollback is unsafe.

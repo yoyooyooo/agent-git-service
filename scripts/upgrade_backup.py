@@ -140,6 +140,17 @@ def available_bytes(path):
     return info.f_bavail * info.f_frsize
 
 
+def retained_bytes(path):
+    """Bytes still occupying the volume. A Trash move that has not disappeared is not free."""
+    total = 0
+    if not path.exists():
+        return 0
+    for child in path.rglob('*'):
+        if child.is_file() and not child.is_symlink():
+            total += child.stat().st_size
+    return total
+
+
 def preflight_space(group, destination, restore_root=None):
     """Full backup, full restore-copy, scratch and declared reserve must fit now."""
     measured = measure_source_bytes(group)
@@ -148,9 +159,11 @@ def preflight_space(group, destination, restore_root=None):
     required = (capacity['backup_bytes'] + capacity['restore_copy_bytes'] + capacity['candidate_scratch_bytes']
                 + capacity['migration_growth_bytes'] + capacity['runtime_reserve_bytes'])
     require(required <= capacity['available_bytes'], 'insufficient_space')
-    require(available_bytes(destination) >= required, 'insufficient_space')
+    occupied = retained_bytes(Path(destination))
+    require(available_bytes(destination) - occupied >= required, 'insufficient_space')
     if restore_root is not None and os.stat(destination).st_dev != os.stat(restore_root).st_dev:
-        require(available_bytes(restore_root) >= capacity['restore_copy_bytes'], 'insufficient_space')
+        require(available_bytes(restore_root) - retained_bytes(Path(restore_root))
+                >= capacity['restore_copy_bytes'], 'insufficient_space')
     return measured
 
 
