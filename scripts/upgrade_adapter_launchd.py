@@ -199,12 +199,36 @@ class Manager:
             raise AdapterError('external_facts_rejected')
         if self.consumed:
             raise AdapterError('oneshot_consumed')
-        plist = self.service.get('plist') or (self.service['label'] + '.plist')
-        result = self._run(['launchctl', 'bootstrap', self.service['domain'], plist])
-        if not isinstance(result, dict) or result.get('exit') != 0:
-            raise AdapterError('start_not_observed')
+        root = self.service.get('root')
+        epoch = self.service.get('epoch')
+        if root and epoch:
+            from upgrade_recovery import Failure, launcher_spawn_authorized
+            def runner(_argv):
+                return self._bootstrap()
+            try:
+                observed = launcher_spawn_authorized(root, runner, epoch=epoch)
+            except Failure as error:
+                self.consumed = True
+                raise AdapterError(error.code) from None
+            self.consumed = True
+            return {'started': True, 'readback': observed}
+        if self.consumed:
+            raise AdapterError('oneshot_consumed')
+        result = self._bootstrap()
         self.consumed = True
         return {'started': True, 'readback': result}
+
+    def _bootstrap(self):
+        plist = self.service.get('plist') or (self.service['label'] + '.plist')
+        try:
+            result = self._run(['launchctl', 'bootstrap', self.service['domain'], plist])
+        except AdapterError:
+            raise
+        except Exception:
+            raise AdapterError('start_not_observed') from None
+        if not isinstance(result, dict) or result.get('exit') != 0:
+            raise AdapterError('start_not_observed')
+        return result
 
 
 def native_probe(service, *, permitted, label=None, runner=None, one_shot=True):

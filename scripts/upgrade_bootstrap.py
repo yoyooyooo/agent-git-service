@@ -63,3 +63,26 @@ def complete_partial(root, receipt, *, phase, ledger=None):
     if phase not in PHASES:
         raise BootstrapError('phase_unknown', 82)
     raise BootstrapError('bootstrap_fenced', 82)
+
+
+def execute(plan_row, root, *, epoch, runner):
+    """Same-binary transition. The durable fence runs before the injected runner.
+
+    This does not stop a service, rewrite a live runtime file, or start a second
+    launcher. A lost or crashed runner stays consumed.
+    """
+    if not isinstance(plan_row, dict) or plan_row.get('business_upgrade') is not False:
+        raise BootstrapError('binary_mismatch', 83)
+    if plan_row.get('phase') != 'planned' or not isinstance(plan_row.get('binary_sha256'), str):
+        raise BootstrapError('binary_mismatch', 83)
+    from upgrade_recovery import Failure, launcher_spawn_authorized
+    from upgrade_state import StateError
+    try:
+        observed = launcher_spawn_authorized(root, runner, epoch=epoch)
+    except (Failure, StateError) as error:
+        code = getattr(error, 'code', None) or str(error)
+        if code == 'state_operation_conflict':
+            code = 'oneshot_consumed'
+        raise BootstrapError(code, 82) from None
+    return {'status': observed['status'], 'business_upgrade': False,
+            'binary_sha256': plan_row['binary_sha256'], 'epoch': epoch}

@@ -447,7 +447,14 @@ _SPAWNED = set()
 
 
 def launcher_spawn_authorized(authority, runner, *, epoch):
-    """Spawn at most once for an active authority. A lost response is not retried."""
+    """Spawn at most once for an active authority. A lost response is not retried.
+
+    A deployment root is the durable path: intent is fsynced before the runner,
+    and a later process reads that consumption. A dict is the in-memory contract
+    used by unit tests; it cannot cross a process boundary.
+    """
+    if isinstance(authority, (str, Path)):
+        return launcher_spawn(authority, runner=runner, epoch=epoch)
     key = (authority.get('binding_sha256') if isinstance(authority, dict) else None, epoch)
     if not isinstance(authority, dict) or authority.get('state') != 'active' or authority.get('epoch') != epoch:
         raise Failure('restart_fenced')
@@ -476,12 +483,20 @@ def launcher_spawn(root, *, runner, epoch):
     effect = {'effect_id': 'spawn-' + str(epoch), 'type': 'spawn',
               'expected_before': 'active', 'desired_after': 'intent', 'status': 'intent'}
     host = (loaded.get('format') or {}).get('host_instance')
+    if effect['effect_id'] in (loaded.get('projection') or {}).get('pending_effects', []):
+        raise Failure('oneshot_consumed')
+    if any(row.get('kind') == 'generation_spawned' and row.get('epoch') == epoch
+           for row in loaded.get('events', [])):
+        raise Failure('oneshot_consumed')
     upgrade_state.commit_phase(root, 'launcher-spawn-' + str(epoch), 'active', 'spawn_intent',
                                kind='spawn_intent', epoch=epoch, effect=effect,
                                host_instance=host,
                                identity_sha256=authority['binding_sha256'],
                                binding_sha256=authority['binding_sha256'])
-    observed = runner([str(Path(root) / 'bin/gh-server')])
+    try:
+        observed = runner([str(Path(root) / 'bin/gh-server')])
+    except Exception:
+        raise Failure('start_observation_unknown') from None
     if not isinstance(observed, dict) or observed.get('pid') is None or not observed.get('boot_id'):
         blocked = {**effect, 'status': 'blocked'}
         upgrade_state.commit_phase(root, 'launcher-observe-' + str(epoch), 'spawn_intent', 'blocked',
