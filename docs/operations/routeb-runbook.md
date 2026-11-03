@@ -69,6 +69,9 @@ Before a later window, these items are still required and are not proven here:
 
 1. Exact candidate manifest: revision, tree, version, GOOS, GOARCH, Go
    version, sha256, linkage. Linux must be a native build, not the Darwin binary.
+   `scripts/routeb_candidate.py` accepts only `ags.routeb-candidate-manifest.v1`
+   and resolves a relative binary against the manifest parent. That check is
+   not host admission and does not install.
 2. Deployment id, transaction id, window approval, and binary/build manifest
    bound together.
 3. External dependency contract accepted by each owner. See

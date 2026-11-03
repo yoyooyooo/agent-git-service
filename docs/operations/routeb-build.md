@@ -50,6 +50,12 @@ is the content baseline, not the built revision. Record `gh-server`, sha256,
 manifest, version JSON, `go version`, `otool -L`, and those two values. Keep
 the output outside the source checkout. Do not start it against `~/.ags`.
 
+`scripts/routeb_candidate.py` reads `ags.routeb-candidate-manifest.v1` only.
+A relative `binary` is resolved against the manifest parent, never the
+process cwd. The rehearsal schema `ags.routeb-candidate.v1` is not accepted.
+`not_installed` and `not_a_release` are history flags, not permission to
+install. Parsing a manifest is not an install and does not start a process.
+
 ## imile-win Linux/amd64
 
 Not built by the Darwin preparation task. Cross-compiling on Darwin is not a
