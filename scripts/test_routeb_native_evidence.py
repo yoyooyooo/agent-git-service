@@ -4,7 +4,7 @@
 Ordinary CI does not run the launchd experiment. A fixture result must not be
 labeled native. The 600 second field is a minimum, not a default success.
 """
-import json
+from pathlib import Path
 import unittest
 
 import routeb_native_evidence as evidence
@@ -49,6 +49,12 @@ class NativeEvidenceTests(unittest.TestCase):
         accepted = evidence.validate(self.sample())
         self.assertEqual(accepted['passed'], True)
         self.assertNotEqual(accepted.get('installable'), True)
+
+    def test_source_ci_does_not_count_a_skipped_native_run_as_passed(self):
+        script = Path(__file__).resolve().parent.joinpath('upgrade-regression.sh').read_text()
+        listed = [line for line in script.splitlines() if line.strip().startswith("'") and 'test_routeb_launchd_native.py' in line]
+        self.assertEqual(listed, [])
+        self.assertIn('AGS_ROUTEB_NATIVE', script)
 
 
 if __name__ == '__main__':

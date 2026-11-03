@@ -130,7 +130,7 @@ old rows/columns. Migration identifiers include structural digests.
 
 The checked-in policy still has `deployments={}` and `migration_admissions=[]`.
 With a valid pin/bundle and window authorization, that default `apply` returns
-`backup_contract_unimplemented` / 83 before any claim or service effect. Earlier
+`backup_contract_unimplemented` / 83 before any claim or service effect. The Route B host package contract is [routeb-host-package](routeb-host-package.md); it does not open this public path. Earlier
 pin/bundle/identity failures retain 64/69/77. No host is provisioned by source.
 Direct v2 `--install` remains unconditionally `install_contracts_unimplemented` /
 83, including when a private upgrade package exists. It is not a second path.

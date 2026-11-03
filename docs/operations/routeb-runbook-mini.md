@@ -1,6 +1,7 @@
 # mini preparation runbook
 
 Common rules: [route B runbook](routeb-runbook.md).
+Host-package contract: [routeb-host-package](routeb-host-package.md). It does not authorize this host.
 Candidate `f63aa88e0c82b1e17174cf07f8033552457185b1`,
 tree `8bf2c52ec3f7c7bc04850791b4e507bbc8261ab4`.
 Rollback remains `0013aa744c8c90637ec54562ffc248a1bf7c9a52` by restoring the

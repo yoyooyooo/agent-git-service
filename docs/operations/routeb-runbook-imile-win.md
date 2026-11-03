@@ -33,7 +33,7 @@ or unmasks a unit. Do not pass a shell or a wildcard through sudo.
 A future stop is closed only when the host package records stop exit,
 `Result=success`, `MainPID=0`, an empty cgroup and a closed trigger.
 Exit zero alone is not closure. `upgrade_adapter_systemd.py` still raises
-`native_adapter_unavailable` from `create()` and is not that host package.
+`native_adapter_unavailable` from `create()` and is not that host package. The Darwin host-package contract is [routeb-host-package](routeb-host-package.md) and does not transfer to this host.
 
 ## Backup boundary
 

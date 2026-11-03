@@ -5,7 +5,7 @@ SQLite backup API and ordinary copies and verifies an independent restore-copy.
 S3 owns the durable cold-window protocol; S4 consumes separate human acceptance.
 S5 connects these existing owners through strict private-package admission.
 The public deployments/migration policy remains empty: default apply and backup
-still return `backup_contract_unimplemented` / 83. Direct v2 install always returns
+still return `backup_contract_unimplemented` / 83. The host-package coordinator is [routeb-host-package](routeb-host-package.md) and is not this public apply path. Direct v2 install always returns
 `install_contracts_unimplemented` / 83 and cannot borrow the S5 admission.
 No source acceptance provisions, publishes or upgrades a host. See
 [local upgrade](local-upgrade.md#s5-two-layer-admission) for the exact package/adapter contract.

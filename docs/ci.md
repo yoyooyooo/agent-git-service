@@ -18,7 +18,10 @@ The repository uses a layered CI gate:
 - `license-check.yml` verifies root Go module dependency license metadata.
 
 Publishing, deployment, and benchmark-history workflows are intentionally not
-part of the default public CI set.
+part of the default public CI set. `scripts/upgrade-regression.sh` does not
+list `scripts/test_routeb_launchd_native.py`. A skipped native run is not a
+source-CI pass and does not authorize deployment. See
+[Route B host package](operations/routeb-host-package.md).
 
 ## Workflow Files
 

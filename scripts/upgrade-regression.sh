@@ -7,7 +7,7 @@ chmod 700 "$sandbox"
 # Deliberately retained for diagnosis, never removed by this runner.
 printf 'Upgrade regression sandbox: %s\n' "$sandbox"
 entries=(
-  'scripts/test_upgrade_identity.py' 'scripts/test_routeb_candidate.py' 'scripts/test_routeb_host_admission.py' 'scripts/test_routeb_backup_binding.py' 'scripts/test_routeb_launchd_stop.py' 'scripts/test_routeb_oneshot.py' 'scripts/test_routeb_launchd_native.py'
+  'scripts/test_upgrade_identity.py' 'scripts/test_routeb_candidate.py' 'scripts/test_routeb_host_admission.py' 'scripts/test_routeb_backup_binding.py' 'scripts/test_routeb_launchd_stop.py' 'scripts/test_routeb_oneshot.py'
   'scripts/test_routeb_metadata_darwin.py' 'scripts/test_routeb_restore_verify.py' 'scripts/test_routeb_storage.py'
   'scripts/test_routeb_full_restore.py' 'scripts/test_routeb_restore_switch.py' 'scripts/test_routeb_old_start.py'
   'scripts/test_routeb_host_transaction.py HostModeTests' 'scripts/test_routeb_observation.py'
@@ -68,6 +68,11 @@ done
 if [[ "$failed" -ne 0 ]]; then
   printf '\nUpgrade regression failed. Sandbox retained: %s\n' "$sandbox"
   exit 1
+fi
+# Native launchd evidence is not a source-CI entry. A skipped unittest is not a pass.
+# Set AGS_ROUTEB_NATIVE=1 to run scripts/test_routeb_launchd_native.py outside this list.
+if [[ "${AGS_ROUTEB_NATIVE:-}" == "1" ]]; then
+  printf 'AGS_ROUTEB_NATIVE=1 does not make scripts/test_routeb_launchd_native.py a source-CI pass.\n'
 fi
 printf '\nUpgrade regression passed (%s entries). Sandbox retained: %s\n' "${#entries[@]}" "$sandbox"
 exit 0
