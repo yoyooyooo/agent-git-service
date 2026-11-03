@@ -466,11 +466,12 @@ def _dict_authority_root(authority, epoch):
         import upgrade_lifecycle
         loaded = upgrade_state_module().load_verified(base)
         if not (loaded.get('projection') or {}).get('authority'):
+            decision = 'approve'
             upgrade_lifecycle.activate_durable(
                 base,
                 {'completion_sha256': binding, 's4_approval_id': 'routeb-oneshot',
                  'epoch': epoch, 'host_instance': 'routeb-oneshot'},
-                {'purpose': 'lifecycle-activate', 'decision': 'approve',
+                {'purpose': 'lifecycle-activate', 'decision': decision,
                  'approval_id': 'routeb-oneshot-' + str(epoch), 'completion_sha256': binding,
                  'host_instance': 'routeb-oneshot'})
     except Exception:
