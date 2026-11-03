@@ -3,7 +3,7 @@
 Preparation states the owner, object set, version and metadata fields,
 stop and restore order, and exact-effect readback for each dependency.
 It does not back up or restore the live objects. A missing owner contract
-makes `scripts/ags-maintenance-transaction plan` refuse the claim.
+makes `scripts/ags-maintenance-transaction plan` refuse the claim. The host-package page is [routeb-host-package](routeb-host-package.md).
 
 Shared Forgejo and Multica state are not rolled back by restoring one AGS
 data directory. Rollback of AGS remains the whole AGS cold backup to
