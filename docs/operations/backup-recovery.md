@@ -537,3 +537,5 @@ Release transport boundaries are synthetic. Neither pure helper outputs nor CI
 success proves two upgrades with a native restart between them. Darwin and Linux
 native chains, isolated VM, production-copy startup and imile behavior require
 separate approval and evidence. See [source integration](local-upgrade.md#s613-source-integration-boundary).
+
+Native launchd evidence is skipped unless `AGS_ROUTEB_NATIVE=1`. A skipped run is not a pass. The harness uses one `com.jackie.ags-hostpkg-test.` label and a 0700 temporary root, then boots that label out. It does not touch `com.jackie.agent-git-service` or `~/.ags`.
