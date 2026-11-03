@@ -89,4 +89,30 @@ def apply_restore(request, *, supervisor_path=None, journal=None):
         switched.append(member['id'])
     require(switched, 'coverage_incomplete')
     return {'applied': True, 'started': False, 'members': planned['members'],
-            'switched': switched, 'snapshot_id': planned['snapshot_id']}
+            'switched': switched, 'snapshot_id': planned['snapshot_id'],
+            'approval_id': request.get('approval_id')}
+
+
+def _consumed_path(restored, approval):
+    root = Path(restored.get('journal_root') or '.')
+    return root / ('.old-start-' + approval['approval_id'])
+
+
+def old_start(restored, approval, *, launcher):
+    """One approved old start. The restore approval cannot authorize it."""
+    require(restored.get('applied') is True and restored.get('started') is False, 'not_restored')
+    require(approval.get('schema') == 'ags.routeb-recovery-approval.v1', 'approval_invalid')
+    require(approval.get('decision') == 'approve' and approval.get('purpose') == 'old-start',
+            'approval_invalid')
+    require(approval.get('data_loss_acknowledged') is True, 'data_loss_unacknowledged')
+    require(approval.get('snapshot_id') == restored.get('snapshot_id'), 'snapshot_mismatch')
+    require(approval.get('approval_id') and approval.get('approval_id') != restored.get('approval_id'),
+            'recovery_approval_reused')
+    marker = _consumed_path(restored, approval)
+    require(not marker.exists(), 'old_start_already_consumed')
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+    observed = launcher()
+    require(isinstance(observed, dict) and observed.get('started') is True, 'start_observation_unknown')
+    return {'started': True, 'approval_id': approval['approval_id'], 'snapshot_id': restored['snapshot_id']}

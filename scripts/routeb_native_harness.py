@@ -53,7 +53,7 @@ def exercise():
         created = bootstrap.returncode == 0
         printed = _run(['/bin/launchctl', 'print', target])
         observed = (printed.returncode == 0 and label in printed.stdout
-                    and 'path = ' + str(plist_path) in printed.stdout)
+                    and 'path = ' + str(plist_path.resolve()) in printed.stdout)
     finally:
         bootout = subprocess.run(['/bin/launchctl', 'bootout', target], check=False,
                                  capture_output=True, text=True, timeout=10)
