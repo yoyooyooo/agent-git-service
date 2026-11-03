@@ -129,7 +129,11 @@ Unknown manager or provider outcome stops.
 A later window still needs: local and service `/readyz` with the exact
 revision, a separate Forgejo authority readback, Git and pull-request
 readback, webhook 413/400 evidence, Edge evidence, and 600 seconds of
-observation. Caddy and Tailscale are not restarted as a side effect of
+observation. `scripts/routeb_observation.py` refuses 599 seconds, a lease
+longer than the elapsed window, and a 200 readyz whose provider result is
+unknown. Elapsed time starts at validation, not prepare. `readyz` remains
+diagnostic_only and is not a webhook proof. Recovery inventory and the
+review gate are the functions in `scripts/ags_maintenance_window.py`. Caddy and Tailscale are not restarted as a side effect of
 replacing the AGS binary.
 
 mini and imile-win are separate windows. A mini observation does not
