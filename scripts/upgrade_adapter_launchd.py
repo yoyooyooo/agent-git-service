@@ -7,8 +7,11 @@ is unverified when permission is absent. This is not a production activation.
 import sys
 sys.dont_write_bytecode = True
 sys.pycache_prefix = None
+import os
+import subprocess
 
 SCHEMA = 'ags.upgrade-host-adapter.v1'
+ABSENT_EXIT = 113
 
 
 class AdapterError(ValueError):
@@ -34,14 +37,19 @@ def allow(argv, service):
 
 
 class Manager:
-    def __init__(self, service, runner=None, observe=None):
+    def __init__(self, service, runner=None, observe=None, enumerate_descendants=None, read_identity=None):
         self.service = service
         self.runner = runner
         self.observe = observe or runner
+        self.enumerate_descendants = enumerate_descendants
+        self.read_identity = read_identity
         self.consumed = False
 
-    def _complete(self, result):
-        if not isinstance(result, dict) or result.get('exit') != 0:
+    def _complete(self, result, *, allow_absent=False):
+        if not isinstance(result, dict):
+            raise AdapterError('command_not_observed')
+        exit_code = result.get('exit')
+        if exit_code != 0 and not (allow_absent and exit_code == ABSENT_EXIT):
             raise AdapterError('command_not_observed')
         if result.get('truncated') is True:
             raise AdapterError('output_truncated')
@@ -52,6 +60,71 @@ class Manager:
         if len(stdout) >= 4096 or len(stderr) >= 4096:
             raise AdapterError('output_truncated')
         return result
+
+    def _job_missing(self, printed):
+        """Only the real launchctl absent response. Empty exit 0 is not absence."""
+        if printed.get('exit') != ABSENT_EXIT:
+            return False
+        text = printed.get('stderr', '')
+        if 'Could not find service' not in text:
+            return False
+        if printed.get('stdout', '').strip():
+            return False
+        return True
+
+    def _enumerate(self):
+        """List descendants of the named supervisor and child. Failure is unknown."""
+        named = []
+        for key in ('supervisor_pid', 'child_pid', 'pid'):
+            value = self.service.get(key)
+            if type(value) is int and value > 0:
+                named.append(value)
+        if not named:
+            return []
+        try:
+            listed = subprocess.run(['ps', '-axo', 'pid=,ppid='], check=False,
+                                    capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            raise AdapterError('descendants_unobserved') from None
+        if listed.returncode != 0 or not isinstance(listed.stdout, str):
+            raise AdapterError('descendants_unobserved')
+        children = {}
+        alive = set()
+        for line in listed.stdout.splitlines():
+            parts = line.split()
+            if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                continue
+            pid, parent = int(parts[0]), int(parts[1])
+            alive.add(pid)
+            children.setdefault(parent, []).append(pid)
+        found = []
+        pending = [pid for pid in named if pid in alive]
+        seen = set()
+        while pending:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            found.append(current)
+            pending.extend(children.get(current, []))
+        return found
+
+    def _identity(self):
+        """Read this process's boot and start time. Never copy the caller's claim."""
+        try:
+            boot = subprocess.run(['sysctl', '-n', 'kern.boottime'], check=False,
+                                  capture_output=True, text=True, timeout=5)
+            started = subprocess.run(['ps', '-o', 'lstart=', '-p', str(os.getpid())],
+                                     check=False, capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            raise AdapterError('identity_unobserved') from None
+        if boot.returncode != 0 or started.returncode != 0:
+            raise AdapterError('identity_unobserved')
+        boot_text = boot.stdout.strip()
+        start_text = started.stdout.strip()
+        if not boot_text or not start_text:
+            raise AdapterError('identity_unobserved')
+        return boot_text, start_text
 
     def _run(self, argv):
         if not callable(self.runner):
@@ -71,13 +144,17 @@ class Manager:
 
     def _job_absent(self):
         domain = self.service['domain'] + '/' + self.service['label']
-        printed = self._complete(self.observe(['launchctl', 'print', domain]))
+        printed = self._complete(self.observe(['launchctl', 'print', domain]), allow_absent=True)
+        if self._job_missing(printed):
+            return True
+        if printed.get('exit') != 0:
+            raise AdapterError('command_not_observed')
         text = printed.get('stdout', '') + printed.get('stderr', '')
-        if 'pid =' in text or 'state = running' in text:
+        if not text.strip():
+            raise AdapterError('job_absence_unproven')
+        if 'pid =' in text or 'state = running' in text or 'state = spawn' in text:
             raise AdapterError('stop_not_closed')
-        if 'Could not find service' not in text and text.strip():
-            raise AdapterError('stop_not_closed')
-        return True
+        raise AdapterError('stop_not_closed')
 
     def suppress_restart(self, readback=None):
         if readback is not None:
@@ -92,10 +169,30 @@ class Manager:
             raise AdapterError('external_facts_rejected')
         domain = self.service['domain'] + '/' + self.service['label']
         self._complete(self._run(['launchctl', 'bootout', domain]))
-        self._job_absent()
+        absent = self._job_absent()
         self._disabled()
-        return {'closed': True, 'disabled': True, 'process_group_empty': True,
-                'boot_id': self.service.get('boot_id'), 'start_time': self.service.get('start_time')}
+        if self.enumerate_descendants is not None:
+            descendants = self.enumerate_descendants()
+            if not isinstance(descendants, list):
+                raise AdapterError('descendants_unobserved')
+        else:
+            descendants = self._enumerate()
+        if self.read_identity is not None:
+            observed = self.read_identity()
+            if not isinstance(observed, tuple) or len(observed) != 2:
+                raise AdapterError('identity_unobserved')
+            boot_id, start_time = observed
+        else:
+            boot_id, start_time = self._identity()
+        claimed_boot = self.service.get('boot_id')
+        claimed_start = self.service.get('start_time')
+        identity_claimed = 'boot_id' in self.service or 'start_time' in self.service
+        identity_matches = (not identity_claimed
+                            or (claimed_boot == boot_id and claimed_start == start_time))
+        empty = absent and not descendants and identity_matches
+        return {'closed': empty, 'disabled': True, 'process_group_empty': empty,
+                'descendants': descendants, 'boot_id': boot_id, 'start_time': start_time,
+                'identity_matches': identity_matches}
 
     def start(self, readback=None):
         if readback is not None:
