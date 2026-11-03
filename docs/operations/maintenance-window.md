@@ -6,7 +6,9 @@ executor directory is required and its three executable Python inputs are
 SHA-256 pinned before import. The repository does not distribute host bindings,
 private configuration, binaries, deployment receipts or credentials. Source CI
 and a merged PR never authorize a deployment. The
-Route B one-shot start (`launcher_spawn_authorized`) refuses a suspended authority and does not retry a start whose response was lost. A deployment root, and a dict authority, use a durable journal: the spawn intent is committed and fsynced before the runner, and a later process with the same binding reads that consumption instead of spawning again. The dict journal is a private state directory under the caller HOME, never `~/.ags`. A lost manager response and a crashed runner stay consumed. The same fence is the same-version launcher transition in `upgrade_bootstrap.execute`. It is not the maintenance-window executor.
+Route B one-shot start (`launcher_spawn_authorized`) refuses a suspended authority and does not retry a start whose response was lost. A deployment root, and a dict authority, use a durable journal: the spawn intent is committed and fsynced before the runner, and a later process with the same binding reads that consumption instead of spawning again. The dict journal is a private state directory under the caller HOME, never `~/.ags`. A lost manager response and a crashed runner stay consumed. The same fence is the same-version launcher transition in `upgrade_bootstrap.execute`. It is not the maintenance-window executor. Host observation reuses
+`recovery_inventory` and `recovery_gate` from this adapter; it does not
+copy the SQL.
 
 [Route B preparation runbook](routeb-runbook.md) describes the 0013aa74 to
 f63aa88e candidate only and does not admit this executor.
