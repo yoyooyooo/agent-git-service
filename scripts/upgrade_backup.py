@@ -27,18 +27,10 @@ NONE_XATTR = hashlib.sha256(b'xattr:none').hexdigest()
 
 
 def xattrs(path):
-    """Only macOS provenance is supported; other xattrs/ACLs require a different implementation."""
+    """Darwin uses the metadata backend. Linux still refuses every xattr."""
     if sys.platform == 'darwin':
-        result = subprocess.run(['/usr/bin/xattr', str(path)], capture_output=True, timeout=30)
-        require(result.returncode == 0, 'metadata_unavailable')
-        names = result.stdout.decode('utf-8').splitlines()
-        require(set(names) <= {'com.apple.provenance'}, 'xattr_unsupported')
-        values = {}
-        for name in names:
-            value = subprocess.run(['/usr/bin/xattr', '-px', name, str(path)], capture_output=True, timeout=30)
-            require(value.returncode == 0, 'metadata_unavailable')
-            values[name] = bytes.fromhex(value.stdout.decode('ascii')).hex()
-        return values
+        from upgrade_metadata_darwin import xattr_map
+        return xattr_map(path)
     require(sys.platform.startswith('linux') and hasattr(os, 'listxattr'), 'metadata_platform_unsupported')
     require(not os.listxattr(path, follow_symlinks=False), 'xattr_unsupported')
     return {}
@@ -47,37 +39,39 @@ def xattrs(path):
 def supported_metadata(path):
     info = path.lstat()
     if sys.platform == 'darwin':
-        result = subprocess.run(['/bin/ls', '-lde', str(path)], capture_output=True, timeout=30)
-        require(result.returncode == 0, 'metadata_unavailable')
-        require(result.stdout.count(b'\n') == 1, 'acl_unsupported')
+        from upgrade_metadata_darwin import capture
+        captured = capture(path)
+        return {'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid,
+                'mtime_ns': info.st_mtime_ns, 'acl_sha256': captured['acl_sha256'],
+                'xattrs_sha256': captured['xattrs_sha256'], 'sidecar': captured['sidecar']}
     attributes = xattrs(path)
     return {'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid,
             'mtime_ns': info.st_mtime_ns, 'acl_sha256': NONE_ACL,
             'xattrs_sha256': fingerprint(attributes) if attributes else NONE_XATTR}
 
 
+def metadata_fields(metadata):
+    """Public digest fields. The sidecar is private and is not a manifest field."""
+    return {key: metadata[key] for key in ('mode', 'uid', 'gid', 'mtime_ns', 'acl_sha256', 'xattrs_sha256')}
+
+
 def apply_metadata(source, destination, metadata):
     """Preserve supported metadata and fail rather than silently losing required attributes."""
-    attributes = xattrs(source)
-    require(fingerprint(attributes) == metadata['xattrs_sha256'] if attributes
-            else metadata['xattrs_sha256'] == NONE_XATTR, 'metadata_mismatch')
     if sys.platform == 'darwin':
-        current = xattrs(destination)
-        # The OS may attach provenance to newly created files. Preserve the captured value exactly.
-        for name in current.keys() - attributes.keys():
-            result = subprocess.run(['/usr/bin/xattr', '-d', name, str(destination)], capture_output=True, timeout=30)
-            require(result.returncode == 0, 'metadata_unavailable')
-        for name, value in attributes.items():
-            if current.get(name) == value:
-                continue
-            result = subprocess.run(['/usr/bin/xattr', '-wx', name, value, str(destination)],
-                                    capture_output=True, timeout=30)
-            require(result.returncode == 0, 'metadata_unavailable')
+        from upgrade_metadata_darwin import capture, materialize
+        captured = capture(source)
+        require(captured['acl_sha256'] == metadata['acl_sha256']
+                and captured['xattrs_sha256'] == metadata['xattrs_sha256'], 'metadata_mismatch')
+        materialize(destination, captured)
+    else:
+        attributes = xattrs(source)
+        require(fingerprint(attributes) == metadata['xattrs_sha256'] if attributes
+                else metadata['xattrs_sha256'] == NONE_XATTR, 'metadata_mismatch')
     info = destination.stat()
     require((info.st_uid, info.st_gid) == (metadata['uid'], metadata['gid']), 'ownership_unsupported')
     os.chmod(destination, metadata['mode'])
     os.utime(destination, ns=(metadata['mtime_ns'], metadata['mtime_ns']))
-    require(supported_metadata(destination) == metadata, 'metadata_mismatch')
+    require(metadata_fields(supported_metadata(destination)) == metadata_fields(metadata), 'metadata_mismatch')
     fd = os.open(destination, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)
@@ -92,7 +86,7 @@ def source_fingerprint(group, dsn, schema):
     metadata = {}
     for key, item in validate_group(group).items():
         path = safe_path(item['source'], item['kind'])
-        metadata[key] = metadata_tree(path) if path.is_dir() else supported_metadata(path)
+        metadata[key] = metadata_tree(path) if path.is_dir() else metadata_fields(supported_metadata(path))
     objects = dict(inventory['objects'])
     objects.pop(group_object(group, 'sqlite')['id'])
     return fingerprint({'objects': objects, 'metadata': metadata,
@@ -106,7 +100,7 @@ def metadata_tree(root):
     while stack:
         current = stack.pop()
         safe_path(current)
-        result.append([str(current.relative_to(root)), supported_metadata(current)])
+        result.append([str(current.relative_to(root)), metadata_fields(supported_metadata(current))])
         if current.is_dir():
             stack.extend(sorted(current.iterdir(), reverse=True))
     return result
@@ -239,7 +233,7 @@ def entry_for(object_id, source_root, source, copied, target_root, info, *, sqli
     relative(relative_path)
     destination = target_root if source == source_root else target_root / source.relative_to(source_root)
     directory = stat.S_ISDIR(info.st_mode)
-    metadata = supported_metadata(source)
+    metadata = metadata_fields(supported_metadata(source))
     digest = None if directory else file_digest(copied)
     if not directory and not sqlite:
         require(file_digest(source) == digest and source.stat().st_size == copied.stat().st_size, 'payload_mismatch')
@@ -398,7 +392,7 @@ def verify_payload(root, entries, *, auxiliary=frozenset()):
         else:
             require(stat.S_ISREG(info.st_mode) and info.st_size == item['size']
                     and file_digest(path) == item['sha256'], 'payload_mismatch')
-        require(supported_metadata(path) == {k: item[k] for k in
+        require(metadata_fields(supported_metadata(path)) == {k: item[k] for k in
                 ('mode', 'uid', 'gid', 'mtime_ns', 'acl_sha256', 'xattrs_sha256')}, 'metadata_mismatch')
         require(path.is_dir() or info.st_nlink == 1, 'hardlink_forbidden')
         observed.add(relative_path)

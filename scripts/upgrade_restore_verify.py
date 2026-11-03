@@ -81,7 +81,9 @@ def compare_manifest(root, manifest, sealed):
         require(original.exists() and payload_identity(copied) != payload_identity(original), 'hardlink_forbidden')
         metadata = {key: item[key] for key in
                     ('mode', 'uid', 'gid', 'mtime_ns', 'acl_sha256', 'xattrs_sha256')}
-        require(supported_metadata(original) == metadata and supported_metadata(copied) == metadata,
+        from upgrade_backup import metadata_fields
+        require(metadata_fields(supported_metadata(original)) == metadata
+                and metadata_fields(supported_metadata(copied)) == metadata,
                 'metadata_mismatch')
 
 

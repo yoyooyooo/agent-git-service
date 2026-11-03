@@ -13,9 +13,11 @@ No source acceptance provisions, publishes or upgrades a host. See
 Route B exact-source bindings use `validate_binding_v2` and an explicit
 `artifact_kind=exact-source`. They require manifest, build-review and CI
 evidence digests and do not carry `release_id`. `validate_binding` remains the
-Release v1 consumer and refuses an exact-source identity. Seal and restore
-report producers still emit v1 until a later host-package slice; this slice
-only adds the dispatch and does not seal a production backup.
+Release v1 consumer and refuses an exact-source identity. Seal validation
+dispatches on `artifact_kind`: a Release binding still goes through
+`validate_binding`, and an exact-source binding goes through
+`validate_binding_v2`. A mixed binding is refused. This does not invent a
+release id for an exact-source snapshot.
 
 ## Recovery group
 
@@ -224,6 +226,15 @@ compares source content and metadata before and after the copy. SQLite uses the
 backup API to include committed WAL data, then normalizes the backup to DELETE
 journal mode. Offline reads therefore do not create unlisted WAL payload.
 Unexpected payload paths are still errors; no suffix-based exclusion hides them.
+
+On Darwin, `upgrade_metadata_darwin.py` captures extended ACL text and every
+xattr, including provenance, through `acl_get_link_np` / `listxattr`. The
+manifest keeps only the sha256 digests. The ACL text and xattr values live in a
+private sidecar used to materialize the copy; logs do not print those values.
+An ACL or xattr that cannot be read or restored is a refusal, not an empty
+digest. Linux still refuses every xattr. A root-owned member is not copied by
+pretending the current user owns it: `upgrade_metadata.materialize` still
+requires a registered helper and refuses when none is supplied.
 
 The backup stores canonical `inventory.json` and `recovery-group.json` beside the
 S1 evidence. The manifest's existing inventory and group digests bind these

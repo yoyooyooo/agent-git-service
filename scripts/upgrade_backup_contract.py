@@ -269,7 +269,7 @@ def validate_seal(manifest_raw, receipt_raw, group):
     require(manifest['schema'] == 'ags.backup-manifest.v1', 'schema_invalid')
     require(canonical(manifest) == manifest_raw, 'manifest_not_canonical')
     identifier(manifest['snapshot_id'])
-    validate_binding(manifest['binding'])
+    validate_binding_version(manifest['binding'])
     fields(manifest['quiescence'], ('nonce', 'stop_evidence_sha256', 'writers_evidence_sha256'))
     identifier(manifest['quiescence']['nonce'])
     for key in ('stop_evidence_sha256', 'writers_evidence_sha256'):
