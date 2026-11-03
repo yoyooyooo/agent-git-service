@@ -64,12 +64,11 @@ class NativeHarnessFailureTests(unittest.TestCase):
 
         with patch.dict(os.environ, {'AGS_ROUTEB_NATIVE': '1'}), \
                 patch.object(harness.subprocess, 'run', side_effect=fail):
-            try:
-                result = harness.exercise()
-            except harness.HarnessError as error:
-                self.assertIn(error.code, ('bootstrap_failed', 'identity_unobserved', 'cleanup_unproven'))
-                return
-            self.fail('all commands failed but harness returned ' + repr(result))
+            result = harness.exercise()
+            self.assertFalse(result['cleaned'])
+            self.assertFalse(result['created'])
+            self.assertFalse(result['observed'])
+            self.assertIn(result['reason'], ('bootstrap_failed', 'identity_unobserved', 'cleanup_unproven'))
 
 
 if __name__ == '__main__':
