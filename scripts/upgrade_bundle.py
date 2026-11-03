@@ -20,6 +20,7 @@ REQUIRED = (
     'upgrade_native_runner.py', 'upgrade_native_parse.py',
     'upgrade_metadata.py', 'upgrade_trash.py', 'upgrade_bundle.py', 'upgrade_wireup.py',
     'upgrade_wireup_safety.py', 'routeb_candidate.py', 'routeb_host_admission.py',
+    'routeb_writer_probe.py', 'routeb_native_harness.py',
     'upgrade_backup_contract.py', 'upgrade_inventory.py', 'upgrade_backup.py',
     'upgrade_restore_verify.py', 'upgrade_recovery.py', 'upgrade_manual_approval.py',
     'upgrade_lifecycle.py', 'upgrade_recovery_cli.py', 'upgrade_forward_recovery.py',

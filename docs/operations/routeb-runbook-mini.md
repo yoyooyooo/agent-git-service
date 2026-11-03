@@ -35,7 +35,10 @@ Historical rehearsal notes named `gui/$(id -u)`, label
 `~/Library/LaunchAgents/com.jackie.agent-git-service.plist`. Those strings
 are inputs a future host package must read back. This document does not
 contain a command that changes launchd. Do not disable, bootout, enable or
-bootstrap the job from this page.
+bootstrap the job from this page. `scripts/routeb_native_harness.py` may
+bootstrap only a `com.jackie.ags-hostpkg-test.<suffix>` label when
+`AGS_ROUTEB_NATIVE=1`. It never uses the production label. A skipped native
+test is not evidence.
 
 ## Transaction
 
