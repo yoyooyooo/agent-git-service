@@ -21,6 +21,8 @@ target.
   `f63aa88e0c82b1e17174cf07f8033552457185b1` (tree
   `8bf2c52ec3f7c7bc04850791b4e507bbc8261ab4`) is not that built identity.
   The copyable command is in [routeb-build.md](routeb-build.md).
+`routeb_candidate.py` binds a relative binary to the manifest parent; a
+cwd-local `gh-server` is not the candidate.
 
 The 2026-11-02 read-only deploy check recorded mini `/readyz` as ready on
 `0013aa744c8c90637ec54562ffc248a1bf7c9a52`, with
