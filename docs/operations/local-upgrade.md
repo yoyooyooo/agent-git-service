@@ -265,7 +265,9 @@ not closure. No sudo shell or wildcard is accepted. No production systemctl is
 called.
 The reviewed writer probe must close every
 other writer; locks do not constrain unmanaged processes or malicious same-UID
-file edits. Writer/lock/unknown failures retain the fence, with no automatic start.
+file edits. An empty list is an observation. `None`, an enumeration failure, or
+a permission error is unknown and leaves `closed` false. Writer/lock/unknown
+failures retain the fence, with no automatic start.
 
 Tq records a nonce plus S2's complete source fingerprint and a data/config
 fingerprint. The latter excludes only the deliberately replaced binary and
