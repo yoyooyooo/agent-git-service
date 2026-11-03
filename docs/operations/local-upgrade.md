@@ -214,6 +214,13 @@ revision `f63aa88e0c82b1e17174cf07f8033552457185b1`. It does not change this
 exit code and does not turn the launchd or systemd adapters into production
 adapters (`native_adapter_unavailable` remains).
 
+Route B host admission is a separate exact-source type in
+`scripts/routeb_host_admission.py`. It does not invent `release_id` or
+`release_tag`, and a Release-shaped package is refused. The shared checks in
+`scripts/upgrade_wireup_safety.py` refuse duplicate keys, a replaced package
+digest and an expired approval. Passing those checks is not a production
+window and does not call a manager.
+
 ## S3 private cold-window protocol
 
 `upgrade_recovery.py` provides a private component harness, not a production
