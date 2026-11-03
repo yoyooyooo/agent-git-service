@@ -174,28 +174,36 @@ class Manager:
                 raise
             absent = False
         self._disabled()
+        descendants_known = True
         if self.enumerate_descendants is not None:
             descendants = self.enumerate_descendants()
             if not isinstance(descendants, list):
                 raise AdapterError('descendants_unobserved')
         else:
-            descendants = self._enumerate()
+            try:
+                descendants = self._enumerate()
+            except AdapterError:
+                descendants, descendants_known = None, False
+        identity_known = True
         if self.read_identity is not None:
             observed = self.read_identity()
             if not isinstance(observed, tuple) or len(observed) != 2:
                 raise AdapterError('identity_unobserved')
             boot_id, start_time = observed
         else:
-            boot_id, start_time = self._identity()
+            try:
+                boot_id, start_time = self._identity()
+            except AdapterError:
+                boot_id, start_time, identity_known = None, None, False
         claimed_boot = self.service.get('boot_id')
         claimed_start = self.service.get('start_time')
         identity_claimed = 'boot_id' in self.service or 'start_time' in self.service
-        identity_matches = (not identity_claimed
-                            or (claimed_boot == boot_id and claimed_start == start_time))
-        empty = absent and not descendants and identity_matches
+        identity_matches = (identity_known and (not identity_claimed
+                            or (claimed_boot == boot_id and claimed_start == start_time)))
+        empty = absent and descendants_known and not descendants and identity_matches
         return {'closed': empty, 'disabled': True, 'process_group_empty': empty,
                 'descendants': descendants, 'boot_id': boot_id, 'start_time': start_time,
-                'identity_matches': identity_matches}
+                'identity_matches': identity_matches, 'identity_known': identity_known}
 
     def start(self, readback=None):
         if readback is not None:
