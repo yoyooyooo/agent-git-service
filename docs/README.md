@@ -59,6 +59,7 @@ accepted direction, or incremental work that has not fully landed yet.
 - [Route B runbook](operations/routeb-runbook.md) - preparation manuals for mini and imile-win; rollback is a full cold restore.
 - [Route B build](operations/routeb-build.md) - exact-source candidate identity; Linux native build is separate.
 - [Route B external dependencies](operations/routeb-external-dependencies.md) - owner contracts; no live backup in this tree.
+- [Route B host package](operations/routeb-host-package.md) - host-mode entry, observation and native-evidence contract; not a deployment approval.
 - [Single-root User Runtime](operations/user-runtime.md) - one installation under `~/.ags`, durable startup inputs, bounded logs and explicit migration.
 - [Automatic Git Maintenance](operations/git-maintenance.md) - primary-owned storage housekeeping, application object protection and explicit history-retirement boundaries.
 - [Official gh and Task Runs](operations/official-gh.md) - origin-based official clients, native run identity and association without command shims.
