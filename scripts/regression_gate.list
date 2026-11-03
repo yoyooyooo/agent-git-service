@@ -21,6 +21,7 @@
 scripts/wiki_regression_gate.sh
 # Includes every test_upgrade_* suite and S6 source integration via isolated sequential runner.
 # Route B host package PR1 candidate identity runs inside scripts/upgrade-regression.sh.
+# Route B host package PR2 backup, restore and old-start tests run inside scripts/upgrade-regression.sh.
 scripts/upgrade-regression.sh
 # S6.10 offline full-group contracts run inside scripts/upgrade-regression.sh.
 # S6.11 handoff v2 contracts run inside scripts/upgrade-regression.sh.
