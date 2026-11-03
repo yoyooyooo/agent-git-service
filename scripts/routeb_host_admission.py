@@ -44,6 +44,10 @@ def admit_raw(raw, approval, verified, *, now):
 
 def admit(package, approval, verified, *, now, raw=None):
     try:
+        if raw is not None:
+            parsed = object_with_unique_keys(raw)
+            require(parsed == package, 'package_raw_mismatch')
+            package = parsed
         fields(package, PACKAGE_FIELDS)
         require(package['schema'] == SCHEMA, 'schema_invalid')
         identifier(package['host']); identifier(package['host_instance'])

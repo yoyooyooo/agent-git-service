@@ -130,6 +130,19 @@ class AdmissionTests(unittest.TestCase):
             self.admission.admit_raw(raw, self.approval, self.verified, now=datetime.now(timezone.utc))
         self.assertEqual(caught.exception.code, 'duplicate_key')
 
+    def test_raw_bytes_must_describe_admitted_package(self):
+        """Approved raw bytes are the only package. A different object is refused."""
+        raw = json.dumps(self.package, sort_keys=True).encode()
+        altered = dict(self.package, host_instance='unapproved-other-host', policy_sha256='f' * 64)
+        with self.assertRaises(self.admission.AdmissionError) as caught:
+            self.admission.admit(altered, self.approval, self.verified,
+                                 now=datetime.now(timezone.utc), raw=raw)
+        self.assertIn(caught.exception.code, ('package_raw_mismatch', 'package_replaced'))
+        admitted = self.admission.admit(self.package, self.approval, self.verified,
+                                        now=datetime.now(timezone.utc), raw=raw)
+        self.assertEqual(admitted.package_sha256, self.package_digest)
+        self.assertEqual(admitted.host, 'mini')
+
 
 if __name__ == '__main__':
     unittest.main()
