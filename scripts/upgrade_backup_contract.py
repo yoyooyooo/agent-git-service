@@ -26,6 +26,9 @@ CAPACITY_FIELDS = ('backup_bytes', 'restore_copy_bytes', 'candidate_scratch_byte
 BINDING_FIELDS = ('host_instance deployment_id transaction_id attempt_id authorization_id old new '
                   'runtime_tree control_revision control_tree release_id release_tag target asset_sha256 '
                   'pin_sha256 tool_sha256 policy_sha256 old_binary_sha256 new_binary_sha256').split()
+EXACT_BINDING_FIELDS = ('artifact_kind host_instance deployment_id transaction_id attempt_id '
+                        'authorization_id old new runtime_tree manifest_sha256 build_review_sha256 '
+                        'ci_evidence_sha256 tool_sha256 policy_sha256 target').split()
 
 
 class ContractError(ValueError):
@@ -124,6 +127,33 @@ def validate_capacity(value):
     required = sum(value[key] for key in CAPACITY_FIELDS if key != 'available_bytes')
     require(required <= value['available_bytes'], 'insufficient_space')
     return required
+
+
+def validate_binding_v2(value):
+    """Exact-source binding. Release fields are not accepted and not invented."""
+    fields(value, EXACT_BINDING_FIELDS)
+    require(value['artifact_kind'] == 'exact-source', 'kind_invalid')
+    for key in ('host_instance', 'deployment_id', 'transaction_id', 'attempt_id', 'authorization_id'):
+        identifier(value[key])
+    for key in ('old', 'new', 'runtime_tree'):
+        require(type(value[key]) is str and OID.fullmatch(value[key]) is not None
+                and value[key] != '0' * 40, 'revision_invalid')
+    for key in ('manifest_sha256', 'build_review_sha256', 'ci_evidence_sha256', 'tool_sha256', 'policy_sha256'):
+        digest(value[key])
+    choice(value['target'], ('darwin_arm64', 'linux_amd64'))
+    return value
+
+
+def validate_binding_version(value):
+    """Dispatch only on an explicit kind. A mixed or unlabeled binding is refused."""
+    require(type(value) is dict, 'fields_invalid')
+    kind = value.get('artifact_kind')
+    if kind == 'exact-source':
+        return validate_binding_v2(value)
+    if kind is None and 'release_id' in value:
+        validate_binding(value)
+        return value
+    raise ContractError('kind_invalid')
 
 
 def validate_binding(value):
