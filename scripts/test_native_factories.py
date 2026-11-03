@@ -28,7 +28,11 @@ class NativeFactoryTests(unittest.TestCase):
 
         def runner(argv):
             calls.append(list(argv))
-            return {'exit': 0, 'stdout': 'pid = 1\nboot = boot-1\n'}
+            if argv[1] == 'print-disabled':
+                return {'exit': 0, 'stdout': '"com.example.once" => disabled\n', 'stderr': ''}
+            if argv[1] == 'print':
+                return {'exit': 0, 'stdout': '', 'stderr': 'Could not find service'}
+            return {'exit': 0, 'stdout': 'pid = 1\nboot = boot-1\n', 'stderr': ''}
 
         launchd_cap = launchd.create(self.root, {
             'native_profile': {'domain': 'gui/501', 'label': 'com.example.once',
