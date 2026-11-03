@@ -20,8 +20,8 @@ from upgrade import Failure, directory_fd, private_json
 from upgrade_backup_contract import (ContractError, MAX_ENTRIES, canonical, digest, fields, fingerprint,
                                      identifier, require, text, timestamp, validate_binding,
                                      validate_group, validate_restore_report)
-from upgrade_backup import (create_sealed_backup, durable_bytes, group_object, source_fingerprint,
-                            supported_metadata, verify_payload)
+from upgrade_backup import (create_sealed_backup, durable_bytes, group_object, metadata_fields,
+                            source_fingerprint, supported_metadata, verify_payload)
 from upgrade_inventory import database_inventory, file_digest, safe_path, scan_tree, sqlite_path
 from upgrade_restore_verify import load_sealed, load_inventory, verify_sealed_backup
 
@@ -170,13 +170,13 @@ def stable_data(group, dsn, schema):
         path = safe_path(item['source'], item['kind'])
         if item['role'] == 'sqlite':
             summaries[key] = {'logical_sha256': logical['logical_sha256'],
-                              'metadata': supported_metadata(path)}
+                              'metadata': metadata_fields(supported_metadata(path))}
         elif path.is_dir():
             summaries[key] = {'tree': scan_tree(path, MAX_ENTRIES), 'metadata': [
-                (str(p.relative_to(path)), supported_metadata(p))
+                (str(p.relative_to(path)), metadata_fields(supported_metadata(p)))
                 for p in [path, *sorted(path.rglob('*'))]]}
         else:
-            summaries[key] = {'sha256': file_digest(path), 'metadata': supported_metadata(path)}
+            summaries[key] = {'sha256': file_digest(path), 'metadata': metadata_fields(supported_metadata(path))}
     return fingerprint(summaries)
 
 

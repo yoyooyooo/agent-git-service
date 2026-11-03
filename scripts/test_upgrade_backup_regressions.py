@@ -44,7 +44,7 @@ class BackupRegressionTests(unittest.TestCase):
             path = root / item['path']
             if not path.exists():
                 continue
-            item.update(backup.supported_metadata(path))
+            item.update(backup.metadata_fields(backup.supported_metadata(path)))
             if path.is_file():
                 item.update(size=path.stat().st_size, sha256=inv.file_digest(path))
             entries.append(item)
@@ -290,25 +290,20 @@ class BackupRegressionTests(unittest.TestCase):
         restored = calls[0] / 'old_binary'
         self.assertEqual(restored.stat().st_mode & 0o777, 0o700)
         entry = next(v for v in sealed['manifest']['entries'] if v['path'] == 'old_binary')
-        self.assertEqual(backup.supported_metadata(restored), {k: entry[k] for k in
+        self.assertEqual(backup.metadata_fields(backup.supported_metadata(restored)), {k: entry[k] for k in
                          ('mode', 'uid', 'gid', 'mtime_ns', 'acl_sha256', 'xattrs_sha256')})
 
     def test_b7_required_xattr_and_acl_refused(self):
         self.t.repo(); group = self.t.prepared_group(); path = self.t.root / 'old_binary'
         if sys.platform == 'darwin':
             subprocess.run(['/usr/bin/xattr', '-w', 'com.example.ags-review', 'synthetic', str(path)], check=True)
+            subprocess.run(['/bin/chmod', '+a', 'group:staff allow read', str(path)], check=True)
+            sealed = self.t.take(group)
+            entry = next(item for item in sealed['manifest']['entries'] if item['path'] == 'old_binary')
+            self.assertNotEqual(entry['acl_sha256'], backup.NONE_ACL)
+            self.assertNotEqual(entry['xattrs_sha256'], backup.NONE_XATTR)
         else:
             os.setxattr(path, 'user.ags-review', b'synthetic')
-        with self.assertRaisesRegex(c.ContractError, 'xattr_unsupported'):
-            self.t.take(group)
-        if sys.platform == 'darwin':
-            subprocess.run(['/usr/bin/xattr', '-d', 'com.example.ags-review', str(path)], check=True)
-            subprocess.run(['/bin/chmod', '+a', 'everyone deny delete', str(path)], check=True)
-            with self.assertRaisesRegex(c.ContractError, 'acl_unsupported'):
-                self.t.take(group)
-        else:
-            os.removexattr(path, 'user.ags-review')
-            os.setxattr(path, 'user.required-acl', b'unsupported')
             with self.assertRaisesRegex(c.ContractError, 'xattr_unsupported'):
                 self.t.take(group)
 
