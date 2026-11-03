@@ -48,6 +48,28 @@ class NativeLaunchdTests(unittest.TestCase):
         self.assertNotEqual(result['label'], 'com.jackie.agent-git-service')
         self.assertEqual(result['cleaned'], True)
         self.assertEqual(result['production_label_touched'], False)
+        self.assertEqual(result['created'], True)
+        self.assertEqual(result['observed'], True)
+
+
+class NativeHarnessFailureTests(unittest.TestCase):
+    def test_native_harness_fails_when_every_command_fails(self):
+        """A permission or missing-job failure is not a successful cleanup."""
+        import subprocess
+        from unittest.mock import patch
+        import routeb_native_harness as harness
+
+        def fail(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 113, '', 'synthetic failure')
+
+        with patch.dict(os.environ, {'AGS_ROUTEB_NATIVE': '1'}), \
+                patch.object(harness.subprocess, 'run', side_effect=fail):
+            try:
+                result = harness.exercise()
+            except harness.HarnessError as error:
+                self.assertIn(error.code, ('bootstrap_failed', 'identity_unobserved', 'cleanup_unproven'))
+                return
+            self.fail('all commands failed but harness returned ' + repr(result))
 
 
 if __name__ == '__main__':
