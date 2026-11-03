@@ -249,6 +249,10 @@ does not clear the cold marker or authorize a manager restart; missing/consumed
 handoff continues to refuse spawn. Restoring normal restarts and starting old
 AGS after pre-start recovery remain separately scoped. Source and synthetic
 manager tests are not a native launchd/systemd acceptance or deployment approval.
+The disposable harness is evidence only when bootstrap created the job, print
+showed that label and plist, and bootout plus a later exit 113 absence proved
+cleanup. A failed command is not a successful native run. The skipped default
+is not a pass.
 
 ### S6b source-only lifecycle limit
 
