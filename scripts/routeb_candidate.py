@@ -90,6 +90,8 @@ def load_candidate(manifest_path, expected_review):
         text(value['toolchain_requested']); text(value['host_go_version']); text(value['cgo_requested'])
         require(value['version']['goos'] in ('darwin', 'linux')
                 and value['version']['goarch'] in ('arm64', 'amd64'), 'version_invalid')
+        require(value['platform'] == value['version']['goos'] + '/' + value['version']['goarch'],
+                'platform_mismatch')
         require(type(value['go_build_settings']) is dict and not value['go_build_settings'],
                 'build_settings_unreviewed')
         require(value['not_a_release'] is True and value['not_installed'] is True

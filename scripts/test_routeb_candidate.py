@@ -106,6 +106,16 @@ class CandidateTests(unittest.TestCase):
             self.candidate.load_candidate(self.root / 'manifest.json', {'revision': OID, 'tree': TREE})
         self.assertEqual(caught.exception.code, 'duplicate_key')
 
+    def test_candidate_platform_must_match_embedded_identity(self):
+        """manifest.platform must equal version.goos/goarch. Enum membership is not enough."""
+        path, _ = write_pair(self.root, platform='linux/amd64')
+        raw = json.loads(path.read_text())
+        self.assertEqual(raw['version']['goos'], 'darwin')
+        self.assertEqual(raw['version']['goarch'], 'arm64')
+        with self.assertRaises(self.candidate.CandidateError) as caught:
+            self.candidate.load_candidate(path, {'revision': OID, 'tree': TREE})
+        self.assertEqual(caught.exception.code, 'platform_mismatch')
+
     def test_version_mismatch_and_expected_review_are_refused(self):
         path, _ = write_pair(self.root)
         with self.assertRaises(self.candidate.CandidateError) as caught:
