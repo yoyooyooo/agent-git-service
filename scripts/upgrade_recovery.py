@@ -446,15 +446,55 @@ class ColdWindow:
 _SPAWNED = set()
 
 
-def launcher_spawn_authorized(authority, runner, *, epoch):
+def _dict_authority_root(authority, epoch):
+    """Private journal for a dict authority. Shared by later processes in the same HOME.
+
+    This is not ~/.ags. A world-writable ancestor makes the durable primitive refuse,
+    and the caller keeps the in-memory fence.
+    """
+    if not isinstance(authority, dict) or authority.get('state') != 'active':
+        return None
+    binding = authority.get('binding_sha256')
+    if not isinstance(binding, str) or len(binding) != 64:
+        return None
+    base = Path.home() / '.local/state/ags-routeb-oneshot' / (binding + '-' + str(epoch))
+    try:
+        base.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(base, 0o700)
+        for parent in (base, base.parent, base.parent.parent):
+            os.chmod(parent, 0o700)
+        import upgrade_lifecycle
+        loaded = upgrade_state_module().load_verified(base)
+        if not (loaded.get('projection') or {}).get('authority'):
+            upgrade_lifecycle.activate_durable(
+                base,
+                {'completion_sha256': binding, 's4_approval_id': 'routeb-oneshot',
+                 'epoch': epoch, 'host_instance': 'routeb-oneshot'},
+                {'purpose': 'lifecycle-activate', 'decision': 'approve',
+                 'approval_id': 'routeb-oneshot-' + str(epoch), 'completion_sha256': binding,
+                 'host_instance': 'routeb-oneshot'})
+    except Exception:
+        return None
+    return base
+
+
+def upgrade_state_module():
+    import upgrade_state
+    return upgrade_state
+
+
+def launcher_spawn_authorized(authority, runner, *, epoch, root=None):
     """Spawn at most once for an active authority. A lost response is not retried.
 
     A deployment root is the durable path: intent is fsynced before the runner,
     and a later process reads that consumption. A dict is the in-memory contract
     used by unit tests; it cannot cross a process boundary.
     """
-    if isinstance(authority, (str, Path)):
-        return launcher_spawn(authority, runner=runner, epoch=epoch)
+    if root is not None or isinstance(authority, (str, Path)):
+        return launcher_spawn(root if root is not None else authority, runner=runner, epoch=epoch)
+    durable = _dict_authority_root(authority, epoch)
+    if durable is not None:
+        return launcher_spawn(durable, runner=runner, epoch=epoch)
     key = (authority.get('binding_sha256') if isinstance(authority, dict) else None, epoch)
     if not isinstance(authority, dict) or authority.get('state') != 'active' or authority.get('epoch') != epoch:
         raise Failure('restart_fenced')

@@ -25,7 +25,7 @@ class OneShotTests(unittest.TestCase):
 
     def test_active_authority_spawns_once(self):
         runner = Mock(return_value={'pid': 9, 'boot_id': 'boot', 'generation': 'g'})
-        authority = {'state': 'active', 'epoch': 2, 'binding_sha256': 'a' * 64}
+        authority = {'state': 'active', 'epoch': 2, 'binding_sha256': 'c' * 64}
         first = recovery.launcher_spawn_authorized(authority, runner, epoch=2)
         self.assertEqual(first['status'], 'spawned')
         self.assertEqual(runner.call_count, 1)
@@ -36,7 +36,7 @@ class OneShotTests(unittest.TestCase):
 
     def test_lost_start_is_not_retried(self):
         runner = Mock(side_effect=OSError('lost'))
-        authority = {'state': 'active', 'epoch': 3, 'binding_sha256': 'b' * 64}
+        authority = {'state': 'active', 'epoch': 3, 'binding_sha256': 'd' * 64}
         with self.assertRaises(recovery.Failure):
             recovery.launcher_spawn_authorized(authority, runner, epoch=3)
         with self.assertRaises(recovery.Failure) as caught:

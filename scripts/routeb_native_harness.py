@@ -17,9 +17,11 @@ PREFIX = 'com.jackie.ags-hostpkg-test.'
 
 
 class HarnessError(RuntimeError):
-    def __init__(self, code):
-        super().__init__(code)
+    def __init__(self, code, result=None):
         self.code = code
+        self.result = result or {'cleaned': False, 'created': False, 'observed': False,
+                                 'production_label_touched': False, 'reason': code}
+        super().__init__(self.result)
 
 
 def _run(argv):
@@ -62,11 +64,10 @@ def exercise():
     listed = subprocess.run(['/bin/launchctl', 'print', target], check=False,
                             capture_output=True, text=True, timeout=10)
     gone = listed.returncode == 113 and 'Could not find service' in (listed.stderr or '')
-    if not created:
-        raise HarnessError('bootstrap_failed')
-    if not observed:
-        raise HarnessError('identity_unobserved')
-    if bootout.returncode != 0 or not gone:
-        raise HarnessError('cleanup_unproven')
-    return {'label': label, 'cleaned': True, 'created': created, 'observed': observed,
-            'production_label_touched': label == PRODUCTION_LABEL}
+    result = {'label': label, 'cleaned': False, 'created': created, 'observed': observed,
+              'production_label_touched': label == PRODUCTION_LABEL,
+              'reason': 'bootstrap_failed' if not created else
+              'identity_unobserved' if not observed else 'cleanup_unproven'}
+    if created and observed and bootout.returncode == 0 and gone:
+        return {**result, 'cleaned': True, 'reason': 'observed'}
+    return result

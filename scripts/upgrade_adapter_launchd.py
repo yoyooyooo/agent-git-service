@@ -152,8 +152,6 @@ class Manager:
         text = printed.get('stdout', '') + printed.get('stderr', '')
         if not text.strip():
             raise AdapterError('job_absence_unproven')
-        if 'pid =' in text or 'state = running' in text or 'state = spawn' in text:
-            raise AdapterError('stop_not_closed')
         raise AdapterError('stop_not_closed')
 
     def suppress_restart(self, readback=None):
@@ -169,7 +167,12 @@ class Manager:
             raise AdapterError('external_facts_rejected')
         domain = self.service['domain'] + '/' + self.service['label']
         self._complete(self._run(['launchctl', 'bootout', domain]))
-        absent = self._job_absent()
+        try:
+            absent = self._job_absent()
+        except AdapterError as error:
+            if error.code == 'job_absence_unproven':
+                raise
+            absent = False
         self._disabled()
         if self.enumerate_descendants is not None:
             descendants = self.enumerate_descendants()
@@ -212,9 +215,11 @@ class Manager:
                 raise AdapterError(error.code) from None
             self.consumed = True
             return {'started': True, 'readback': observed}
-        if self.consumed:
-            raise AdapterError('oneshot_consumed')
-        result = self._bootstrap()
+        try:
+            result = self._bootstrap()
+        except Exception:
+            self.consumed = True
+            raise
         self.consumed = True
         return {'started': True, 'readback': result}
 
