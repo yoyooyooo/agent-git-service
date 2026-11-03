@@ -106,6 +106,10 @@ deleted to make room.
 Do not assemble a production install from separate manager commands.
 `launchctl` and `systemctl` forms in older rehearsal notes are not a
 runbook step. The single entry is `scripts/ags-maintenance-transaction`.
+`--mode host` is the production coordinator and is not the default. A host
+plan without a private package writes nothing and reports `package_missing`.
+The default command remains the isolated rehearsal and still refuses a real
+`~/.ags`. Host mode does not accept `--manager-dir` or `--fault-after`.
 
 Its required order, once a future window is approved, is: manager
 suppression, normal drain, cold backup, independent restore verification,
