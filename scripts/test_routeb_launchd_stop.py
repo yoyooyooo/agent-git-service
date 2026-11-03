@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 import upgrade_adapter_launchd as adapter
 
@@ -148,6 +149,22 @@ class StopEvidenceTests(unittest.TestCase):
         self.assertNotEqual(evidence.get('boot_id'), 'stale-boot')
         self.assertNotEqual(evidence.get('start_time'), -1)
         self.assertTrue(any(item[1] in ('print', 'bootout') for item in calls))
+
+    def test_unreadable_identity_does_not_close(self):
+        """A Linux runner without sysctl must not crash or invent closure."""
+
+        def runner(argv):
+            if argv[1] == 'print-disabled':
+                return {'exit': 0, 'stdout': '"com.example.synthetic" => disabled\n', 'stderr': ''}
+            if argv[1] == 'print':
+                return {'exit': 113, 'stdout': '', 'stderr': 'Could not find service'}
+            return {'exit': 0, 'stdout': '', 'stderr': ''}
+
+        with patch.object(adapter.subprocess, 'run', side_effect=OSError('no sysctl')):
+            evidence = adapter.Manager(service(), runner=runner, observe=runner).stop()
+        self.assertFalse(evidence['closed'])
+        self.assertFalse(evidence['identity_known'])
+        self.assertIsNone(evidence['boot_id'])
 
 
 if __name__ == '__main__':
