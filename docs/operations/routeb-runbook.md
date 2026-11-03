@@ -122,7 +122,11 @@ Failure keeps the service stopped and fenced. Before `start_attempted`, and
 only when Tq is unchanged, a newly approved pre-start restore of the old
 binary and receipt is possible. After `start_attempted`, or after the
 migration has run, recovery is the whole group or a forward repair.
-Unknown manager or provider outcome stops.
+Unknown manager or provider outcome stops. An isolated admitted chain
+in `scripts/routeb_host_transaction.py` seals a backup, runs independent
+restore verification, and starts once. An unknown start is not replayed.
+Stop and start each re-read the approval; an expired approval stops before
+the manager call.
 
 ## 6. Acceptance that this page does not perform
 
