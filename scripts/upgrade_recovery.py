@@ -443,6 +443,26 @@ class ColdWindow:
         self.manager.start()
 
 
+_SPAWNED = set()
+
+
+def launcher_spawn_authorized(authority, runner, *, epoch):
+    """Spawn at most once for an active authority. A lost response is not retried."""
+    key = (authority.get('binding_sha256') if isinstance(authority, dict) else None, epoch)
+    if not isinstance(authority, dict) or authority.get('state') != 'active' or authority.get('epoch') != epoch:
+        raise Failure('restart_fenced')
+    if key in _SPAWNED:
+        raise Failure('oneshot_consumed')
+    _SPAWNED.add(key)
+    try:
+        observed = runner(['spawn', str(epoch)])
+    except Exception:
+        raise Failure('start_observation_unknown') from None
+    if not isinstance(observed, dict) or observed.get('pid') is None or not observed.get('boot_id'):
+        raise Failure('start_observation_unknown')
+    return {'status': 'spawned', 'observed': observed, 'epoch': epoch}
+
+
 def launcher_spawn(root, *, runner, epoch):
     """Read durable authority before any runner. Suspended or missing authority is fenced.
 

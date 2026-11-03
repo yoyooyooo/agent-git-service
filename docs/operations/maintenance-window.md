@@ -6,6 +6,8 @@ executor directory is required and its three executable Python inputs are
 SHA-256 pinned before import. The repository does not distribute host bindings,
 private configuration, binaries, deployment receipts or credentials. Source CI
 and a merged PR never authorize a deployment. The
+Route B one-shot start (`launcher_spawn_authorized`) refuses a suspended authority and does not retry a start whose response was lost. It is not the maintenance-window executor.
+
 [Route B preparation runbook](routeb-runbook.md) describes the 0013aa74 to
 f63aa88e candidate only and does not admit this executor.
 
