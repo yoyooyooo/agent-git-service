@@ -11,6 +11,7 @@ entries=(
   'scripts/test_routeb_metadata_darwin.py' 'scripts/test_routeb_restore_verify.py' 'scripts/test_routeb_storage.py'
   'scripts/test_routeb_full_restore.py' 'scripts/test_routeb_restore_switch.py' 'scripts/test_routeb_old_start.py'
   'scripts/test_routeb_host_transaction.py HostModeTests' 'scripts/test_routeb_observation.py'
+  'scripts/test_routeb_bundle_closure.py'
   'scripts/test_upgrade_host_evidence.py' 'scripts/test_upgrade_bootstrap.py'
   'scripts/test_upgrade_adapter_launchd.py' 'scripts/test_upgrade_adapter_systemd.py'
   'scripts/test_upgrade_metadata.py' 'scripts/test_upgrade_bundle.py'

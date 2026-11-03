@@ -1,5 +1,11 @@
 # Upgrade bundle provisioning
 
+Route B host mode adds `routeb_host_transaction.py` and `routeb_observation.py`
+to the closed bundle member list. `scripts/routeb_provision.py` is a read-only
+plan: a missing native evidence file, a skipped native run, a wrong owner, or
+an unreviewed interpreter closes the plan. A closed plan is not a pass and
+does not install.
+
 `scripts/upgrade_bundle.py` builds a closed staging bundle. It copies only the
 reviewed member list, writes a manifest that does not include its own digest,
 and verifies that staging directory read-only. Verification success sets
