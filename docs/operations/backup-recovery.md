@@ -493,7 +493,7 @@ inventory/dependencies, and a published successful S2 restore report. A missing
 tool, secret dependency or member refuses the entire plan. Audit claims,
 authorizations, journals and runtime authority are not restore-group members.
 The result has `effects=[]`, `started=false`, `live_switch_supported=false`.
-`scripts/routeb_full_restore.py` applies a synthetic full-group restore from a sealed payload. It reuses the offline plan, switches data members, and leaves tool/launcher/manager/policy to a separate provisioner. Audit files are refused. A wrong snapshot refuses before any switch. This is not a production window and does not start a service.
+`scripts/routeb_full_restore.py` applies a synthetic full-group restore from a sealed payload. It reuses the offline plan, switches data members, and leaves tool/launcher/manager/policy to a separate provisioner. Audit files are refused. A wrong snapshot refuses before any switch. This is not a production window and does not start a service. Each data switch records an effect id distinct from the transaction id, fsyncs the parent directory after rename, and refuses a target outside the reviewed group or a path that is the running supervisor.
 
 Before any separately approved implementation can switch live data, preserve
 the failed group including WAL/SHM, close every writer, materialize independent
