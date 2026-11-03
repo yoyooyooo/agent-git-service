@@ -10,6 +10,13 @@ still return `backup_contract_unimplemented` / 83. Direct v2 install always retu
 No source acceptance provisions, publishes or upgrades a host. See
 [local upgrade](local-upgrade.md#s5-two-layer-admission) for the exact package/adapter contract.
 
+Route B exact-source bindings use `validate_binding_v2` and an explicit
+`artifact_kind=exact-source`. They require manifest, build-review and CI
+evidence digests and do not carry `release_id`. `validate_binding` remains the
+Release v1 consumer and refuses an exact-source identity. Seal and restore
+report producers still emit v1 until a later host-package slice; this slice
+only adds the dispatch and does not seal a production backup.
+
 ## Recovery group
 
 `scripts/upgrade_backup_contract.py` owns the closed JSON contracts;
