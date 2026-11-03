@@ -86,6 +86,8 @@ python3 ~/.ags/bin/ags-runtime.py --root ~/.ags serve
 
 ## Cold-window startup fence
 
+The launchd adapter no longer treats `launchctl` exit 0 as closure. Stop evidence requires a disabled readback and an absent job with no live pid. Truncated manager output is a refusal. This is not a production activation.
+
 The S3 [local upgrade component](local-upgrade.md#s3-private-cold-window-protocol)
 adds `state/upgrade-cold.json`, independently of `installing.json`. Before spawn,
 the launcher refuses pending upgrades with missing marker/claim/journal, unknown

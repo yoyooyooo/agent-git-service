@@ -34,10 +34,24 @@ def allow(argv, service):
 
 
 class Manager:
-    def __init__(self, service, runner=None):
+    def __init__(self, service, runner=None, observe=None):
         self.service = service
         self.runner = runner
+        self.observe = observe or runner
         self.consumed = False
+
+    def _complete(self, result):
+        if not isinstance(result, dict) or result.get('exit') != 0:
+            raise AdapterError('command_not_observed')
+        if result.get('truncated') is True:
+            raise AdapterError('output_truncated')
+        stdout = result.get('stdout', '')
+        stderr = result.get('stderr', '')
+        if not isinstance(stdout, str) or not isinstance(stderr, str):
+            raise AdapterError('output_truncated')
+        if len(stdout) >= 4096 or len(stderr) >= 4096:
+            raise AdapterError('output_truncated')
+        return result
 
     def _run(self, argv):
         if not callable(self.runner):
@@ -45,24 +59,43 @@ class Manager:
         allow(argv, self.service)
         return self.runner(argv)
 
+    def _disabled(self):
+        domain = self.service['domain']
+        readback = self._complete(self._run(['launchctl', 'print-disabled', domain]))
+        label = self.service['label']
+        disabled = f'"{label}" => disabled' in readback.get('stdout', '')
+        enabled = f'"{label}" => enabled' in readback.get('stdout', '')
+        if not disabled or enabled:
+            raise AdapterError('disabled_not_observed')
+        return True
+
+    def _job_absent(self):
+        domain = self.service['domain'] + '/' + self.service['label']
+        printed = self._complete(self.observe(['launchctl', 'print', domain]))
+        text = printed.get('stdout', '') + printed.get('stderr', '')
+        if 'pid =' in text or 'state = running' in text:
+            raise AdapterError('stop_not_closed')
+        if 'Could not find service' not in text and text.strip():
+            raise AdapterError('stop_not_closed')
+        return True
+
     def suppress_restart(self, readback=None):
         if readback is not None:
             raise AdapterError('external_facts_rejected')
         domain = self.service['domain'] + '/' + self.service['label']
-        self._run(['launchctl', 'disable', domain])
-        readback = self._run(['launchctl', 'print-disabled', self.service['domain']])
-        if not isinstance(readback, dict) or readback.get('exit') != 0:
-            raise AdapterError('disable_not_read_back')
-        return {'disabled': True, 'readback': readback}
+        self._complete(self._run(['launchctl', 'disable', domain]))
+        self._disabled()
+        return {'disabled': True, 'boot_id': self.service.get('boot_id')}
 
     def stop(self, facts=None):
         if facts is not None:
             raise AdapterError('external_facts_rejected')
         domain = self.service['domain'] + '/' + self.service['label']
-        result = self._run(['launchctl', 'bootout', domain])
-        if not isinstance(result, dict) or result.get('exit') != 0:
-            raise AdapterError('stop_not_observed')
-        return {'closed': True, 'readback': result}
+        self._complete(self._run(['launchctl', 'bootout', domain]))
+        self._job_absent()
+        self._disabled()
+        return {'closed': True, 'disabled': True, 'process_group_empty': True,
+                'boot_id': self.service.get('boot_id'), 'start_time': self.service.get('start_time')}
 
     def start(self, readback=None):
         if readback is not None:
