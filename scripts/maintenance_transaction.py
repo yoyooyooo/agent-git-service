@@ -130,6 +130,13 @@ def refuse_effect_path(root: Path, path: Path, code: str) -> Path:
 
 
 def parse(argv: list[str]) -> argparse.Namespace:
+    if argv and argv[0] == "--mode":
+        if len(argv) < 2 or argv[1] != "host":
+            raise Failure("mode_rejected", 78)
+        if "--manager-dir" in argv or "--fault-after" in argv:
+            raise Failure("manager_dir_refused" if "--manager-dir" in argv else "fault_hook_refused", 78)
+        import routeb_host_transaction
+        return routeb_host_transaction.parse(argv[2:])
     parser = argparse.ArgumentParser(prog="ags-maintenance-transaction")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -420,10 +427,16 @@ def status(args: argparse.Namespace) -> int:
 def main(argv: list[str]) -> int:
     try:
         args = parse(argv)
+    except Failure as error:
+        print(f"code={error.code}", file=sys.stderr)
+        return error.exit_code
     except SystemExit as error:
         code = error.code
         return code if isinstance(code, int) else 2
     try:
+        if getattr(args, "mode", None) == "host":
+            import routeb_host_transaction
+            return routeb_host_transaction.dispatch(args)
         refuse_root(Path(args.root))
         if args.command == "plan":
             return plan(args)
