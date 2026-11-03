@@ -18,6 +18,7 @@ Related contracts, which stay fail-closed:
 - [backup and recovery](backup-recovery.md)
 - [maintenance window](maintenance-window.md)
 - [external dependencies](routeb-external-dependencies.md)
+- [host package](routeb-host-package.md)
 - [build inputs](routeb-build.md)
 
 `c980bb6385504c7a3e87d4b1e42f50909ee75d0e` is a historical rehearsal revision.
