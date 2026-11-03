@@ -40,9 +40,10 @@ def plan_restore(request):
     return planned
 
 
-def apply_restore(request, *, supervisor_path=None):
+def apply_restore(request, *, supervisor_path=None, journal=None):
     """Replace every planned member from the sealed payload. No service start."""
     planned = plan_restore(request)
+    journal = [] if journal is None else journal
     if supervisor_path is not None:
         require(Path(supervisor_path).resolve() not in
                 {Path(item['target']).resolve() for item in planned['members']},
@@ -56,6 +57,9 @@ def apply_restore(request, *, supervisor_path=None):
         target = Path(member['target'])
         require_snapshot_target(target)
         require(source.exists(), 'payload_missing')
+        effect_id = planned['snapshot_id'] + ':' + member['id']
+        require(effect_id != request.get('transaction_id'), 'effect_identity_invalid')
+        journal.append({'effect_id': effect_id, 'member': member['id'], 'status': 'intent'})
         staging = target.with_name('.' + target.name + '.routeb-restore')
         if staging.exists():
             raise ContractError('restore_target_invalid')
@@ -79,8 +83,9 @@ def apply_restore(request, *, supervisor_path=None):
             require(not incident.exists(), 'incident_material_exists')
             os.replace(target, incident)
             _fsync_dir(target.parent)
-        os.replace(staging, target)
+            os.replace(staging, target)
         _fsync_dir(target.parent)
+        journal.append({'effect_id': effect_id, 'member': member['id'], 'status': 'observed'})
         switched.append(member['id'])
     require(switched, 'coverage_incomplete')
     return {'applied': True, 'started': False, 'members': planned['members'],
