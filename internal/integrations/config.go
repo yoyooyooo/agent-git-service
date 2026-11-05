@@ -116,9 +116,9 @@ type ForgejoConfig struct {
 	ActionsLogBridgeURL       string                              `yaml:"actions_log_bridge_url"`
 	ActionsLogBridgeTokenFile string                              `yaml:"actions_log_bridge_token_file"`
 	ActionsLogBridgeToken     string                              `yaml:"-"`
-	// WebBaseURL is the optional browser-reachable web origin used only by
-	// read-only browser redirects. Empty disables those redirects; it never
-	// falls back to base_url.
+	// WebBaseURL is the optional browser-reachable web origin for read-only
+	// redirects and CI run selectors on the same configured Forgejo instance.
+	// Empty disables those redirects; it never falls back to base_url.
 	WebBaseURL string `yaml:"web_base_url"`
 }
 
@@ -581,6 +581,19 @@ func LoadFile(path string) (Config, error) {
 		decoder.KnownFields(true)
 		if err := decoder.Decode(&cfg.CI); err != nil {
 			return Config{}, fmt.Errorf("CI configuration has unknown or invalid fields")
+		}
+	}
+	// Reuse an explicitly configured browser origin only for the same Forgejo
+	// instance. An independent CI backend can select its own web_url. Neither
+	// browser URL changes the API origin or the namespace of existing CI IDs.
+	if cfg.Forgejo.Enabled && strings.TrimSpace(cfg.Forgejo.WebBaseURL) != "" {
+		origin := strings.TrimRight(strings.TrimSpace(cfg.Forgejo.BaseURL), "/")
+		for name, backend := range cfg.CI.Backends {
+			if backend.Kind == "forgejo" && backend.WebURL == "" && origin != "" &&
+				strings.TrimRight(strings.TrimSpace(backend.URL), "/") == origin {
+				backend.WebURL = strings.TrimSpace(cfg.Forgejo.WebBaseURL)
+				cfg.CI.Backends[name] = backend
+			}
 		}
 	}
 	if err := cibackend.Validate(cfg.CI); err != nil {
