@@ -419,6 +419,17 @@ func (f *Forgejo) boundJobLogs(ctx context.Context, repo string, run Run, job Jo
 }
 
 func (f *Forgejo) boundJobResource(ctx context.Context, repo string, run Run, job Job, steps bool) ([]byte, error) {
+	observation, err := f.boundJobObservation(ctx, repo, run, job, steps)
+	if err != nil {
+		return nil, err
+	}
+	if steps {
+		return json.Marshal(observation.Steps)
+	}
+	return []byte(observation.Text), nil
+}
+
+func (f *Forgejo) boundJobObservation(ctx context.Context, repo string, run Run, job Job, steps bool) (*forgejoJobObservation, error) {
 	if f.config.LogBridge == nil {
 		return nil, fmt.Errorf("%w: Forgejo log bridge is not configured", ErrUnsupported)
 	}
@@ -484,19 +495,7 @@ func (f *Forgejo) boundJobResource(ctx context.Context, repo string, run Run, jo
 	if e != nil {
 		return nil, e
 	}
-	var log struct {
-		Schema      string `json:"schema"`
-		Repo        string `json:"repo"`
-		TaskID      int64  `json:"task_id"`
-		RunNumber   int64  `json:"run_number"`
-		JobName     string `json:"job_name"`
-		Head        string `json:"head_sha"`
-		ProviderPR  int    `json:"provider_pr"`
-		ProviderRef string `json:"provider_ref"`
-		Event       string `json:"event"`
-		Text        string `json:"text"`
-		Steps       []Step `json:"steps"`
-	}
+	var log forgejoJobObservation
 	if e = decode(body, &log); e != nil {
 		return nil, e
 	}
@@ -518,9 +517,8 @@ func (f *Forgejo) boundJobResource(ctx context.Context, repo string, run Run, jo
 		if log.Steps == nil {
 			return nil, ErrInvalid
 		}
-		return json.Marshal(log.Steps)
 	}
-	return []byte(log.Text), nil
+	return &log, nil
 }
 func (f *Forgejo) RunLogs(ctx context.Context, repo, id string) ([]byte, error) {
 	if f.config.LogBridge == nil {
@@ -537,33 +535,49 @@ func (f *Forgejo) RunLogs(ctx context.Context, repo, id string) ([]byte, error) 
 	var b bytes.Buffer
 	writer := zip.NewWriter(&b)
 	total := 0
+	entryCount := 0
+	names := make(map[string]int, len(jobs.Items))
+	for _, job := range jobs.Items {
+		names[ghLogJobName(job.Name)]++
+	}
 	for index, j := range jobs.Items {
-		body, e := f.boundJobLogs(ctx, repo, run, j)
+		name := ghLogJobName(j.Name)
+		if names[name] != 1 || !safeGHLogJobName(name) {
+			// gh matches ZIP paths by display name. Ambiguous/unsafe names must
+			// use its existing job-ID log fallback, never another job's file.
+			continue
+		}
+		observation, e := f.boundJobObservation(ctx, repo, run, j, false)
+		var body []byte
+		var entries []forgejoLogEntry
 		if e != nil {
 			return nil, e
+		}
+		body = []byte(observation.Text)
+		if name != "" && name != "." && name != ".." {
+			entries = forgejoStepLogEntries(j, name, body, observation.StepLogs)
 		}
 		total += len(body)
 		if total > MaxBody {
 			return nil, ErrUnavailable
 		}
-		// A whole-job segment is honest about missing step metadata. gh may present
-		// UNKNOWN STEP; it must never fabricate successful steps or drop the log.
-		name := strings.Map(func(r rune) rune {
-			if r == '/' || r == ':' {
-				return -1
-			}
-			if r == '\\' || r < 32 {
-				return '_'
-			}
-			return r
-		}, j.Name)
-		// Official gh recognizes whole-job logs as top-level <ordinal>_<job>.txt.
-		entry, e := writer.Create(strconv.Itoa(index) + "_" + name + ".txt")
-		if e != nil {
-			return nil, e
+		if len(entries) == 0 || entryCount+len(entries) > 1000 {
+			// No partial step ZIP: gh switches entirely to step mode as soon
+			// as it finds any one step file, silently skipping missing steps.
+			entries = []forgejoLogEntry{{name: strconv.Itoa(index) + "_" + name + ".txt", body: body}}
 		}
-		if _, e = entry.Write(body); e != nil {
-			return nil, e
+		entryCount += len(entries)
+		if entryCount > 1000 {
+			return nil, ErrUnavailable
+		}
+		for _, file := range entries {
+			entry, e := writer.Create(file.name)
+			if e != nil {
+				return nil, e
+			}
+			if _, e = entry.Write(file.body); e != nil {
+				return nil, e
+			}
 		}
 	}
 	if e = writer.Close(); e != nil {
