@@ -1,0 +1,96 @@
+// This is compiled by gh-forgejo-ci-acceptance.py, not installed as a command.
+// The production application handler is bound only to a fresh loopback listener.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"github.com/ngaut/agent-git-service/config"
+	"github.com/ngaut/agent-git-service/server"
+)
+
+type fixtureConfig struct {
+	Root         string `json:"root"`
+	Integrations string `json:"integrations"`
+	AdminToken   string `json:"admin_token"`
+	Certificate  string `json:"certificate"`
+	Key          string `json:"key"`
+	State        string `json:"state"`
+}
+
+func run() error {
+	if len(os.Args) != 2 {
+		return errors.New("expected one generated fixture configuration")
+	}
+	data, err := os.ReadFile(os.Args[1])
+	if err != nil {
+		return err
+	}
+	var fixture fixtureConfig
+	if err = json.Unmarshal(data, &fixture); err != nil {
+		return err
+	}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	origin := "https://" + listener.Addr().String()
+	app, err := server.New(config.Config{
+		Port: "0", BaseURL: origin, APIBaseURL: origin,
+		DBdsn:      "sqlite:" + filepath.Join(fixture.Root, "application.sqlite") + "?_foreign_keys=on",
+		GitRepoDir: filepath.Join(fixture.Root, "repositories"),
+		ListenMode: "production", Environment: "development",
+		AdminLogin: "fixture", AdminToken: fixture.AdminToken,
+		IntegrationsConfigFile: fixture.Integrations, GitMaintenanceDisabled: true,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = app.Shutdown(ctx)
+	}()
+	httpServer := &http.Server{Handler: app.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	serveError := make(chan error, 1)
+	go func() { serveError <- httpServer.ServeTLS(listener, fixture.Certificate, fixture.Key) }()
+	state, err := json.Marshal(map[string]string{"origin": origin})
+	if err != nil {
+		return err
+	}
+	if err = os.WriteFile(fixture.State, state, 0600); err != nil {
+		return err
+	}
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(stop)
+	select {
+	case err = <-serveError:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	case <-stop:
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return httpServer.Shutdown(ctx)
+	}
+	return nil
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
