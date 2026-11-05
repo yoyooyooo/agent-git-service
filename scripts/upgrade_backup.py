@@ -301,6 +301,10 @@ def create_sealed_backup(group, dsn, schema, binding, quiescence, snapshot_id, *
     checkpoint('scan')
     before = source_fingerprint(group, dsn, schema)
     inventory = inspect_group(group, dsn, schema)
+    authority_evidence = None
+    if group['schema'] == 'ags.recovery-group.v2':
+        from routeb_immutable_authority import verify_group
+        authority_evidence = verify_group(group)
     started = now or time.strftime('%Y-%m-%dT%H:%M:%S+00:00', time.gmtime())
     partial = backup_root / ('.partial-' + snapshot_id)
     require(not partial.exists(), 'partial_exists')
@@ -313,6 +317,15 @@ def create_sealed_backup(group, dsn, schema, binding, quiescence, snapshot_id, *
         for key, item in objects.items():
             source = safe_path(item['source'], item['kind'])
             target = partial / key
+            if 'immutable_authority' in item:
+                # This is an owner-private byte archive, not a restored root
+                # authority. The original metadata is separate v2 evidence.
+                copy_file(Path(item['immutable_authority']['asset']), target)
+                record = entry_for(key, source, source, target, Path(item['restore_target']), source.lstat())
+                record.update(metadata_fields(supported_metadata(target)))
+                require(record['mode'] == 0o600 and record['uid'] == os.getuid(), 'immutable_archive_invalid')
+                entries.append(record)
+                continue
             if item['role'] == 'sqlite':
                 checkpoint('sqlite')
                 sqlite_backup(sqlite_path(dsn), target)
@@ -334,6 +347,8 @@ def create_sealed_backup(group, dsn, schema, binding, quiescence, snapshot_id, *
                 record_one(source, target, source.lstat())
             entries.extend(recorded)
         for record in sorted(entries, key=lambda v: len(Path(v['path']).parts), reverse=True):
+            if 'immutable_authority' in objects[record['object_id']]:
+                continue
             apply_metadata(Path(record['restore_target']), partial / record['path'],
                            {k: record[k] for k in ('mode', 'uid', 'gid', 'mtime_ns', 'acl_sha256', 'xattrs_sha256')})
         checkpoint('payload')
@@ -341,6 +356,8 @@ def create_sealed_backup(group, dsn, schema, binding, quiescence, snapshot_id, *
         checkpoint('seal')
         after = source_fingerprint(group, dsn, schema)
         require(before == after, 'source_changed')
+        if authority_evidence is not None:
+            verify_group(group, authority_evidence)
         copied_inventory = database_inventory(partial / group_object(group, 'sqlite')['id'],
                                               partial / group_object(group, 'git_root')['id'], schema)
         require(copied_inventory['logical_sha256'] == inventory['logical_sha256'], 'sqlite_logical_mismatch')
@@ -352,9 +369,12 @@ def create_sealed_backup(group, dsn, schema, binding, quiescence, snapshot_id, *
                     'source_before_sha256': before, 'source_after_sha256': after,
                     'retention': group['retention'], 'capacity': group['capacity'],
                     'entries': sorted(entries, key=lambda item: item['path'])}
+        if authority_evidence is not None:
+            manifest.update(schema='ags.backup-manifest.v2', authority_evidence=authority_evidence)
         from upgrade_backup_contract import validate_seal
         raw = canonical(manifest)
-        receipt = {'schema': 'ags.local-backup.v2', 'state': 'sealed', 'snapshot_id': snapshot_id,
+        receipt = {'schema': 'ags.local-backup.v3' if authority_evidence is not None else 'ags.local-backup.v2',
+                   'state': 'sealed', 'snapshot_id': snapshot_id,
                    'manifest_sha256': hashlib.sha256(raw).hexdigest(),
                    'inventory_sha256': manifest['inventory_sha256'],
                    'binding_sha256': fingerprint(binding)}

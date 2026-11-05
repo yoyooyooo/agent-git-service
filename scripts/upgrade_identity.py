@@ -247,16 +247,18 @@ def require_same(identity, *, expected_sha256=None, root=None, host_instance=Non
 
 def runtime_identity(root):
     """Cold-window admission only. Ordinary single-root startup stays independent."""
-    identity = resolve_identity()
-    require_same(identity, root=root)
-    from upgrade import BUNDLE, bundle_engine
+    from routeb_host_identity import resolve_for_root
+    resolved = resolve_for_root(root)
+    identity = resolved.identity
+    resolved.recheck()
+    from upgrade import bundle_engine
     from upgrade_recovery import read_window
     _, journal, _ = read_window(root)
     binding = journal['backup_binding']
     if identity.host_instance != binding['host_instance']:
         reject('host_machine_mismatch', 64)
-    bundle_engine(BUNDLE, binding['tool_sha256'])
-    if hashlib.sha256(read_trusted(PROFILE)).hexdigest() != identity.profile_sha256:
+    bundle_engine(resolved.bundle, binding['tool_sha256'])
+    if hashlib.sha256(read_trusted(resolved.profile)).hexdigest() != identity.profile_sha256:
         reject()
     return identity
 

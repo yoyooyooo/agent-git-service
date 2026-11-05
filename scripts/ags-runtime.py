@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import shlex
 import signal
@@ -72,6 +73,54 @@ def consume_start(root):
         return None
     from upgrade_recovery import consume_start as consume
     return consume(root)
+
+
+def running_permitted(root, generation, child_pid):
+    """A consumed handoff permits this living generation, never another spawn."""
+    if not cold_pending(root):
+        return startup_permitted(root)
+    try:
+        from upgrade_identity import runtime_identity
+        from upgrade import private_json
+        from upgrade_inventory import file_digest
+        from upgrade_recovery import read_window
+        import upgrade_state
+        identity = runtime_identity(root)
+        loaded = upgrade_state.load_verified(root)
+        projection = loaded.get('projection') or {}
+        authority = projection.get('authority') or {}
+        marker, journal, _ = read_window(root)
+        handoff = journal.get('handoff') or {}
+        runtime, _ = private_json(root / 'state/runtime.json')
+        if not (isinstance(generation, str) and generation
+                and type(child_pid) is int and child_pid > 0
+                and loaded.get('format', {}).get('host_instance') == identity.host_instance
+                and authority.get('state') == 'active' and not projection.get('pending_effects')
+                and authority.get('epoch') == projection.get('epoch') == 1
+                and projection.get('generation') == generation
+                and marker['generation'] == journal['generation'] == generation
+                and journal['backup_binding']['host_instance'] == identity.host_instance
+                and journal['phase'] == 'start_attempted' and journal['start_attempted'] is True
+                and handoff.get('generation') == generation and handoff.get('consumed') is True
+                and handoff.get('manager_requested') is True
+                and type(handoff.get('token')) is str
+                and re.fullmatch(r'[0-9a-f]{32}', handoff['token']) is not None
+                and handoff.get('binary_sha256') == journal['backup_binding']['new_binary_sha256']
+                and handoff.get('receipt_sha256') == journal.get('installed_receipt_sha256')
+                and handoff['binary_sha256'] == file_digest(root / 'bin/gh-server')
+                and handoff['receipt_sha256'] == file_digest(root / 'state/installation.json')
+                and runtime.get('schema') == 'ags.runtime.v1' and runtime.get('root') == str(root)
+                and runtime.get('generation') == generation and 'stopped_at' not in runtime
+                and runtime.get('supervisor_pid') == os.getpid() and runtime.get('pid') == child_pid):
+            return False
+        parent = subprocess.run(['/bin/ps', '-p', str(child_pid), '-o', 'ppid='],
+                                capture_output=True, text=True, timeout=5,
+                                env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
+        return parent.returncode == 0 and not parent.stderr and parent.stdout.strip() == str(os.getpid())
+    except Exception:
+        # Unknown ownership or lifecycle facts remain unhealthy. No token is
+        # consumed, recreated or refunded by a periodic inspection.
+        return False
 
 
 class CheckFailure(ValueError):
@@ -153,14 +202,16 @@ def retention_limits(root: Path) -> dict:
     return {'log_segment_bytes': maximum, 'log_backups': backups}
 
 
-def inspect(root: Path) -> dict:
+def inspect(root: Path, *, running_generation=None, running_pid=None) -> dict:
     checks: dict[str, str] = {}
     details: dict[str, dict] = {}
     root_ok = root.is_dir() and not root.is_symlink() and root.resolve() == root.absolute()
     checks['root'] = 'ok' if root_ok and root.stat().st_uid == os.getuid() and root.stat().st_mode & 0o077 == 0 else 'unsafe'
     marker = root / 'state/installing.json'
     checks['installation'] = 'interrupted' if marker.exists() or marker.is_symlink() else 'ok'
-    checks['upgrade_cold_window'] = 'ok' if startup_permitted(root) else 'blocked'
+    permitted = (startup_permitted(root) if running_generation is None and running_pid is None else
+                 running_permitted(root, running_generation, running_pid))
+    checks['upgrade_cold_window'] = 'ok' if permitted else 'blocked'
     for name in ('bin', 'config', 'state', 'logs'):
         directory = root / name
         checks[name + '_directory'] = 'ok' if directory.is_dir() and not directory.is_symlink() and directory.resolve() == directory.absolute() else 'missing_or_unsafe'
@@ -389,7 +440,7 @@ def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock,
                 else:
                     selector.unregister(key.fileobj)
             if time.monotonic() >= next_check:
-                report = inspect(root)
+                report = inspect(root, running_generation=current['generation'], running_pid=child.pid)
                 atomic_json(root / 'state/startup-health.json', report)
                 if not report['ready_to_start'] and (report['checks'], report['check_details']) != last_checks:
                     log.write((json.dumps(report) + '\n').encode())

@@ -26,6 +26,18 @@ def exact_binding():
 
 
 class BindingDispatchTests(unittest.TestCase):
+    def test_executable_exact_binding_requires_hashes_and_explicit_schema(self):
+        value = {**exact_binding(), 'schema': contract.EXACT_COLD_SCHEMA,
+                 'old_binary_sha256': '1' * 64, 'new_binary_sha256': '2' * 64}
+        self.assertEqual(contract.validate_cold_binding(value), value)
+        self.assertEqual(contract.validate_binding_version(value), value)
+        for change in ({'schema': 'unknown'}, {'new_binary_sha256': '0' * 64},
+                       {'release_id': 1}):
+            with self.subTest(change=change), self.assertRaises(contract.ContractError):
+                contract.validate_cold_binding({**value, **change})
+        with self.assertRaises(contract.ContractError):
+            contract.validate_cold_binding(exact_binding())
+
     def test_v1_release_binding_still_requires_release_fields(self):
         contract.validate_binding(release_binding())
         forged = release_binding()

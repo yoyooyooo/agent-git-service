@@ -553,6 +553,9 @@ def inspect_group(group, dsn, reviewed_schema_sha256, limit=MAX_ENTRIES):
     summaries = {}
     total_entries = 0
     for key, item in objects.items():
+        if 'immutable_authority' in item:
+            from routeb_immutable_authority import verify
+            verify(item)
         path = safe_path(item['source'], item['kind'])
         by_role.setdefault(item['role'], []).append(path)
         files, size = scan_tree(path, limit) if path.is_dir() else (None, path.stat().st_size)

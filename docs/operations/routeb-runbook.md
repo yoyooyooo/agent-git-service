@@ -1,10 +1,9 @@
 # Route B preparation runbook
 
-This runbook updates the c980bb63 rehearsal notes to exact source
-`f63aa88e0c82b1e17174cf07f8033552457185b1`
-(tree `8bf2c52ec3f7c7bc04850791b4e507bbc8261ab4`).
-It describes preparation facts and the separate deployment window.
-It does not authorize either window.
+This runbook describes the executable host-package source slice and the
+remaining native and production gates. It does not grant a deployment or a
+Release. Earlier `c980bb63` and `f63aa88e` rehearsal notes are historical inputs,
+not current running or rollback identities.
 
 Host-specific pages:
 
@@ -28,24 +27,30 @@ It was not deployed. It is not the current target and not the rollback target.
 
 | Role | Revision |
 |---|---|
-| Candidate | `f63aa88e0c82b1e17174cf07f8033552457185b1` |
-| Running and rollback | `0013aa744c8c90637ec54562ffc248a1bf7c9a52` |
+| Application baseline verified on 2026-11-05 | `4c963c9ff7ef03f283bf628ad213777713469532` |
+| Host-package candidate | Explicit private candidate manifest; current execution policy requires the same application revision and tree as the installed baseline |
+| Host tooling | Separately reviewed tool revision, tree and complete bundle manifest |
+| Recovery target | Exact old binary and whole Tq group from that transaction's sealed backup |
 
 `--version` must show `version=source-<built revision>`, `revision=<built revision>`,
 and `tree=<built tree>`, plus `goos`, `goarch` and `go_version`.
 `development` is not an acceptable candidate version. The builder stamps the
-clean checkout it verified. After the build-script change, that checkout is
-no longer `f63aa88e0c82b1e17174cf07f8033552457185b1`; the manifest keeps that
-baseline revision beside the built identity. This page does not claim a Release.
+clean checkout it verified. The server's ready revision is a separate build
+field, `server.gitSHA`, and must contain the same full revision. A `buildinfo`
+version stamp alone does not populate `/readyz.version`. This page does not
+claim a Release or select a mainline application upgrade.
 
 ## 2. What changed for operators
 
-The first start of the candidate runs `MigratePRLifecycleColumns`.
-On an existing `pull_requests` table it adds `lifecycle_generation`,
-`forgejo_reopen_pending` and `forgejo_lifecycle_at` when each column is
-absent. The migration is idempotent. There is no down migration.
+The current host-tooling slice refuses an application source/tree transition
+and requires `allow_schema_change=false`. It does not bring in mainline's
+`MigratePRLifecycleColumns` or change the deployed CI run-selection policy.
+Any later application upgrade needs its own exact source diff, schema boundary
+and recovery plan.
 
-Configuration files and launcher arguments did not change in this range.
+Native host provisioning installs a fixed trusted bundle and a user-owned
+isolated Python launcher, with a one-shot manager definition. It does not
+silently modify the existing production launcher or manager.
 The recovery group still includes SQLite committed state and WAL, Git, Wiki,
 CAS, runtime, config, secrets, the old binary and receipt, and the external
 dependency contract. "No new environment variable" is not "no backup".
@@ -60,11 +65,11 @@ Webhook classification at this revision: a body already over 10 MiB is HTTP
 
 ## 3. Preparation gates
 
-Preparation may read git, update these documents, build in an isolated
-directory, and run the transaction tool against an injected fake manager.
-Preparation must not read or write a real `~/.ags`, stop or start a service,
-edit launchd, systemd, Caddy or Tailscale, install, migrate, restore, tag,
-publish a Release, or dispatch a workflow.
+Source preparation may read git, build in an isolated directory, and run
+component tests. The private host `plan` and `status` commands are read-only.
+Native registration, lifecycle activation and `run --execute` are explicit
+steps with their own bound inputs; ordinary source tests do not perform them.
+Production plans remain fail-closed at `native_full_closure_required`.
 
 Before a later window, these items are still required and are not proven here:
 
@@ -77,20 +82,26 @@ Before a later window, these items are still required and are not proven here:
    bound together.
 3. External dependency contract accepted by each owner. See
    [external dependencies](routeb-external-dependencies.md).
-4. A host package for the transaction tool. The checked-in tool refuses a
-   real home `~/.ags` and refuses `execute` without an explicit approved
-   window file. `scripts/upgrade` still returns `backup_contract_unimplemented`.
-   `upgrade_adapter_launchd.py` and `upgrade_adapter_systemd.py` still raise
-   `native_adapter_unavailable` from `create()`. Those source contracts are
-   not the production adapter.
+4. A complete private host package, its fixed sidecars, registered native host
+   identity, reviewed bundle, current installed receipt and bound approval.
+   `routeb_host_native.py` provides fixed launchd/systemd capabilities; its
+   constructor does not register a service or grant permissions. The old
+   `upgrade_adapter_*.create()` stubs are not that execution path.
+5. An existing active, host-bound lifecycle authority at epoch 1, no pending
+   effect, a one-shot manager definition, real process and writer closure,
+   usable System Trash, and every recovery dependency. The entry reports
+   specific blockers before stopping when these prerequisites are missing.
+6. Explicit v2 immutable-authority records for the complete root-owned bundle
+   and fixed host identity. See [authority archives](routeb-immutable-authority.md).
+   Missing privilege never permits a fictitious root-metadata copy.
 
 ## 4. Backup and rollback
 
-Rollback target is `0013aa744c8c90637ec54562ffc248a1bf7c9a52`.
-Because the migration has no down migration, rollback is: stop the service,
-restore the whole cold backup taken at quiescence, then start the old
-binary. Swapping only the binary after the new process has started is not
-rollback.
+The transaction's installed receipt and cold seal determine the rollback
+target; an old revision written in a runbook is not authority. After a start
+attempt, recovery is a whole cold-group restore followed by a separately
+approved old start. Swapping only the binary after a new process has started
+is not rollback.
 
 The cold backup is one Tq group: SQLite committed state and WAL semantics,
 Git, Wiki, CAS, config, secrets, old binary, old receipt, and the manager
@@ -107,24 +118,26 @@ deleted to make room.
 Do not assemble a production install from separate manager commands.
 `launchctl` and `systemctl` forms in older rehearsal notes are not a
 runbook step. The single entry is `scripts/ags-maintenance-transaction`.
-`--mode host` is the production coordinator and is not the default. A host
+`--mode host` selects the host coordinator and is not the default. A host
 plan without a private package writes nothing and reports `package_missing`.
 The default command remains the isolated rehearsal and still refuses a real
 `~/.ags`. Host mode does not accept `--manager-dir` or `--fault-after`.
 
-Its required order, once a future window is approved, is: manager
+Its required order for an admitted window is: manager
 suppression, normal drain, cold backup, independent restore verification,
-candidate readback, install, one start, first-start migration, ready plus
+candidate readback, install, one start, ready plus
 business and external readback, then observation of at least 600 seconds.
-This repository copy defaults to an isolated root and a fake manager. It
-does not perform that window.
+The default command remains a fixture rehearsal. Explicit host mode now
+uses `routeb_host_execution.py` and real fixed capabilities after admission;
+it cannot turn a fixture result into native acceptance. Production execution
+is still blocked until the complete native closure is consumed.
 
 Failure keeps the service stopped and fenced. Before `start_attempted`, and
 only when Tq is unchanged, a newly approved pre-start restore of the old
 binary and receipt is possible. After `start_attempted`, or after the
 migration has run, recovery is the whole group or a forward repair.
 Unknown manager or provider outcome stops. An isolated admitted chain
-in `scripts/routeb_host_transaction.py` seals a backup, runs independent
+through `scripts/routeb_host_execution.py` seals a backup, runs independent
 restore verification, and starts once. An unknown start is not replayed.
 Stop and start each re-read the approval; an expired approval stops before
 the manager call.
@@ -141,5 +154,7 @@ diagnostic_only and is not a webhook proof. Recovery inventory and the
 review gate are the functions in `scripts/ags_maintenance_window.py`. Caddy and Tailscale are not restarted as a side effect of
 replacing the AGS binary.
 
-mini and imile-win are separate windows. A mini observation does not
-authorize imile-win.
+mini and imile-win require their own host identities, private packages and
+receipts. A completed observation on one host is not evidence for the other.
+Use the current session's explicit deployment authorization; these source
+documents neither create it nor revoke an authorization already given.
