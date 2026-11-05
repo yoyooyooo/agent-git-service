@@ -14,7 +14,7 @@ func TestForgejoPRLogsCarryTheExactProviderSourceBranch(t *testing.T) {
 		t.Run(event, func(t *testing.T) {
 			head := strings.Repeat("a", 40)
 			providerPRReads := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(withCurrentJobFixture(map[int64]string{41: "test"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/api/v1/repos/ci/project/actions/runs/17":
 					run := forgejoFixtureRun()
@@ -43,7 +43,7 @@ func TestForgejoPRLogsCarryTheExactProviderSourceBranch(t *testing.T) {
 					t.Errorf("guessed log context endpoint %s", r.URL.Path)
 					http.NotFound(w, r)
 				}
-			}))
+			})))
 			defer server.Close()
 			backend, err := NewHTTP(BackendConfig{Kind: "forgejo", URL: server.URL, TokenFile: "fixture", AllowHTTP: true, LogBridge: &LogBridgeConfig{URL: server.URL, TokenFile: "fixture", AllowHTTP: true}}, "provider-only", "logs-only")
 			if err != nil {

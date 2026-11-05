@@ -44,9 +44,16 @@ func TestForgejoCollectionOnlyRunDetailsJobsLogsAndRerun(t *testing.T) {
 				"id": 17, "index_in_repo": 9, "workflow_id": "ci.yml", "prettyref": "feature", "commit_sha": head, "event": "push", "status": runStatus, "created": now, "updated": now, "html_url": "https://ci.example.test/ci/project/actions/runs/9",
 			}}})
 		case "/api/v1/repos/ci/project/actions/tasks":
-			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "workflow_runs": []any{map[string]any{
-				"id": 41, "run_number": 9, "name": "check-linux", "workflow_id": "ci.yml", "head_sha": head, "status": "failure", "created_at": now, "updated_at": now, "url": "https://ci.example.test/ci/project/actions/runs/9",
-			}}})
+			// Retried runs retain same-name historical tasks in the public API.
+			// Only task 41 still belongs to a current action_run_job.
+			tasks := []any{}
+			for _, task := range []int{41, 40, 39} {
+				tasks = append(tasks, map[string]any{"id": task, "run_number": 9, "name": "check-linux", "workflow_id": "ci.yml", "head_sha": head, "status": "failure", "created_at": now, "updated_at": now, "url": "https://ci.example.test/ci/project/actions/runs/9"})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(tasks), "workflow_runs": tasks})
+		case "/api/internal/provider-logs/repos/ci/project/runs/17/jobs":
+			require.Equal(t, "Bearer bridge-only", r.Header.Get("Authorization"))
+			_ = json.NewEncoder(w).Encode(map[string]any{"schema": "ags.internal-provider-jobs.v1", "repo": "ci/project", "run": "17", "run_number": 9, "head_sha": head, "jobs": []any{map[string]any{"task_id": 41, "name": "check-linux"}}})
 		case "/api/internal/provider-logs/repos/ci/project/runs/17/artifacts":
 			require.Equal(t, "Bearer bridge-only", r.Header.Get("Authorization"))
 			require.Equal(t, head, r.URL.Query().Get("head_sha"))
@@ -112,6 +119,11 @@ func TestForgejoCollectionOnlyRunDetailsJobsLogsAndRerun(t *testing.T) {
 	require.Len(t, rows, 1)
 	job := rows[0].(map[string]any)
 	require.Equal(t, "check-linux", job["name"])
+	checks := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/commits/%s/check-runs", repo.FullName, head), nil)
+	require.Equal(t, 200, checks.Code, checks.Body.String())
+	checkRows := testharness.DecodeJSON(t, checks)["check_runs"].([]any)
+	require.Len(t, checkRows, 1, "historical retries must not create ambiguous check names")
+	require.Equal(t, job["id"], checkRows[0].(map[string]any)["id"])
 	steps := job["steps"].([]any)
 	require.Len(t, steps, 2)
 	require.Equal(t, "failure", steps[0].(map[string]any)["conclusion"])

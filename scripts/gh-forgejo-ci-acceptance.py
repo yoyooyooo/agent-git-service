@@ -57,7 +57,7 @@ def require(condition, message):
 
 
 class ProviderFixture:
-    """Intentionally unordered Forgejo inventory plus two bridge generations."""
+    """Unordered Forgejo runs, current job inventory, and optional step ranges."""
 
     def __init__(self, provider_token, bridge_token):
         self.provider_token = provider_token
@@ -129,11 +129,11 @@ class ProviderFixture:
             return 405, {"message": "fixture provider is read-only"}
         bridge_base = "/api/internal/provider-logs/repos/" + PROVIDER_REPOSITORY
         if bridge and path == bridge_base + "/runs":
-            # mini must continue working with the deployed bridge generation.
+            # Run inventory is optional; older bridges use provider pagination.
             return 404, {"message": "not found"}
         if bridge and path == bridge_base + f"/runs/{RUN}/jobs":
-            if self.mode == "legacy":
-                return 404, {"message": "not found"}
+            # Jobs bind to the current task inventory in every mode.
+            # Legacy mode omits optional step ranges, not the job binding.
             return 200, {"schema": "ags.internal-provider-jobs.v1", "repo": PROVIDER_REPOSITORY,
                          "run": str(RUN), "run_number": NUMBER, "head_sha": HEAD,
                          "jobs": [{"task_id": TASK, "name": JOB}]}
@@ -363,7 +363,7 @@ class Acceptance:
         self.report["target"] = {"run_number": NUMBER, "canonical_run_id": canonical, "head_sha": HEAD}
         self.check("typed number and explicit web URL preserve canonical identity", lambda: self.check_selectors(repository_args, canonical))
         self.check("wrong selector authority and typed writes are rejected", lambda: self.check_rejections(repository_args, prefix))
-        self.check("legacy bridge preserves complete job logs", lambda: self.check_legacy(repository_args, prefix, canonical))
+        self.check("bridge without step ranges preserves complete job logs", lambda: self.check_legacy(repository_args, prefix, canonical))
         self.fixture.mode = "modern"
         self.check("exact step logs and explicit unassigned output", lambda: self.check_steps(repository_args, prefix, canonical))
         self.fixture.mode = "corrupt"

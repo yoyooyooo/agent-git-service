@@ -312,6 +312,20 @@ projection with matching origin/repository/head; AGS PR numbers are never guesse
 as provider PR numbers. The same job name in two workflow files is two checks, identified by workflow file plus job name. A repeated name inside one workflow, malformed statuses, cross-run jobs,
 outages and incomplete pagination are errors, not empty success.
 
+Forgejo's public task collection includes historical rerun attempts. Current
+jobs require the authenticated bridge's read-only
+`/runs/{run}/jobs` inventory, bound through `action_run_job.task_id` to the exact
+repository, provider run and commit. A missing bridge, missing task or incomplete
+association fails explicitly; AGS does not choose a task by name, highest ID or
+successful outcome. Distinct current jobs with the same workflow/name retain
+the existing ambiguous-check rejection. This binding does not change the
+existing PR-event priority when selecting a run across events.
+
+Deploy the matching bridge endpoint before the adapter. Step metadata remains
+optional, but current-job identity is required even when logs have expired or
+the event does not support step projection. This rollout adds no database schema,
+runtime configuration or CLI changes.
+
 `HEAD /repos/...` preserves GET visibility for stock gh discovery. No-CI PRs still
 return a commit connection, with empty check contexts rather than a fictitious
 missing commit. Draft creation and standard merge expected-head semantics are

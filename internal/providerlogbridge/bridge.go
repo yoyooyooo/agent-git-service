@@ -147,6 +147,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveRuns(w, r)
 		return
 	}
+	if chi.URLParam(r, "run") != "" && strings.HasSuffix(r.URL.Path, "/jobs") {
+		h.serveJobs(w, r)
+		return
+	}
 	if chi.URLParam(r, "run") != "" {
 		h.ServeArtifacts(w, r)
 		return

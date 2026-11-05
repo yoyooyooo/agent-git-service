@@ -100,6 +100,10 @@ try {
     if (bridge && url.pathname === "/api/internal/provider-logs/repos/ci/project/runs") {
       json(res, {}, 404); return;
     }
+    if (bridge && url.pathname.endsWith("/runs/17/jobs")) {
+      if (url.searchParams.get("head_sha") !== head) { json(res, {}, 409); return; }
+      json(res, {schema:"ags.internal-provider-jobs.v1",repo:"ci/project",run:"17",run_number:9,head_sha:head,jobs:jobs().map(j=>({task_id:j.id,name:j.name}))});return;
+    }
     if (bridge && url.pathname.endsWith("/runs/17/artifacts")) {
       if (url.searchParams.get("head_sha") !== head) { json(res, {}, 409); return; }
       json(res, {schema:"ags.internal-provider-artifacts.v1",repo:"ci/project",run:"17",head_sha:head,artifacts:[]});return;

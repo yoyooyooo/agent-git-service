@@ -21,7 +21,7 @@ func forgejoFixtureRun() map[string]any {
 func TestForgejoNativeRunTaskAndExplicitLogBridge(t *testing.T) {
 	corrupt := false
 	calls := []string{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(withCurrentJobFixture(map[int64]string{41: "test"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.URL.Path)
 		if r.URL.Path == "/api/internal/provider-logs/repos/ci/project/runs" {
 			http.NotFound(w, r) // Older bridge: use the bounded public API inventory.
@@ -58,7 +58,7 @@ func TestForgejoNativeRunTaskAndExplicitLogBridge(t *testing.T) {
 			t.Errorf("guessed unsupported Forgejo route: %s", r.URL.Path)
 			http.NotFound(w, r)
 		}
-	}))
+	})))
 	defer server.Close()
 	backend, e := NewHTTP(BackendConfig{Kind: "forgejo", URL: server.URL, TokenFile: "fixture", AllowHTTP: true, LogBridge: &LogBridgeConfig{URL: server.URL, TokenFile: "other-fixture", AllowHTTP: true}}, "server-only", "bridge-only")
 	if e != nil {

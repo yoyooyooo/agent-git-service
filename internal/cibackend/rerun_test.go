@@ -16,7 +16,7 @@ func TestForgejoRerunDispatchesExactWorkflowAtOriginalSHA(t *testing.T) {
 	for _, action := range []string{"rerun", "rerun-failed-jobs", "job-rerun"} {
 		t.Run(action, func(t *testing.T) {
 			writes := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(withCurrentJobFixture(map[int64]string{41: "unit"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				require.Equal(t, "token server-only", r.Header.Get("Authorization"))
 				if r.Method == "POST" {
 					writes++
@@ -38,9 +38,9 @@ func TestForgejoRerunDispatchesExactWorkflowAtOriginalSHA(t *testing.T) {
 				default:
 					http.NotFound(w, r)
 				}
-			}))
+			})))
 			defer server.Close()
-			b, err := NewHTTP(BackendConfig{Kind: "forgejo", URL: server.URL, TokenFile: "fixture", AllowHTTP: true}, "server-only")
+			b, err := NewHTTP(BackendConfig{Kind: "forgejo", URL: server.URL, TokenFile: "fixture", AllowHTTP: true, LogBridge: &LogBridgeConfig{URL: server.URL, TokenFile: "fixture", AllowHTTP: true}}, "server-only", "bridge-only")
 			require.NoError(t, err)
 			id := "17"
 			if action == "job-rerun" {
