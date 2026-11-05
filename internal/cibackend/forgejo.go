@@ -165,7 +165,19 @@ func (f *Forgejo) Jobs(ctx context.Context, repo, id string) (Jobs, error) {
 	if e != nil {
 		return Jobs{}, e
 	}
+	current, e := f.currentJobs(ctx, repo, run)
+	if e != nil {
+		return Jobs{}, e
+	}
 	result := Jobs{Items: []Job{}}
+	matched := false
+	finish := func() (Jobs, error) {
+		if len(result.Items) != len(current) {
+			return Jobs{}, ErrUnavailable
+		}
+		result.Complete, result.Total = true, len(result.Items)
+		return result, nil
+	}
 	limit := f.config.TaskPageLimit
 	if limit == 0 {
 		limit = 100
@@ -205,6 +217,14 @@ func (f *Forgejo) Jobs(ctx context.Context, repo, id string) (Jobs, error) {
 			if task.RunNumber != run.Number {
 				continue
 			}
+			matched = true
+			name, exists := current[task.ID]
+			if !exists {
+				continue
+			}
+			if task.Name != name {
+				return Jobs{}, ErrInvalid
+			}
 			if task.Head != run.HeadSHA || task.Workflow != run.Workflow || task.Name == "" || task.Created.IsZero() || !safeURL(task.URL) {
 				return Jobs{}, ErrInvalid
 			}
@@ -224,17 +244,13 @@ func (f *Forgejo) Jobs(ctx context.Context, repo, id string) (Jobs, error) {
 			if len(seen) != expectedTotal {
 				return Jobs{}, fmt.Errorf("%w: incomplete CI task inventory", ErrUnavailable)
 			}
-			result.Complete = true
-			result.Total = len(result.Items)
-			return result, nil
+			return finish()
 		}
 		// id DESC makes each full page older than the previous one. Once the
 		// previous page already held this run, a smaller maximum cannot hide another
 		// task of it, including a retry. Do not require a page after that.
-		if len(result.Items) > 0 && previousMax > 0 && pageMaxRun < run.Number {
-			result.Complete = true
-			result.Total = len(result.Items)
-			return result, nil
+		if matched && previousMax > 0 && pageMaxRun < run.Number {
+			return finish()
 		}
 		previousMax = pageMaxRun
 	}

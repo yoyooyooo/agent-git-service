@@ -52,6 +52,7 @@ func TestForgejoSyncJobAndRunLogsThroughRealBridge(t *testing.T) {
 	router := chi.NewRouter()
 	router.Use(providerlogbridge.CaptureSocketPeer)
 	router.Get("/api/internal/provider-logs/repos/{owner}/{repo}/tasks/{task}", handler.ServeHTTP)
+	router.Get("/api/internal/provider-logs/repos/{owner}/{repo}/runs/{run}/jobs", handler.ServeHTTP)
 	bridge := httptest.NewServer(router)
 	defer bridge.Close()
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

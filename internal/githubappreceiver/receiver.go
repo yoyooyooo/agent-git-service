@@ -87,9 +87,14 @@ func (r Receiver) serveHTTP(w http.ResponseWriter, req *http.Request) {
 		http.NotFound(w, req)
 		return
 	}
-	body, tooLarge := readBody(req.Body)
-	if tooLarge {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "payload exceeds 10 MiB"})
+	body, err := readBody(req.Body)
+	if err != nil {
+		if errors.Is(err, errBodyTooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "payload exceeds 10 MiB"})
+			return
+		}
+		r.logReadFailure(err)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "payload read failed"})
 		return
 	}
 	deliveryID := strings.TrimSpace(req.Header.Get(headerDelivery))
@@ -154,13 +159,32 @@ func (r Receiver) serveHTTP(w http.ResponseWriter, req *http.Request) {
 	})
 }
 
-func readBody(src io.Reader) ([]byte, bool) {
+var errBodyTooLarge = errors.New("payload exceeds 10 MiB")
+
+type bodyReadError struct {
+	bytes int
+	err   error
+}
+
+func (e *bodyReadError) Error() string {
+	return fmt.Sprintf("payload read failed after %d bytes: %v", e.bytes, e.err)
+}
+
+func (e *bodyReadError) Unwrap() error { return e.err }
+
+func readBody(src io.Reader) ([]byte, error) {
 	limited := io.LimitReader(src, MaxBodyBytes+1)
 	body, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, true
+	// Bytes already past the cap are oversized even when the same Read also
+	// failed (for example connection reset). Classify that as 413 before a
+	// transport error, which stays a 400 only while the body is still in cap.
+	if len(body) > MaxBodyBytes {
+		return nil, errBodyTooLarge
 	}
-	return body, len(body) > MaxBodyBytes
+	if err != nil {
+		return nil, &bodyReadError{bytes: len(body), err: err}
+	}
+	return body, nil
 }
 
 func verifySignature(secret, header string, body []byte) (string, error) {
@@ -221,6 +245,22 @@ func selectedHeaders(header http.Header) map[string]string {
 		}
 	}
 	return out
+}
+
+func (r Receiver) logReadFailure(err error) {
+	logger := r.Log
+	if logger == nil {
+		logger = slog.Default()
+	}
+	bytesRead := 0
+	var readErr *bodyReadError
+	if errors.As(err, &readErr) {
+		bytesRead = readErr.bytes
+	}
+	logger.Info("github app webhook payload read failed",
+		"error", err.Error(),
+		"bytes", bytesRead,
+	)
 }
 
 func (r Receiver) logDelivery(deliveryID string, installationID, repositoryID int64, status string) {

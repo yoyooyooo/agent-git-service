@@ -57,6 +57,8 @@ func TestForgejoOptionalStepsKeepJobsAndChecksAvailable(t *testing.T) {
 			require.NoError(t, database.Exec(`INSERT INTO action_run VALUES (17, 1, 9, ?, ?, ?)`, tc.ref, head, tc.event).Error)
 			require.NoError(t, database.Exec(`INSERT INTO action_run_job VALUES (31, 17, 1, 41, 'unit', ?)`, head).Error)
 			require.NoError(t, database.Exec(`INSERT INTO action_task VALUES (41, 1, ?, 'missing.log', false, true)`, head).Error)
+			require.NoError(t, database.Exec(`INSERT INTO action_run_job VALUES (32, 17, 1, 40, 'lint', ?)`, head).Error)
+			require.NoError(t, database.Exec(`INSERT INTO action_task VALUES (40, 1, ?, 'missing.log', false, true)`, head).Error)
 			require.NoError(t, database.Exec(`INSERT INTO action_task_step VALUES (1,41,1,'private step',0,1,1767225600,1767225601,0,0)`).Error)
 			switch tc.name {
 			case "wrong_commit":
@@ -75,6 +77,7 @@ func TestForgejoOptionalStepsKeepJobsAndChecksAvailable(t *testing.T) {
 			router := chi.NewRouter()
 			router.Use(providerlogbridge.CaptureSocketPeer)
 			router.Get("/api/internal/provider-logs/repos/{owner}/{repo}/tasks/{task}", handler.ServeHTTP)
+			router.Get("/api/internal/provider-logs/repos/{owner}/{repo}/runs/{run}/jobs", handler.ServeHTTP)
 			bridge := httptest.NewServer(router)
 			defer bridge.Close()
 			config := cibackend.BackendConfig{Kind: "forgejo", TokenFile: "fixture", AllowHTTP: true, LogBridge: &cibackend.LogBridgeConfig{URL: bridge.URL, TokenFile: "fixture", AllowHTTP: true}}
@@ -89,6 +92,12 @@ func TestForgejoOptionalStepsKeepJobsAndChecksAvailable(t *testing.T) {
 			run := runs.Runs[0]
 			// The optional read still fails closed. No refused metadata is exposed.
 			jobs, err := backend.Jobs(context.Background(), "ci/project", "17")
+			if strings.HasPrefix(tc.name, "wrong_") {
+				require.Error(t, err, "mandatory current-job binding must fail closed")
+				response := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/runs/%d/jobs", repo.FullName, run.ID), nil)
+				require.NotEqual(t, 200, response.Code, response.Body.String())
+				return
+			}
 			require.NoError(t, err)
 			require.Len(t, jobs.Items, 2)
 			steps, err := backend.(cibackend.StepBackend).JobSteps(context.Background(), "ci/project", run.Run, jobs.Items[0])
