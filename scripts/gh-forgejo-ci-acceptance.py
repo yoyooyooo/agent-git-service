@@ -363,7 +363,7 @@ class Acceptance:
         self.report["target"] = {"run_number": NUMBER, "canonical_run_id": canonical, "head_sha": HEAD}
         self.check("typed number and explicit web URL preserve canonical identity", lambda: self.check_selectors(repository_args, canonical))
         self.check("wrong selector authority and typed writes are rejected", lambda: self.check_rejections(repository_args, prefix))
-        self.check("legacy bridge preserves complete job logs", lambda: self.check_legacy(repository_args, prefix, canonical))
+        self.check("bridge without step ranges preserves complete job logs", lambda: self.check_legacy(repository_args, prefix, canonical))
         self.fixture.mode = "modern"
         self.check("exact step logs and explicit unassigned output", lambda: self.check_steps(repository_args, prefix, canonical))
         self.fixture.mode = "corrupt"
