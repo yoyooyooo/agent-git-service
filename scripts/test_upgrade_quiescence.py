@@ -382,15 +382,32 @@ class QuiescenceTests(ColdFixture):
             if name == 'manager-start-intent': raise RuntimeError('fixture crash')
         with patch.object(cold, 'checkpoint', side_effect=crash), self.assertRaises(RuntimeError):
             self.window.start()
+        _, journal, _ = cold.read_window(self.root)
+        self.assertTrue(journal['start_called'])
+        self.assertFalse(journal['handoff']['manager_requested'])
+        self.assertFalse(journal['handoff']['consumed'])
+        self.assertFalse(cold.startup_permitted(self.root))
+        before = (self.pending / 'cold-journal.json').read_bytes()
         with self.assertRaises(c.ContractError): self.window.start()
+        with self.assertRaises(c.ContractError): cold.consume_start(self.root)
+        self.assertEqual((self.pending / 'cold-journal.json').read_bytes(), before)
         self.assertEqual(self.manager.starts, 0)
-        # One durable launcher capability remains; consuming before spawn and then
-        # crashing must not refund it or permit another launcher.
+
+    def test_consumed_start_crash_never_refunds_launcher_capability(self):
+        self.prepare(); self.install(); self.window.start_intent(); self.window.release()
         def consumed(name):
             if name == 'start-token-consumed': raise RuntimeError('fixture crash')
         with patch.object(cold, 'checkpoint', side_effect=consumed), self.assertRaises(RuntimeError):
-            cold.consume_start(self.root)
+            self.window.start()
+        _, journal, _ = cold.read_window(self.root)
+        self.assertTrue(journal['start_called'])
+        self.assertTrue(journal['handoff']['manager_requested'])
+        self.assertTrue(journal['handoff']['consumed'])
+        before = (self.pending / 'cold-journal.json').read_bytes()
+        with self.assertRaises(c.ContractError): self.window.start()
         with self.assertRaises(c.ContractError): cold.consume_start(self.root)
+        self.assertEqual((self.pending / 'cold-journal.json').read_bytes(), before)
+        self.assertEqual(self.manager.starts, 1)
         self.assertFalse(cold.startup_permitted(self.root))
 
     def test_s2_inventory_basis_is_revalidated_before_install(self):

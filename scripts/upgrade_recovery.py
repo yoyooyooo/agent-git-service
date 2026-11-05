@@ -433,7 +433,7 @@ class ColdWindow:
         require(file_digest(self.root / 'bin/gh-server') == self.backup_binding['new_binary_sha256']
                 and file_digest(self.state / 'installation.json') == self.journal['installed_receipt_sha256'],
                 'installed_identity_mismatch')
-        self.phase('start_attempted', start_attempted=True,
+        self.phase('start_attempted', start_attempted=True, start_called=False,
                    handoff={'token': uuid.uuid4().hex, 'generation': self.journal['generation'],
                             'consumed': False, 'binary_sha256': self.backup_binding['new_binary_sha256'],
                             'receipt_sha256': self.journal['installed_receipt_sha256'],
@@ -447,16 +447,19 @@ class ColdWindow:
         _, current, _ = read_window(self.root)
         require(current['phase'] == 'start_attempted' and current['start_attempted'] is True
                 and current['generation'] == self.journal['generation']
+                and current.get('start_called') is False
                 and current.get('handoff', {}).get('consumed') is False
                 and current.get('handoff', {}).get('manager_requested') is False, 'start_already_requested')
-        # Publish a consumable handoff only after the final approval succeeds.
-        # Retain intent before the manager call so unknown results never replay.
+        # Claim this entry durably before interruption can make a retry ambiguous.
+        # The claim grants no launcher capability; final approval must come first.
+        current['start_called'] = True
+        replace_json(self.pending / 'cold-journal.json', current)
+        self.journal = current
+        checkpoint('manager-start-intent')
         if authorize is not None:
             authorize()
         current['handoff']['manager_requested'] = True
         replace_json(self.pending / 'cold-journal.json', current)
-        checkpoint('manager-start-intent')
-        self.journal = current
         self.manager.start()
 
 

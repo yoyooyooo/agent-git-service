@@ -114,9 +114,15 @@ class InstallerTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, 'approval_expired'):
             fixture.window.start(authorize=Mock(side_effect=ContractError('approval_expired')))
         _, journal, _ = cold.read_window(fixture.root)
+        self.assertTrue(journal['start_called'])
         self.assertFalse(journal['handoff']['manager_requested'])
         self.assertFalse(journal['handoff']['consumed'])
         self.assertFalse(cold.startup_permitted(fixture.root))
+        self.assertEqual(fixture.manager.starts, 0)
+        before = (fixture.pending / 'cold-journal.json').read_bytes()
+        with self.assertRaisesRegex(ContractError, 'start_already_requested'):
+            fixture.window.start(authorize=Mock())
+        self.assertEqual((fixture.pending / 'cold-journal.json').read_bytes(), before)
         self.assertEqual(fixture.manager.starts, 0)
 
 
