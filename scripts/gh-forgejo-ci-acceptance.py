@@ -57,7 +57,7 @@ def require(condition, message):
 
 
 class ProviderFixture:
-    """Intentionally unordered Forgejo inventory plus two bridge generations."""
+    """Unordered Forgejo runs, current job inventory, and optional step ranges."""
 
     def __init__(self, provider_token, bridge_token):
         self.provider_token = provider_token
@@ -129,11 +129,11 @@ class ProviderFixture:
             return 405, {"message": "fixture provider is read-only"}
         bridge_base = "/api/internal/provider-logs/repos/" + PROVIDER_REPOSITORY
         if bridge and path == bridge_base + "/runs":
-            # mini must continue working with the deployed bridge generation.
+            # Run inventory is optional; older bridges use provider pagination.
             return 404, {"message": "not found"}
         if bridge and path == bridge_base + f"/runs/{RUN}/jobs":
-            if self.mode == "legacy":
-                return 404, {"message": "not found"}
+            # Mainline binds jobs to the current task inventory in every mode.
+            # Legacy mode omits optional step ranges, not the job binding.
             return 200, {"schema": "ags.internal-provider-jobs.v1", "repo": PROVIDER_REPOSITORY,
                          "run": str(RUN), "run_number": NUMBER, "head_sha": HEAD,
                          "jobs": [{"task_id": TASK, "name": JOB}]}

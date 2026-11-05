@@ -527,10 +527,11 @@ func (f *Forgejo) RunLogs(ctx context.Context, repo, id string) ([]byte, error) 
 			}
 			// Never include provider bodies, credentials or unverified partial output.
 			body = []byte(fmt.Sprintf("AGS_LOG_UNAVAILABLE provider_job=%s status=%s; retrieve this job through AGS for diagnosis.\n", j.Key, DiagnosticStatus(e)))
-		}
-		body = []byte(observation.Text)
-		if name != "" && name != "." && name != ".." {
-			entries = forgejoStepLogEntries(j, name, body, observation.StepLogs)
+		} else {
+			body = []byte(observation.Text)
+			if name != "" && name != "." && name != ".." {
+				entries = forgejoStepLogEntries(j, name, body, observation.StepLogs)
+			}
 		}
 		total += len(body)
 		if total > MaxBody {
