@@ -49,7 +49,7 @@ func TestForgejoOptionalStepsKeepJobsAndChecksAvailable(t *testing.T) {
 				`CREATE TABLE action_run (id integer primary key, repo_id integer, "index" integer, ref text, commit_sha text, event text)`,
 				`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text)`,
 				`CREATE TABLE action_task (id integer primary key, repo_id integer, commit_sha text, log_filename text, log_in_storage boolean, log_expired boolean)`,
-				`CREATE TABLE action_task_step (id integer primary key, task_id integer, repo_id integer, name text, "index" integer, status integer, started integer, stopped integer)`,
+				`CREATE TABLE action_task_step (id integer primary key, task_id integer, repo_id integer, name text, "index" integer, status integer, started integer, stopped integer, log_index integer, log_length integer)`,
 				`INSERT INTO repository VALUES (1, 'ci', 'project')`,
 			} {
 				require.NoError(t, database.Exec(sql).Error)
@@ -57,7 +57,7 @@ func TestForgejoOptionalStepsKeepJobsAndChecksAvailable(t *testing.T) {
 			require.NoError(t, database.Exec(`INSERT INTO action_run VALUES (17, 1, 9, ?, ?, ?)`, tc.ref, head, tc.event).Error)
 			require.NoError(t, database.Exec(`INSERT INTO action_run_job VALUES (31, 17, 1, 41, 'unit', ?)`, head).Error)
 			require.NoError(t, database.Exec(`INSERT INTO action_task VALUES (41, 1, ?, 'missing.log', false, true)`, head).Error)
-			require.NoError(t, database.Exec(`INSERT INTO action_task_step VALUES (1,41,1,'private step',0,1,1767225600,1767225601)`).Error)
+			require.NoError(t, database.Exec(`INSERT INTO action_task_step VALUES (1,41,1,'private step',0,1,1767225600,1767225601,0,0)`).Error)
 			switch tc.name {
 			case "wrong_commit":
 				require.NoError(t, database.Exec(`UPDATE action_task SET commit_sha=?`, strings.Repeat("b", 40)).Error)
