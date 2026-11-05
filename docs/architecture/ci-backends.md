@@ -135,6 +135,16 @@ reduce work or upgrade the bridge for larger inventories. The separate legacy
 single-run lookup still reads raw provider pages and may stop at an exact match;
 it does not repeat the full listing scan for each page.
 
+For repositories with large histories, deploy and verify the indexed bridge
+before upgrading the client-facing adapter. The public API includes complete
+event payloads and repository objects in every run; even an inventory below the
+page budget can exceed the request deadline while those bodies are transferred.
+Bounded concurrency reduces request latency but cannot remove that transfer
+cost. A missing indexed endpoint therefore provides protocol compatibility,
+not a guarantee that broad listings will finish in time. Verify an unfiltered
+100-item read and subsequent page against the actual repository during rollout;
+keep the previous client-facing version if this check fails.
+
 Missing capabilities return unsupported. Forgejo cancel and workflow catalogue
 management remain unsupported. Reruns use the public workflow dispatch API as
 described below; no private web endpoints, SQL or another backend are used.
