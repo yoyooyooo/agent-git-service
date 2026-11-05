@@ -31,6 +31,12 @@ type runPageFlights struct {
 	counts  map[int]int
 }
 
+func (f *runPageFlights) activeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.active
+}
+
 func (f *runPageFlights) begin(r *http.Request) (int, func()) {
 	query := r.URL.Query()
 	page, _ := strconv.Atoi(query.Get("page"))
@@ -116,14 +122,14 @@ func TestForgejoRunInventoryParallelPagesAreBoundedAndOrdered(t *testing.T) {
 			done <- runReadResult{runs, err}
 		}()
 		synctest.Wait()
-		require.Equal(t, 4, flights.active, "the remaining inventory must progress with four bounded requests")
+		require.Equal(t, 4, flights.activeCount(), "the remaining inventory must progress with four bounded requests")
 		require.Equal(t, 4, flights.maximum)
 		require.Equal(t, map[int]int{1: 1, 2: 1, 3: 1, 4: 1, 5: 1}, flights.counts)
 		// Finish page 5 first. That worker must fetch the rest while 2–4 stay
 		// blocked; completion order must never determine page row counts.
 		release(5)
 		synctest.Wait()
-		require.Equal(t, 3, flights.active)
+		require.Equal(t, 3, flights.activeCount())
 		require.Equal(t, 4, flights.maximum)
 		require.Len(t, flights.counts, 27)
 		select {
@@ -143,7 +149,7 @@ func TestForgejoRunInventoryParallelPagesAreBoundedAndOrdered(t *testing.T) {
 			require.Equal(t, int64(total-100-i), run.Number)
 		}
 		synctest.Wait()
-		require.Zero(t, flights.active)
+		require.Zero(t, flights.activeCount())
 		for page := 1; page <= 27; page++ {
 			require.Equal(t, 1, flights.counts[page])
 			query := flights.queries[page]
@@ -215,7 +221,7 @@ func TestForgejoRunInventoryErrorsCancelAllOtherPages(t *testing.T) {
 					done <- runReadResult{runs, err}
 				}()
 				synctest.Wait()
-				require.Equal(t, 4, flights.active)
+				require.Equal(t, 4, flights.activeCount())
 				close(failPage)
 				result := <-done
 				synctest.Wait()
@@ -230,7 +236,7 @@ func TestForgejoRunInventoryErrorsCancelAllOtherPages(t *testing.T) {
 				require.Empty(t, result.runs.Items)
 				require.Zero(t, result.runs.Total)
 				require.False(t, result.runs.Complete)
-				require.Zero(t, flights.active, "all sibling reads must finish before return")
+				require.Zero(t, flights.activeCount(), "all sibling reads must finish before return")
 				require.Equal(t, map[int]int{1: 1, 2: 1, 3: 1, 4: 1, 5: 1}, flights.counts, "failure must not start queued pages")
 				require.Len(t, cancelled, 3)
 				seen := map[int]bool{}
@@ -275,7 +281,7 @@ func TestForgejoRunInventoryCancellationJoinsEveryPage(t *testing.T) {
 				}()
 				synctest.Wait()
 				active := map[string]int{"before-first": 0, "first-page": 1, "remaining-pages": 4, "deadline": 4}[phase]
-				require.Equal(t, active, flights.active)
+				require.Equal(t, active, flights.activeCount())
 				want := context.Canceled
 				if phase == "deadline" {
 					// This advances only synctest's fake clock, not wall time.
@@ -290,7 +296,7 @@ func TestForgejoRunInventoryCancellationJoinsEveryPage(t *testing.T) {
 				require.Empty(t, result.runs.Items)
 				require.Zero(t, result.runs.Total)
 				require.False(t, result.runs.Complete)
-				require.Zero(t, flights.active)
+				require.Zero(t, flights.activeCount())
 				require.Len(t, cancelled, active)
 				for range active {
 					require.ErrorIs(t, <-cancelled, want)
