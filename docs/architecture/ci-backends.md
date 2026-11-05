@@ -190,6 +190,9 @@ adapters never fall back to native state. See [command coverage](../operations/g
 
 ## Logs
 
+See [Forgejo step logs](forgejo-step-logs.md) for the optional exact step layout,
+unassigned-output diagnostic segment and official gh ZIP selection contract.
+
 When Forgejo does not provide public logs, its adapter may use the explicit typed
 provider-log bridge. The bridge must match repository, task ID, run number, job
 name, commit, ref, event and provider PR (when applicable). It never receives an
