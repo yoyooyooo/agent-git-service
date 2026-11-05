@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -127,10 +128,10 @@ func TestForgejoRunsFilterBeforePaginationAndCountConclusions(t *testing.T) {
 func TestForgejoRunsRejectIncompleteOrUnstableInventories(t *testing.T) {
 	for _, mode := range []string{"duplicate", "number-collision", "changed-total", "short-page", "budget"} {
 		t.Run(mode, func(t *testing.T) {
-			calls := 0
+			var calls atomic.Int32
 			items := forgejoRunInventoryFixture(125)
 			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls++
+				calls.Add(1)
 				page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 				start := (page - 1) * 50
 				end := min(start+50, len(items))
@@ -159,7 +160,7 @@ func TestForgejoRunsRejectIncompleteOrUnstableInventories(t *testing.T) {
 			require.NoError(t, err)
 			_, err = backend.Runs(t.Context(), "ci/project", Query{Page: 1, PerPage: 10})
 			require.True(t, errors.Is(err, ErrUnavailable) || errors.Is(err, ErrInvalid), "partial or ambiguous inventories cannot become pages: %v", err)
-			require.LessOrEqual(t, calls, limit)
+			require.LessOrEqual(t, int(calls.Load()), limit)
 		})
 	}
 }
