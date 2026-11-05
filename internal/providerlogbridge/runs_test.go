@@ -150,3 +150,33 @@ func TestBridgeRunInventoryRejectsUnboundAndInvalidReads(t *testing.T) {
 	require.Equal(t, 502, res.Code, res.Body.String())
 	require.NotContains(t, res.Body.String(), "workflow_runs", "invalid ordering cannot return a partial page")
 }
+
+func TestBridgeRunInventoryShortensOnlyTheOuterRefNamespace(t *testing.T) {
+	for _, test := range []struct{ ref, branch string }{
+		{"refs/heads/refs/tags/topic", "refs/tags/topic"},
+		{"refs/tags/refs/heads/topic", "refs/heads/topic"},
+		{"refs/heads/refs/pull/42/head", "refs/pull/42/head"},
+	} {
+		t.Run(test.ref, func(t *testing.T) {
+			h, mux := runBridgeFixture(t)
+			require.NoError(t, h.db.Exec(`UPDATE action_run SET ref=?, event='push' WHERE id=10125`, test.ref).Error)
+			for _, query := range []string{
+				"page=1&per_page=1",
+				"page=1&per_page=1&branch=" + url.QueryEscape(test.branch),
+			} {
+				res := runBridgeRequest(mux, query)
+				require.Equal(t, 200, res.Code, res.Body.String())
+				var body struct {
+					Runs []struct {
+						Number int64  `json:"index_in_repo"`
+						Branch string `json:"prettyref"`
+					} `json:"workflow_runs"`
+				}
+				require.NoError(t, json.Unmarshal(res.Body.Bytes(), &body))
+				require.Len(t, body.Runs, 1)
+				require.Equal(t, int64(125), body.Runs[0].Number)
+				require.Equal(t, test.branch, body.Runs[0].Branch)
+			}
+		})
+	}
+}
