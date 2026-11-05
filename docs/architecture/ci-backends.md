@@ -17,6 +17,8 @@ ci:
     build-farm:
       kind: forgejo
       url: https://forgejo.example.test
+      # Optional trusted browser URL; never an API or credential destination.
+      web_url: https://build.example.test
       token_file: private/ci-forgejo.token
       task_page_limit: 100
       log_bridge:
@@ -47,6 +49,12 @@ provider or log bridge. HTTP requires explicit `allow_http: true`; production
 should use verified TLS. CI fields are strictly decoded: a misspelled selector
 cannot silently revert to another backend.
 
+`web_url` is a Forgejo browser alias for read locators; it does not change the API
+destination or any existing CI resource ID. If omitted, a Forgejo CI backend at
+the same API origin as the configured Forgejo integration may inherit that
+integration's validated `web_base_url`. An explicit CI `web_url` takes precedence;
+an unrelated provider never inherits the alias.
+
 `required_checks: []` is a known empty set; omission is unknown for an external
 backend. Current AGS branch protection requirements are unioned with configured
 requirements and cannot be removed by changing CI backend. Unknown policy cannot
@@ -73,6 +81,55 @@ inventories and an exhausted budget return unavailable; authentication failures,
 transport failures and other provider errors do not trigger this fallback.
 Details, jobs and logs all use this lookup, so a successful `gh run list` does not
 lead to a false missing-run error solely because the single-run route is absent.
+
+### Forgejo read locators
+
+The GET run detail, jobs and logs routes (including attempt routes) also accept
+`forgejo:<repository-run-number>` or an encoded Forgejo browser run URL. This is
+an explicit AGS compatibility extension for stock `gh run view`. The service
+authorizes the AGS repository first, then the adapter queries the configured
+provider's public `run_number` filter and requires one exact result. Responses
+always contain the existing canonical AGS numeric ID; subsequent client requests
+use that ID normally.
+
+A URL must match the selected backend's configured API/browser base and exact
+external repository. It must have no credentials, query or fragment. The URL is
+parsed as a locator and is never fetched. A bare numeric value remains an AGS
+resource ID, so it cannot accidentally select a same-numbered provider run.
+Mutation routes continue to require canonical numeric IDs.
+
+```bash
+gh run view forgejo:9 -R team/service --json databaseId,number,headSha,jobs
+gh run view https://build.example.test/ci/service/actions/runs/9 \
+  -R team/service --log-failed
+```
+
+### Run filtering and pagination
+
+Forgejo listings are ordered by repository run number descending. Branch,
+workflow, head SHA, event and status/conclusion filters apply before the client
+page is selected. `status=failure` matches the conclusion of a completed run;
+`status=completed` matches its execution state. `total_count` counts the filtered
+inventory and pages may contain up to 100 runs even when Forgejo's public API
+caps each provider page at 50. The returned next link preserves the filters.
+
+An upgraded explicit bridge exposes the repository-bound read-only
+`GET /api/internal/provider-logs/repos/{owner}/{repo}/runs` resource with schema
+`ags.internal-provider-runs.v1`. It counts and selects an ordered page in one
+read-only repeatable-read transaction. It never returns event payloads or
+credentials. The adapter validates the response repository, query match, order,
+page size and run identities before mapping them.
+
+When an older bridge returns 404/501, AGS reads the public run collection within
+the configured `task_page_limit` budget and request deadline. Supported head,
+event and status filters reduce provider work; the complete remaining inventory
+is validated, sorted and filtered before pagination. Duplicate IDs or run
+numbers, changing totals, incomplete pages and exhausted budgets fail explicitly.
+Provider denial, outage or malformed indexed evidence does not trigger fallback.
+The default budget is 100 provider pages (5,000 runs); select an exact head to
+reduce work or upgrade the bridge for larger inventories. The separate legacy
+single-run lookup still reads raw provider pages and may stop at an exact match;
+it does not repeat the full listing scan for each page.
 
 Missing capabilities return unsupported. Forgejo cancel and workflow catalogue
 management remain unsupported. Reruns use the public workflow dispatch API as

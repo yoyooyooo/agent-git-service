@@ -23,13 +23,16 @@ type LogBridgeConfig struct {
 	AllowHTTP bool   `yaml:"allow_http" json:"allow_http"`
 }
 type BackendConfig struct {
-	Kind             string           `yaml:"kind" json:"kind"`
-	URL              string           `yaml:"url" json:"url"`
+	Kind string `yaml:"kind" json:"kind"`
+	URL  string `yaml:"url" json:"url"`
+	// Optional browser origin/path for Forgejo read selectors. Never an API or
+	// credential destination, and deliberately outside the resource namespace.
+	WebURL           string           `yaml:"web_url" json:"web_url,omitempty"`
 	TokenFile        string           `yaml:"token_file" json:"-"`
 	AllowHTTP        bool             `yaml:"allow_http" json:"allow_http"`
 	LogDownloadHosts []string         `yaml:"log_download_hosts" json:"log_download_hosts,omitempty"`
 	LogBridge        *LogBridgeConfig `yaml:"log_bridge" json:"log_bridge,omitempty"`
-	// Bounded inventory work for Forgejo APIs without a run-specific jobs route.
+	// Bounded run/task inventory work for older Forgejo APIs and bridges.
 	TaskPageLimit int `yaml:"task_page_limit" json:"task_page_limit,omitempty"`
 }
 type Binding struct {
@@ -92,6 +95,12 @@ func Validate(c Config) error {
 		}
 		if u.RawPath != "" || strings.Contains(u.Path, "..") {
 			return fmt.Errorf("invalid CI API path")
+		}
+		if b.WebURL != "" {
+			web, e := url.Parse(b.WebURL)
+			if b.Kind != "forgejo" || e != nil || web.Hostname() == "" || web.User != nil || web.RawQuery != "" || web.ForceQuery || strings.Contains(b.WebURL, "#") || web.RawPath != "" || strings.Contains(web.Path, "..") || (web.Scheme != "https" && !(web.Scheme == "http" && b.AllowHTTP)) {
+				return fmt.Errorf("CI web_url must be an explicit trusted Forgejo HTTP(S) browser URL")
+			}
 		}
 		if strings.TrimSpace(b.TokenFile) == "" {
 			return fmt.Errorf("CI backend %s requires a server token file", name)
