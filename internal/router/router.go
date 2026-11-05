@@ -92,6 +92,7 @@ func registerProviderLogBridgeRoutes(r chi.Router, handlers *rest.Deps) {
 		return
 	}
 	r.Get("/api/internal/provider-logs/repos/{owner}/{repo}/tasks/{task}", handlers.ProviderLogBridge.ServeHTTP)
+	r.Get("/api/internal/provider-logs/repos/{owner}/{repo}/runs", handlers.ProviderLogBridge.ServeHTTP)
 	r.Get("/api/internal/provider-logs/repos/{owner}/{repo}/runs/{run}/artifacts", handlers.ProviderLogBridge.ServeHTTP)
 	r.Get("/api/internal/provider-logs/repos/{owner}/{repo}/runs/{run}/jobs", handlers.ProviderLogBridge.ServeHTTP)
 }
@@ -983,6 +984,9 @@ func registerRepositoryDispatchRoutes(r chi.Router, handlers *rest.Deps) {
 func registerWorkflowRunRoutes(r chi.Router, handlers *rest.Deps) {
 	// Actions: Workflow Runs
 	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs", handlers.CI(handlers.ListWorkflowRuns, "runs"))
+	// Forgejo read compatibility: run_id may be forgejo:<repository-number> or
+	// an encoded URL at a configured browser origin. Responses use canonical AGS
+	// IDs; mutation routes continue to require those numeric IDs.
 	r.Get("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}", handlers.CI(handlers.GetWorkflowRun, "run"))
 	r.Post("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/cancel", handlers.CI(handlers.CancelWorkflowRun, "cancel"))
 	r.Delete("/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}", handlers.CI(handlers.DeleteWorkflowRun, "unsupported"))
