@@ -125,6 +125,10 @@ the configured `task_page_limit` budget and request deadline. Supported head,
 event and status filters reduce provider work; the complete remaining inventory
 is validated, sorted and filtered before pagination. Duplicate IDs or run
 numbers, changing totals, incomplete pages and exhausted budgets fail explicitly.
+The first provider page establishes the bounded inventory size. Up to four
+workers then fetch the remaining pages concurrently with separate query values;
+any error cancels the other reads, and every worker finishes before a result is
+returned. Completion order does not change page-size or identity validation.
 Provider denial, outage or malformed indexed evidence does not trigger fallback.
 The default budget is 100 provider pages (5,000 runs); select an exact head to
 reduce work or upgrade the bridge for larger inventories. The separate legacy

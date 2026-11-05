@@ -9,7 +9,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+
+	"golang.org/x/sync/errgroup"
 )
+
+const forgejoRunPageConcurrency = 4
 
 type forgejoRunPage struct {
 	Schema string       `json:"schema"`
@@ -89,6 +94,9 @@ func (f *Forgejo) runPage(ctx context.Context, repo string, query url.Values) (R
 }
 
 func (f *Forgejo) observeRuns(ctx context.Context, repo string, q Query) ([]Run, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	limit := f.config.TaskPageLimit
 	if limit == 0 {
 		limit = 100
@@ -115,35 +123,94 @@ func (f *Forgejo) observeRuns(ctx context.Context, repo string, q Query) ([]Run,
 	case "success", "failure", "cancelled", "skipped":
 		query.Set("status", q.Status)
 	}
-	seen := map[string]bool{}
-	numbers := map[int64]bool{}
-	items := []Run{}
-	total := -1
-	for page := 1; page <= limit; page++ {
-		query.Set("page", strconv.Itoa(page))
-		found, err := f.runPage(ctx, repo, query)
-		if err != nil {
-			return nil, err
+	// Observe and validate the size before scheduling any other request. Large
+	// inventories still fail the configured page budget, never a partial page.
+	query.Set("page", "1")
+	first, err := f.runPage(ctx, repo, query)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, err
+	}
+	total := first.Total
+	if total > limit*50 {
+		return nil, fmt.Errorf("%w: incomplete or oversized CI run inventory", ErrUnavailable)
+	}
+	items := make([]Run, total)
+	seen, numbers := map[string]bool{}, map[int64]bool{}
+	var observationMu sync.Mutex
+	observed := 0
+	recordPage := func(page int, found Runs) error {
+		if found.Total != total {
+			return fmt.Errorf("%w: CI run inventory changed during observation", ErrUnavailable)
 		}
-		if total >= 0 && total != found.Total {
-			return nil, fmt.Errorf("%w: CI run inventory changed during observation", ErrUnavailable)
+		offset := (page - 1) * 50
+		if len(found.Items) != min(50, total-offset) {
+			return fmt.Errorf("%w: incomplete CI run inventory page", ErrUnavailable)
 		}
-		total = found.Total
-		if total > limit*50 || len(found.Items) != min(50, total-len(items)) {
-			return nil, fmt.Errorf("%w: incomplete or oversized CI run inventory", ErrUnavailable)
-		}
+		observationMu.Lock()
+		defer observationMu.Unlock()
 		for _, run := range found.Items {
 			if seen[run.Key] || numbers[run.Number] {
-				return nil, fmt.Errorf("%w: repeated CI run identity", ErrUnavailable)
+				return fmt.Errorf("%w: repeated CI run identity", ErrUnavailable)
 			}
 			seen[run.Key], numbers[run.Number] = true, true
-			items = append(items, run)
 		}
-		if len(items) == total {
-			return items, nil
-		}
+		copy(items[offset:], found.Items)
+		observed += len(found.Items)
+		return nil
 	}
-	return nil, fmt.Errorf("%w: Forgejo run inventory exceeds bounded observation", ErrUnavailable)
+	if err := recordPage(1, first); err != nil {
+		return nil, err
+	}
+	if observed == total {
+		return items, nil
+	}
+	pageCount := (total + 49) / 50
+	pages := make(chan int, pageCount-1)
+	for page := 2; page <= pageCount; page++ {
+		pages <- page
+	}
+	close(pages)
+	group, workerCtx := errgroup.WithContext(ctx)
+	for range min(forgejoRunPageConcurrency, pageCount-1) {
+		group.Go(func() error {
+			// Each worker owns its query, including repeated event/status values.
+			// It may update only its page while the other workers are encoding.
+			workerQuery := make(url.Values, len(query))
+			for key, values := range query {
+				workerQuery[key] = append([]string(nil), values...)
+			}
+			for page := range pages {
+				if err := workerCtx.Err(); err != nil {
+					return err
+				}
+				workerQuery.Set("page", strconv.Itoa(page))
+				found, err := f.runPage(workerCtx, repo, workerQuery)
+				if err != nil {
+					return err
+				}
+				if err := recordPage(page, found); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+	// An error cancels sibling reads. Join every worker before inspecting the
+	// result; neither a cancellation nor malformed page can expose partial data.
+	err = group.Wait()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if observed != total {
+		return nil, fmt.Errorf("%w: incomplete CI run inventory", ErrUnavailable)
+	}
+	return items, nil
 }
 
 func (f *Forgejo) indexedRuns(ctx context.Context, repo string, q Query) (Runs, error) {
