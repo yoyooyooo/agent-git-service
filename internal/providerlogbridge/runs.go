@@ -121,8 +121,12 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		seen[row.ID], previous = true, row.Number
-		ref := strings.TrimPrefix(strings.TrimPrefix(row.Ref, "refs/heads/"), "refs/tags/")
-		if number, pull := strings.CutPrefix(row.Ref, "refs/pull/"); pull && strings.HasSuffix(number, "/head") {
+		ref := row.Ref
+		if branch, head := strings.CutPrefix(row.Ref, "refs/heads/"); head {
+			ref = branch
+		} else if tag, tagged := strings.CutPrefix(row.Ref, "refs/tags/"); tagged {
+			ref = tag
+		} else if number, pull := strings.CutPrefix(row.Ref, "refs/pull/"); pull && strings.HasSuffix(number, "/head") {
 			n, err := strconv.ParseInt(strings.TrimSuffix(number, "/head"), 10, 64)
 			if err != nil || n <= 0 || number != strconv.FormatInt(n, 10)+"/head" {
 				h.fail(w, 502, "metadata_invalid", "Invalid provider run ref")
