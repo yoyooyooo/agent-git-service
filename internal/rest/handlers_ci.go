@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -136,15 +137,8 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 			return
 		case "runs":
 			q := r.URL.Query()
-			page, _ := strconv.Atoi(q.Get("page"))
-			size, _ := strconv.Atoi(q.Get("per_page"))
-			if page == 0 {
-				page = 1
-			}
-			if size == 0 {
-				size = 30
-			}
-			if page < 1 || page > 1000 || size < 1 || size > 100 {
+			page, size, valid := ciRunPagination(q)
+			if !valid {
 				respond.Error(w, 422, "invalid CI pagination")
 				return
 			}
@@ -166,15 +160,27 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 			respond.JSON(w, 200, map[string]any{"total_count": result.Total, "workflow_runs": rows})
 			return
 		case "run", "run-jobs", "run-logs", "cancel", "rerun", "rerun-failed-jobs":
-			id, ok := readID("run_id")
-			if !ok {
-				return
+			var run service.CIRun
+			var e error
+			if r.Method == http.MethodGet {
+				selector, err := url.PathUnescape(chi.URLParam(r, "run_id"))
+				if err != nil {
+					respond.Error(w, 422, "invalid CI run selector")
+					return
+				}
+				run, e = d.Svc.CIReadRun(r.Context(), repo.FullName, selector)
+			} else {
+				id, ok := readID("run_id")
+				if !ok {
+					return
+				}
+				run, e = d.Svc.CIRun(r.Context(), repo.FullName, id)
 			}
-			run, e := d.Svc.CIRun(r.Context(), repo.FullName, id)
 			if e != nil {
 				ciHTTPError(w, e)
 				return
 			}
+			id := run.ID
 			if attempt := chi.URLParam(r, "attempt_number"); attempt != "" && attempt != strconv.Itoa(run.Run.Attempt) {
 				respond.Error(w, 404, "Only the selected run attempt is available")
 				return
@@ -298,6 +304,26 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 		}
 	}
 }
+
+func ciRunPagination(query url.Values) (int, int, bool) {
+	values := []int{1, 30}
+	for i, field := range []string{"page", "per_page"} {
+		raw, exists := query[field]
+		if !exists {
+			continue
+		}
+		if len(raw) != 1 {
+			return 0, 0, false
+		}
+		n, err := strconv.Atoi(raw[0])
+		if err != nil || n < 1 || strconv.Itoa(n) != raw[0] {
+			return 0, 0, false
+		}
+		values[i] = n
+	}
+	return values[0], values[1], values[0] <= 1000 && values[1] <= 100
+}
+
 func ciHTTPError(w http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
 	switch {

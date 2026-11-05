@@ -20,8 +20,8 @@ func TestStepsUseDatabaseStatusAndNullableTimesWithoutRequiringLogs(t *testing.T
 	h, _ := setupBridge(t, 1024)
 	token := "bridge-secret"
 	for _, sql := range []string{
-		`CREATE TABLE action_task_step (id integer primary key, task_id integer, repo_id integer, name text, "index" integer, status integer, started integer, stopped integer)`,
-		`INSERT INTO action_task_step VALUES (1,41,1,'checkout',0,1,1767225600,1767225601),(2,41,1,'pending',1,5,0,0),(3,41,1,'unknown',2,0,0,0)`,
+		`CREATE TABLE action_task_step (id integer primary key, task_id integer, repo_id integer, name text, "index" integer, status integer, started integer, stopped integer, log_index integer, log_length integer)`,
+		`INSERT INTO action_task_step VALUES (1,41,1,'checkout',0,1,1767225600,1767225601,0,0),(2,41,1,'pending',1,5,0,0,0,0),(3,41,1,'unknown',2,0,0,0,0,0)`,
 		`UPDATE action_task SET log_expired=true`,
 	} {
 		if err := h.db.Exec(sql).Error; err != nil {

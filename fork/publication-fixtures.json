@@ -26,6 +26,12 @@
       "reason": "Synthetic example.test URL is created in disposable Git history to prove exact reviewed-fixture and historical scanning behavior."
     },
     {
+      "path": "internal/cibackend/run_selectors_test.go",
+      "object": "b49a93b6ae896d02ac81c6d87154cfcf37d3e008",
+      "rule": "credential-in-url",
+      "reason": "Literal user/secret example.test URLs are synthetic invalid run selectors and browser origins; the tests require rejection before provider I/O and contain no real credentials."
+    },
+    {
       "path": "internal/executioncontext/connector_test.go",
       "object": "9678497ed900d4cb96df3f2020b90e3949455018",
       "rule": "credential-in-url",
