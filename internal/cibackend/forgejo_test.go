@@ -23,6 +23,10 @@ func TestForgejoNativeRunTaskAndExplicitLogBridge(t *testing.T) {
 	calls := []string{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.URL.Path)
+		if r.URL.Path == "/api/internal/provider-logs/repos/ci/project/runs" {
+			http.NotFound(w, r) // Older bridge: use the bounded public API inventory.
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/internal/provider-logs/") {
 			if r.Header.Get("Authorization") != "Bearer bridge-only" {
 				t.Error("wrong bridge credential")

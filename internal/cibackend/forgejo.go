@@ -63,52 +63,7 @@ func (r forgejoRun) run() (Run, error) {
 	return Run{Untrusted: r.NeedApproval || r.ForkPullRequest, Key: strconv.FormatInt(r.ID, 10), Number: r.Number, Workflow: r.Workflow, Name: r.Workflow, Branch: branch, HeadSHA: r.Head, Event: r.Event, Status: status, Conclusion: conclusion, URL: r.URL, CreatedAt: r.Created, UpdatedAt: r.Updated, StartedAt: r.Started, Attempt: 1, PullRequests: prs}, nil
 }
 func (f *Forgejo) Runs(ctx context.Context, repo string, q Query) (Runs, error) {
-	prefix, e := f.prefix(repo)
-	if e != nil {
-		return Runs{}, e
-	}
-	if q.Page == 0 {
-		q.Page = 1
-	}
-	if q.PerPage == 0 || q.PerPage > 50 {
-		q.PerPage = 50
-	}
-	if q.Page < 1 || q.Page > 1000 || q.PerPage < 1 {
-		return Runs{}, ErrInvalid
-	}
-	v := url.Values{"page": {strconv.Itoa(q.Page)}, "limit": {strconv.Itoa(q.PerPage)}}
-	if q.HeadSHA != "" {
-		v.Set("head_sha", q.HeadSHA)
-	}
-	if q.Event != "" {
-		v.Set("event", q.Event)
-	}
-	data, e := f.request(ctx, "GET", prefix+"runs?"+v.Encode(), false)
-	if e != nil {
-		return Runs{}, e
-	}
-	var body struct {
-		Total int          `json:"total_count"`
-		Items []forgejoRun `json:"workflow_runs"`
-	}
-	if e = decode(data, &body); e != nil {
-		return Runs{}, e
-	}
-	if body.Total < 0 || len(body.Items) > q.PerPage {
-		return Runs{}, ErrInvalid
-	}
-	result := Runs{Items: []Run{}, Total: body.Total, Complete: body.Total > 0 && q.Page*q.PerPage >= body.Total || len(body.Items) < q.PerPage}
-	for _, item := range body.Items {
-		r, e := item.run()
-		if e != nil {
-			return Runs{}, e
-		}
-		if q.Workflow != "" && r.Workflow != q.Workflow {
-			continue
-		}
-		result.Items = append(result.Items, r)
-	}
-	return result, nil
+	return f.queryRuns(ctx, repo, q)
 }
 func (f *Forgejo) Run(ctx context.Context, repo, id string) (Run, error) {
 	prefix, e := f.prefix(repo)
@@ -147,7 +102,7 @@ func (f *Forgejo) findListedRun(ctx context.Context, repo, id string) (Run, erro
 	seen := map[string]bool{}
 	total := -1
 	for page := 1; page <= limit; page++ {
-		found, err := f.Runs(ctx, repo, Query{Page: page, PerPage: 50})
+		found, err := f.runPage(ctx, repo, url.Values{"page": {strconv.Itoa(page)}, "limit": {"50"}})
 		if err != nil {
 			return Run{}, err
 		}

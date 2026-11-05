@@ -131,7 +131,7 @@ func (s *Service) CIRuns(ctx context.Context, repository string, query cibackend
 	out := CIRuns{Runs: []CIRun{}, Total: found.Total, Complete: found.Complete, Backend: sel.Name}
 	for _, run := range found.Items {
 		// Do not rely on a provider actually honoring its query parameters.
-		if query.HeadSHA != "" && run.HeadSHA != query.HeadSHA || query.Branch != "" && run.Branch != query.Branch || query.Event != "" && run.Event != query.Event || query.Status != "" && run.Status != query.Status {
+		if !cibackend.MatchesRunQuery(run, query) {
 			continue
 		}
 		r, e := s.ciRun(ctx, repo, sel, run)
@@ -142,6 +142,32 @@ func (s *Service) CIRuns(ctx context.Context, repository string, query cibackend
 	}
 	return out, nil
 }
+
+// CIReadRun accepts typed read selectors without changing numeric ID semantics
+// or widening mutation routes. Repository access is checked before any selector
+// is resolved by the configured backend.
+func (s *Service) CIReadRun(ctx context.Context, repository, selector string) (CIRun, error) {
+	repo, sel, err := s.ciScope(ctx, repository)
+	if err != nil {
+		return CIRun{}, err
+	}
+	if id, err := strconv.ParseUint(selector, 10, 64); err == nil && id > 0 {
+		return s.CIRun(ctx, repository, id)
+	}
+	backend, ok := sel.Backend.(cibackend.RunSelectorBackend)
+	if !ok || sel.Kind != "forgejo" {
+		return CIRun{}, ErrValidation
+	}
+	run, err := backend.RunBySelector(ctx, sel.Binding.Repository, selector)
+	if err != nil {
+		if errors.Is(err, cibackend.ErrInvalidRunSelector) {
+			return CIRun{}, ErrValidation
+		}
+		return CIRun{}, ciError(err)
+	}
+	return s.ciRun(ctx, repo, sel, run)
+}
+
 func (s *Service) CIRun(ctx context.Context, repository string, id uint64) (CIRun, error) {
 	repo, sel, e := s.ciScope(ctx, repository)
 	if e != nil {

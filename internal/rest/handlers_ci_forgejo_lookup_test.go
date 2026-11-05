@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -73,7 +74,7 @@ func TestForgejoCollectionOnlyRunDetailsJobsLogsAndRerun(t *testing.T) {
 		}
 	}))
 	defer provider.Close()
-	config := cibackend.BackendConfig{Kind: "forgejo", URL: provider.URL, TokenFile: "fixture", AllowHTTP: true, LogBridge: &cibackend.LogBridgeConfig{URL: provider.URL, TokenFile: "bridge-fixture", AllowHTTP: true}}
+	config := cibackend.BackendConfig{Kind: "forgejo", URL: provider.URL, WebURL: "https://ci.example.test", TokenFile: "fixture", AllowHTTP: true, LogBridge: &cibackend.LogBridgeConfig{URL: provider.URL, TokenFile: "bridge-fixture", AllowHTTP: true}}
 	backend, err := cibackend.NewHTTP(config, "provider-only", "bridge-only")
 	require.NoError(t, err)
 	h.Svc.CI, err = cibackend.WithBackends(cibackend.Config{Backends: map[string]cibackend.BackendConfig{"builder": config}, Repositories: map[string]cibackend.Binding{repo.FullName: {Backend: "builder", Repository: "ci/project"}}}, map[string]cibackend.Backend{"builder": backend})
@@ -85,6 +86,26 @@ func TestForgejoCollectionOnlyRunDetailsJobsLogsAndRerun(t *testing.T) {
 	detail := h.DoREST(t, "GET", path, nil)
 	require.Equal(t, 200, detail.Code, detail.Body.String())
 	require.Equal(t, head, testharness.DecodeJSON(t, detail)["head_sha"])
+	for _, selector := range []string{"forgejo:9", "https://ci.example.test/ci/project/actions/runs/9"} {
+		selectorPath := fmt.Sprintf("/api/v3/repos/%s/actions/runs/%s", repo.FullName, url.PathEscape(selector))
+		selected := h.DoREST(t, "GET", selectorPath, nil)
+		require.Equal(t, 200, selected.Code, selected.Body.String())
+		body := testharness.DecodeJSON(t, selected)
+		require.Equal(t, float64(runs.Runs[0].ID), body["id"], "typed and encoded URL locators retain the canonical ID")
+		require.Equal(t, head, body["head_sha"])
+		require.True(t, strings.HasSuffix(body["jobs_url"].(string), path+"/jobs"))
+		for _, action := range []string{"rerun", "rerun-failed-jobs", "cancel"} {
+			denied := h.DoREST(t, "POST", selectorPath+"/"+action, nil)
+			require.Equal(t, 422, denied.Code, "read locators must not widen mutations: %s", denied.Body.String())
+		}
+	}
+	require.Zero(t, writes)
+	wrongHost := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/runs/%s", repo.FullName, url.PathEscape("https://other.example.test/ci/project/actions/runs/9")), nil)
+	require.Equal(t, 404, wrongHost.Code, wrongHost.Body.String())
+	for _, query := range []string{"per_page=101", "per_page=zero", "per_page=0", "page=-1", "page=1001", "page=1&page=2", "page=01"} {
+		invalid := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/runs?%s", repo.FullName, query), nil)
+		require.Equal(t, 422, invalid.Code, invalid.Body.String())
+	}
 	jobs := h.DoREST(t, "GET", path+"/jobs", nil)
 	require.Equal(t, 200, jobs.Code, jobs.Body.String())
 	rows := testharness.DecodeJSON(t, jobs)["jobs"].([]any)

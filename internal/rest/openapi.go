@@ -211,6 +211,15 @@ func buildGitHubCompatibleOpenAPIPaths() map[string]any {
 			"get":  operation("listPullRequests", "List pull requests.", nil, nil, pathParams(param("owner", "string"), param("repo", "string")), response(200, "Pull request list returned")),
 			"post": operation("createPullRequest", "Create a pull request.", auth(), nil, pathParams(param("owner", "string"), param("repo", "string")), response(201, "Pull request created")),
 		},
+		"/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}": map[string]any{
+			"get": operation("getWorkflowRun", "Read a workflow run. Numeric run_id is an AGS ID. For a selected Forgejo backend only, the read compatibility extension also accepts forgejo:<repository-run-number> or an encoded run URL at the configured browser base and exact external repository. Responses retain the canonical numeric AGS ID; mutations do not accept these locators.", auth(), nil, pathParams(param("owner", "string"), param("repo", "string"), param("run_id", "string")), response(200, "Workflow run returned")),
+		},
+		"/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/jobs": map[string]any{
+			"get": operation("listWorkflowRunJobs", "Read jobs of an authorized workflow run. Accepts the same read-only run locators as getWorkflowRun; job IDs remain canonical AGS numeric IDs.", auth(), nil, pathParams(param("owner", "string"), param("repo", "string"), param("run_id", "string")), response(200, "Workflow jobs returned")),
+		},
+		"/api/v3/repos/{owner}/{repo}/actions/runs/{run_id}/logs": map[string]any{
+			"get": operation("getWorkflowRunLogs", "Read a workflow run log ZIP. Accepts the same read-only run locators as getWorkflowRun and preserves repository/backend authorization.", auth(), nil, pathParams(param("owner", "string"), param("repo", "string"), param("run_id", "string")), response(200, "Workflow log ZIP returned")),
+		},
 		"/api/v3/repos/{owner}/{repo}/pulls/{number}": map[string]any{
 			"get":   operation("getPullRequest", "Get a pull request.", nil, nil, pathParams(param("owner", "string"), param("repo", "string"), param("number", "integer")), response(200, "Pull request returned")),
 			"patch": operation("updatePullRequest", "Update a pull request.", auth(), nil, pathParams(param("owner", "string"), param("repo", "string"), param("number", "integer")), response(200, "Pull request updated")),
