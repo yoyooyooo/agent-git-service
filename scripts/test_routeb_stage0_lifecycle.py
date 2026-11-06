@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 import routeb_host_native as native
 import routeb_native_capture as capture
+import routeb_stage0_client as peer_client
 from upgrade_backup_contract import ContractError
 
 
@@ -148,11 +149,17 @@ class BrokerManagerTests(unittest.TestCase):
             'Type': 'simple', 'User': 'root', 'Group': 'root', 'Restart': 'no',
             'KillMode': 'mixed', 'SendSIGKILL': 'no', 'TimeoutStopSec': '120',
             'ExecStart': '/usr/local/libexec/ags-routeb-native/example/stage0/ags-routeb-stage0'
-                         ' serve --registration example --operation serve'}
+                         ' serve --registration example --operation serve',
+            'ExecStopPost': '/usr/local/libexec/ags-routeb-native/example/stage0/ags-routeb-stage0'
+                            ' manager-complete --registration example --operation serve'}
         def definition(*_args, **_kwargs):
             return ('[Service]\n' + ''.join(f'{key}={value}\n' for key, value in entries.items())).encode()
         properties = {'DropInPaths': '', 'Restart': 'no', 'KillMode': 'mixed', 'SendSIGKILL': 'no',
                       'TimeoutStopUSec': '2min', 'FragmentPath': self.manager.spec['definition']}
+        properties['ExecStopPost'] = (
+            '{ path=/usr/local/libexec/ags-routeb-native/example/stage0/ags-routeb-stage0 ; argv[]='
+            + entries['ExecStopPost'] + ' ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a]'
+            ' ; pid=0 ; code=(null) ; status=0/0 }')
         with patch.object(capture, 'read_regular', side_effect=definition), \
                 patch.object(capture, 'sha', return_value='a' * 64), \
                 patch.object(capture, 'stage0_client', return_value=self.client), \
@@ -161,6 +168,7 @@ class BrokerManagerTests(unittest.TestCase):
             for key, value in [('KillMode', 'control-group'), ('User', 'fixture'),
                                ('SendSIGKILL', 'yes'),
                                ('Environment', 'LD_PRELOAD=/fixture/untrusted.so'),
+                               ('ExecStopPost', '/bin/true'),
                                ('ExecStart', '/bin/sh -c anything')]:
                 previous = entries.get(key)
                 entries[key] = value
@@ -178,8 +186,16 @@ class BrokerManagerTests(unittest.TestCase):
                 properties['SendSIGKILL'] = value
                 with self.subTest(effective=value), self.assertRaisesRegex(ContractError, 'stage0_manager_force_kill_enabled'):
                     self.manager.definition()
+            properties['SendSIGKILL'] = 'no'
+            original = properties['ExecStopPost']
+            for value in ('', original + ' ' + original,
+                          original.replace('ignore_errors=no', 'ignore_errors=yes'),
+                          original.replace('--operation serve', '--operation serve --unsafe')):
+                properties['ExecStopPost'] = value
+                with self.subTest(hook=value), self.assertRaisesRegex(ContractError, 'stage0_manager_completion_command_changed'):
+                    self.manager.definition()
 
-    def stop_fixture(self, *, mutation=None, runtime_mutation=None, manager_result='success'):
+    def stop_fixture(self, *, mutation=None, runtime_mutation=None, manager_result='success', manager_code='0'):
         tree = NativeTreeTests()
         tree.setUp()
         context = tree.context
@@ -194,12 +210,23 @@ class BrokerManagerTests(unittest.TestCase):
                           ('registration_sha256', 'invocation_id', 'phase', 'boot_id', 'supervisor', 'child')},
                        'child_exit_code': 0, 'signal_forwarded': True, 'forced_kill': False,
                        'context_verified': True, 'authority_rechecked': True, 'normal_exit': True}
+        manager_id = 'e' * 32
+        exit_record['manager_completion'] = {
+            'schema': 'ags.routeb-stage0-manager-completion.v1',
+            **{key: context[key] for key in ('registration_sha256', 'invocation_id', 'phase', 'boot_id')},
+            'unit': self.manager.spec['target'], 'manager_invocation_id': manager_id,
+            'start_anchor_sha256': '1' * 64, 'context_sha256': '2' * 64, 'exit_sha256': '3' * 64,
+            'hook': identity(1104, 1, 0, 0, 103, 'a'),
+            'manager': {'invocation_id': manager_id, 'main_pid': 0,
+                        'exec_main_pid': context['supervisor']['pid'], 'control_pid': 1104,
+                        'exec_main_code': 1, 'exec_main_status': 0, 'result': 'success',
+                        'service_result': 'success', 'exit_code': 'exited', 'exit_status': '0'}}
         if mutation is not None:
             mutation(exit_record)
         self.client.runtime_exit = Mock(return_value=exit_record)
         def manager_status(_spec, names):
             values = {'MainPID': '0', 'ActiveState': 'inactive', 'SubState': 'dead',
-                      'ExecMainCode': '1', 'ExecMainStatus': '0', 'Result': manager_result}
+                      'ExecMainCode': manager_code, 'ExecMainStatus': '0', 'Result': manager_result}
             return {key: values[key] for key in names}
         with patch('routeb_host_package.require_interpreter_closure'), \
                 patch.object(self.manager, 'definition'), patch.object(self.manager, '_systemd'), \
@@ -213,7 +240,34 @@ class BrokerManagerTests(unittest.TestCase):
     def test_normal_stop_binds_root_exit_and_actual_manager_exit(self):
         result = self.stop_fixture()
         self.assertTrue(result['stage0_exit']['normal_exit'])
+        self.assertEqual(result['stage0_exit']['manager_completion']['manager']['exec_main_code'], 1)
         self.client.runtime_exit.assert_called_once_with(self.root, 'serve-candidate-one')
+
+    def test_gc_zero_cannot_replace_the_root_manager_completion(self):
+        for manager_code in ('0', '1'):
+            self.manager.called.clear()
+            with self.subTest(code=manager_code), self.assertRaisesRegex(ContractError, 'stage0_manager_completion_unproven'):
+                self.stop_fixture(manager_code=manager_code, mutation=lambda value: value.pop('manager_completion'))
+
+    def test_wrong_manager_incarnation_control_process_or_signal_is_rejected(self):
+        mutations = [
+            lambda value: value.update(invocation_id='other'),
+            lambda value: value.update(unit='other.service'),
+            lambda value: value.update(manager_invocation_id='f' * 32),
+            lambda value: value.update(context_sha256='not-a-hash'),
+            lambda value: value['manager'].update(control_pid=9999),
+            lambda value: value['manager'].update(exec_main_pid=9999),
+            lambda value: value['manager'].update(exec_main_code=2),
+            lambda value: value['manager'].update(exec_main_status=78),
+            lambda value: value['manager'].update(exit_code='killed', exit_status='TERM'),
+            lambda value: value['hook'].update(uid=1000),
+            lambda value: value['hook'].update(parent_pid=9999),
+            lambda value: value['hook'].update(executable_sha256='f' * 64),
+        ]
+        for mutate in mutations:
+            self.manager.called.clear()
+            with self.subTest(mutation=mutate), self.assertRaisesRegex(ContractError, 'stage0_manager_completion_unproven'):
+                self.stop_fixture(mutation=lambda value: mutate(value['manager_completion']))
 
     def test_root_receipt_cannot_predict_a_successful_manager_exit(self):
         with self.assertRaisesRegex(ContractError, 'stage0_manager_exit_unproven'):
@@ -233,6 +287,21 @@ class BrokerManagerTests(unittest.TestCase):
             self.manager.called.clear()
             with self.subTest(mutation=mutation), self.assertRaisesRegex(ContractError, 'stage0_supervision_failed'):
                 self.stop_fixture(runtime_mutation=mutation)
+
+
+class PeerCompletionTests(unittest.TestCase):
+    def test_runtime_exit_requires_separate_peer_completion_without_reencoding_exit(self):
+        original = {'schema': 'ags.routeb-stage0-exit.v1'}
+        completion = {'schema': 'ags.routeb-stage0-manager-completion.v1', 'exit_sha256': 'a' * 64}
+        with patch.object(peer_client, '_request', return_value={'exit': original, 'manager_completion': completion}):
+            value = peer_client.runtime_exit('/fixture/root', 'serve-one')
+        self.assertEqual(value, {**original, 'manager_completion': completion})
+        self.assertNotIn('manager_completion', original)
+        for response in ({'exit': original}, {'exit': original, 'manager_completion': None},
+                         {'exit': {**original, 'manager_completion': completion}, 'manager_completion': completion}):
+            with self.subTest(response=response), patch.object(peer_client, '_request', return_value=response), \
+                    self.assertRaisesRegex(ContractError, 'stage0_manager_completion_unproven'):
+                peer_client.runtime_exit('/fixture/root', 'serve-one')
 
 
 class RootWriterProbeTests(unittest.TestCase):

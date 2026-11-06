@@ -134,6 +134,60 @@ def launchd_fields(raw):
     return found
 
 
+def effective_stop_post(value, expected):
+    """One fixed systemd ExecCommand; observed timestamps/status are not argv."""
+    if (type(value) is not str or any(c in value for c in '\r\n\t')
+            or value.count('{') != 1 or value.count('}') != 1
+            or not value.startswith('{ ') or not value.endswith(' }')):
+        return False
+    fields = value[2:-2].split(' ; ')
+    if (len(fields) != 8 or fields[:3] !=
+            ['path=' + expected[0], 'argv[]=' + ' '.join(expected), 'ignore_errors=no']):
+        return False
+    return all(field.startswith(key + '=') and field[len(key) + 1:] and ';' not in field
+               for field, key in zip(fields[3:], ('start_time', 'stop_time', 'pid', 'code', 'status')))
+
+
+def native_manager_completion(value, context, unit):
+    # The authenticated root peer checked these hashes against the original
+    # root-private files. Python must not re-encode Go's JSON to invent a hash.
+    require(type(value) is dict and set(value) == {
+        'schema', 'registration_sha256', 'invocation_id', 'phase', 'boot_id', 'unit',
+        'manager_invocation_id', 'start_anchor_sha256', 'context_sha256', 'exit_sha256',
+        'hook', 'manager'} and value['schema'] == 'ags.routeb-stage0-manager-completion.v1',
+        'stage0_manager_completion_unproven')
+    require(all(value[key] == context[key] for key in
+                ('registration_sha256', 'invocation_id', 'phase', 'boot_id'))
+            and value['unit'] == unit, 'stage0_manager_completion_unproven')
+    for key, size in (('manager_invocation_id', 32), ('start_anchor_sha256', 64),
+                      ('context_sha256', 64), ('exit_sha256', 64)):
+        digest = value[key]
+        require(type(digest) is str and len(digest) == size and digest != '0' * size
+                and all(c in '0123456789abcdef' for c in digest),
+                'stage0_manager_completion_unproven')
+    hook = value['hook']
+    require(type(hook) is dict and set(hook) ==
+            {'pid', 'start_ticks', 'parent_pid', 'uid', 'gid', 'executable_sha256'}
+            and all(type(hook[key]) is int for key in ('pid', 'start_ticks', 'parent_pid', 'uid', 'gid'))
+            and hook['pid'] > 1 and hook['start_ticks'] > 0
+            and hook['parent_pid'] == 1 and hook['uid'] == hook['gid'] == 0
+            and hook['pid'] not in (context['supervisor']['pid'], context['child']['pid'])
+            and hook['executable_sha256'] == context['supervisor']['executable_sha256'],
+            'stage0_manager_completion_unproven')
+    manager = value['manager']
+    require(type(manager) is dict and set(manager) == {
+        'invocation_id', 'main_pid', 'exec_main_pid', 'control_pid', 'exec_main_code',
+        'exec_main_status', 'result', 'service_result', 'exit_code', 'exit_status'}
+        and all(type(manager[key]) is int for key in
+                ('main_pid', 'exec_main_pid', 'control_pid', 'exec_main_code', 'exec_main_status'))
+        and manager == {'invocation_id': value['manager_invocation_id'], 'main_pid': 0,
+                        'exec_main_pid': context['supervisor']['pid'], 'control_pid': hook['pid'],
+                        'exec_main_code': 1, 'exec_main_status': 0, 'result': 'success',
+                        'service_result': 'success', 'exit_code': 'exited', 'exit_status': '0'},
+        'stage0_manager_completion_unproven')
+    return value
+
+
 class FixedManager:
     def __init__(self, root, profile, host):
         self.root = Path(root)
@@ -196,23 +250,29 @@ class FixedManager:
                     and entries.get('KillMode') == ('mixed' if registration is not None else 'control-group')
                     and entries.get('Type', 'simple') == 'simple'
                     and entries.get('TimeoutStopSec') in ('90', '90s', '95', '95s', '120', '120s')
-                    and not any(key.startswith('Exec') and key != 'ExecStart' for key in entries),
+                    and not any(key.startswith('Exec') and key not in
+                                ({'ExecStart', 'ExecStopPost'} if registration is not None else {'ExecStart'})
+                                for key in entries),
                     'oneshot_manager_definition_required')
             if registration is not None:
+                expected_stop = [expected[0], 'manager-complete', *expected[2:]]
                 require(entries.get('User') == entries.get('Group') == 'root'
                         and entries.get('TimeoutStopSec') in ('120', '120s')
                         and entries.get('SendSIGKILL') == 'no'
+                        and entries.get('ExecStopPost') == ' '.join(expected_stop)
                         and not any(key.startswith('Environment') for key in entries),
                         'stage0_manager_definition_required')
             properties = ('DropInPaths', 'Restart', 'KillMode', 'TimeoutStopUSec', 'FragmentPath')
             if registration is not None:
-                properties += ('SendSIGKILL',)
+                properties += ('SendSIGKILL', 'ExecStopPost')
             facts = systemd_properties(self.spec, properties)
             require(facts['DropInPaths'] == '' and facts['Restart'] == 'no'
                     and facts['KillMode'] == ('mixed' if registration is not None else 'control-group')
                     and facts['FragmentPath'] == self.spec['definition'], 'manager_definition_changed')
             if registration is not None:
                 require(facts.get('SendSIGKILL') == 'no', 'stage0_manager_force_kill_enabled')
+                require(effective_stop_post(facts.get('ExecStopPost'), expected_stop),
+                        'stage0_manager_completion_command_changed')
         return raw
 
     def preflight(self):
@@ -273,14 +333,26 @@ class FixedManager:
         else:
             run(['/bin/launchctl', 'kill', 'SIGTERM', self.spec['target']])
         cap = capture_module()
+        native_exit = None
+        if 'stage0' in self.before:
+            context = self.before['stage0']
+            native_exit = cap.stage0_client().runtime_exit(self.root, context['invocation_id'])
+            require(type(native_exit) is dict, 'stage0_normal_stop_unproven')
+            native_manager_completion(native_exit.get('manager_completion'), context, self.spec['target'])
         deadline = time.monotonic() + 95
         exit_observed = False
         while time.monotonic() < deadline:
             if self.spec['kind'] == 'systemd':
-                row = systemd_properties(self.spec, ('MainPID', 'ActiveState', 'SubState', 'ExecMainCode', 'ExecMainStatus'))
-                exit_observed = (row['MainPID'] == '0' and row['ActiveState'] == 'inactive'
-                                 and row['SubState'] == 'dead' and row['ExecMainCode'] == '1'
-                                 and row['ExecMainStatus'] == '0')
+                if native_exit is not None:
+                    row = systemd_properties(self.spec, ('MainPID', 'ActiveState', 'SubState', 'Result'))
+                    exit_observed = row == {'MainPID': '0', 'ActiveState': 'inactive', 'SubState': 'dead',
+                                            'Result': 'success'}
+                    require(row.get('Result') == 'success', 'stage0_manager_exit_unproven')
+                else:
+                    row = systemd_properties(self.spec, ('MainPID', 'ActiveState', 'SubState', 'ExecMainCode', 'ExecMainStatus'))
+                    exit_observed = (row['MainPID'] == '0' and row['ActiveState'] == 'inactive'
+                                     and row['SubState'] == 'dead' and row['ExecMainCode'] == '1'
+                                     and row['ExecMainStatus'] == '0')
             else:
                 row = launchd_fields(run(['/bin/launchctl', 'print', self.spec['target']]).stdout)
                 exit_observed = (row.get('state') in ('not running', 'exited') and 'pid' not in row
@@ -300,7 +372,6 @@ class FixedManager:
                 and stopped.get('exit_code') == 0 and type(stopped.get('exit_code')) is int
                 and stopped.get('forced_kill') is False and stopped.get('stop_requested') is True
                 and stopped.get('process_group_empty') is True, 'normal_stop_unproven')
-        native_exit = None
         if 'stage0' in self.before:
             context = self.before['stage0']
             require(stopped.get('supervision_failed', False) is False
@@ -308,7 +379,6 @@ class FixedManager:
                     and type(stopped.get('supervisor_exit_code', 0)) is int
                     and stopped.get('supervisor_exit_code', 0) == 0, 'stage0_supervision_failed')
             require(stopped.get('stage0') == context, 'stage0_stop_context_changed')
-            native_exit = cap.stage0_client().runtime_exit(self.root, context['invocation_id'])
             require(type(native_exit) is dict and native_exit.get('schema') == 'ags.routeb-stage0-exit.v1'
                     and all(native_exit.get(key) == context[key] for key in
                             ('registration_sha256', 'invocation_id', 'phase', 'boot_id', 'supervisor', 'child'))
@@ -318,13 +388,12 @@ class FixedManager:
                     and all(native_exit.get(key) is True for key in
                             ('signal_forwarded', 'context_verified', 'authority_rechecked', 'normal_exit'))
                     and all(absent(pid) for pid in self.before['pids']), 'stage0_normal_stop_unproven')
-            # A before-exit root receipt cannot prove its own parent exited.
-            # Independently retain the manager's actual exit status above and
-            # require the complete bound process set to be absent.
-            final = systemd_properties(self.spec, ('MainPID', 'ActiveState', 'SubState',
-                                                   'ExecMainCode', 'ExecMainStatus', 'Result'))
+            # The root peer independently verified the post-exit manager proof
+            # and empty cgroup. Keep checking present inactivity and every PID;
+            # inactive-unit GC may already have discarded ExecMainCode.
+            final = systemd_properties(self.spec, ('MainPID', 'ActiveState', 'SubState', 'Result'))
             require(final == {'MainPID': '0', 'ActiveState': 'inactive', 'SubState': 'dead',
-                              'ExecMainCode': '1', 'ExecMainStatus': '0', 'Result': 'success'},
+                               'Result': 'success'},
                     'stage0_manager_exit_unproven')
         if self.spec['kind'] == 'launchd':
             run(['/bin/launchctl', 'bootout', self.spec['target']])

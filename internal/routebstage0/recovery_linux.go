@@ -47,38 +47,8 @@ func (s *supervisor) completeRestore(resultSHA string) (RestoreCompletion, error
 // work can be consumed by another operation. A before-exit record alone does
 // not prove systemd observed the parent exit or that the cgroup drained.
 func (s *supervisor) completedControl(invocation Invocation) (Context, error) {
-	l := s.loaded
-	raw, err := interpreterauthority.ReadProtected(l.statePath("active", invocation.ID), 65536)
-	if err != nil {
-		return Context{}, err
-	}
-	var c Context
-	if err = decodeExact(raw, &c); err != nil {
-		return c, err
-	}
-	raw, err = interpreterauthority.ReadProtected(l.statePath("exits", invocation.ID), 65536)
-	if err != nil {
-		return c, err
-	}
-	var exit ExitRecord
-	if err = decodeExact(raw, &exit); err != nil {
-		return c, err
-	}
-	if c.RegistrationSHA256 != l.registrationSHA || c.RecoveryRegistrationSHA256 != l.recoverySHA || c.InvocationID != invocation.ID || c.Operation != invocation.Operation || c.Phase != invocation.Phase ||
-		c.BootID != s.platform.boot || exit.Schema != "ags.routeb-stage0-exit.v1" || exit.RegistrationSHA256 != l.registrationSHA || exit.InvocationID != invocation.ID || exit.Phase != invocation.Phase ||
-		exit.BootID != c.BootID || exit.Supervisor != c.Supervisor || exit.Child != c.Child || exit.ChildExitCode != 0 || exit.SignalForwarded || exit.ForcedKill || !exit.ContextVerified || !exit.AuthorityRechecked || !exit.NormalExit ||
-		!processGone(c.Supervisor) || !processGone(c.Child) {
-		return c, refused("stage0_restore_normal_exit_unproven")
-	}
-	properties, err := managerProperties(invocation.Unit, "MainPID", "ActiveState", "SubState", "ExecMainCode", "ExecMainStatus", "Result")
-	if err != nil || properties["MainPID"] != "0" || properties["ActiveState"] != "inactive" || properties["SubState"] != "dead" || properties["ExecMainCode"] != "1" || properties["ExecMainStatus"] != "0" || properties["Result"] != "success" {
-		return c, refused("stage0_restore_normal_exit_unproven")
-	}
-	group, err := cgroupMembers(invocation.Unit)
-	if err != nil || len(group) != 0 {
-		return c, refused("stage0_restore_cgroup_not_empty")
-	}
-	return c, nil
+	context, _, _, err := s.loaded.completedManager(invocation, s.platform.boot)
+	return context, err
 }
 
 func (s *supervisor) restoreResult() (RestoreCompletion, error) {

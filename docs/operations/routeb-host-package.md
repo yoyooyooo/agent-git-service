@@ -44,6 +44,23 @@ protected unit bytes and the effective manager properties must disable forced
 termination. A native stop timeout fails the transaction and retains the
 supervisor, runtime lock and output pipe while the child remains alive; it does
 not escalate the signal or proceed to backup.
+Every v2 unit also has exactly one fixed `ExecStopPost` command using the
+same registered native image:
+`ags-routeb-stage0 manager-complete --registration <id> --operation <operation>`.
+Both the protected definition and the effective manager command must match.
+The hook cannot run an operation, consume a ticket or choose a caller script.
+Provisioning must create the root-owned, private `state/manager-start` and
+`state/manager-completion` directories under that native registration.
+The running parent records the manager's invocation ID and original Context
+digest once. After the parent exits, the hook records its observed successful
+manager exit and binds the original anchor, Context and ExitRecord bytes.
+Both records use exclusive creation and remain as evidence.
+
+Systemd may discard the exit fields of an inactive unit. The normal-stop
+consumer therefore requires the durable hook proof plus current
+`inactive/dead`, `MainPID=0`, `Result=success`, absent bound processes and an
+empty cgroup. An inactive unit or zeroed manager properties without that proof
+cannot pass. Legacy profiles keep their existing live exit-status requirement.
 Registration and lifecycle activation are separate explicit provisioning
 steps; the run command neither invents an approval nor expands sudo privileges.
 

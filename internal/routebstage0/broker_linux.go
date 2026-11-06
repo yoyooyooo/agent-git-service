@@ -199,40 +199,17 @@ func (s *supervisor) runtimeIdentity() (RuntimeIdentity, error) {
 }
 
 func (s *supervisor) runtimeExit(id string) (ExitRecord, error) {
+	result, _, err := s.runtimeExitEvidence(id)
+	return result, err
+}
+
+func (s *supervisor) runtimeExitEvidence(id string) (ExitRecord, ManagerCompletion, error) {
 	i, err := s.serveInvocation(id)
 	if err != nil {
-		return ExitRecord{}, err
+		return ExitRecord{}, ManagerCompletion{}, err
 	}
-	raw, err := interpreterauthority.ReadProtected(s.loaded.statePath("exits", id), 65536)
-	if err != nil {
-		return ExitRecord{}, err
-	}
-	var result ExitRecord
-	if err = decodeExact(raw, &result); err != nil {
-		return result, err
-	}
-	active, err := interpreterauthority.ReadProtected(s.loaded.statePath("active", id), 65536)
-	if err != nil {
-		return result, err
-	}
-	var c Context
-	if err = decodeExact(active, &c); err != nil {
-		return result, err
-	}
-	if result.Schema != "ags.routeb-stage0-exit.v1" || result.RegistrationSHA256 != s.loaded.registrationSHA || result.InvocationID != id || result.Phase != i.Phase ||
-		result.BootID != s.platform.boot || result.Supervisor != c.Supervisor || result.Child != c.Child || result.ChildExitCode != 0 || !result.SignalForwarded || result.ForcedKill ||
-		!result.ContextVerified || !result.AuthorityRechecked || !result.NormalExit || !processGone(result.Supervisor) || !processGone(result.Child) {
-		return result, refused("stage0_runtime_normal_exit_unproven")
-	}
-	properties, err := managerProperties(i.Unit, "MainPID", "ActiveState", "SubState", "ExecMainCode", "ExecMainStatus", "Result")
-	if err != nil || properties["MainPID"] != "0" || properties["ActiveState"] != "inactive" || properties["SubState"] != "dead" || properties["ExecMainCode"] != "1" || properties["ExecMainStatus"] != "0" || properties["Result"] != "success" {
-		return result, refused("stage0_runtime_normal_exit_unproven")
-	}
-	group, err := cgroupMembers(i.Unit)
-	if err != nil || len(group) != 0 {
-		return result, refused("stage0_runtime_cgroup_not_empty")
-	}
-	return result, nil
+	_, result, completion, err := s.loaded.completedManager(i, s.platform.boot)
+	return result, completion, err
 }
 
 func (s *supervisor) managerAction(method string) error {

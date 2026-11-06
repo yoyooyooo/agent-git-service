@@ -85,6 +85,20 @@ class NativeCapabilityTests(unittest.TestCase):
                 manager.start()
             self.assertEqual(runner.call_count, 1)
 
+    def test_legacy_systemd_still_rejects_gc_zero_exit_status(self):
+        manager = self.manager('systemd')
+        manager.before = {'pids': {123}}
+        properties = {'MainPID': '0', 'ActiveState': 'inactive', 'SubState': 'dead',
+                      'ExecMainCode': '0', 'ExecMainStatus': '0'}
+        with patch('routeb_host_package.require_interpreter_closure'), \
+                patch.object(manager, 'definition'), patch.object(manager, '_systemd'), \
+                patch.object(native, 'systemd_properties', return_value=properties), \
+                patch.object(native, 'absent', return_value=True), \
+                patch.object(native.time, 'monotonic', side_effect=[0, 0, 96]), \
+                patch.object(native.time, 'sleep'), \
+                self.assertRaisesRegex(ContractError, 'normal_stop_unproven'):
+            manager.stop()
+
 
 if __name__ == '__main__':
     unittest.main()

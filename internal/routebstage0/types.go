@@ -62,15 +62,16 @@ type Request struct {
 }
 
 type Response struct {
-	Schema  string             `json:"schema"`
-	OK      bool               `json:"ok"`
-	Error   string             `json:"error,omitempty"`
-	Context *Context           `json:"context,omitempty"`
-	Runtime *RuntimeIdentity   `json:"runtime,omitempty"`
-	Exit    *ExitRecord        `json:"exit,omitempty"`
-	Action  string             `json:"action,omitempty"`
-	Writers *WriterResult      `json:"writers,omitempty"`
-	Restore *RestoreCompletion `json:"restore,omitempty"`
+	Schema            string             `json:"schema"`
+	OK                bool               `json:"ok"`
+	Error             string             `json:"error,omitempty"`
+	Context           *Context           `json:"context,omitempty"`
+	Runtime           *RuntimeIdentity   `json:"runtime,omitempty"`
+	Exit              *ExitRecord        `json:"exit,omitempty"`
+	ManagerCompletion *ManagerCompletion `json:"manager_completion,omitempty"`
+	Action            string             `json:"action,omitempty"`
+	Writers           *WriterResult      `json:"writers,omitempty"`
+	Restore           *RestoreCompletion `json:"restore,omitempty"`
 }
 
 type Writer struct {

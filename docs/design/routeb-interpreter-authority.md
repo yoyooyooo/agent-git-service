@@ -219,6 +219,28 @@ recheck the same interpreter authority. Normal stop combines the AGS exit
 record, Python exit, native parent exit, effective manager result and empty
 cgroup; a parent's before-exit receipt cannot prove its own successful exit.
 
+The fixed systemd `ExecStopPost` command uses that same sealed native image's
+`manager-complete` entry. It never enters `Run`, consumes a claim/ticket or
+starts a child. While running, the parent exclusively writes
+`state/manager-start/<invocation>.json`, binding the real manager invocation ID
+and original Context SHA-256. The hook selects exactly one registered anchor
+with that manager ID, including when initial/candidate/old phases share a unit.
+It requires PID 1 provenance, the registered image, root credentials,
+`ControlPID=self`, `MainPID=0`, the anchored `ExecMainPID`, and matching
+manager and environment facts for a successful normal exit. It exclusively
+writes `state/manager-completion/<invocation>.json` with original
+anchor/context/exit hashes. Provisioning creates both root-owned 0700 parents;
+records are 0600. Neither an operator argument nor a before-exit record supplies
+manager completion.
+
+The hook itself still occupies the cgroup. The later runtime/control consumer
+checks process absence, an empty cgroup and current inactive/success state in
+addition to the durable proof. This remains usable after inactive-unit GC has
+zeroed `ExecMainCode`, `ExecMainPID` and `InvocationID`; missing or mismatched
+proof still refuses. Recovery completion reads the same pinned authorization
+and snapshot without requiring a new execution window after the work exits.
+New restore/old-start execution retains its fresh authorization-time check.
+
 Ordinary full-group restore preserves and rechecks the live root interpreter
 authority and its independent recovery material. It does not reconstruct a
 root prefix or modify system libraries. A separate root reconstruction in a

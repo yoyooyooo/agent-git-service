@@ -176,15 +176,29 @@ func (l *loaded) readRecoveryApproval(reference interpreterauthority.File, purpo
 	if !found {
 		return value, refused("stage0_recovery_approval_operation")
 	}
-	issued, e1 := time.Parse(time.RFC3339, value.IssuedAt)
-	expires, e2 := time.Parse(time.RFC3339, value.ExpiresAt)
-	if e1 != nil || e2 != nil || !expires.After(issued) || (checkTime && (time.Now().Before(issued) || !time.Now().Before(expires))) {
+	if !recoveryApprovalTime(value, checkTime, time.Now()) {
 		return value, refused("stage0_recovery_approval_time")
 	}
 	return value, nil
 }
 
+func recoveryApprovalTime(value RecoveryApproval, checkTime bool, now time.Time) bool {
+	issued, e1 := time.Parse(time.RFC3339, value.IssuedAt)
+	expires, e2 := time.Parse(time.RFC3339, value.ExpiresAt)
+	return e1 == nil && e2 == nil && expires.After(issued) && (!checkTime || (!now.Before(issued) && now.Before(expires)))
+}
+
 func (l *loaded) loadRecovery() error {
+	return l.loadRecoveryEvidence(true)
+}
+
+// A completion observes an already authorized invocation; it cannot authorize
+// a new restore/start. Run and ticket admission keep the fresh-time check.
+func (l *loaded) loadRecoveryCompletion() error {
+	return l.loadRecoveryEvidence(false)
+}
+
+func (l *loaded) loadRecoveryEvidence(checkTime bool) error {
 	if l.recovery != nil {
 		return l.recheckRecovery()
 	}
@@ -204,10 +218,10 @@ func (l *loaded) loadRecovery() error {
 	}
 	l.recovery = &r
 	l.recoverySHA = hash(raw)
-	if _, err = l.readRecoveryApproval(r.RestoreApproval, "full-restore", true); err != nil {
+	if _, err = l.readRecoveryApproval(r.RestoreApproval, "full-restore", checkTime); err != nil {
 		return err
 	}
-	if _, err = l.readRecoveryApproval(r.OldStartApproval, "old-start", true); err != nil {
+	if _, err = l.readRecoveryApproval(r.OldStartApproval, "old-start", checkTime); err != nil {
 		return err
 	}
 	return l.verifySnapshotReference()

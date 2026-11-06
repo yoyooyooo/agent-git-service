@@ -12,11 +12,14 @@ func errorCode(err error) string {
 }
 
 func Execute(args []string) error {
-	if len(args) != 5 || args[0] != "serve" || args[1] != "--registration" || args[3] != "--operation" {
+	if len(args) != 5 || (args[0] != "serve" && args[0] != "manager-complete") || args[1] != "--registration" || args[3] != "--operation" {
 		return refused("stage0_fixed_command_required")
 	}
 	if !operationPhase(args[4], args[4]) && args[4] != "serve" {
 		return refused("stage0_operation_invalid")
+	}
+	if args[0] == "manager-complete" {
+		return CompleteManager(args[2], args[4])
 	}
 	return Run(args[2], args[4])
 }

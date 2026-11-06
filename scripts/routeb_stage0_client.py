@@ -152,7 +152,7 @@ def _request(method, *, root=None, invocation_id=None, generation=None, result_s
         require(os.getppid() == parent, 'stage0_parent_changed')
     response = strict_json(bytes(raw))
     require(type(response) is dict and response.get('schema') == PROTOCOL
-            and set(response) <= {'schema', 'ok', 'error', 'context', 'runtime', 'exit', 'action', 'writers', 'restore'},
+            and set(response) <= {'schema', 'ok', 'error', 'context', 'runtime', 'exit', 'manager_completion', 'action', 'writers', 'restore'},
             'stage0_response_invalid')
     if response.get('ok') is not True:
         reason = response.get('error')
@@ -160,6 +160,11 @@ def _request(method, *, root=None, invocation_id=None, generation=None, result_s
                 and len(reason) <= 96, 'stage0_response_invalid')
         raise ContractError(reason)
     _validate_context(response.get('context'), registration, host, registration_sha, parent)
+    if method == 'runtime_exit':
+        require(set(response) == {'schema', 'ok', 'context', 'exit', 'manager_completion'},
+                'stage0_response_invalid')
+    else:
+        require('manager_completion' not in response, 'stage0_response_invalid')
     return response
 
 
@@ -185,7 +190,13 @@ def runtime_identity(root):
 
 
 def runtime_exit(root, invocation_id):
-    return _request('runtime_exit', root=root, invocation_id=invocation_id)['exit']
+    response = _request('runtime_exit', root=root, invocation_id=invocation_id)
+    value, completion = response.get('exit'), response.get('manager_completion')
+    require(type(value) is dict and 'manager_completion' not in value and type(completion) is dict,
+            'stage0_manager_completion_unproven')
+    # The added peer field is not part of the on-disk ExitRecord whose original
+    # SHA-256 was checked by the native parent against this completion.
+    return {**value, 'manager_completion': completion}
 
 
 def writer_probe(root, generation):

@@ -66,6 +66,12 @@ child; it does not authorize a replacement start. The root exit record is
 independent of the Python runtime record. Normal-stop verification additionally
 requires the manager's actual successful exit and absence of the bound process
 set; a root record written before its own exit cannot prove that exit.
+The fixed native `ExecStopPost` hook saves that manager observation against
+the running invocation's root start anchor before inactive-unit garbage
+collection can erase it. The authenticated peer verifies the original
+anchor/context/exit hashes and returns this separate manager completion with
+the runtime exit. The current manager must still be inactive and successful,
+all bound processes must be gone, and the service cgroup must be empty.
 
 After that verified stop, the v2 writer probe asks the same live root peer to
 inspect the registered recovery objects and loopback listener. The root peer

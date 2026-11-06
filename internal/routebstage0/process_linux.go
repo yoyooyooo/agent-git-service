@@ -139,6 +139,11 @@ func platformPrerequisites(l *loaded) (platformFacts, ProcessIdentity, error) {
 	if err := interpreterauthority.ProtectedDirectory(filepath.Join(rootFor(l.registration.ID), "state"), true); err != nil {
 		return platformFacts{}, ProcessIdentity{}, err
 	}
+	for _, kind := range []string{"manager-start", "manager-completion"} {
+		if err := interpreterauthority.ProtectedDirectory(filepath.Join(rootFor(l.registration.ID), "state", kind), true); err != nil {
+			return platformFacts{}, ProcessIdentity{}, err
+		}
+	}
 	actual, err := os.Readlink("/proc/self/exe")
 	if err := l.verifyAccountResources(); err != nil {
 		return platformFacts{}, ProcessIdentity{}, err

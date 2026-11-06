@@ -38,6 +38,13 @@ func writeExclusive(path string, value any) error {
 	if err := interpreterauthority.ProtectedDirectory(filepath.Dir(path), true); err != nil {
 		return err
 	}
+	return writeExclusiveFile(path, value)
+}
+
+// The production entry above always verifies the root-private parent first.
+// Keep the exclusive, durable file operation separable for an ordinary-user
+// filesystem regression without creating a root-owned test namespace.
+func writeExclusiveFile(path string, value any) error {
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return refused("stage0_state_encoding")

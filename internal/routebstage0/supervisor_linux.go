@@ -117,6 +117,9 @@ func (s *supervisor) serveConnection(conn *net.UnixConn) {
 			if err = writeExclusive(s.loaded.statePath("active", s.loaded.invocation.ID), s.context); err != nil {
 				s.fatal = err
 				response.Error = errorCode(err)
+			} else if err = s.recordManagerStart(); err != nil {
+				s.fatal = err
+				response.Error = errorCode(err)
 			} else {
 				s.verified = true
 			}
@@ -146,11 +149,12 @@ func (s *supervisor) dispatch(request Request) Response {
 		}
 		response.Runtime = &value
 	case "runtime_exit":
-		value, err := s.runtimeExit(request.InvocationID)
+		value, completion, err := s.runtimeExitEvidence(request.InvocationID)
 		if err != nil {
 			return Response{Schema: Protocol, Error: errorCode(err)}
 		}
 		response.Exit = &value
+		response.ManagerCompletion = &completion
 	case "manager_stop", "manager_start":
 		if err := s.managerAction(request.Method); err != nil {
 			return Response{Schema: Protocol, Error: errorCode(err)}
