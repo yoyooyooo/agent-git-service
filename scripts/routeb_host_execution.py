@@ -118,7 +118,7 @@ def preflight(package):
         preflight_space(package.group, Path(package.group['storage']['backup_root']),
                         Path(package.group['storage']['restore_root']))
         log_baselines(package.profile['capture'])
-    except (ContractError, Failure, OSError) as error:
+    except (ContractError, Failure, OSError, capture.CaptureError) as error:
         blockers.append(failure_code(error))
     return {'schema': 'ags.routeb-host-plan.v1', 'host': package.package['host'],
             'host_instance': package.package['host_instance'], 'scope': package.host.scope,

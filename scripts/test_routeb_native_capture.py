@@ -3,6 +3,7 @@
 import copy
 import os
 from pathlib import Path
+import sys
 import tempfile
 import threading
 import unittest
@@ -10,6 +11,39 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
 import routeb_native_capture as capture
+
+
+class ProcessIdentityTests(unittest.TestCase):
+    def running_executable(self):
+        if sys.platform != 'darwin':
+            return Path(sys.executable).resolve()
+        # Framework Python can exec an app image distinct from sys.executable.
+        import ctypes
+        libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
+        libproc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        libproc.proc_pidpath.restype = ctypes.c_int
+        path = ctypes.create_string_buffer(4096)
+        self.assertGreater(libproc.proc_pidpath(os.getpid(), path, len(path)), 0)
+        return Path(os.fsdecode(path.value)).resolve()
+
+    def test_live_executable_accepts_path_and_string(self):
+        binary = self.running_executable()
+        observed = capture.process_identity(os.getpid(), str(binary))
+        self.assertEqual((observed['pid'], observed['parent_pid']), (os.getpid(), os.getppid()))
+        self.assertEqual(capture.process_identity(os.getpid(), binary), observed)
+
+    def test_path_inputs_keep_absolute_symlink_and_image_checks(self):
+        folder = Path(tempfile.mkdtemp(prefix='routeb-process-identity-')).resolve()
+        folder.chmod(0o700)
+        alias = folder / 'python-alias'
+        alias.symlink_to(Path(sys.executable).resolve())
+        other = folder / 'other-image'
+        other.write_bytes(b'synthetic non-executable\n')
+        other.chmod(0o600)
+        for path, reason in ((Path('relative-image'), 'path_invalid'),
+                             (alias, 'path_symlink'), (other, 'process_binary_mismatch')):
+            with self.subTest(reason=reason), self.assertRaisesRegex(capture.CaptureError, reason):
+                capture.process_identity(os.getpid(), path)
 
 
 class FakeClock:

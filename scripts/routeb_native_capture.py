@@ -251,7 +251,7 @@ def process_identity(pid, binary=None, *, artifacts=None, name='process'):
     facts = {'pid': pid, 'parent_pid': int(match[2]), 'started': match[3], 'precision': 'second'}
     if binary is None:
         return facts
-    path = absolute(binary)
+    path = absolute(os.fspath(binary))
     if sys.platform.startswith('linux'):
         executable = Path('/proc') / str(pid) / 'exe'
         link = os.readlink(executable)

@@ -7,6 +7,7 @@ import copy
 import hashlib
 import os
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -16,6 +17,42 @@ import upgrade_recovery as cold
 import upgrade_state
 from upgrade_backup_contract import ContractError, canonical
 import test_routeb_cold_window as cold_fixtures
+
+
+class PreflightCaptureTests(unittest.TestCase):
+    def setUp(self):
+        # Isolate error reporting from admission; this fixture grants no native authority.
+        folder = Path(tempfile.mkdtemp(prefix='routeb-preflight-capture-')).resolve()
+        folder.chmod(0o700)
+        self.package = SimpleNamespace(
+            root=folder / 'ags', pending=folder / 'pending',
+            authorize=Mock(), execution_blockers=Mock(return_value=[]),
+            host=SimpleNamespace(scope='isolated-native'), profile={}, group={},
+            package={'host': 'fixture', 'host_instance': 'fixture-host',
+                     'transaction_id': 'fixture-transaction', 'tool_sha256': 'a' * 64},
+            package_raw=b'{}', candidate=SimpleNamespace(revision='b' * 40, tree='c' * 40))
+        self.manager = Mock()
+
+    def preflight(self, error):
+        self.manager.preflight.side_effect = error
+        with patch.object(execution, 'lifecycle_blockers', return_value=[]), \
+                patch.object(execution, 'FixedManager', return_value=self.manager), \
+                patch.object(execution, 'old_installation_unchanged'):
+            return execution.preflight(self.package)
+
+    def test_capture_error_preserves_its_specific_blocker(self):
+        for code in ('path_invalid', 'process_binary_mismatch'):
+            with self.subTest(code=code):
+                result = self.preflight(execution.capture.CaptureError(code))
+                self.assertEqual(result['blockers'], [code])
+                self.assertFalse(result['execution_allowed'])
+                self.assertEqual(result['effects'], [])
+        self.manager.stop.assert_not_called()
+        self.manager.start.assert_not_called()
+
+    def test_unclassified_value_error_is_not_a_preflight_blocker(self):
+        with self.assertRaisesRegex(ValueError, 'synthetic programming error'):
+            self.preflight(ValueError('synthetic programming error'))
 
 
 class InstallerTests(unittest.TestCase):
