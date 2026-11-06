@@ -5,17 +5,14 @@ import (
 	"testing"
 )
 
-// allocateLoopbackAddr is test-only. Production Start still binds all sockets
-// atomically; fixture reservation never claims to eliminate the bind race.
-func allocateLoopbackAddr(t *testing.T) string {
+// reserveLoopbackListener keeps fixture addresses distinct until each test
+// releases the reservation at the corresponding Start boundary.
+func reserveLoopbackListener(t *testing.T) net.Listener {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	address := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return address
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener
 }

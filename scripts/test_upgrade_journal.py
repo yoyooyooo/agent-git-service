@@ -123,26 +123,52 @@ class JournalTests(unittest.TestCase):
             self.state.load_verified(self.root)
 
     def test_two_processes_cannot_both_hold_the_state_lock(self):
+        import fcntl
+        import select
         import subprocess
         import sys
         held = self.state.StateLock(self.root)
         held.__enter__()
         self.addCleanup(held.__exit__, None, None, None)
+        lock_path = self.state.layout(self.root)[0] / 'state.lock'
         probe = subprocess.Popen(
             [sys.executable, '-B', '-c',
-             'import sys,time; from upgrade_state import StateLock\n'
-             'started=time.monotonic(); StateLock(sys.argv[1]).__enter__();\n'
-             'print(int((time.monotonic()-started)*1000)); raise SystemExit(0)',
-             str(self.root)],
-            cwd=Path(__file__).resolve().parent, stdout=subprocess.PIPE,
+             'import fcntl,sys; from upgrade_state import StateLock\n'
+             'with open(sys.argv[2], "r+b") as other:\n'
+             ' try: fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)\n'
+             ' except BlockingIOError: print("parent-held", flush=True)\n'
+             ' else: raise SystemExit("parent did not hold the state lock")\n'
+             'with StateLock(sys.argv[1]):\n'
+             ' print("child-held", flush=True)\n'
+             ' if sys.stdin.readline() != "release\\n": raise SystemExit("release missing")\n',
+             str(self.root), str(lock_path)],
+            cwd=Path(__file__).resolve().parent, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True)
-        import time
-        time.sleep(0.2)
-        self.assertIsNone(probe.poll())
+
+        def finish_probe():
+            if probe.poll() is None:
+                probe.kill()
+            probe.communicate(timeout=5)
+        self.addCleanup(finish_probe)
+
+        def expect(message):
+            ready, _, _ = select.select([probe.stdout], [], [], 15)
+            self.assertTrue(ready, 'state-lock handshake timed out: ' + message)
+            self.assertEqual(probe.stdout.readline().strip(), message)
+
+        # A real conflicting kernel lock proves ownership after child imports,
+        # independently of process startup speed or scheduler timing.
+        expect('parent-held')
         held.__exit__(None, None, None)
-        stdout, stderr = probe.communicate(timeout=15)
+        expect('child-held')
+        with lock_path.open('r+b') as other:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        stdout, stderr = probe.communicate(input='release\n', timeout=15)
         self.assertEqual(probe.returncode, 0, stderr)
-        self.assertGreaterEqual(int(stdout.strip()), 100)
+        self.assertEqual(stdout, '')
+        with self.state.StateLock(self.root):
+            pass  # The child has released the lock after its normal exit.
 
 
 if __name__ == '__main__':

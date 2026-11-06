@@ -562,7 +562,9 @@ class WireupTests(WireFixture):
         self.assertEqual(window['start_attempted'], starting)
         self.assertEqual(marker['generation'], window['generation'])
         if starting:
+            self.assertFalse(window['handoff']['manager_requested'])
             self.assertFalse(window['handoff']['consumed'])
+        self.assertFalse(cold.startup_permitted(self.root))
         self.assertEqual(self.manager.starts, 0)
         self.assertEqual(self.binary.read_bytes(), self.new if starting else self.old)
         before = snapshot(self.root)
@@ -695,9 +697,11 @@ class WireupTests(WireFixture):
         self.assertEqual(window['phase'], 'start_attempted' if starting else 'quiescent')
         self.assertEqual(window['start_attempted'], starting)
         if starting:
-            self.assertTrue(window['handoff']['manager_requested'])
+            self.assertTrue(window['start_called'])
+            self.assertFalse(window['handoff']['manager_requested'])
             self.assertFalse(window['handoff']['consumed'])
             self.assertRegex(window['handoff']['token'], r'^[0-9a-f]{32}$')
+        self.assertFalse(cold.startup_permitted(self.root))
         self.assertEqual(self.manager.starts, 0)
         self.assertEqual(self.binary.read_bytes(), self.new if starting else self.old)
         # Snapshot the package's unreadable state without trying to read it.

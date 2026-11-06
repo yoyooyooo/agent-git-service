@@ -134,6 +134,13 @@ def verify_dependencies(destination, group, dsn):
             if value and key != 'GIT_REPO_DIR':
                 require(value in sources, 'configuration_dependency_missing')
     require(all((destination / key).exists() for key in objects), 'coverage_incomplete')
+    if group['schema'] == 'ags.recovery-group.v2':
+        from routeb_immutable_authority import verify_group
+        verify_group(group)
+        for key, item in objects.items():
+            if 'immutable_authority' in item:
+                require(file_digest(destination / key) == item['immutable_authority']['asset_sha256'],
+                        'immutable_archive_invalid')
 
 
 def role_paths(group):
@@ -161,6 +168,10 @@ def verify_sealed_backup(backup_dir, *, trash, group=None, dsn=None, schema=None
     require(callable(trash), 'trash_unavailable')
     require(group is not None and schema is not None and dsn is not None, 'restore_input_missing')
     backup_dir, manifest, receipt, _raw = load_sealed(backup_dir, group)
+    authority_evidence = manifest.get('authority_evidence')
+    if authority_evidence is not None:
+        from routeb_immutable_authority import verify_group
+        verify_group(group, authority_evidence)
     basis = load_inventory(backup_dir, manifest, group, schema, dsn)
     try:
         verify_payload(backup_dir, manifest['entries'], auxiliary={'manifest.json', 'receipt.json',
@@ -223,11 +234,19 @@ def verify_sealed_backup(backup_dir, *, trash, group=None, dsn=None, schema=None
         checks['sqlite_logical_digest'] = True
         compare_manifest(destination, manifest, backup_dir)
         checks['manifest'] = True
-        require(set(checks) == set(CHECKS) and all(checks.values()), 'restore_check_failed')
+        required_checks = CHECKS
+        if authority_evidence is not None:
+            verify_group(group, authority_evidence)
+            checks['immutable_authorities'] = True
+            required_checks = (*CHECKS, 'immutable_authorities')
+        require(set(checks) == set(required_checks) and all(checks.values()), 'restore_check_failed')
         report_body = {'schema': 'ags.restore-verification.v1', 'snapshot_id': manifest['snapshot_id'],
                        'manifest_sha256': receipt['manifest_sha256'], 'restore_copy_id': attempt,
                        'verified_at': time.strftime('%Y-%m-%dT%H:%M:%S+00:00', time.gmtime()),
-                       'checks': {key: checks[key] for key in CHECKS}}
+                       'checks': {key: checks[key] for key in required_checks}}
+        if authority_evidence is not None:
+            report_body.update(schema='ags.restore-verification.v2',
+                               authority_evidence_sha256=fingerprint(authority_evidence))
         report_body['report_sha256'] = fingerprint({key: value for key, value in report_body.items()
                                                     if key != 'report_sha256'})
         raw = canonical(report_body)
