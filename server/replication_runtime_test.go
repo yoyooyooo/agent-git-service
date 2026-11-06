@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -30,13 +32,15 @@ import (
 )
 
 type replicationRuntimeFixture struct {
-	root     string
-	cfg      config.Config
-	file     ReplicationFileConfig
-	path     string
-	identity ReplicationIdentity
-	pool     *x509.CertPool
-	client   tls.Certificate
+	root              string
+	cfg               config.Config
+	file              ReplicationFileConfig
+	path              string
+	identity          ReplicationIdentity
+	pool              *x509.CertPool
+	client            tls.Certificate
+	publicReservation net.Listener
+	peerReservation   net.Listener
 }
 
 func runtimeCertificate(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey, client bool) (tls.Certificate, []byte, []byte) {
@@ -75,7 +79,9 @@ func runtimeCertificate(t *testing.T, ca *x509.Certificate, caKey *ecdsa.Private
 func newReplicationRuntimeFixture(t *testing.T) *replicationRuntimeFixture {
 	t.Helper()
 	f := &replicationRuntimeFixture{root: t.TempDir()}
-	public := allocateLoopbackAddr(t)
+	f.publicReservation = reserveLoopbackListener(t)
+	f.peerReservation = reserveLoopbackListener(t)
+	public := f.publicReservation.Addr().String()
 	_, port, _ := net.SplitHostPort(public)
 	f.cfg = config.Config{DBdsn: "file:" + filepath.Join(f.root, "primary.db"), GitRepoDir: filepath.Join(f.root, "repos"), BaseURL: "http://" + public, Port: port, ListenMode: "production", Environment: "production"}
 	seed, err := New(f.cfg)
@@ -125,7 +131,7 @@ func newReplicationRuntimeFixture(t *testing.T) *replicationRuntimeFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.file = ReplicationFileConfig{Version: ReplicationConfigVersion, AuthorityID: "runtime-primary", ListenAddr: allocateLoopbackAddr(t), ServerName: "127.0.0.1", CAFile: "ca.pem", CertificateFile: "server.pem", PrivateKeyFile: "server-key.pem", SnapshotRoot: "retained", ManagedWritesOnly: true, MinFreeBytes: 1, ExportPolicyRevision: "test-v1", ExportPrefixes: []string{"refs/heads/", "refs/tags/"}, MaxPackBytes: 16 << 20, Peers: []ReplicationFilePeer{{EdgeID: "edge-1", SPKISHA256: replication.CertificateKeyID(clientLeaf), Stores: []ReplicationIdentity{f.identity}}}}
+	f.file = ReplicationFileConfig{Version: ReplicationConfigVersion, AuthorityID: "runtime-primary", ListenAddr: f.peerReservation.Addr().String(), ServerName: "127.0.0.1", CAFile: "ca.pem", CertificateFile: "server.pem", PrivateKeyFile: "server-key.pem", SnapshotRoot: "retained", ManagedWritesOnly: true, MinFreeBytes: 1, ExportPolicyRevision: "test-v1", ExportPrefixes: []string{"refs/heads/", "refs/tags/"}, MaxPackBytes: 16 << 20, Peers: []ReplicationFilePeer{{EdgeID: "edge-1", SPKISHA256: replication.CertificateKeyID(clientLeaf), Stores: []ReplicationIdentity{f.identity}}}}
 	f.path = filepath.Join(f.root, "replication.json")
 	f.save(t)
 	f.cfg.ReplicationConfigFile = f.path
@@ -163,6 +169,12 @@ func TestConfiguredPrimaryReplicationListenerLifecycle(t *testing.T) {
 	t.Cleanup(func() { cleanupFailedBootstrap(srv.deps) })
 	if len(srv.deps.Servers) != 2 || srv.deps.Replication == nil {
 		t.Fatal("peer not attached to primary")
+	}
+	if err := f.publicReservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.peerReservation.Close(); err != nil {
+		t.Fatal(err)
 	}
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
@@ -216,23 +228,23 @@ func TestConfiguredReplicationFailsClosedAndReleasesOwnership(t *testing.T) {
 				f.file.SnapshotRoot = "repos/retained"
 			}
 			f.save(t)
-			var occupied net.Listener
-			if name == "occupied port" {
-				var err error
-				occupied, err = net.Listen("tcp", f.file.ListenAddr)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer occupied.Close()
-			}
 			srv, err := New(f.cfg)
+			if closeErr := f.publicReservation.Close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
 			if name == "occupied port" {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := srv.Start(); err == nil {
+				startErr := srv.Start()
+				if startErr == nil {
 					cleanupFailedBootstrap(srv.deps)
 					t.Fatal("partial listener start succeeded")
+				}
+				var listenErr *net.OpError
+				if !errors.As(startErr, &listenErr) || listenErr.Op != "listen" || listenErr.Addr == nil || listenErr.Addr.String() != f.file.ListenAddr || !errors.Is(startErr, syscall.EADDRINUSE) {
+					cleanupFailedBootstrap(srv.deps)
+					t.Fatalf("expected occupied peer listener %s, got %v", f.file.ListenAddr, startErr)
 				}
 				if srv.started || len(srv.listeners) != 0 {
 					t.Fatal("partial listeners retained")
@@ -248,7 +260,7 @@ func TestConfiguredReplicationFailsClosedAndReleasesOwnership(t *testing.T) {
 				t.Fatal("failed construction leaked snapshot lock", err)
 			}
 			store.Close()
-			ln, err := net.Listen("tcp", strings.TrimPrefix(f.cfg.BaseURL, "http://"))
+			ln, err := net.Listen("tcp", ":"+f.cfg.Port)
 			if err != nil {
 				t.Fatal("public listener leaked", err)
 			}
