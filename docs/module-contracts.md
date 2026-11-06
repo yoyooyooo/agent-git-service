@@ -90,6 +90,7 @@ document the relevant contract below in the same change.
 | `replicationadmin` | database-free remote native-admin registration client and offline, unapplied certificate/peer/binding plans |
 | `githttp` | primary Git Smart HTTP authorization/storage/effect adapter using gitbackend |
 | `integrations` | file-backed integration config loading and translation for Forgejo, GitLab, GitHub, Multica, notifications, and projection watch |
+| `interpreterauthority` | bounded verification and rechecks of interpreter archives, prefix contents, native dependencies and recovery assets from a fixed root registry, plus fixed Linux loader arguments; file evidence does not grant process or execution admission |
 | `gitstore` | on-disk bare repository operations |
 | `graphql` | GitHub GraphQL API surface |
 | `httputil` | bounded outbound HTTP helpers |
@@ -110,6 +111,7 @@ document the relevant contract below in the same change.
 | `randutil` | shared random helper functions |
 | `ratelimit` | GitHub-compatible rate-limit snapshot helpers |
 | `rest` | GitHub REST API surface |
+| `routebstage0` | Linux root supervisor and broker bound to kernel peer credentials for registered Route B invocations, fixed manager lifecycle, writer observation and recovery; no caller-selected scripts, runtime roots or manager targets |
 | `router` | route registration and host rewrite |
 | `service` | business logic and cross-store orchestration |
 | `sessionauthority` | team-authority-v4 registered-source/workspace/team/class bindings, exact policy-class operations, target/service resource defaults, exact repo exception overrides, and non-executable legacy compatibility inventory |
