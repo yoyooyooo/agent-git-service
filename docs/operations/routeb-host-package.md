@@ -20,6 +20,10 @@ manager components retain source-level tests for backup, independent restore
 verification and a single start. An unknown start is not replayed. These
 component tests do not admit a native transaction.
 
+The public admission gate reports this same blocker for each refused native
+context. Its exception cause preserves the client's specific refusal reason;
+unexpected programming errors remain errors rather than capability blockers.
+
 The package policy requires the same application revision and tree on
 both sides of the transaction. The tool bundle has a separate revision, tree
 and byte manifest. This permits validating host tooling without introducing

@@ -38,9 +38,14 @@ def require_interpreter_closure(root=None, operations=None):
 
     File-only evidence, a flag and direct Python invocation cannot satisfy it.
     The parent currently admits only its isolated Linux authority contract.
+    Public callers retain one blocker; the client preserves the exact refusal
+    as its cause for diagnosis. Unexpected programming errors are not masked.
     """
     from routeb_stage0_client import context
-    return context(root, operations=operations)
+    try:
+        return context(root, operations=operations)
+    except ContractError as error:
+        raise ContractError(INTERPRETER_CLOSURE_BLOCKER) from error
 
 
 def read_document(path):

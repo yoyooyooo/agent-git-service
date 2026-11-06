@@ -49,6 +49,34 @@ class HostPackageBoundaryTests(unittest.TestCase):
                 if scope == 'production':
                     self.assertIn('native_full_closure_required', blockers)
 
+    def test_linux_admission_refusals_keep_the_public_blocker_and_private_cause(self):
+        """Real client checks run on every source-CI platform; no peer is mocked."""
+        import routeb_stage0_client as client
+        for isolated, reason in ((0, 'stage0_isolated_interpreter_required'),
+                                 (1, 'stage0_fixed_bundle_required')):
+            flags = SimpleNamespace(isolated=isolated, ignore_environment=1,
+                                    no_site=1, no_user_site=1)
+            with self.subTest(isolated=isolated), \
+                    patch.object(client.sys, 'platform', 'linux'), \
+                    patch.object(client.sys, 'flags', flags), \
+                    patch.object(client.sys, 'dont_write_bytecode', True), \
+                    patch.multiple(client.os, getuid=lambda: 1000, geteuid=lambda: 1000,
+                                   getgid=lambda: 1000, getegid=lambda: 1000):
+                with self.assertRaisesRegex(ContractError, '^' + reason + '$'):
+                    client.context(self.root, operations=('serve',))
+                with self.assertRaisesRegex(ContractError, '^interpreter_full_closure_required$') as raised:
+                    package.require_interpreter_closure(self.root, operations=('serve',))
+                self.assertIsInstance(raised.exception.__cause__, ContractError)
+                self.assertEqual(str(raised.exception.__cause__), reason)
+
+    def test_public_gate_does_not_relabel_programming_errors_as_missing_authority(self):
+        import routeb_stage0_client as client
+        error = AttributeError('invalid fixture shape')
+        with patch.object(client, 'context', side_effect=error):
+            with self.assertRaises(AttributeError) as raised:
+                package.require_interpreter_closure(self.root, operations=('serve',))
+        self.assertIs(raised.exception, error)
+
     def test_native_bootstrap_refuses_before_provision_reads_or_journal_lock(self):
         import routeb_native_bootstrap as bootstrap
         with patch.object(bootstrap, 'read_bindings', side_effect=AssertionError('provision read')) as read, \
@@ -136,7 +164,8 @@ class HostPackageBoundaryTests(unittest.TestCase):
             with self.subTest(command=command), ExitStack() as stack:
                 stack.enter_context(patch.object(sys, 'path', list(sys.path)))
                 stack.enter_context(patch.object(sys, 'argv', list(sys.argv)))
-                stack.enter_context(patch.object(sys, 'flags', SimpleNamespace(isolated=True)))
+                stack.enter_context(patch.object(sys, 'flags', SimpleNamespace(
+                    isolated=1, ignore_environment=1, no_site=1, no_user_site=1)))
                 stack.enter_context(patch.object(launcher, 'bundle_location', return_value=bundle))
                 stack.enter_context(patch.object(Path, 'lstat', return_value=SimpleNamespace(
                     st_uid=0, st_mode=stat.S_IFDIR | 0o755)))
