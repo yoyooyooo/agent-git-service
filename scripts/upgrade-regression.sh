@@ -15,6 +15,8 @@ entries=(
   'scripts/test_routeb_host_identity.py' 'scripts/test_routeb_host_native.py'
   'scripts/test_routeb_host_package.py' 'scripts/test_routeb_immutable_authority.py'
   'scripts/test_routeb_native_bootstrap.py'
+  'scripts/test_routeb_stage0_lifecycle.py' 'scripts/test_routeb_native_delegation.py'
+  'scripts/test_routeb_native_recovery.py'
   'scripts/test_routeb_bundle_closure.py' 'scripts/test_routeb_native_evidence.py' 'scripts/test_routeb_native_capture.py'
   'scripts/test_upgrade_host_evidence.py' 'scripts/test_upgrade_bootstrap.py'
   'scripts/test_upgrade_adapter_launchd.py' 'scripts/test_upgrade_adapter_systemd.py'

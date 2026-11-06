@@ -39,8 +39,9 @@ class HostPackageBoundaryTests(unittest.TestCase):
     def test_executable_and_sqlite_capability_cannot_admit_interpreter_closure(self):
         value = package.HostPackage.__new__(package.HostPackage)
         value.group = {'objects': []}
+        value.profile = {'schema': package.NATIVE_PROFILE_SCHEMA}
         for scope in ('isolated-native', 'production'):
-            value.host = SimpleNamespace(scope=scope)
+            value.host = SimpleNamespace(scope=scope, identity=SimpleNamespace(root=str(self.root)))
             with self.subTest(scope=scope), patch.object(package.sqlite3, 'Connection',
                     SimpleNamespace(setlimit=True, getlimit=True)):
                 blockers = value.execution_blockers()
@@ -60,6 +61,7 @@ class HostPackageBoundaryTests(unittest.TestCase):
     def test_host_run_refuses_before_preflight_claim_or_native_window(self):
         import routeb_host_execution as execution
         operation = execution.HostExecution.__new__(execution.HostExecution)
+        operation.root = self.root
         operation.package = Mock()
         operation.window = Mock()
         operation.claim = Mock()

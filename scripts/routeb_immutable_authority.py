@@ -13,6 +13,7 @@ import stat
 from upgrade_backup_contract import (absolute, digest, fields, fingerprint, identifier, integer,
                                      require, strict_json, timestamp)
 from upgrade_identity import read_trusted
+from routeb_native_delegation import is_delegated, require_delegation, SCHEMAS as DELEGATED_SCHEMAS
 
 
 SCHEMA = 'ags.immutable-authority.v1'
@@ -114,14 +115,20 @@ def verify(item):
     require(hashlib.sha256(approval_raw).hexdigest() == value['provision_approval_sha256'],
             'immutable_provision_approval_changed')
     approval = strict_json(approval_raw)
-    fields(approval, ('schema', 'authorization_id', 'actor', 'decision', 'host_instance',
-                      'tool_manifest_sha256', 'installer_sha256', 'issued_at', 'expires_at', 'objects'))
-    require(approval['schema'] == 'ags.immutable-authority-approval.v1' and approval['decision'] == 'approve'
-            and type(approval['actor']) is str and approval['actor'].startswith('human:')
-            and len(approval['actor']) > len('human:')
+    approval_fields = ('schema', 'authorization_id', 'actor', 'decision', 'host_instance',
+                       'tool_manifest_sha256', 'installer_sha256', 'issued_at', 'expires_at', 'objects')
+    delegated = is_delegated(approval, 'immutable-provision')
+    fields(approval, (*approval_fields, 'delegation') if delegated else approval_fields)
+    require(approval['schema'] in ('ags.immutable-authority-approval.v1', DELEGATED_SCHEMAS['immutable-provision'])
+            and approval['decision'] == 'approve'
             and approval['host_instance'] == value['host_instance']
             and approval['tool_manifest_sha256'] == value['tool_manifest_sha256']
             and type(approval['objects']) is list, 'immutable_provision_approval_invalid')
+    if delegated:
+        require_delegation(approval, 'immutable-provision', host_instance=value['host_instance'])
+    else:
+        require(type(approval['actor']) is str and approval['actor'].startswith('human:')
+                and len(approval['actor']) > len('human:'), 'immutable_provision_approval_invalid')
     identifier(approval['authorization_id'])
     expected_object = {'role': item['role'], 'source': item['source'], 'asset_sha256': value['asset_sha256'],
                        'metadata': value['metadata']}

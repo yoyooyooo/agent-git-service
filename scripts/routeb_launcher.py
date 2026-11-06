@@ -63,7 +63,7 @@ def main(argv=None):
     from upgrade_backup_contract import ContractError
     from routeb_host_package import INTERPRETER_CLOSURE_BLOCKER, require_interpreter_closure
     try:
-        require_interpreter_closure()
+        require_interpreter_closure(root, operations=(args.command,))
     except ContractError as error:
         if str(error) != INTERPRETER_CLOSURE_BLOCKER:
             raise
@@ -74,8 +74,13 @@ def main(argv=None):
         else:
             print('code=' + INTERPRETER_CLOSURE_BLOCKER, file=sys.stderr)
         return 78
-    sys.argv = [str(bundle / 'ags-runtime.py'), '--root', str(root), args.command]
-    runpy.run_path(str(bundle / 'ags-runtime.py'), run_name='__main__')
+    runtime = runpy.run_path(str(bundle / 'ags-runtime.py'), run_name='routeb_managed_runtime')
+    if args.command == 'doctor':
+        result = runtime['inspect'](root)
+        result.update(native_execution_allowed=False, installable=False)
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result.get('ready_to_start') is True else 78
+    return runtime['serve'](root, native_context=lambda: require_interpreter_closure(root, operations=('serve',)))
 
 
 if __name__ == '__main__':

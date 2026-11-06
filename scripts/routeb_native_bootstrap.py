@@ -44,6 +44,7 @@ from routeb_host_package import (read_document, verify_launch_dependencies, oid,
 from routeb_native_capture import read_regular
 from routeb_candidate import load_candidate
 import upgrade_state
+from routeb_native_delegation import is_delegated, require_delegation, SCHEMAS as DELEGATED_SCHEMAS
 
 
 PROVISION = 'ags.routeb-native-provision.v1'
@@ -65,10 +66,13 @@ def trusted_document(path, maximum=1024 * 1024):
     return _authority_bytes(Path(path), maximum)
 
 
-def check_human(value, purpose, now, *, point=None):
-    require(type(value['actor']) is str and value['actor'].startswith('human:')
-            and len(value['actor']) > 6 and value['decision'] == 'approve'
-            and value['purpose'] == purpose, 'bootstrap_approval_invalid')
+def check_human(value, purpose, now, *, point=None, root=None, host_instance=None):
+    require(value['decision'] == 'approve' and value['purpose'] == purpose, 'bootstrap_approval_invalid')
+    if is_delegated(value, purpose):
+        require_delegation(value, purpose, root=root, host_instance=host_instance)
+    else:
+        require(type(value['actor']) is str and value['actor'].startswith('human:')
+                and len(value['actor']) > 6, 'bootstrap_approval_invalid')
     identifier(value['authorization_id'])
     at = now if point is None else point
     require(timestamp(value['issued_at']) <= at < timestamp(value['expires_at']), 'bootstrap_approval_expired')
@@ -121,15 +125,17 @@ def read_bindings(root, approval_path):
     approved_raw = trusted_document(host.profile.parent / 'provision-approval.json')
     require(sha(approved_raw) == provision['provision_approval_sha256'], 'bootstrap_provision_approval_changed')
     approved = strict_json(approved_raw)
-    fields(approved, ('schema', 'authorization_id', 'actor', 'purpose', 'decision',
-                     'issued_at', 'expires_at', 'binding_sha256'))
+    approved_fields = ('schema', 'authorization_id', 'actor', 'purpose', 'decision',
+                       'issued_at', 'expires_at', 'binding_sha256')
+    fields(approved, (*approved_fields, 'delegation') if is_delegated(approved, 'native-provision') else approved_fields)
     binding = {key: value for key, value in provision.items()
                if key not in ('schema', 'provisioned_at', 'provision_approval_sha256')}
-    require(approved['schema'] == 'ags.routeb-native-provision-approval.v1'
+    require(approved['schema'] in ('ags.routeb-native-provision-approval.v1', DELEGATED_SCHEMAS['native-provision'])
             and approved['authorization_id'] == provision['provision_authorization_id']
             and approved['binding_sha256'] == fingerprint(binding), 'bootstrap_provision_approval_mismatch')
     now = datetime.now(timezone.utc)
-    check_human(approved, 'native-provision', now, point=timestamp(provision['provisioned_at']))
+    check_human(approved, 'native-provision', now, point=timestamp(provision['provisioned_at']),
+                root=root, host_instance=identity.host_instance)
     require(timestamp(provision['provisioned_at']) <= now, 'bootstrap_provision_time_invalid')
     manifest_path = root.parent / 'package/candidate-manifest.json'
     _, manifest_raw, manifest_sha = read_document(manifest_path)
@@ -151,9 +157,10 @@ def read_bindings(root, approval_path):
     require(result.returncode == 0 and not result.stderr and len(result.stdout) <= 65536
             and strict_json(result.stdout) == candidate.value['version'], 'bootstrap_program_identity_unknown')
     approval, approval_raw, approval_sha = read_document(approval_path)
-    fields(approval, APPROVAL_FIELDS)
-    require(approval['schema'] == APPROVAL, 'bootstrap_approval_invalid')
-    check_human(approval, 'native-bootstrap', datetime.now(timezone.utc))
+    fields(approval, (*APPROVAL_FIELDS, 'delegation') if is_delegated(approval, 'native-bootstrap') else APPROVAL_FIELDS)
+    require(approval['schema'] in (APPROVAL, DELEGATED_SCHEMAS['native-bootstrap']), 'bootstrap_approval_invalid')
+    check_human(approval, 'native-bootstrap', datetime.now(timezone.utc),
+                root=root, host_instance=identity.host_instance)
     require(approval['root'] == str(root) and approval['host_instance'] == identity.host_instance
             and approval['transaction_id'] == provision['transaction_id']
             and approval['provision_sha256'] == sha(raw) and approval['identity_sha256'] == identity.sha256
@@ -208,7 +215,7 @@ def archive_rows(value):
 
 
 def activate(root, approval_path):
-    require_interpreter_closure()
+    require_interpreter_closure(root, operations=('bootstrap',))
     root = Path(root)
     value = read_bindings(root, approval_path)
     loaded = upgrade_state.load_verified(root)
@@ -243,12 +250,21 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == 'plan':
+            try:
+                require_interpreter_closure(args.root, operations=('bootstrap-plan',))
+            except ContractError:
+                print(json.dumps({
+                    'schema': 'ags.routeb-native-bootstrap-plan.v1', 'status': 'blocked',
+                    'native_execution_allowed': False, 'native_pass': False, 'installable': False,
+                    'blockers': [INTERPRETER_CLOSURE_BLOCKER], 'effects': []}, sort_keys=True))
+                return 78
+            read_bindings(args.root, args.approval)
             print(json.dumps({
-                'schema': 'ags.routeb-native-bootstrap-plan.v1', 'status': 'blocked',
+                'schema': 'ags.routeb-native-bootstrap-plan.v1', 'status': 'planned',
                 'native_execution_allowed': False, 'native_pass': False, 'installable': False,
-                'blockers': [INTERPRETER_CLOSURE_BLOCKER], 'effects': []}, sort_keys=True))
-            return 78
-        require_interpreter_closure()
+                'blockers': [], 'effects': []}, sort_keys=True))
+            return 0
+        require_interpreter_closure(args.root, operations=('bootstrap',))
         value = read_bindings(args.root, args.approval)
         require(Path(__file__).resolve().parent == value['host'].bundle, 'executing_bundle_mismatch')
         result = activate(args.root, args.approval)

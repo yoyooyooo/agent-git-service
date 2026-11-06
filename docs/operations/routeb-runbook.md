@@ -68,9 +68,12 @@ Webhook classification at this revision: a body already over 10 MiB is HTTP
 Source preparation may read git, build in an isolated directory, and run
 component tests. The private host `plan` and `status` commands are read-only.
 Native registration requires its own bound inputs. Lifecycle activation,
-`run --execute` and managed native startup are currently closed by
-`interpreter_full_closure_required`; bootstrap plans also return this blocker
-and exit 78. Ordinary source tests do not perform these native steps.
+`run --execute` and managed native startup require the live registered root
+native supervisor. Direct Python, legacy profiles and file-only checks remain
+closed by `interpreter_full_closure_required`; bootstrap plans without that
+authority return this blocker and exit 78. Isolated Linux v2 has a conditional
+native path with the [complete interpreter authority](../design/routeb-interpreter-authority.md).
+Ordinary source tests do not perform or prove these native steps.
 Production plans additionally retain `native_full_closure_required`.
 
 Before a later window, these items are still required and are not proven here:
@@ -100,7 +103,9 @@ Before a later window, these items are still required and are not proven here:
    and extension bytes, loader/shared libraries, and mapped OS resources,
    verified before that interpreter executes. The existing executable hash
    and SQLite capability check do not establish this authority. The current
-   source has no admitted implementation or bypass for this gate.
+   isolated Linux v2 entry must prove its registered files, kernel identities,
+   fixed process tree and platform prerequisites before satisfying this gate.
+   Source CI does not establish native or production acceptance.
 
 ## 4. Backup and rollback
 

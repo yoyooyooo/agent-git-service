@@ -28,7 +28,16 @@ def cold_pending(root):
                (root / 'state/upgrade-cold.json', root / 'state/ags-autodeploy/local-v2/pending'))
 
 
-def startup_permitted(root):
+def startup_permitted(root, *, native_context=None):
+    if native_context is not None:
+        try:
+            native = _native_context(root, native_context)
+            if native['phase'] == 'serve-old':
+                from routeb_native_recovery import old_start_binding
+                old_start_binding(root, native)
+                return True
+        except Exception:
+            return False
     control = root / 'state/ags-autodeploy/local-v2/control'
     events = control / 'events'
     published = events.exists() and not events.is_symlink() and any(
@@ -63,7 +72,12 @@ def startup_permitted(root):
         return False
 
 
-def consume_start(root):
+def consume_start(root, *, native_context=None):
+    if native_context is not None:
+        native = _native_context(root, native_context)
+        if native['phase'] == 'serve-old':
+            from routeb_native_recovery import consume_old_generation
+            return consume_old_generation(root, native)
     if cold_pending(root):
         from upgrade_identity import runtime_identity
         runtime_identity(root)
@@ -75,8 +89,16 @@ def consume_start(root):
     return consume(root)
 
 
-def running_permitted(root, generation, child_pid):
+def running_permitted(root, generation, child_pid, *, native_context=None):
     """A consumed handoff permits this living generation, never another spawn."""
+    if native_context is not None:
+        try:
+            native = _native_context(root, native_context)
+            if native['phase'] == 'serve-old':
+                from routeb_native_recovery import old_generation_running
+                return old_generation_running(root, generation, child_pid, native)
+        except Exception:
+            return False
     if not cold_pending(root):
         return startup_permitted(root)
     try:
@@ -202,15 +224,16 @@ def retention_limits(root: Path) -> dict:
     return {'log_segment_bytes': maximum, 'log_backups': backups}
 
 
-def inspect(root: Path, *, running_generation=None, running_pid=None) -> dict:
+def inspect(root: Path, *, running_generation=None, running_pid=None, native_context=None) -> dict:
     checks: dict[str, str] = {}
     details: dict[str, dict] = {}
     root_ok = root.is_dir() and not root.is_symlink() and root.resolve() == root.absolute()
     checks['root'] = 'ok' if root_ok and root.stat().st_uid == os.getuid() and root.stat().st_mode & 0o077 == 0 else 'unsafe'
     marker = root / 'state/installing.json'
     checks['installation'] = 'interrupted' if marker.exists() or marker.is_symlink() else 'ok'
-    permitted = (startup_permitted(root) if running_generation is None and running_pid is None else
-                 running_permitted(root, running_generation, running_pid))
+    native_options = {'native_context': native_context} if native_context is not None else {}
+    permitted = (startup_permitted(root, **native_options) if running_generation is None and running_pid is None else
+                 running_permitted(root, running_generation, running_pid, **native_options))
     checks['upgrade_cold_window'] = 'ok' if permitted else 'blocked'
     for name in ('bin', 'config', 'state', 'logs'):
         directory = root / name
@@ -390,7 +413,29 @@ def _journal_effect(root, operation, before, after, kind, effect):
                                epoch=epoch, expected_epoch=expected)
 
 
-def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock, generation=None) -> int:
+def _native_context(root, callback, previous=None):
+    """Read the launcher's live peer binding, never a serialized permission flag."""
+    if callback is None:
+        return None
+    value = callback()
+    if (not isinstance(value, dict) or value.get('schema') != 'ags.routeb-stage0-context.v1'
+            or value.get('root') != str(root) or value.get('operation') != 'serve'
+            or not isinstance(value.get('supervisor'), dict) or not isinstance(value.get('child'), dict)
+            or value['supervisor'].get('pid') != os.getppid()
+            or value['supervisor'].get('uid') != 0 or value['supervisor'].get('gid') != 0
+            or value['child'].get('pid') != os.getpid()
+            or value['child'].get('parent_pid') != os.getppid()
+            or value['child'].get('uid') != os.getuid() or value['child'].get('gid') != os.getgid()
+            or (previous is not None and value != previous)):
+        raise ValueError('native runtime context changed')
+    # Freeze the snapshot: a callback retaining a mutable dictionary cannot
+    # change the saved generation identity in place between later checks.
+    return json.loads(json.dumps(value))
+
+
+def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock, generation=None,
+              *, native_context=None) -> int:
+    native = _native_context(root, native_context)
     if cold_pending(root):
         from upgrade_identity import runtime_identity
         runtime_identity(root)
@@ -420,6 +465,9 @@ def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock,
         current = {'schema': 'ags.runtime.v1', 'supervisor_pid': os.getpid(), 'pid': child.pid,
                    'generation': generation or uuid.uuid4().hex,
                    'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'root': str(root), 'build': build}
+        if native is not None:
+            _native_context(root, native_context, native)
+            current['stage0'] = native
         atomic_json(root / 'state/runtime.json', current)
         _journal_effect(root, 'supervise-spawn-' + current['generation'], 'active', 'running',
                         'generation_spawned',
@@ -440,7 +488,9 @@ def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock,
                 else:
                     selector.unregister(key.fileobj)
             if time.monotonic() >= next_check:
-                report = inspect(root, running_generation=current['generation'], running_pid=child.pid)
+                _native_context(root, native_context, native)
+                options = {'native_context': native_context} if native_context is not None else {}
+                report = inspect(root, running_generation=current['generation'], running_pid=child.pid, **options)
                 atomic_json(root / 'state/startup-health.json', report)
                 if not report['ready_to_start'] and (report['checks'], report['check_details']) != last_checks:
                     log.write((json.dumps(report) + '\n').encode())
@@ -454,6 +504,7 @@ def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock,
             group_empty = False
         except ProcessLookupError:
             group_empty = True
+        _native_context(root, native_context, native)
         current.update(process_group_empty=group_empty, exit_code=code, forced_kill=forced_kill,
                        stop_requested=stop_deadline is not None,
                        stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())
@@ -478,8 +529,10 @@ def supervise(root: Path, env: dict, build: dict, log: BoundedLog, install_lock,
             signal.signal(sig, handler)
 
 
-def serve(root: Path) -> int:
-    if cold_pending(root) and not startup_permitted(root):
+def serve(root: Path, *, native_context=None) -> int:
+    native = _native_context(root, native_context)
+    native_options = {'native_context': native_context} if native_context is not None else {}
+    if cold_pending(root) and not startup_permitted(root, **native_options):
         return 78
     os.umask(0o077)
     if (not root.is_dir() or root.is_symlink() or root.resolve() != root.absolute()
@@ -505,7 +558,7 @@ def serve(root: Path) -> int:
             install_lockfd = os.open(root / 'state/install.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
             install_lock = resources.enter_context(os.fdopen(install_lockfd, 'w'))
             fcntl.flock(install_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            report = inspect(root)
+            report = inspect(root, **native_options)
             atomic_json(root / 'state/startup-health.json', report)
             if not report['ready_to_start']:
                 log.write((json.dumps(report) + '\n').encode())
@@ -515,6 +568,7 @@ def serve(root: Path) -> int:
             env['AGS_HOME'] = str(root)
             env['PATH'] = str(root / 'bin') + ':' + env.get('PATH', '')
             stage = 'program_identity'
+            _native_context(root, native_context, native)
             result = subprocess.run([str(root / 'bin/gh-server'), '--version'], env=env,
                                     capture_output=True, check=True, timeout=10)
             build = json.loads(result.stdout)
@@ -522,9 +576,9 @@ def serve(root: Path) -> int:
             if build != receipt['binaries']['gh-server']['identity']:
                 raise ValueError('program identity mismatch')
             stage = 'upgrade_handoff'
-            generation = consume_start(root)
+            generation = consume_start(root, **native_options)
             stage = 'process_lifecycle'
-            return supervise(root, env, build, log, install_lock, generation)
+            return supervise(root, env, build, log, install_lock, generation, native_context=native_context)
         except Exception as error:
             # Do not serialize exception text: subprocess output/config can be sensitive.
             failure = {'schema': 'ags.runtime-failure.v1', 'stage': stage,

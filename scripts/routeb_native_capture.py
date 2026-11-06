@@ -35,6 +35,7 @@ MAX_JSON = 4 * 1024 * 1024
 MAX_LOG_DELTA = 64 * 1024 * 1024
 PREFIX_LAUNCHD = 'com.jackie.ags-hostpkg-test.'
 PREFIX_SYSTEMD = 'ags-hostpkg-test-'
+STAGE0_PROFILE = 'ags.routeb-native-profile.v2'
 
 
 class CaptureError(ValueError):
@@ -279,6 +280,98 @@ def process_identity(pid, binary=None, *, artifacts=None, name='process'):
     return {**facts, 'executable': str(path), 'device': live.st_dev, 'inode': live.st_ino}
 
 
+def stage0_client():
+    # The native entry imports this from the verified, root-owned bundle.
+    # Importing it, or presenting runtime JSON, never supplies peer authority.
+    import routeb_stage0_client
+    return routeb_stage0_client
+
+
+def stage0_registration(profile, root):
+    if profile.get('schema') != STAGE0_PROFILE:
+        return None
+    value = profile.get('stage0')
+    require(type(value) is dict and set(value) == {'registration_id'}, 'stage0_profile_invalid')
+    identifier = value['registration_id']
+    require(type(identifier) is str and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,47}', identifier)
+            and identifier not in ('.', '..') and Path(root).name == 'ags'
+            and Path(root).parent.name == identifier, 'stage0_profile_mismatch')
+    return value
+
+
+def _kernel_identity(value):
+    names = {'pid', 'start_ticks', 'parent_pid', 'uid', 'gid', 'executable_sha256'}
+    require(type(value) is dict and set(value) == names, 'stage0_process_identity_invalid')
+    require(all(type(value[key]) is int and value[key] >= 0 for key in
+                ('pid', 'start_ticks', 'parent_pid', 'uid', 'gid'))
+            and value['pid'] > 1 and value['start_ticks'] > 0, 'stage0_process_identity_invalid')
+    digest(value['executable_sha256'])
+    return value
+
+
+def runtime_processes(root, runtime, manager, binary, *, stage0=None, artifacts=None):
+    """Bind the fixed root parent, its Python child and that child's AGS process.
+
+    The online root broker reads kernel birth identities. Runtime JSON only
+    names the claimed context; it must equal that independent observation.
+    The old two-process form remains available for legacy component callers.
+    """
+    child = process_identity(runtime['pid'], binary, artifacts=artifacts, name='child')
+    supervisor = process_identity(runtime['supervisor_pid'], artifacts=artifacts, name='supervisor')
+    require(child['parent_pid'] == runtime['supervisor_pid'], 'process_parent_mismatch')
+    if stage0 is None:
+        require(manager['pid'] == runtime['supervisor_pid'], 'process_parent_mismatch')
+        return {'child': child, 'supervisor': supervisor}
+    observed = stage0_client().runtime_identity(root)
+    require(type(observed) is dict and set(observed) == {'context', 'pids', 'manager_unit'},
+            'stage0_runtime_identity_invalid')
+    context = observed['context']
+    require(type(context) is dict and context == runtime.get('stage0')
+            and context.get('schema') == 'ags.routeb-stage0-context.v1'
+            and context.get('root') == str(root)
+            and context.get('registration_id') == stage0['registration_id']
+            and context.get('operation') == 'serve'
+            and context.get('phase') in ('serve-initial', 'serve-candidate', 'serve-old')
+            and observed['manager_unit'] == manager['target'], 'stage0_runtime_context_mismatch')
+    root_parent = _kernel_identity(context.get('supervisor'))
+    python = _kernel_identity(context.get('child'))
+    require(root_parent['uid'] == root_parent['gid'] == 0 and root_parent['parent_pid'] == 1
+            and root_parent['pid'] == manager['pid']
+            and python['pid'] == runtime['supervisor_pid']
+            and python['parent_pid'] == root_parent['pid']
+            and supervisor['parent_pid'] == root_parent['pid']
+            and python['uid'] == os.getuid() and python['gid'] == os.getgid(),
+            'stage0_process_parent_mismatch')
+    require(type(observed['pids']) is list and 3 <= len(observed['pids']) <= 4096,
+            'stage0_process_tree_invalid')
+    members = {}
+    for row in observed['pids']:
+        _kernel_identity(row)
+        require(row['pid'] not in members, 'stage0_process_tree_invalid')
+        members[row['pid']] = row
+    require(members.get(root_parent['pid']) == root_parent and members.get(python['pid']) == python,
+            'stage0_process_tree_invalid')
+    application = members.get(runtime['pid'])
+    require(application is not None and application['parent_pid'] == python['pid']
+            and application['uid'] == os.getuid() and application['gid'] == os.getgid()
+            and application['executable_sha256'] == hash_file(binary), 'stage0_application_mismatch')
+    for pid in members:
+        seen = set()
+        while pid != root_parent['pid']:
+            require(pid in members and pid not in seen, 'stage0_process_tree_invalid')
+            seen.add(pid)
+            pid = members[pid]['parent_pid']
+    child.update(start_ticks=application['start_ticks'], uid=application['uid'], gid=application['gid'],
+                 executable_sha256=application['executable_sha256'])
+    supervisor.update(start_ticks=python['start_ticks'], uid=python['uid'], gid=python['gid'],
+                      executable_sha256=python['executable_sha256'])
+    if artifacts is not None:
+        artifacts['stage0-runtime.json'] = (canonical(observed), 'online_root_broker_runtime_identity')
+    stable_tree = {'child': child, 'supervisor': supervisor, 'stage0': context}
+    return {**stable_tree, 'stage0_sha256': sha(canonical(context)),
+            'stage0_tree_sha256': sha(canonical(stable_tree)), 'pids': observed['pids']}
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
@@ -364,6 +457,10 @@ def load_inputs(receipt_path, profile_path):
     spec = profile.get('capture')
     require(type(spec) is dict, 'capture_profile_missing')
     root = absolute(receipt['root'])
+    native_registration = stage0_registration(profile, root)
+    require('stage0_registration' not in spec, 'capture_profile_invalid')
+    if native_registration is not None:
+        spec = {**spec, 'stage0_registration': native_registration}
     require(root.is_dir(), 'root_missing')
     for key in ('runtime_path', 'installation_path', 'binary_path'):
         path = absolute(spec[key])
@@ -383,10 +480,18 @@ def load_inputs(receipt_path, profile_path):
         require(bool(re.fullmatch(r'[a-zA-Z0-9._-]+\.service', target)), 'manager_target_invalid')
         require(manager.get('scope') in ('user', 'system'), 'manager_scope_invalid')
         if spec['mode'] == 'isolated-native':
-            require(target.startswith(PREFIX_SYSTEMD) and manager['scope'] == 'user', 'native_label_rejected')
+            if native_registration is None:
+                require(target.startswith(PREFIX_SYSTEMD) and manager['scope'] == 'user', 'native_label_rejected')
+            else:
+                require(target == PREFIX_SYSTEMD + native_registration['registration_id'] + '.service'
+                        and manager['scope'] == 'system', 'native_label_rejected')
     definition = absolute(manager['definition'])
     if spec['mode'] == 'isolated-native':
-        require(root in definition.parents, 'native_definition_outside_root')
+        if native_registration is None:
+            require(root in definition.parents, 'native_definition_outside_root')
+        else:
+            require(manager['kind'] == 'systemd'
+                    and definition == Path('/etc/systemd/system') / target, 'native_definition_outside_registry')
     require(sha(read_regular(definition, private=False)) == digest(manager['definition_sha256']), 'manager_definition_changed')
     for key in ('duration_seconds', 'lease_seconds', 'interval_seconds', 'max_gap_seconds'):
         require(type(spec.get(key)) is int, 'capture_timing_invalid')
@@ -402,6 +507,12 @@ def load_inputs(receipt_path, profile_path):
     digest(receipt['tool']['bundle_sha256'])
     for key in ('runtime_sha256', 'manager_sha256', 'binary_sha256', 'installation_sha256'):
         digest(receipt['validated_start'][key])
+    if native_registration is not None:
+        digest(receipt['validated_start'].get('stage0_sha256'))
+        digest(receipt['validated_start'].get('stage0_tree_sha256'))
+    else:
+        require(not any(key in receipt['validated_start'] for key in ('stage0_sha256', 'stage0_tree_sha256')),
+                'stage0_profile_missing')
     require(receipt['validated_start']['binary_sha256'] == receipt['candidate']['binary_sha256'], 'candidate_binary_mismatch')
     require(type(receipt['validated_start']['monotonic_ns']) is int and receipt['validated_start']['monotonic_ns'] > 0, 'start_clock_invalid')
     require(receipt['start_once'] == {'attempted': True, 'token_consumed': True, 'manager_requested': True}
@@ -468,17 +579,19 @@ class NativeProbe:
         require(not journal['projection']['pending_effects'], 'journal_effect_unknown')
         require(runtime.get('schema') == 'ags.runtime.v1' and runtime.get('root') == str(self.root)
                 and 'stopped_at' not in runtime, 'runtime_invalid')
-        child = process_identity(runtime['pid'], spec['binary_path'], artifacts=artifacts, name='child')
-        supervisor = process_identity(runtime['supervisor_pid'], artifacts=artifacts, name='supervisor')
-        require(manager['pid'] == runtime['supervisor_pid'] and child['parent_pid'] == runtime['supervisor_pid'], 'process_parent_mismatch')
+        process_tree = runtime_processes(self.root, runtime, manager, spec['binary_path'],
+                                         stage0=spec.get('stage0_registration'), artifacts=artifacts)
         observed_boot, raw_boot = boot_identity()
         artifacts['boot.txt'] = (raw_boot, 'raw_os_boot_identity')
         facts = {'boot_id': observed_boot, 'generation': runtime.get('generation'),
                  'revision': runtime.get('build', {}).get('revision'),
                  'runtime_sha256': sha(raw_runtime), 'installation_sha256': sha(installation),
                  'binary_sha256': hash_file(spec['binary_path']), 'manager_sha256': sha(canonical(manager)),
-                 'manager': manager, 'child': child, 'supervisor': supervisor,
+                 'manager': manager, 'child': process_tree['child'], 'supervisor': process_tree['supervisor'],
                  'journal_head_sha256': journal['projection']['event_sha256'], 'health': {}}
+        if 'stage0' in process_tree:
+            require(process_tree['stage0']['boot_id'] == observed_boot, 'stage0_boot_changed')
+            facts.update({key: process_tree[key] for key in ('stage0', 'stage0_sha256', 'stage0_tree_sha256')})
         artifacts.update({'runtime.json': (raw_runtime, 'raw_runtime'),
                      'installation.json': (installation, 'raw_installation'),
                      'manager.txt': (raw_manager, manager_kind),
@@ -530,13 +643,15 @@ def validate_sample(facts, receipt, previous=None):
     require(facts['revision'] == receipt['candidate']['revision'], 'revision_changed')
     for key in ('runtime_sha256', 'installation_sha256', 'binary_sha256', 'manager_sha256'):
         require(facts[key] == receipt['validated_start'][key], key + '_changed')
+    for key in ('stage0_sha256', 'stage0_tree_sha256'):
+        require(facts.get(key) == receipt['validated_start'].get(key), 'stage0_identity_changed')
     require(set(facts['health']) == {'local', 'service'}, 'health_profile_invalid')
     for value in facts['health'].values():
         require(value['http_status'] == 200 and value['status'] == 'ready'
                 and value['revision'] == receipt['candidate']['revision'], 'health_not_ready')
     if previous is not None:
-        for key in ('child', 'supervisor', 'manager'):
-            require(facts[key] == previous[key], 'process_identity_changed')
+        for key in ('child', 'supervisor', 'manager', 'stage0'):
+            require(facts.get(key) == previous.get(key), 'process_identity_changed')
 
 
 def capture(receipt_path, profile_path, output, *, probe=None, clock=None):

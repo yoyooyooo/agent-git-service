@@ -1,9 +1,12 @@
 # Route B native host execution
 
-Native bootstrap activation, host execution and managed startup currently
-refuse with `interpreter_full_closure_required`. An executable hash does not
-verify the interpreter's complete dependencies before it executes. There is
-no runtime override for this gate; see the [host package contract](operations/routeb-host-package.md#interpreter-execution-remains-closed).
+Native bootstrap activation, host execution and managed startup require a
+live registered native supervisor. Direct Python entry, an executable hash,
+or a file-only catalog check still refuses with
+`interpreter_full_closure_required`. Isolated Linux can satisfy this boundary
+only through the fixed root systemd supervisor and its complete interpreter
+authority. There is no runtime override; see the
+[host package contract](operations/routeb-host-package.md#interpreter-execution-remains-closed).
 
 The component flow described below connects an exact-source package to the
 durable cold window, independent restore verification, one manager start and
@@ -14,11 +17,15 @@ until the complete native acceptance contract is satisfied.
 
 ## Entry and admission
 
-Use the canonical interpreter recorded in the registered host profile with
-`-I -B`, executing `routeb_host_transaction.py` from that profile's frozen,
-root-owned bundle. The entry refuses an untrusted import directory before
-loading the implementation. It also verifies that the executing bundle is the
-bundle registered for the admitted host. A checkout is not a native entry.
+The isolated Linux v2 manager starts the fixed root `ags-routeb-stage0`
+image. Its registration fixes the operation, child credentials, canonical
+loader and interpreter, and frozen root-owned bundle. After complete native
+verification it executes the selected Python entry with `-I -B -S`. The
+entry independently binds the live kernel-authenticated parent and registered
+bundle. A checkout, direct interpreter invocation, or caller-supplied context
+does not satisfy this boundary. The platform contract and remaining native
+acceptance requirements are specified in the
+[interpreter authority design](design/routeb-interpreter-authority.md).
 
 The host command accepts these operations:
 

@@ -22,6 +22,7 @@ from routeb_host_identity import resolve_for_root
 
 
 PROFILE_SCHEMA = 'ags.routeb-native-profile.v1'
+NATIVE_PROFILE_SCHEMA = 'ags.routeb-native-profile.v2'
 PROFILE_FIELDS = ('schema root tool_revision tool_tree interpreter launcher_sha256 '
                   'build_review_sha256 ci_evidence_sha256 recovery_review_sha256 '
                   'schema_sha256 trash_root capture').split()
@@ -32,9 +33,14 @@ SIDE_FILES = ('native-profile.json', 'policy.json', 'recovery-group.json', 'buil
 INTERPRETER_CLOSURE_BLOCKER = 'interpreter_full_closure_required'
 
 
-def require_interpreter_closure():
-    """Refuse native effects until the interpreter's full authority is modeled."""
-    raise ContractError(INTERPRETER_CLOSURE_BLOCKER)
+def require_interpreter_closure(root=None, operations=None):
+    """Require the kernel-authenticated, live registered native parent.
+
+    File-only evidence, a flag and direct Python invocation cannot satisfy it.
+    The parent currently admits only its isolated Linux authority contract.
+    """
+    from routeb_stage0_client import context
+    return context(root, operations=operations)
 
 
 def read_document(path):
@@ -92,11 +98,17 @@ def validate_capture_profile(profile, host):
     else:
         require(manager['kind'] == 'systemd' and host.identity.platform == 'Linux'
                 and bool(re.fullmatch(r'[A-Za-z0-9._-]+\.service', target)), 'manager_target_invalid')
-        require((manager['scope'] == 'user' and target.startswith('ags-hostpkg-test-'))
+        native = profile.get('schema') == NATIVE_PROFILE_SCHEMA
+        isolated = ((manager['scope'] == 'system' and target == 'ags-hostpkg-test-' + root.parent.name + '.service')
+                    if native else (manager['scope'] == 'user' and target.startswith('ags-hostpkg-test-')))
+        require(isolated
                 if host.scope == 'isolated-native' else
                 (manager['scope'] == 'system' and target == 'agent-git-service.service'), 'manager_target_invalid')
     if host.scope == 'isolated-native':
-        require(root in definition.parents, 'native_definition_outside_root')
+        if profile.get('schema') == NATIVE_PROFILE_SCHEMA and manager['kind'] == 'systemd':
+            require(definition == Path('/etc/systemd/system') / target, 'native_definition_outside_root')
+        else:
+            require(root in definition.parents, 'native_definition_outside_root')
     fields(spec['health'], ('local', 'service'))
     for name, value in spec['health'].items():
         parsed = urlsplit(value)
@@ -150,6 +162,8 @@ class HostPackage:
         return self.root / 'state/ags-autodeploy/local-v2/pending'
 
     def authorize(self):
+        if self.profile.get('schema') == NATIVE_PROFILE_SCHEMA:
+            require_interpreter_closure(self.root, operations=('plan', 'transaction', 'restore', 'old-start'))
         self.host.recheck()
         _, raw, _ = read_document(self.path)
         require(raw == self.package_raw, 'package_replaced')
@@ -182,7 +196,17 @@ class HostPackage:
         return validate_cold_binding(value)
 
     def execution_blockers(self):
-        blockers = [INTERPRETER_CLOSURE_BLOCKER, *python_capability_blockers()]
+        blockers = python_capability_blockers()
+        try:
+            require(self.profile.get('schema') == NATIVE_PROFILE_SCHEMA, INTERPRETER_CLOSURE_BLOCKER)
+            value = require_interpreter_closure(self.root, operations=('plan', 'transaction', 'restore', 'old-start'))
+            require(value['registration_id'] == self.profile['stage0']['registration_id']
+                    and value['tool_revision'] == self.profile['tool_revision']
+                    and value['tool_tree'] == self.profile['tool_tree']
+                    and value['tool_manifest_sha256'] == self.package['tool_sha256'],
+                    INTERPRETER_CLOSURE_BLOCKER)
+        except (ContractError, OSError, KeyError, TypeError):
+            blockers.append(INTERPRETER_CLOSURE_BLOCKER)
         if self.host.scope == 'production':
             blockers.append('native_full_closure_required')
         for item in self.group['objects']:
@@ -289,8 +313,15 @@ def load(package_path, approval_path, expected_host):
         value, _, sha = read_document(path.parent / name)
         sidecars[name], documents[name] = value, sha
     profile = sidecars['native-profile.json']
-    fields(profile, PROFILE_FIELDS)
-    require(profile['schema'] == PROFILE_SCHEMA, 'native_profile_invalid')
+    native = profile.get('schema') == NATIVE_PROFILE_SCHEMA
+    fields(profile, (*PROFILE_FIELDS, 'stage0') if native else PROFILE_FIELDS)
+    require(profile['schema'] in (PROFILE_SCHEMA, NATIVE_PROFILE_SCHEMA), 'native_profile_invalid')
+    if native:
+        fields(profile['stage0'], ('registration_id',))
+        from upgrade_backup_contract import identifier
+        identifier(profile['stage0']['registration_id'])
+        require(profile['stage0']['registration_id'] == Path(profile['root']).parent.name,
+                'native_profile_invalid')
     for key in ('tool_revision', 'tool_tree'):
         oid(profile[key])
     for key in ('launcher_sha256', 'build_review_sha256', 'ci_evidence_sha256',

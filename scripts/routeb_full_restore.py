@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from upgrade_backup_contract import ContractError, canonical, fingerprint, identifier, require, strict_json, timestamp
 from upgrade_backup import apply_metadata, copy_file, copy_tree, metadata_fields, supported_metadata
 from upgrade_full_restore import plan as offline_plan, require_snapshot_target
+from routeb_native_delegation import is_delegated, require_delegation, SCHEMAS as DELEGATED_SCHEMAS
 
 
 def _fsync(path):
@@ -129,8 +130,14 @@ def verify_recovered_group(restored, approval):
     require(receipt['manifest_sha256'] == context['manifest_sha256'] == approval.get('manifest_sha256')
             and manifest['snapshot_id'] == restored['snapshot_id']
             and approval.get('host_instance') == manifest['binding']['host_instance'], 'recovery_binding_mismatch')
-    require(type(approval.get('actor')) is str and approval['actor'].startswith('human:')
-            and timestamp(approval['issued_at']) <= datetime.now(timezone.utc) < timestamp(approval['expires_at']),
+    purpose = approval.get('purpose')
+    require(purpose in ('full-restore', 'old-start'), 'recovery_purpose_invalid')
+    if is_delegated(approval, purpose):
+        require_delegation(approval, purpose, host_instance=manifest['binding']['host_instance'])
+    else:
+        require(type(approval.get('actor')) is str and approval['actor'].startswith('human:'),
+                'recovery_approval_expired')
+    require(timestamp(approval['issued_at']) <= datetime.now(timezone.utc) < timestamp(approval['expires_at']),
             'recovery_approval_expired')
     verify_payload(backup_dir, manifest['entries'], auxiliary=AUXILIARY)
     load_inventory(backup_dir, manifest, group, context['schema_sha256'], context['dsn'])
@@ -160,7 +167,8 @@ def _consumed_path(restored, approval, verified):
 def old_start(restored, approval, *, launcher):
     """One approved old start. The restore approval cannot authorize it."""
     require(restored.get('applied') is True and restored.get('started') is False, 'not_restored')
-    require(approval.get('schema') == 'ags.routeb-recovery-approval.v1', 'approval_invalid')
+    require(approval.get('schema') in ('ags.routeb-recovery-approval.v1', DELEGATED_SCHEMAS['old-start']),
+            'approval_invalid')
     require(approval.get('decision') == 'approve' and approval.get('purpose') == 'old-start',
             'approval_invalid')
     require(approval.get('data_loss_acknowledged') is True, 'data_loss_unacknowledged')

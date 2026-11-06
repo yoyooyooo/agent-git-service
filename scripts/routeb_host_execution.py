@@ -243,12 +243,12 @@ class HostExecution:
                 'started_runtime_unverified')
         manager, manager_raw, manager_kind = capture.read_manager(spec['manager'])
         artifacts = {}
-        child = capture.process_identity(runtime['pid'], spec['binary_path'], artifacts=artifacts, name='child')
-        supervisor = capture.process_identity(runtime['supervisor_pid'], artifacts=artifacts, name='supervisor')
-        require(child['parent_pid'] == runtime['supervisor_pid'] and manager['pid'] == runtime['supervisor_pid'],
-                'process_parent_mismatch')
+        tree = capture.runtime_processes(self.root, runtime, manager, spec['binary_path'],
+                    stage0=capture.stage0_registration(self.package.profile, self.root), artifacts=artifacts)
         boot_id, boot_raw = capture.boot_identity()
         require(boot_id == self.manager.before['boot_id'], 'boot_changed')
+        if 'stage0' in tree:
+            require(tree['stage0']['boot_id'] == boot_id, 'stage0_boot_changed')
         installation_raw = capture.read_regular(spec['installation_path'])
         require(capture.sha(installation_raw) == self.window.journal['installed_receipt_sha256']
                 and capture.hash_file(spec['binary_path']) == self.package.candidate.sha256,
@@ -276,9 +276,11 @@ class HostExecution:
         require(capture.read_regular(spec['runtime_path']) == runtime_raw, 'runtime_changed_during_probe')
         self.manager.definition()
         return {'runtime': runtime, 'boot_id': boot_id, 'manager': manager,
-                'child': child, 'supervisor': supervisor, 'projection': projection,
+                'child': tree['child'], 'supervisor': tree['supervisor'], 'projection': projection,
                 'runtime_sha256': capture.sha(runtime_raw),
-                'installation_sha256': capture.sha(installation_raw), 'artifacts': artifacts}
+                'installation_sha256': capture.sha(installation_raw), 'artifacts': artifacts,
+                **({key: tree[key] for key in ('stage0', 'stage0_sha256', 'stage0_tree_sha256')}
+                   if 'stage0' in tree else {})}
 
     def observe_start(self):
         deadline = time.monotonic() + 90
@@ -333,7 +335,9 @@ class HostExecution:
         fresh = self.ready_snapshot()
         require(fresh['runtime_sha256'] == snapshot['runtime_sha256']
                 and fresh['manager'] == snapshot['manager']
-                and fresh['projection'] == snapshot['projection'], 'start_changed_before_capture')
+                and fresh['projection'] == snapshot['projection']
+                and fresh['child'] == snapshot['child'] and fresh['supervisor'] == snapshot['supervisor']
+                and fresh.get('stage0') == snapshot.get('stage0'), 'start_changed_before_capture')
         record['validated_start'] = {'at_utc': utc(), 'monotonic_ns': time.monotonic_ns(),
                                      'runtime_sha256': fresh['runtime_sha256'],
                                      'manager_sha256': capture.sha(capture.canonical(fresh['manager'])),
@@ -345,6 +349,9 @@ class HostExecution:
                                                        if item['name'] == row['name']),
                                           'device': row['device'], 'inode': row['inode'], 'offset': row['end']}
                                          for row in ranges]}
+        if 'stage0_sha256' in fresh:
+            record['validated_start']['stage0_sha256'] = fresh['stage0_sha256']
+            record['validated_start']['stage0_tree_sha256'] = fresh['stage0_tree_sha256']
         require(capture.sha(capture.read_regular(package.profile['capture']['runtime_path'])) ==
                 record['validated_start']['runtime_sha256'], 'runtime_changed_during_probe')
         target = self.pending / 'execution.json'
@@ -352,7 +359,7 @@ class HostExecution:
         return target
 
     def run(self):
-        require_interpreter_closure()
+        require_interpreter_closure(self.root, operations=('transaction',))
         package, window = self.package, self.window
         require(not preflight(package)['blockers'], 'execution_preflight_blocked')
         require(read_version(package.candidate.binary_path) == package.candidate.value['version']

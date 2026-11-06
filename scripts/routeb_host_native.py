@@ -140,14 +140,32 @@ class FixedManager:
         self.profile, self.host = profile, host
         self.spec = profile['capture']['manager']
         self.before = None
+        self.stopped = None
         self.called = set()
+
+    def native_registration(self):
+        if self.profile.get('schema') != 'ags.routeb-native-profile.v2':
+            return None
+        return capture_module().stage0_registration(self.profile, self.root)
 
     def definition(self):
         cap = capture_module()
         raw = cap.read_regular(self.spec['definition'], private=False)
         require(cap.sha(raw) == self.spec['definition_sha256'], 'manager_definition_changed')
-        expected = [self.profile['interpreter']['path'], '-I', '-B', str(self.root / 'bin/ags-runtime.py'),
-                    '--root', str(self.root), 'serve']
+        registration = self.native_registration()
+        if registration is None:
+            expected = [self.profile['interpreter']['path'], '-I', '-B', str(self.root / 'bin/ags-runtime.py'),
+                        '--root', str(self.root), 'serve']
+        else:
+            context = cap.stage0_client().context(self.root, operations=('plan', 'transaction', 'restore', 'old-start'))
+            identifier = registration['registration_id']
+            require(context['root'] == str(self.root) and context['registration_id'] == identifier
+                    and self.spec['kind'] == 'systemd' and self.spec['scope'] == 'system'
+                    and self.spec['target'] == 'ags-hostpkg-test-' + identifier + '.service'
+                    and self.spec['definition'] == '/etc/systemd/system/' + self.spec['target'],
+                    'stage0_manager_binding_mismatch')
+            expected = ['/usr/local/libexec/ags-routeb-native/' + identifier + '/stage0/ags-routeb-stage0',
+                        'serve', '--registration', identifier, '--operation', 'serve']
         if self.spec['kind'] == 'launchd':
             value = plistlib.loads(raw)
             require(value.get('Label') == self.spec['target'].rsplit('/', 1)[-1]
@@ -174,14 +192,20 @@ class FixedManager:
                     require(key not in entries, 'manager_definition_unsupported')
                     entries[key] = value
             require(shlex.split(entries.get('ExecStart', '')) == expected
-                    and entries.get('Restart') == 'no' and entries.get('KillMode') == 'control-group'
+                    and entries.get('Restart') == 'no'
+                    and entries.get('KillMode') == ('mixed' if registration is not None else 'control-group')
                     and entries.get('Type', 'simple') == 'simple'
                     and entries.get('TimeoutStopSec') in ('90', '90s', '95', '95s', '120', '120s')
                     and not any(key.startswith('Exec') and key != 'ExecStart' for key in entries),
                     'oneshot_manager_definition_required')
+            if registration is not None:
+                require(entries.get('User') == entries.get('Group') == 'root'
+                        and entries.get('TimeoutStopSec') in ('120', '120s')
+                        and not any(key.startswith('Environment') for key in entries),
+                        'stage0_manager_definition_required')
             facts = systemd_properties(self.spec, ('DropInPaths', 'Restart', 'KillMode', 'TimeoutStopUSec', 'FragmentPath'))
             require(facts['DropInPaths'] == '' and facts['Restart'] == 'no'
-                    and facts['KillMode'] == 'control-group'
+                    and facts['KillMode'] == ('mixed' if registration is not None else 'control-group')
                     and facts['FragmentPath'] == self.spec['definition'], 'manager_definition_changed')
         return raw
 
@@ -192,12 +216,17 @@ class FixedManager:
         runtime = cap.object_json(cap.read_regular(self.root / 'state/runtime.json'))
         manager, _, _ = cap.read_manager(self.spec)
         require(runtime.get('root') == str(self.root) and runtime.get('generation')
-                and 'stopped_at' not in runtime and manager['pid'] == runtime.get('supervisor_pid'),
+                and 'stopped_at' not in runtime,
                 'generation_launcher_required')
-        child = cap.process_identity(runtime['pid'], self.root / 'bin/gh-server')
-        require(child['parent_pid'] == runtime['supervisor_pid'], 'process_parent_mismatch')
+        registration = self.native_registration()
+        tree = cap.runtime_processes(self.root, runtime, manager, self.root / 'bin/gh-server',
+                                     stage0=registration)
         self.before = {'runtime': runtime, 'manager': manager, 'boot_id': cap.boot_identity()[0],
-                       'pids': descendants(processes(), runtime['supervisor_pid'])}
+                       'pids': ({row['pid'] for row in tree['pids']} if registration is not None
+                                else descendants(processes(), runtime['supervisor_pid']))}
+        if registration is not None:
+            require(tree['stage0']['boot_id'] == self.before['boot_id'], 'stage0_boot_changed')
+            self.before['stage0'] = tree['stage0']
         return self.before
 
     def suppress_restart(self):
@@ -215,6 +244,8 @@ class FixedManager:
 
     def _systemd(self, action):
         require(action in ('stop', 'start'), 'manager_action_invalid')
+        if self.native_registration() is not None:
+            return capture_module().stage0_client().manager_action(self.root, action)
         if self.host.scope == 'production':
             require(self.spec['kind'] == 'systemd' and self.spec['scope'] == 'system'
                     and self.spec['target'] == 'agent-git-service.service', 'manager_target_invalid')
@@ -258,15 +289,41 @@ class FixedManager:
         stopped = cap.object_json(raw)
         require(stopped.get('generation') == self.before['runtime']['generation']
                 and stopped.get('root') == str(self.root)
+                and stopped.get('pid') == self.before['runtime']['pid']
+                and stopped.get('supervisor_pid') == self.before['runtime']['supervisor_pid']
                 and stopped.get('exit_code') == 0 and type(stopped.get('exit_code')) is int
                 and stopped.get('forced_kill') is False and stopped.get('stop_requested') is True
                 and stopped.get('process_group_empty') is True, 'normal_stop_unproven')
+        native_exit = None
+        if 'stage0' in self.before:
+            context = self.before['stage0']
+            require(stopped.get('stage0') == context, 'stage0_stop_context_changed')
+            native_exit = cap.stage0_client().runtime_exit(self.root, context['invocation_id'])
+            require(type(native_exit) is dict and native_exit.get('schema') == 'ags.routeb-stage0-exit.v1'
+                    and all(native_exit.get(key) == context[key] for key in
+                            ('registration_sha256', 'invocation_id', 'phase', 'boot_id', 'supervisor', 'child'))
+                    and native_exit.get('child_exit_code') == 0
+                    and type(native_exit.get('child_exit_code')) is int
+                    and native_exit.get('forced_kill') is False
+                    and all(native_exit.get(key) is True for key in
+                            ('signal_forwarded', 'context_verified', 'authority_rechecked', 'normal_exit'))
+                    and all(absent(pid) for pid in self.before['pids']), 'stage0_normal_stop_unproven')
+            # A before-exit root receipt cannot prove its own parent exited.
+            # Independently retain the manager's actual exit status above and
+            # require the complete bound process set to be absent.
+            final = systemd_properties(self.spec, ('MainPID', 'ActiveState', 'SubState',
+                                                   'ExecMainCode', 'ExecMainStatus', 'Result'))
+            require(final == {'MainPID': '0', 'ActiveState': 'inactive', 'SubState': 'dead',
+                              'ExecMainCode': '1', 'ExecMainStatus': '0', 'Result': 'success'},
+                    'stage0_manager_exit_unproven')
         if self.spec['kind'] == 'launchd':
             run(['/bin/launchctl', 'bootout', self.spec['target']])
             gone = run(['/bin/launchctl', 'print', self.spec['target']], allowed=(113,))
             require(not gone.stdout and b'Could not find service' in gone.stderr, 'manager_stop_unknown')
-        return {**stopped, 'supervisor_exited': True, 'supervisor_exit_code': 0,
-                'runtime_sha256': cap.sha(raw)}
+        self.stopped = {**stopped, 'supervisor_exited': True, 'supervisor_exit_code': 0,
+                        'runtime_sha256': cap.sha(raw),
+                        **({'stage0_exit': native_exit} if native_exit is not None else {})}
+        return self.stopped
 
     def start(self):
         from routeb_host_package import require_interpreter_closure
@@ -283,6 +340,9 @@ class FixedManager:
 class WriterProbe:
     def __init__(self, manager, group, generation):
         self.manager, self.group, self.generation = manager, group, generation
+        self.native_registration = manager.native_registration()
+        if self.native_registration is not None:
+            return
         self.lsof = '/usr/sbin/lsof' if sys.platform == 'darwin' else '/usr/bin/lsof'
         require(Path(self.lsof).is_file(), 'writer_probe_unavailable')
         parsed = urlsplit(manager.profile['capture']['health']['local'])
@@ -295,10 +355,41 @@ class WriterProbe:
         require(not result.stderr and (result.returncode == 0 or not result.stdout), 'writer_probe_unknown')
         return result.stdout.decode('utf-8', errors='strict').splitlines()
 
+    def _native(self):
+        # The unprivileged coordinator cannot observe root-owned file handles.
+        # The live root peer derives both objects and port from its pinned
+        # package. The generation is only an audit correlation value.
+        generation = self.generation()
+        result = capture_module().stage0_client().writer_probe(self.manager.root, generation)
+        require(type(result) is dict and set(result) == {'generation', 'closed', 'writers', 'unknown'}
+                and result['generation'] == generation and type(result['closed']) is bool
+                and type(result['writers']) is list and result['unknown'] == []
+                and result['closed'] is (not result['writers']), 'writer_probe_unknown')
+        objects = {item['id'] for item in self.group['objects']}
+        seen = set()
+        for row in result['writers']:
+            require(type(row) is dict and row.get('kind') in ('listener', 'holder')
+                    and type(row.get('count')) is int and row['count'] > 0,
+                    'writer_probe_unknown')
+            if row['kind'] == 'holder':
+                require(set(row) == {'kind', 'object', 'count'}
+                        and type(row['object']) is str and row['object'] in objects,
+                        'writer_probe_unknown')
+            else:
+                require(set(row) == {'kind', 'count'}, 'writer_probe_unknown')
+            key = (row['kind'], row.get('object'))
+            require(key not in seen, 'writer_probe_unknown')
+            seen.add(key)
+        return result
+
     def __call__(self):
         cap = capture_module()
         require(self.manager.before is not None and cap.boot_identity()[0] == self.manager.before['boot_id'], 'boot_changed')
         current = processes()
+        if self.native_registration is not None:
+            require(self.manager.stopped is not None and 'stage0_exit' in self.manager.stopped
+                    and not self.manager.before['pids'] & current.keys(), 'normal_stop_unproven')
+            return self._native()
         writers = []
         if self.manager.before['pids'] & current.keys():
             writers.append({'kind': 'descendant', 'count': len(self.manager.before['pids'] & current.keys())})
