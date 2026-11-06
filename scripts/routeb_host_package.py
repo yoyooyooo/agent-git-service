@@ -12,7 +12,7 @@ import stat
 from urllib.parse import urlsplit
 
 from upgrade import bundle_engine, directory_fd
-from upgrade_backup_contract import (EXACT_COLD_SCHEMA, digest, fields, require, strict_json,
+from upgrade_backup_contract import (ContractError, EXACT_COLD_SCHEMA, digest, fields, require, strict_json,
                                      validate_cold_binding, validate_group)
 from upgrade_backup import group_object
 from upgrade_inventory import file_digest, sqlite_path
@@ -29,6 +29,12 @@ POLICY_FIELDS = ('schema host old_revision old_tree candidate_revision candidate
                  'schema_sha256 allow_schema_change').split()
 SIDE_FILES = ('native-profile.json', 'policy.json', 'recovery-group.json', 'build-review.json',
               'ci-evidence.json', 'recovery-review.json')
+INTERPRETER_CLOSURE_BLOCKER = 'interpreter_full_closure_required'
+
+
+def require_interpreter_closure():
+    """Refuse native effects until the interpreter's full authority is modeled."""
+    raise ContractError(INTERPRETER_CLOSURE_BLOCKER)
 
 
 def read_document(path):
@@ -176,7 +182,7 @@ class HostPackage:
         return validate_cold_binding(value)
 
     def execution_blockers(self):
-        blockers = python_capability_blockers()
+        blockers = [INTERPRETER_CLOSURE_BLOCKER, *python_capability_blockers()]
         if self.host.scope == 'production':
             blockers.append('native_full_closure_required')
         for item in self.group['objects']:

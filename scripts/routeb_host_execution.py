@@ -23,6 +23,7 @@ from upgrade_inventory import file_digest
 from upgrade_recovery import ColdWindow, MARKER, read_window, replace_json
 import routeb_native_capture as capture
 from routeb_host_native import FixedManager, SystemTrash, WriterProbe
+from routeb_host_package import require_interpreter_closure
 import upgrade_state
 
 
@@ -351,6 +352,7 @@ class HostExecution:
         return target
 
     def run(self):
+        require_interpreter_closure()
         package, window = self.package, self.window
         require(not preflight(package)['blockers'], 'execution_preflight_blocked')
         require(read_version(package.candidate.binary_path) == package.candidate.value['version']

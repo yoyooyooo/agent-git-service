@@ -12,14 +12,14 @@ Host mode does not accept `--manager-dir` or `--fault-after`.
 Host mode loads a private package and its fixed sidecars through
 `routeb_host_package.py`. `plan` reads the real registered host, manager,
 running generation, lifecycle authority, recovery group and native capabilities.
-`status` reads the existing transaction journal. `run --execute` uses
-`routeb_host_execution.py`, `ColdWindow` and fixed native manager commands; it
-does not execute the old injected fixture chain. An admitted isolated chain
-seals a backup, runs independent restore verification, and starts once. An
-unknown start is not replayed. Stop and start each re-read the window approval.
-An expired approval stops before the manager call.
+`status` reads the existing transaction journal. `run --execute` currently
+refuses with `interpreter_full_closure_required` before a claim or native
+effect. The coordinator in `routeb_host_execution.py`, `ColdWindow` and fixed
+manager components retain source-level tests for backup, independent restore
+verification and a single start. An unknown start is not replayed. These
+component tests do not admit a native transaction.
 
-The current executable slice admits the same application revision and tree on
+The package policy requires the same application revision and tree on
 both sides of the transaction. The tool bundle has a separate revision, tree
 and byte manifest. This permits validating host tooling without introducing
 the mainline database migration or losing an already deployed CI hotfix.
@@ -35,11 +35,33 @@ one-shot definition: launchd `KeepAlive=false`, or user systemd `Restart=no`.
 Registration and lifecycle activation are separate explicit provisioning
 steps; the run command neither invents an approval nor expands sudo privileges.
 
-Production plans still report `native_full_closure_required`. The current
+Both isolated and production plans report `interpreter_full_closure_required`.
+Production plans also report `native_full_closure_required`. The current
 source does not claim a complete native run, M6 acceptance, or an installed
 production host package. Missing registration, an old automatic-restart
 definition, unknown process/holder state, foreign metadata without an explicit
 authority record, or a non-active lifecycle epoch prevents a stop.
+
+## Interpreter execution remains closed
+
+An executable hash and the SQLite `setlimit`/`getlimit` APIs do not verify the
+interpreter's standard library, extension modules, loader, shared libraries or
+mapped operating-system resources. The current profile verifies executable
+bytes only. The file-only immutable-authority contract does not cover this
+dependency set or authorize a larger directory/symlink exception.
+
+Until a complete authority and verification before interpreter execution are
+implemented and accepted, native bootstrap activation, host execution and
+fixed manager stop/start calls refuse before their first effect. The managed
+launcher refuses `serve`; its `doctor` reports a blocked execution capability,
+which is not a judgment about an existing service's health. Bootstrap `plan`
+also reports `blocked` and exits 78. Read-only transaction `status` remains
+available. There is no CLI or environment override for this refusal.
+
+This refusal prevents native effects. It does not claim that a Python process
+has verified its own imports before starting. A prepared interpreter, a
+successful candidate build, source CI, process arguments or a caller-supplied
+handoff flag cannot replace that missing evidence.
 
 The complete executing bundle and its fixed identity must be present in the
 recovery inventory. Root-owned immutable files use the versioned

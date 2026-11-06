@@ -227,6 +227,8 @@ class FixedManager:
         return run(argv, timeout=125)
 
     def stop(self):
+        from routeb_host_package import require_interpreter_closure
+        require_interpreter_closure()
         require(self.before is not None, 'native_preflight_required')
         self._once('stop')
         if self.spec['kind'] == 'systemd':
@@ -267,6 +269,8 @@ class FixedManager:
                 'runtime_sha256': cap.sha(raw)}
 
     def start(self):
+        from routeb_host_package import require_interpreter_closure
+        require_interpreter_closure()
         self._once('start')
         if self.spec['kind'] == 'systemd':
             self._systemd('start')

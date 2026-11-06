@@ -7,6 +7,7 @@ select a bundle, and this launcher does not register or install one.
 """
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import pwd
@@ -59,13 +60,27 @@ def main(argv=None):
     bundle_engine(bundle, hashlib.sha256(raw).hexdigest())
     if read_trusted(bundle / 'routeb_launcher.py', maximum=1024 * 1024) != Path(__file__).read_bytes():
         raise ValueError('launcher_identity_mismatch')
+    from upgrade_backup_contract import ContractError
+    from routeb_host_package import INTERPRETER_CLOSURE_BLOCKER, require_interpreter_closure
+    try:
+        require_interpreter_closure()
+    except ContractError as error:
+        if str(error) != INTERPRETER_CLOSURE_BLOCKER:
+            raise
+        if args.command == 'doctor':
+            print(json.dumps({'status': 'blocked', 'native_execution_allowed': False,
+                              'installable': False, 'blockers': [INTERPRETER_CLOSURE_BLOCKER],
+                              'effects': []}, sort_keys=True))
+        else:
+            print('code=' + INTERPRETER_CLOSURE_BLOCKER, file=sys.stderr)
+        return 78
     sys.argv = [str(bundle / 'ags-runtime.py'), '--root', str(root), args.command]
     runpy.run_path(str(bundle / 'ags-runtime.py'), run_name='__main__')
 
 
 if __name__ == '__main__':
     try:
-        main()
+        raise SystemExit(main())
     except Exception:
         print('code=routeb_launcher_unavailable', file=sys.stderr)
         raise SystemExit(78)

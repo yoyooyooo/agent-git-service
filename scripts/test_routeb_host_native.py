@@ -76,7 +76,9 @@ class NativeCapabilityTests(unittest.TestCase):
 
     def test_same_start_action_is_never_replayed_after_unknown(self):
         manager = self.manager('systemd')
-        with patch.object(manager, 'definition'), patch.object(manager, '_systemd', side_effect=TimeoutError) as runner:
+        # Isolate the once-only component from the closed native entry.
+        with patch('routeb_host_package.require_interpreter_closure', return_value=None), \
+                patch.object(manager, 'definition'), patch.object(manager, '_systemd', side_effect=TimeoutError) as runner:
             with self.assertRaises(TimeoutError):
                 manager.start()
             with self.assertRaises(ContractError):

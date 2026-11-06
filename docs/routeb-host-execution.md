@@ -1,11 +1,16 @@
 # Route B native host execution
 
-The host entry connects an admitted exact-source package to the durable cold
-window, an independent restore verification, one native manager start and a
-continuous native observation. A successful observation remains evidence:
-`accepted` and `installable` stay false. The production profile is blocked by
-`native_full_closure_required` until the complete native acceptance contract is
-satisfied.
+Native bootstrap activation, host execution and managed startup currently
+refuse with `interpreter_full_closure_required`. An executable hash does not
+verify the interpreter's complete dependencies before it executes. There is
+no runtime override for this gate; see the [host package contract](operations/routeb-host-package.md#interpreter-execution-remains-closed).
+
+The component flow described below connects an exact-source package to the
+durable cold window, independent restore verification, one manager start and
+continuous observation. It is source-tested and is not an admitted native
+workflow. A successful observation remains evidence: `accepted` and
+`installable` stay false. Production also retains `native_full_closure_required`
+until the complete native acceptance contract is satisfied.
 
 ## Entry and admission
 

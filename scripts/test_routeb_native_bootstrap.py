@@ -83,6 +83,8 @@ class NativeBootstrapTests(unittest.TestCase):
         self.approval_path = base / 'bootstrap-approval.json'
         self.refresh_receipts()
         for target, kwargs in (
+            # These are state-machine component tests, not native admission.
+            ('require_interpreter_closure', {'return_value': None}),
             ('resolve_for_root', {'return_value': self.host}),
             ('trusted_document', {'side_effect': lambda path, **_kwargs: self.trusted[Path(path).name]}),
             ('_runtime_environment', {'side_effect': lambda *_args: dict(self.environment)}),

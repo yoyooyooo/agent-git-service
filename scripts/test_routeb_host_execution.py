@@ -198,7 +198,10 @@ class UnknownStartTests(unittest.TestCase):
         def boundary(pkg):
             return {'blockers': ['transaction_already_claimed'] if pkg.pending.exists() else []}
 
-        with patch.object(execution, 'FixedManager', return_value=fixture.manager), \
+        # Exercise the durable window with fixture capabilities; the real
+        # native execution refusal is covered by the package boundary tests.
+        with patch.object(execution, 'require_interpreter_closure', return_value=None), \
+                patch.object(execution, 'FixedManager', return_value=fixture.manager), \
                 patch.object(execution, 'SystemTrash', return_value=FixtureTrash()), \
                 patch.object(execution, 'WriterProbe', side_effect=writer_factory), \
                 patch.object(execution, 'lifecycle_blockers', return_value=[]), \

@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import routeb_host_package as package
 from routeb_launcher import bundle_location
@@ -35,6 +35,129 @@ class HostPackageBoundaryTests(unittest.TestCase):
             self.assertEqual(package.python_capability_blockers(), ['python_sqlite_limit_api_unavailable'])
         with patch.object(package.sqlite3, 'Connection', SimpleNamespace(setlimit=True, getlimit=True)):
             self.assertEqual(package.python_capability_blockers(), [])
+
+    def test_executable_and_sqlite_capability_cannot_admit_interpreter_closure(self):
+        value = package.HostPackage.__new__(package.HostPackage)
+        value.group = {'objects': []}
+        for scope in ('isolated-native', 'production'):
+            value.host = SimpleNamespace(scope=scope)
+            with self.subTest(scope=scope), patch.object(package.sqlite3, 'Connection',
+                    SimpleNamespace(setlimit=True, getlimit=True)):
+                blockers = value.execution_blockers()
+                self.assertIn('interpreter_full_closure_required', blockers)
+                if scope == 'production':
+                    self.assertIn('native_full_closure_required', blockers)
+
+    def test_native_bootstrap_refuses_before_provision_reads_or_journal_lock(self):
+        import routeb_native_bootstrap as bootstrap
+        with patch.object(bootstrap, 'read_bindings', side_effect=AssertionError('provision read')) as read, \
+                patch.object(bootstrap.upgrade_state, 'StateLock') as lock:
+            with self.assertRaisesRegex(ContractError, '^interpreter_full_closure_required$'):
+                bootstrap.activate(self.root, self.root / 'approval.json')
+        read.assert_not_called()
+        lock.assert_not_called()
+
+    def test_host_run_refuses_before_preflight_claim_or_native_window(self):
+        import routeb_host_execution as execution
+        operation = execution.HostExecution.__new__(execution.HostExecution)
+        operation.package = Mock()
+        operation.window = Mock()
+        operation.claim = Mock()
+        with patch.object(execution, 'preflight', side_effect=AssertionError('preflight')) as preflight:
+            with self.assertRaisesRegex(ContractError, '^interpreter_full_closure_required$'):
+                operation.run()
+        preflight.assert_not_called()
+        operation.claim.assert_not_called()
+        self.assertEqual(operation.window.mock_calls, [])
+
+    def test_native_manager_effects_refuse_without_consuming_an_action(self):
+        import routeb_host_native as native
+        profile = {'capture': {'manager': {'kind': 'systemd', 'scope': 'user',
+                   'target': 'ags-hostpkg-test-example.service'}}}
+        for action in ('stop', 'start'):
+            host = SimpleNamespace(scope='isolated-native', recheck=Mock())
+            manager = native.FixedManager(self.root, profile, host)
+            manager.before = {'pids': set()}
+            manager.definition = Mock()
+            with self.subTest(action=action), patch.object(native, 'run',
+                    side_effect=AssertionError('manager command')) as command:
+                with self.assertRaisesRegex(ContractError, '^interpreter_full_closure_required$'):
+                    getattr(manager, action)()
+            self.assertEqual(manager.called, set())
+            host.recheck.assert_not_called()
+            manager.definition.assert_not_called()
+            command.assert_not_called()
+
+    def test_bootstrap_cli_plan_and_activate_are_closed_before_any_binding_read(self):
+        from contextlib import redirect_stderr, redirect_stdout
+        import io
+        import json
+        import sys
+        import routeb_native_bootstrap as bootstrap
+        for command in ('plan', 'activate'):
+            stdout, stderr = io.StringIO(), io.StringIO()
+            argv = ['routeb-native-bootstrap', command, '--root', str(self.root),
+                    '--approval', str(self.root / 'approval.json')]
+            with self.subTest(command=command), patch.object(sys, 'argv', argv), \
+                    patch.object(bootstrap, 'read_bindings', side_effect=AssertionError('binding read')) as read, \
+                    redirect_stdout(stdout), redirect_stderr(stderr):
+                self.assertEqual(bootstrap.main(), 78)
+            read.assert_not_called()
+            if command == 'plan':
+                value = json.loads(stdout.getvalue())
+                self.assertEqual(value['status'], 'blocked')
+                self.assertFalse(value['native_execution_allowed'])
+                self.assertFalse(value['native_pass'])
+                self.assertFalse(value['installable'])
+                self.assertEqual(value['blockers'], ['interpreter_full_closure_required'])
+                self.assertEqual(value['effects'], [])
+            else:
+                self.assertEqual(stderr.getvalue(), 'code=interpreter_full_closure_required\n')
+
+    def test_verified_bundle_launcher_still_refuses_runtime_execution(self):
+        """Synthetic root trust exercises the gate, never a native acceptance."""
+        from contextlib import ExitStack, redirect_stderr, redirect_stdout
+        import io
+        import json
+        import stat
+        import sys
+        import routeb_launcher as launcher
+        import routeb_host_identity
+        import upgrade
+        import upgrade_identity
+        bundle = self.root / 'bundle'
+        bundle.mkdir(mode=0o700)
+        launcher_raw = Path(launcher.__file__).read_bytes()
+        trusted = lambda path, **_kwargs: b'{}' if path.name == 'manifest.json' else launcher_raw
+        for command in ('doctor', 'serve'):
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with self.subTest(command=command), ExitStack() as stack:
+                stack.enter_context(patch.object(sys, 'path', list(sys.path)))
+                stack.enter_context(patch.object(sys, 'argv', list(sys.argv)))
+                stack.enter_context(patch.object(sys, 'flags', SimpleNamespace(isolated=True)))
+                stack.enter_context(patch.object(launcher, 'bundle_location', return_value=bundle))
+                stack.enter_context(patch.object(Path, 'lstat', return_value=SimpleNamespace(
+                    st_uid=0, st_mode=stat.S_IFDIR | 0o755)))
+                verifier = stack.enter_context(patch.object(upgrade, 'bundle_engine'))
+                stack.enter_context(patch.object(upgrade_identity, 'read_trusted', side_effect=trusted))
+                stack.enter_context(patch.object(routeb_host_identity, 'resolve_for_root',
+                                                 return_value=SimpleNamespace(bundle=bundle)))
+                runtime = stack.enter_context(patch.object(launcher.runpy, 'run_path',
+                    side_effect=AssertionError('runtime execution')))
+                stack.enter_context(redirect_stdout(stdout))
+                stack.enter_context(redirect_stderr(stderr))
+                self.assertEqual(launcher.main(['--root', str(self.root), command]), 78)
+                verifier.assert_called_once()
+                runtime.assert_not_called()
+            if command == 'doctor':
+                value = json.loads(stdout.getvalue())
+                self.assertEqual(value['status'], 'blocked')
+                self.assertFalse(value['native_execution_allowed'])
+                self.assertFalse(value['installable'])
+                self.assertEqual(value['blockers'], ['interpreter_full_closure_required'])
+                self.assertEqual(value['effects'], [])
+            else:
+                self.assertEqual(stderr.getvalue(), 'code=interpreter_full_closure_required\n')
 
     def profile(self):
         identity = SimpleNamespace(root=str(self.root), platform='Linux', uid=1000)

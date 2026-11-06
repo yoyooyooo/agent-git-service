@@ -39,7 +39,8 @@ from upgrade_backup_contract import (ContractError, digest, fields, fingerprint,
 from upgrade_inventory import file_digest
 from routeb_host_identity import resolve_for_root
 from routeb_host_package import (read_document, verify_launch_dependencies, oid,
-                                 validate_native_paths, _runtime_environment, python_capability_blockers)
+                                 validate_native_paths, _runtime_environment, python_capability_blockers,
+                                 INTERPRETER_CLOSURE_BLOCKER, require_interpreter_closure)
 from routeb_native_capture import read_regular
 from routeb_candidate import load_candidate
 import upgrade_state
@@ -207,6 +208,7 @@ def archive_rows(value):
 
 
 def activate(root, approval_path):
+    require_interpreter_closure()
     root = Path(root)
     value = read_bindings(root, approval_path)
     loaded = upgrade_state.load_verified(root)
@@ -240,20 +242,16 @@ def main():
     parser.add_argument('--approval', required=True)
     args = parser.parse_args()
     try:
+        if args.command == 'plan':
+            print(json.dumps({
+                'schema': 'ags.routeb-native-bootstrap-plan.v1', 'status': 'blocked',
+                'native_execution_allowed': False, 'native_pass': False, 'installable': False,
+                'blockers': [INTERPRETER_CLOSURE_BLOCKER], 'effects': []}, sort_keys=True))
+            return 78
+        require_interpreter_closure()
         value = read_bindings(args.root, args.approval)
         require(Path(__file__).resolve().parent == value['host'].bundle, 'executing_bundle_mismatch')
-        if args.command == 'activate':
-            result = activate(args.root, args.approval)
-        else:
-            loaded = upgrade_state.load_verified(Path(args.root))
-            prior = completed(Path(args.root), loaded, value)
-            control = Path(args.root) / 'state/ags-autodeploy/local-v2/control'
-            require(prior is not None or (not control.exists() and not control.is_symlink()),
-                    'bootstrap_state_not_empty')
-            result = prior or {
-                'schema': 'ags.routeb-native-bootstrap-plan.v1', 'status': 'admitted',
-                'binding_sha256': value['binding_sha256'], 'effects': [],
-                'native_pass': False, 'installable': False}
+        result = activate(args.root, args.approval)
         print(json.dumps(result, sort_keys=True))
         return 0
     except Exception as error:

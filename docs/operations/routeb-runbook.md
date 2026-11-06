@@ -67,9 +67,11 @@ Webhook classification at this revision: a body already over 10 MiB is HTTP
 
 Source preparation may read git, build in an isolated directory, and run
 component tests. The private host `plan` and `status` commands are read-only.
-Native registration, lifecycle activation and `run --execute` are explicit
-steps with their own bound inputs; ordinary source tests do not perform them.
-Production plans remain fail-closed at `native_full_closure_required`.
+Native registration requires its own bound inputs. Lifecycle activation,
+`run --execute` and managed native startup are currently closed by
+`interpreter_full_closure_required`; bootstrap plans also return this blocker
+and exit 78. Ordinary source tests do not perform these native steps.
+Production plans additionally retain `native_full_closure_required`.
 
 Before a later window, these items are still required and are not proven here:
 
@@ -94,6 +96,11 @@ Before a later window, these items are still required and are not proven here:
 6. Explicit v2 immutable-authority records for the complete root-owned bundle
    and fixed host identity. See [authority archives](routeb-immutable-authority.md).
    Missing privilege never permits a fictitious root-metadata copy.
+7. A complete interpreter dependency authority, including standard-library
+   and extension bytes, loader/shared libraries, and mapped OS resources,
+   verified before that interpreter executes. The existing executable hash
+   and SQLite capability check do not establish this authority. The current
+   source has no admitted implementation or bypass for this gate.
 
 ## 4. Backup and rollback
 
@@ -127,10 +134,10 @@ Its required order for an admitted window is: manager
 suppression, normal drain, cold backup, independent restore verification,
 candidate readback, install, one start, ready plus
 business and external readback, then observation of at least 600 seconds.
-The default command remains a fixture rehearsal. Explicit host mode now
-uses `routeb_host_execution.py` and real fixed capabilities after admission;
-it cannot turn a fixture result into native acceptance. Production execution
-is still blocked until the complete native closure is consumed.
+The default command remains a fixture rehearsal. Explicit host mode contains
+`routeb_host_execution.py` and fixed capabilities, but its native effects remain
+blocked by the interpreter gate. A fixture result cannot establish native
+acceptance. Production execution also requires the complete native closure.
 
 Failure keeps the service stopped and fenced. Before `start_attempted`, and
 only when Tq is unchanged, a newly approved pre-start restore of the old
