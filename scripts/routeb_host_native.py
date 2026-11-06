@@ -201,12 +201,18 @@ class FixedManager:
             if registration is not None:
                 require(entries.get('User') == entries.get('Group') == 'root'
                         and entries.get('TimeoutStopSec') in ('120', '120s')
+                        and entries.get('SendSIGKILL') == 'no'
                         and not any(key.startswith('Environment') for key in entries),
                         'stage0_manager_definition_required')
-            facts = systemd_properties(self.spec, ('DropInPaths', 'Restart', 'KillMode', 'TimeoutStopUSec', 'FragmentPath'))
+            properties = ('DropInPaths', 'Restart', 'KillMode', 'TimeoutStopUSec', 'FragmentPath')
+            if registration is not None:
+                properties += ('SendSIGKILL',)
+            facts = systemd_properties(self.spec, properties)
             require(facts['DropInPaths'] == '' and facts['Restart'] == 'no'
                     and facts['KillMode'] == ('mixed' if registration is not None else 'control-group')
                     and facts['FragmentPath'] == self.spec['definition'], 'manager_definition_changed')
+            if registration is not None:
+                require(facts.get('SendSIGKILL') == 'no', 'stage0_manager_force_kill_enabled')
         return raw
 
     def preflight(self):
@@ -297,6 +303,10 @@ class FixedManager:
         native_exit = None
         if 'stage0' in self.before:
             context = self.before['stage0']
+            require(stopped.get('supervision_failed', False) is False
+                    and stopped.get('stop_timed_out', False) is False
+                    and type(stopped.get('supervisor_exit_code', 0)) is int
+                    and stopped.get('supervisor_exit_code', 0) == 0, 'stage0_supervision_failed')
             require(stopped.get('stage0') == context, 'stage0_stop_context_changed')
             native_exit = cap.stage0_client().runtime_exit(self.root, context['invocation_id'])
             require(type(native_exit) is dict and native_exit.get('schema') == 'ags.routeb-stage0-exit.v1'

@@ -146,12 +146,12 @@ class BrokerManagerTests(unittest.TestCase):
     def test_root_unit_requires_fixed_entry_mixed_signal_and_no_environment(self):
         entries = {
             'Type': 'simple', 'User': 'root', 'Group': 'root', 'Restart': 'no',
-            'KillMode': 'mixed', 'TimeoutStopSec': '120',
+            'KillMode': 'mixed', 'SendSIGKILL': 'no', 'TimeoutStopSec': '120',
             'ExecStart': '/usr/local/libexec/ags-routeb-native/example/stage0/ags-routeb-stage0'
                          ' serve --registration example --operation serve'}
         def definition(*_args, **_kwargs):
             return ('[Service]\n' + ''.join(f'{key}={value}\n' for key, value in entries.items())).encode()
-        properties = {'DropInPaths': '', 'Restart': 'no', 'KillMode': 'mixed',
+        properties = {'DropInPaths': '', 'Restart': 'no', 'KillMode': 'mixed', 'SendSIGKILL': 'no',
                       'TimeoutStopUSec': '2min', 'FragmentPath': self.manager.spec['definition']}
         with patch.object(capture, 'read_regular', side_effect=definition), \
                 patch.object(capture, 'sha', return_value='a' * 64), \
@@ -159,6 +159,7 @@ class BrokerManagerTests(unittest.TestCase):
                 patch.object(native, 'systemd_properties', return_value=properties):
             self.manager.definition()
             for key, value in [('KillMode', 'control-group'), ('User', 'fixture'),
+                               ('SendSIGKILL', 'yes'),
                                ('Environment', 'LD_PRELOAD=/fixture/untrusted.so'),
                                ('ExecStart', '/bin/sh -c anything')]:
                 previous = entries.get(key)
@@ -169,8 +170,16 @@ class BrokerManagerTests(unittest.TestCase):
                     del entries[key]
                 else:
                     entries[key] = previous
+            del entries['SendSIGKILL']
+            with self.assertRaisesRegex(ContractError, 'stage0_manager_definition_required'):
+                self.manager.definition()
+            entries['SendSIGKILL'] = 'no'
+            for value in (None, 'yes'):
+                properties['SendSIGKILL'] = value
+                with self.subTest(effective=value), self.assertRaisesRegex(ContractError, 'stage0_manager_force_kill_enabled'):
+                    self.manager.definition()
 
-    def stop_fixture(self, *, mutation=None, manager_result='success'):
+    def stop_fixture(self, *, mutation=None, runtime_mutation=None, manager_result='success'):
         tree = NativeTreeTests()
         tree.setUp()
         context = tree.context
@@ -178,6 +187,8 @@ class BrokerManagerTests(unittest.TestCase):
                                'pids': {1101, 1102, 1103}, 'boot_id': 'fixture-boot'}
         stopped = {**tree.runtime, 'generation': 'one', 'exit_code': 0, 'forced_kill': False,
                    'stop_requested': True, 'process_group_empty': True}
+        if runtime_mutation is not None:
+            stopped.update(runtime_mutation)
         exit_record = {'schema': 'ags.routeb-stage0-exit.v1',
                        **{key: copy.deepcopy(context[key]) for key in
                           ('registration_sha256', 'invocation_id', 'phase', 'boot_id', 'supervisor', 'child')},
@@ -215,6 +226,13 @@ class BrokerManagerTests(unittest.TestCase):
             self.manager.called.clear()
             with self.subTest(mutation=mutate), self.assertRaisesRegex(ContractError, 'stage0_normal_stop_unproven'):
                 self.stop_fixture(mutation=mutate)
+
+    def test_failed_native_supervision_cannot_be_normalized_to_zero(self):
+        for mutation in ({'supervision_failed': True}, {'stop_timed_out': True},
+                         {'supervisor_exit_code': 78}, {'supervisor_exit_code': False}):
+            self.manager.called.clear()
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ContractError, 'stage0_supervision_failed'):
+                self.stop_fixture(runtime_mutation=mutation)
 
 
 class RootWriterProbeTests(unittest.TestCase):
@@ -309,17 +327,28 @@ class RuntimePeerTests(unittest.TestCase):
         self.assertEqual(saved['stage0'], self.context)
         self.assertEqual(saved['exit_code'], 0)
 
-    def test_lost_peer_after_spawn_closes_only_the_owned_child(self):
+    def test_lost_peer_after_spawn_retains_only_the_owned_child_until_exit(self):
         callback = Mock(side_effect=[self.context, ContractError('stage0_peer_unavailable')])
-        child = Mock(pid=123, stdout=io.BytesIO())
-        child.poll.return_value = None
+        reader, writer = os.pipe()
+        os.close(writer)
+        child = Mock(pid=123, stdout=os.fdopen(reader, 'rb', buffering=0))
+        polls = iter([None])
+        child.poll.side_effect = lambda: next(polls, 0)
+        child.wait.return_value = 0
+        def signal_group(_pid, signum):
+            if signum == 0:
+                raise ProcessLookupError
         with patch.object(self.runtime.subprocess, 'Popen', return_value=child), \
                 patch.object(self.runtime.signal, 'signal'), \
-                patch.object(self.runtime.os, 'killpg') as signal_group, self.assertRaises(ContractError):
+                patch.object(self.runtime.os, 'killpg', side_effect=signal_group) as signals, \
+                self.assertRaisesRegex(self.runtime.NativeSupervisionFailure, 'native_supervision_failed'):
             self.runtime.supervise(self.root, {}, {}, Mock(), Mock(), native_context=callback)
-        signal_group.assert_called_once_with(123, self.runtime.signal.SIGTERM)
-        child.wait.assert_called_once_with(timeout=80)
-        self.assertFalse((self.root / 'state/runtime.json').exists())
+        self.assertEqual(signals.call_args_list, [unittest.mock.call(123, self.runtime.signal.SIGTERM),
+                                                unittest.mock.call(123, 0)])
+        child.wait.assert_called_once_with()
+        saved = capture.object_json((self.root / 'state/runtime.json').read_bytes())
+        self.assertTrue(saved['supervision_failed'])
+        self.assertEqual(saved['supervisor_exit_code'], 78)
 
 
 if __name__ == '__main__':

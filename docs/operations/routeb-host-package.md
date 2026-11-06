@@ -38,8 +38,12 @@ CLI path can select another trust profile. The user-owned launcher verifies
 that bundle before loading its runtime core. The manager must already be a
 one-shot definition. Legacy profiles use launchd `KeepAlive=false` or user
 systemd `Restart=no` and do not satisfy native interpreter admission. Linux
-v2 uses a root systemd supervisor, `Restart=no`, `KillMode=mixed`, fixed
-registered commands and no caller environment.
+v2 uses a root systemd supervisor, `Restart=no`, `KillMode=mixed`,
+`SendSIGKILL=no`, fixed registered commands and no caller environment. Both the
+protected unit bytes and the effective manager properties must disable forced
+termination. A native stop timeout fails the transaction and retains the
+supervisor, runtime lock and output pipe while the child remains alive; it does
+not escalate the signal or proceed to backup.
 Registration and lifecycle activation are separate explicit provisioning
 steps; the run command neither invents an approval nor expands sudo privileges.
 

@@ -55,11 +55,7 @@ func managerProperties(unit string, names ...string) (map[string]string, error) 
 	return out, nil
 }
 
-func (l *loaded) verifyUnit(i Invocation, own bool) error {
-	raw, err := interpreterauthority.ReadProtectedFile(i.Definition, 65536)
-	if err != nil {
-		return err
-	}
+func (l *loaded) verifyUnitDefinition(i Invocation, raw []byte) error {
 	section := ""
 	service := map[string]string{}
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -85,11 +81,12 @@ func (l *loaded) verifyUnit(i Invocation, own bool) error {
 	}
 	expected := l.registration.NativeImage.Path + " serve --registration " + l.registration.ID + " --operation " + i.Operation
 	if service["ExecStart"] != expected || service["User"] != "root" || service["Group"] != "root" || service["Type"] != "simple" ||
-		service["Restart"] != "no" || service["KillMode"] != "mixed" || (service["TimeoutStopSec"] != "120" && service["TimeoutStopSec"] != "120s") || (service["NoNewPrivileges"] != "yes" && service["NoNewPrivileges"] != "true") {
+		service["Restart"] != "no" || service["KillMode"] != "mixed" || service["SendSIGKILL"] != "no" ||
+		(service["TimeoutStopSec"] != "120" && service["TimeoutStopSec"] != "120s") || (service["NoNewPrivileges"] != "yes" && service["NoNewPrivileges"] != "true") {
 		return refused("stage0_fixed_unit_required")
 	}
 	for key := range service {
-		allowed := map[string]bool{"ExecStart": true, "User": true, "Group": true, "Type": true, "Restart": true, "KillMode": true, "TimeoutStopSec": true,
+		allowed := map[string]bool{"ExecStart": true, "User": true, "Group": true, "Type": true, "Restart": true, "KillMode": true, "SendSIGKILL": true, "TimeoutStopSec": true,
 			"WorkingDirectory": true, "StandardOutput": true, "StandardError": true, "UMask": true, "NoNewPrivileges": true}
 		if !allowed[key] {
 			return refused("stage0_unit_extension_unsupported")
@@ -100,12 +97,30 @@ func (l *loaded) verifyUnit(i Invocation, own bool) error {
 		(service["UMask"] != "" && service["UMask"] != "0077") || (service["NoNewPrivileges"] != "" && service["NoNewPrivileges"] != "yes" && service["NoNewPrivileges"] != "true") {
 		return refused("stage0_unit_extension_unsupported")
 	}
-	properties, err := managerProperties(i.Unit, "FragmentPath", "DropInPaths", "User", "Group", "Type", "Restart", "KillMode", "MainPID", "NoNewPrivileges")
+	return nil
+}
+
+func verifyEffectiveUnit(i Invocation, properties map[string]string) error {
+	if properties["FragmentPath"] != i.Definition.Path || properties["DropInPaths"] != "" || properties["User"] != "root" || properties["Group"] != "root" || properties["Type"] != "simple" || properties["Restart"] != "no" || properties["KillMode"] != "mixed" || properties["SendSIGKILL"] != "no" || properties["NoNewPrivileges"] != "yes" {
+		return refused("stage0_effective_unit_changed")
+	}
+	return nil
+}
+
+func (l *loaded) verifyUnit(i Invocation, own bool) error {
+	raw, err := interpreterauthority.ReadProtectedFile(i.Definition, 65536)
 	if err != nil {
 		return err
 	}
-	if properties["FragmentPath"] != i.Definition.Path || properties["DropInPaths"] != "" || properties["User"] != "root" || properties["Group"] != "root" || properties["Type"] != "simple" || properties["Restart"] != "no" || properties["KillMode"] != "mixed" || properties["NoNewPrivileges"] != "yes" {
-		return refused("stage0_effective_unit_changed")
+	if err = l.verifyUnitDefinition(i, raw); err != nil {
+		return err
+	}
+	properties, err := managerProperties(i.Unit, "FragmentPath", "DropInPaths", "User", "Group", "Type", "Restart", "KillMode", "SendSIGKILL", "MainPID", "NoNewPrivileges")
+	if err != nil {
+		return err
+	}
+	if err = verifyEffectiveUnit(i, properties); err != nil {
+		return err
 	}
 	if own {
 		if properties["MainPID"] != decimal(os.Getpid()) {
