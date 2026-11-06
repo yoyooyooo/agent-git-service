@@ -83,6 +83,21 @@ real fixed-operation native probes must establish catalog completeness before
 the native entry can admit execution. Unknown native dependencies remain a
 blocker; the checked catalog is never relabeled as a full native acceptance.
 
+### Mach-O library inventory
+
+The file verifier reads ordinary, weak, re-exported, lazy and upward dylib
+load commands directly. The standard library's imported-library list alone
+does not enumerate all these command types. Command sizes, alignment, string
+offsets and terminating NUL bytes are checked in the image's byte order.
+Library names and RPATH strings must be nonempty UTF-8.
+
+Every observed library, including a weak load, must occur in the exact native
+image inventory and resolve to a registered native object. An absent weak
+library is not treated as an optional unbound dependency. Legacy fixed-VM or
+prebound library commands and embedded dyld environment commands are refused.
+This bounded library view does not establish dyld shared-cache authority,
+signature policy, process provenance or Darwin native admission.
+
 ## Process and platform boundary
 
 The OS kernel, privileged service manager and the explicitly registered
