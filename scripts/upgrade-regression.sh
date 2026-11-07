@@ -10,7 +10,7 @@ entries=(
   'scripts/test_upgrade_identity.py' 'scripts/test_routeb_candidate.py' 'scripts/test_routeb_host_admission.py' 'scripts/test_routeb_backup_binding.py' 'scripts/test_routeb_launchd_stop.py' 'scripts/test_routeb_oneshot.py'
   'scripts/test_routeb_metadata_darwin.py' 'scripts/test_routeb_restore_verify.py' 'scripts/test_routeb_storage.py'
   'scripts/test_routeb_full_restore.py' 'scripts/test_routeb_restore_switch.py' 'scripts/test_routeb_old_start.py'
-  'scripts/test_routeb_host_transaction.py' 'scripts/test_routeb_host_execution.py'
+  'scripts/test_routeb_cold_window.py' 'scripts/test_routeb_host_transaction.py' 'scripts/test_routeb_host_execution.py'
   'scripts/test_routeb_runtime_health.py' 'scripts/test_routeb_observation.py'
   'scripts/test_routeb_host_identity.py' 'scripts/test_routeb_host_native.py'
   'scripts/test_routeb_host_package.py' 'scripts/test_routeb_immutable_authority.py'
