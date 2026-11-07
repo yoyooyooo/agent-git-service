@@ -963,7 +963,11 @@ func (s *Store) MoveFiles(ctx context.Context, fullName, branch string, moves []
 			return "", fmt.Errorf("path not found: %s", move.OldPath)
 		}
 		if _, seen := removed[move.OldPath]; !seen {
-			if out, err := runGit("update-index", "--force-remove", move.OldPath); err != nil {
+			// Feed an index-only deletion; positional paths require a worktree even with --force-remove.
+			removeCmd := exec.CommandContext(ctx, "git", "--git-dir", dir, "update-index", "-z", "--index-info")
+			removeCmd.Env = indexEnv
+			removeCmd.Stdin = strings.NewReader("0 " + ZeroSHA + "\t" + move.OldPath + "\x00")
+			if out, err := removeCmd.CombinedOutput(); err != nil {
 				return "", fmt.Errorf("update-index remove failed: %w, output: %s", err, out)
 			}
 			removed[move.OldPath] = struct{}{}

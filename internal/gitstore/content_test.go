@@ -1276,6 +1276,9 @@ func TestMoveFiles_MissingSourceLeavesTreeUntouched(t *testing.T) {
 	if err == nil {
 		t.Fatal("MoveFiles missing source error = nil, want non-nil")
 	}
+	if !strings.Contains(err.Error(), "path not found: tutorial/missing.md") {
+		t.Fatalf("MoveFiles missing source error = %v, want the missing path", err)
+	}
 
 	afterCount, err := gitRevListCount(ctx, repoDir, "main")
 	if err != nil {
@@ -1292,6 +1295,35 @@ func TestMoveFiles_MissingSourceLeavesTreeUntouched(t *testing.T) {
 	joined := strings.Join(files, ",")
 	if !strings.Contains(joined, "tutorial/intro.md") || !strings.Contains(joined, "README.md") || strings.Contains(joined, "guides/intro.md") {
 		t.Fatalf("files after failed MoveFiles = %v, want README.md and tutorial/intro.md only", files)
+	}
+}
+
+func TestMoveFiles_PreservesPathBoundaries(t *testing.T) {
+	store, cleanup := gitstore.NewTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	repoName := "user/movefiles-paths"
+	if err := store.Init(ctx, repoName, "main", true); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := "-old\tline\nname.md"
+	newPath := "-new\tline\nname.md"
+	for path, content := range map[string]string{oldPath: "moved content\n", "neighbor.md": "untouched\n"} {
+		if _, err := store.WriteFile(ctx, repoName, "main", path, "add file", []byte(content)); err != nil {
+			t.Fatalf("WriteFile %q: %v", path, err)
+		}
+	}
+	if _, err := store.MoveFiles(ctx, repoName, "main", []gitstore.FileMove{{OldPath: oldPath, NewPath: newPath}}, "move file"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadFile(ctx, repoName, oldPath); err == nil {
+		t.Fatal("old path still exists after MoveFiles")
+	}
+	for path, want := range map[string]string{newPath: "moved content\n", "neighbor.md": "untouched\n"} {
+		got, err := store.ReadFile(ctx, repoName, path)
+		if err != nil || string(got) != want {
+			t.Fatalf("ReadFile %q = %q, %v; want %q", path, got, err, want)
+		}
 	}
 }
 
