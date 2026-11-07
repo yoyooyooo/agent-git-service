@@ -181,6 +181,61 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(len(result['store']['repositories']), 2)
         self.assertTrue(repo.is_dir())
 
+    def test_legacy_go_git_bare_repositories_keep_full_inventory_and_config(self):
+        repo = self.repo()
+        ci_repo = self.repo('sample/ci', 2)
+        wiki = self.store / 'sample/project.wiki.git'; self.init_repo(wiki)
+        commit, ci_commit, wiki_commit = [self.commit(path) for path in (repo, ci_repo, wiki)]
+        self.insert('commit_statuses', repository_id=1, commit_sha=commit)
+        self.insert('workflow_runs', repository_id=2, head_sha=ci_commit)
+        self.insert('wiki_changesets', changeset_id=1, repository_id=1,
+                    synth_commit_sha=wiki_commit, synth_format_ver=1, source='git')
+        expected = self.inventory()
+        # Older go-git bare initialization persisted IsBare but omitted format 0.
+        for path in (repo, ci_repo, wiki):
+            (path / 'config').write_text('[core]\n\tbare = true\n')
+        before = {path: (path / 'config').read_bytes() for path in (repo, ci_repo, wiki)}
+        actual = self.inventory()
+        self.assertEqual(actual['local_oids'], expected['local_oids'])
+        self.assertEqual(actual['logical_sha256'], expected['logical_sha256'])
+        self.assertEqual(actual['store']['repositories'], expected['store']['repositories'])
+        self.assertEqual(len(actual['store']['repositories']), 3)
+        self.assertEqual(before, {path: (path / 'config').read_bytes() for path in before})
+        with fixture_db(self.dbpath) as db:
+            db.execute('UPDATE workflow_runs SET head_sha=?', ('f' * 40,))
+        with self.assertRaisesRegex(c.ContractError, 'git_validation_failed'):
+            self.inventory()
+
+    def test_legacy_bare_compatibility_rejects_ambiguous_and_worktree_config(self):
+        repo = self.repo()
+        for body in ('[core]\n\tbare = false\n', '[core]\n',
+                     '[core]\n\tbare = true\n\tbare = true\n',
+                     '[core]\n\tbare = true\n\trepositoryformatversion = -1\n',
+                     '[core]\n\tbare = true\n\tworktree = /nonexistent\n',
+                     '[core]\n\tbare = true\n[include]\n\tpath = /nonexistent\n',
+                     '[decoy]\n\tmessage = "unrelated\\ncore.bare=true"\n'):
+            with self.subTest(config=body):
+                (repo / 'config').write_text(body)
+                with self.assertRaises(c.ContractError):
+                    self.inventory()
+
+    def test_git_directory_redirects_never_substitute_another_repository(self):
+        repo = self.repo()
+        other = self.root / 'other.git'; self.init_repo(other)
+        (repo / 'config').write_text('[core]\n\tbare = true\n')
+        for name, body in (('commondir', str(other) + '\n'),
+                           ('.git', 'gitdir: ' + str(other) + '\n')):
+            marker = repo / name; marker.write_text(body)
+            with self.subTest(marker=name), self.assertRaisesRegex(
+                    c.ContractError, 'git_directory_redirect_unsupported'):
+                self.inventory()
+            marker.rename(self.root / ('saved-' + name))
+        # A directory inside a parent bare repository must not discover that parent.
+        child = other / 'nested'; child.mkdir()
+        (child / 'config').write_text('[core]\n\tbare = true\n')
+        with self.assertRaises(c.ContractError):
+            inv.check_repo(child)
+
     def test_db_only_oid_fork_head_constraints_deployment_and_external_sha(self):
         repo = self.repo(); commit = self.commit(repo)
         other = self.repo('sample/fork', 2); fork_commit = self.commit(other)

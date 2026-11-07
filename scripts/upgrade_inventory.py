@@ -212,12 +212,16 @@ def oid(value, *, symbolic=False):
     return value
 
 
-def git(repo, *args, input=None):
+def git(repo, *args, input=None, discover=False):
     env = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': '/nonexistent',
            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_COUNT': '0',
            'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_REPLACE_OBJECTS': '1', 'GIT_TERMINAL_PROMPT': '0',
            'GIT_NO_LAZY_FETCH': '1', 'GIT_ALLOW_PROTOCOL': ''}
-    command = ['git', '--git-dir=' + str(repo), '-c', 'core.hooksPath=/dev/null',
+    location = ['--git-dir=' + str(repo)]
+    if discover:
+        location = ['-C', str(repo)]
+        env['GIT_CEILING_DIRECTORIES'] = str(repo.parent)
+    command = ['git', *location, '-c', 'core.hooksPath=/dev/null',
                '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', *args]
     try:
         result = subprocess.run(command, env=env, input=input, capture_output=True, timeout=120)
@@ -229,16 +233,32 @@ def git(repo, *args, input=None):
 
 
 def check_repo(repo):
+    require(not any((repo / marker).exists() for marker in ('commondir', '.git')),
+            'git_directory_redirect_unsupported')
     for marker in ('objects/info/alternates', 'objects/info/http-alternates', 'shallow'):
         require(not (repo / marker).exists(), 'git_external_objects_unsupported')
     require(not list((repo / 'objects').rglob('*.promisor')), 'git_promisor_unsupported')
-    require(git(repo, 'rev-parse', '--is-bare-repository').strip() == b'true', 'git_not_bare')
     config = git(repo, 'config', '--no-includes', '--local', '--list').lower().splitlines()
     require(all(not line.startswith((b'include.', b'includeif.', b'extensions.', b'core.worktree=',
                                     b'core.repositoryformatversion=1', b'core.alternate', b'fsck.'))
                 and b'.promisor=' not in line and b'.partialclonefilter=' not in line
                 and not line.startswith((b'core.fsmonitor=', b'core.sshcommand=', b'core.attributesfile='))
-                for line in config), 'git_config_unsupported')
+                 for line in config), 'git_config_unsupported')
+    if git(repo, 'rev-parse', '--is-bare-repository').strip() != b'true':
+        # Older go-git omitted format 0. Explicit --git-dir then loses the bare
+        # flag during Git's format read; discovery recognizes the same repository.
+        # Admit only that producer shape and prove discovery did not select a
+        # parent, worktree or shared repository. Never rewrite stored config.
+        require([line for line in config if line.startswith(b'core.bare=')] == [b'core.bare=true']
+                and not any(line.startswith(b'core.repositoryformatversion=') for line in config),
+                'git_not_bare')
+        # Values in --list may contain newlines; verify the actual key as well.
+        require(git(repo, 'config', '--no-includes', '--local', '--bool', '--get-all',
+                    'core.bare') == b'true\n', 'git_not_bare')
+        identity = git(repo, 'rev-parse', '--path-format=absolute', '--absolute-git-dir',
+                       '--git-common-dir', '--is-bare-repository', discover=True)
+        path = os.fsencode(repo)
+        require(identity == path + b'\n' + path + b'\ntrue\n', 'git_not_bare')
     git(repo, 'fsck', '--full', '--strict')
     return {'refs_sha256': hashlib.sha256(git(repo, 'for-each-ref', '--format=%(refname) %(objectname)')).hexdigest(),
             'head_sha256': hashlib.sha256((repo / 'HEAD').read_bytes()).hexdigest()}
