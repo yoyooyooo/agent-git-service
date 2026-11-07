@@ -447,6 +447,29 @@ class InventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(c.ContractError, 'unknown_table'):
             self.inventory()
 
+    def test_label_associations_are_included_in_logical_inventory(self):
+        # GORM creates these join tables through the Issue/PullRequest Labels fields.
+        with fixture_db(self.dbpath) as db:
+            db.execute('CREATE TABLE issue_labels (issue_id INTEGER, label_id INTEGER, '
+                       'PRIMARY KEY (issue_id, label_id))')
+            db.execute('CREATE TABLE pr_labels (pull_request_id INTEGER, label_id INTEGER, '
+                       'PRIMARY KEY (pull_request_id, label_id))')
+            db.execute('INSERT INTO issue_labels VALUES (11, 21)')
+            db.execute('INSERT INTO pr_labels VALUES (12, 22)')
+        self.admission = inv.schema_digest(self.dbpath)
+        before = self.inventory()
+        for table in ('issue_labels', 'pr_labels'):
+            self.assertEqual(before['tables'][table]['rows'], 1)
+            with fixture_db(self.dbpath) as db:
+                db.execute('UPDATE ' + table + ' SET label_id = label_id + 1')
+            after = self.inventory()
+            self.assertEqual(after['schema_sha256'], before['schema_sha256'])
+            self.assertNotEqual(after['tables'][table]['sha256'], before['tables'][table]['sha256'])
+            self.assertNotEqual(after['logical_sha256'], before['logical_sha256'])
+            for other in before['tables'].keys() - {table}:
+                self.assertEqual(after['tables'][other], before['tables'][other])
+            before = after
+
     def test_missing_required_table_and_changed_schema_refuse(self):
         with fixture_db(self.dbpath) as db:
             db.execute('ALTER TABLE deployments RENAME TO lost_deployments')
@@ -794,7 +817,8 @@ class SourceMappingTests(unittest.TestCase):
             if value.endswith(('s', 'ch', 'sh', 'x', 'z')): return value + 'es'
             return value + 's'
 
-        self.assertEqual({table_name(name) for name in models}, inv.KNOWN_TABLES)
+        joins = set(re.findall(r'many2many:([a-z_]+);', all_source))
+        self.assertEqual({table_name(name) for name in models} | joins, inv.KNOWN_TABLES)
 
 
 SOURCE_LOCKS = {

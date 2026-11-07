@@ -74,7 +74,7 @@ KNOWN_TABLES = frozenset('''users organization_members organization_invitations 
 agent_bindings agent_invites teams team_members team_repositories repositories issue_pr_number_counters
 repo_redirects tokens execution_context_snapshots access_grants access_grant_invocations
 delegated_agent_sessions team_authority_epochs principal_binding_revocations user_identities device_codes
-device_code_audit_logs authorization_codes labels deploy_keys milestones issues issue_comments issue_events
+device_code_audit_logs authorization_codes labels issue_labels pr_labels deploy_keys milestones issues issue_comments issue_events
 issue_references pages_configs pages_builds audit_log_entries pull_requests pull_request_multica_links
 pull_request_projections pull_request_projection_jobs pull_request_projection_job_attempts
 pull_request_action_intents authority_boundary_receipts outbound_deliveries projection_events
@@ -353,15 +353,46 @@ def store_inventory(root, repositories, limit):
             'auxiliary': auxiliary, 'cas': cas}, actual
 
 
-def database_inventory(path, root, reviewed_schema_sha256, limit=MAX_ENTRIES):
-    integer(limit, 1, MAX_ENTRIES); digest(reviewed_schema_sha256)
+def _database_schema(db, reviewed_schema_sha256):
+    digest(reviewed_schema_sha256)
+    require(fingerprint(schema_description(db)) == reviewed_schema_sha256, 'schema_not_admitted')
+    tables = {decode(row[0]) for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    require(tables <= KNOWN_TABLES | {'sqlite_sequence'}, 'unknown_table')
+    required = RECOVERY_TABLES | WIKI_TABLES | {q[0] for q in ROOT_QUERIES} | set(EXTERNAL_COLUMNS) | {'deployments'}
+    require(required <= tables, 'required_table_missing')
+    # These columns define the accepted semantic mapping even for empty tables.
+    required_columns = {'repositories': {'id', 'full_name'}, 'deployments': {'repository_id', 'ref'}}
+    for table, where, _, columns in ROOT_QUERIES:
+        required_columns.setdefault(table, set()).update(columns)
+        required_columns[table].add('pull_request_id' if 'pull_request_id IN' in where else 'repository_id')
+        if 'head_repository_id' in where:
+            required_columns[table].add('head_repository_id')
+    for table, column in CONSTRAINT_COLUMNS:
+        required_columns.setdefault(table, set()).add(column)
+    for table, columns in EXTERNAL_COLUMNS.items():
+        required_columns.setdefault(table, set()).update(columns)
+    for table, columns in WIKI_COLUMNS.items():
+        required_columns.setdefault(table, set()).update(columns)
+    for table, columns in required_columns.items():
+        observed = {decode(row[1]) for row in db.execute('PRAGMA table_info(' + sqlname(table) + ')')}
+        require(columns <= observed, 'required_column_missing')
+    return tables
+
+
+def check_database_schema(path, reviewed_schema_sha256):
+    """Check schema support before stopping a service, without reading business rows.
+
+    The cold inventory repeats these checks in its own read transaction. This
+    early check neither admits a discovered schema nor proves quiescence.
+    """
     with readonly(path) as db:
-        schema = schema_description(db)
-        require(fingerprint(schema) == reviewed_schema_sha256, 'schema_not_admitted')
-        tables = {decode(row[0]) for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        require(tables <= KNOWN_TABLES | {'sqlite_sequence'}, 'unknown_table')
-        required = RECOVERY_TABLES | WIKI_TABLES | {q[0] for q in ROOT_QUERIES} | set(EXTERNAL_COLUMNS) | {'deployments'}
-        require(required <= tables, 'required_table_missing')
+        _database_schema(db, reviewed_schema_sha256)
+
+
+def database_inventory(path, root, reviewed_schema_sha256, limit=MAX_ENTRIES):
+    integer(limit, 1, MAX_ENTRIES)
+    with readonly(path) as db:
+        tables = _database_schema(db, reviewed_schema_sha256)
         integrity = db.execute('PRAGMA integrity_check').fetchmany(2)
         require(len(integrity) == 1 and integrity[0][0] == b'ok', 'sqlite_integrity_failed')
         require(not db.execute('PRAGMA foreign_key_check').fetchone(), 'sqlite_fk_failed')
@@ -381,22 +412,6 @@ def database_inventory(path, root, reviewed_schema_sha256, limit=MAX_ENTRIES):
             require(byte_count <= 64 * 1024 * 1024, 'inventory_budget')
             row_digests[table] = {'rows': len(data), 'sha256': hashlib.sha256(b''.join(encoded)).hexdigest()}
             all_rows[table] = data
-        # These columns define the accepted semantic mapping even for empty tables.
-        required_columns = {'repositories': {'id', 'full_name'}, 'deployments': {'repository_id', 'ref'}}
-        for table, where, _, columns in ROOT_QUERIES:
-            required_columns.setdefault(table, set()).update(columns)
-            required_columns[table].add('pull_request_id' if 'pull_request_id IN' in where else 'repository_id')
-            if 'head_repository_id' in where:
-                required_columns[table].add('head_repository_id')
-        for table, column in CONSTRAINT_COLUMNS:
-            required_columns.setdefault(table, set()).add(column)
-        for table, columns in EXTERNAL_COLUMNS.items():
-            required_columns.setdefault(table, set()).update(columns)
-        for table, columns in WIKI_COLUMNS.items():
-            required_columns.setdefault(table, set()).update(columns)
-        for table, columns in required_columns.items():
-            observed = {decode(row[1]) for row in db.execute('PRAGMA table_info(' + sqlname(table) + ')')}
-            require(columns <= observed, 'required_column_missing')
         store, actual = store_inventory(root, all_rows['repositories'], limit)
         repos = {}
         for row in all_rows['repositories']:
