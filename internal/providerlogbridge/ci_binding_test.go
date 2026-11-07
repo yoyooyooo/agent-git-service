@@ -65,3 +65,42 @@ func TestCIBridgeBindsBranchRunWithoutInventingProviderPR(t *testing.T) {
 		t.Fatal("ambiguous duplicate binding accepted")
 	}
 }
+
+func TestCIBridgeBindsDetachedWorkflowDispatchExactly(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	expected := expectedBinding{HeadRef: head, HeadSHA: head}
+	valid := logBinding{CommitSHA: head, JobCommitSHA: head, TaskCommitSHA: head, ProviderRef: head, Event: "workflow_dispatch"}
+	actual, err := verifyBinding(valid, expected)
+	if err != nil || actual.ProviderPR != 0 || actual.HeadRef != head || actual.ProviderRef != head || actual.Event != "workflow_dispatch" {
+		t.Errorf("exact detached dispatch rejected: %+v %v", actual, err)
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*logBinding, *expectedBinding)
+	}{
+		{"foreign_pr", func(_ *logBinding, e *expectedBinding) { e.ProviderPR = 42 }},
+		{"query_ref", func(_ *logBinding, e *expectedBinding) { e.HeadRef = "feature" }},
+		{"stored_ref", func(b *logBinding, _ *expectedBinding) { b.ProviderRef = strings.Repeat("b", 40) }},
+		{"spaced_ref", func(b *logBinding, _ *expectedBinding) { b.ProviderRef = " " + head }},
+		{"push", func(b *logBinding, _ *expectedBinding) { b.Event = "push" }},
+		{"missing_event", func(b *logBinding, _ *expectedBinding) { b.Event = "" }},
+		{"unknown_event", func(b *logBinding, _ *expectedBinding) { b.Event = "unknown" }},
+		{"spaced_event", func(b *logBinding, _ *expectedBinding) { b.Event = "workflow_dispatch " }},
+		{"run_commit", func(b *logBinding, _ *expectedBinding) { b.CommitSHA = strings.Repeat("b", 40) }},
+		{"job_commit", func(b *logBinding, _ *expectedBinding) { b.JobCommitSHA = strings.Repeat("b", 40) }},
+		{"task_commit", func(b *logBinding, _ *expectedBinding) { b.TaskCommitSHA = strings.Repeat("b", 40) }},
+		{"noncanonical_commit", func(b *logBinding, e *expectedBinding) {
+			upper := strings.Repeat("A", 40)
+			b.CommitSHA, b.JobCommitSHA, b.TaskCommitSHA, b.ProviderRef = upper, upper, upper, upper
+			e.HeadRef, e.HeadSHA = upper, upper
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			binding, query := valid, expected
+			test.edit(&binding, &query)
+			if _, err := verifyBinding(binding, query); err == nil {
+				t.Fatal("unbound detached dispatch accepted")
+			}
+		})
+	}
+}

@@ -256,6 +256,16 @@ and strict log receipt validation use the same event. Stored provenance is not r
 host actually serving the log bridge as well as any affected CI adapter; updating
 only the AGS client-facing primary cannot repair an older remote bridge.
 
+Forgejo 12 may return an empty public `event` for an exact-commit workflow
+dispatch while retaining `trigger_event: workflow_dispatch`. The adapter uses
+that exact trigger only when the public event is empty; other missing events
+remain unknown, and explicit events are preserved. A detached log or step
+binding requires no provider PR, a canonical commit ref equal to the queried
+head, identical stored run/job/task commits, and the raw stored
+`workflow_dispatch` event. Ordinary `refs/heads/<branch>` bindings are checked
+first, including branches whose names happen to be 40 hexadecimal characters.
+Neither the run index nor stored provider provenance is rewritten.
+
 Run ZIPs contain actual whole-job logs where step metadata is unavailable; no
 successful steps are fabricated. Signed download redirects require an exact
 configured HTTPS hostname and receive no provider authorization, cookies or AGS
