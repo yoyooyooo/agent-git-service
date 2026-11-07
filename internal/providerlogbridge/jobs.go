@@ -34,14 +34,16 @@ func (h *Handler) serveJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rows []struct {
-		TaskID, JobRepoID int64
-		TaskRepoID        *int64
-		Name, JobSHA      string
-		TaskSHA           *string
+		JobRepoID                   int64
+		TaskID                      *int64
+		ActualTaskID, TaskRepoID    *int64
+		Name, JobSHA                string
+		TaskSHA                     *string
+		JobStatus, Started, Stopped *int64
 	}
 	// Enumerate by run before validating repository bindings: filtering invalid
 	// bindings in a JOIN would silently turn corrupt metadata into missing jobs.
-	err = h.db.WithContext(r.Context()).Raw(`SELECT arj.task_id, arj.repo_id AS job_repo_id, arj.name, arj.commit_sha AS job_sha, at.repo_id AS task_repo_id, at.commit_sha AS task_sha FROM action_run_job arj LEFT JOIN action_task at ON at.id=arj.task_id WHERE arj.run_id=? ORDER BY arj.id LIMIT 1001`, run).Scan(&rows).Error
+	err = h.db.WithContext(r.Context()).Raw(`SELECT arj.task_id, arj.repo_id AS job_repo_id, arj.name, arj.commit_sha AS job_sha, arj.status AS job_status, arj.started, arj.stopped, at.id AS actual_task_id, at.repo_id AS task_repo_id, at.commit_sha AS task_sha FROM action_run_job arj LEFT JOIN action_task at ON at.id=arj.task_id WHERE arj.run_id=? ORDER BY arj.id LIMIT 1001`, run).Scan(&rows).Error
 	if err != nil || len(rows) > 1000 {
 		h.fail(w, 502, "metadata_unavailable", "Provider job inventory unavailable")
 		return
@@ -49,12 +51,24 @@ func (h *Handler) serveJobs(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0, len(rows))
 	seen := map[int64]bool{}
 	for _, row := range rows {
-		if row.JobRepoID != runs[0].RepoID || row.TaskRepoID == nil || *row.TaskRepoID != runs[0].RepoID || row.TaskID <= 0 || row.Name == "" || row.JobSHA != sha || row.TaskSHA == nil || *row.TaskSHA != sha || seen[row.TaskID] {
+		if row.JobRepoID != runs[0].RepoID || row.Name == "" || row.JobSHA != sha || row.TaskID == nil {
 			h.fail(w, 502, "metadata_invalid", "Provider job inventory is not fully bound")
 			return
 		}
-		seen[row.TaskID] = true
-		items = append(items, map[string]any{"task_id": row.TaskID, "name": row.Name})
+		taskID := *row.TaskID
+		// Forgejo 12 uses status 4 for Skipped. A never-started skipped job
+		// has no current task association; do not invent a task or log for it.
+		if taskID == 0 && row.JobStatus != nil && *row.JobStatus == 4 &&
+			row.Started != nil && *row.Started == 0 && row.Stopped != nil && *row.Stopped == 0 &&
+			row.ActualTaskID == nil && row.TaskRepoID == nil && row.TaskSHA == nil {
+			continue
+		}
+		if row.TaskRepoID == nil || *row.TaskRepoID != runs[0].RepoID || taskID <= 0 || row.TaskSHA == nil || *row.TaskSHA != sha || seen[taskID] {
+			h.fail(w, 502, "metadata_invalid", "Provider job inventory is not fully bound")
+			return
+		}
+		seen[taskID] = true
+		items = append(items, map[string]any{"task_id": taskID, "name": row.Name})
 	}
 	h.write(w, 200, map[string]any{"schema": "ags.internal-provider-jobs.v1", "repo": owner + "/" + repo, "run": strconv.FormatInt(run, 10), "run_number": runs[0].Number, "head_sha": sha, "jobs": items})
 }

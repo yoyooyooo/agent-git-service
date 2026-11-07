@@ -27,11 +27,12 @@ func TestForgejoSyncJobAndRunLogsThroughRealBridge(t *testing.T) {
 	for _, sql := range []string{
 		`CREATE TABLE repository (id integer primary key, owner_name text, lower_name text)`,
 		`CREATE TABLE action_run (id integer primary key, repo_id integer, "index" integer, ref text, commit_sha text, event text)`,
-		`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text)`,
+		`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text, status integer DEFAULT 0, started integer DEFAULT 0, stopped integer DEFAULT 0)`,
 		`CREATE TABLE action_task (id integer primary key, repo_id integer, commit_sha text, log_filename text, log_in_storage boolean, log_expired boolean)`,
 		`INSERT INTO repository VALUES (1, 'ci', 'project')`,
 		`INSERT INTO action_run VALUES (17, 1, 9, 'refs/pull/42/head', '` + head + `', 'pull_request_sync')`,
-		`INSERT INTO action_run_job VALUES (31, 17, 1, 41, 'test', '` + head + `')`,
+		`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha) VALUES (31, 17, 1, 41, 'test', '` + head + `')`,
+		`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped) VALUES (32,17,1,0,'conditional','` + head + `',4,0,0)`,
 		`INSERT INTO action_task VALUES (41, 1, '` + head + `', 'job.log', true, false)`,
 	} {
 		if err := db.Exec(sql).Error; err != nil {

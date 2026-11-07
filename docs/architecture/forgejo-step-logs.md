@@ -7,6 +7,22 @@ optional `step_logs` member of its existing, fully bound
 original whole-job log; upgrading the client-facing AGS alone does not create
 missing provider metadata.
 
+## Current tasks and skipped jobs
+
+The bridge's `ags.internal-provider-jobs.v1` inventory lists current job-to-task
+associations. Forgejo can skip a conditional job before allocating a task. The
+bridge accepts that absence only when the job belongs to the selected repository,
+run and commit, has a name, and records `task_id=0`, `status=4` (`Skipped`),
+`started=0` and `stopped=0`, with no joined task row. These status values come from
+[Forgejo 12's status model](https://codeberg.org/forgejo/forgejo/src/tag/v12.0.4/models/actions/status.go).
+
+Such a job contributes no task or log entry. A run containing only these skipped
+jobs has an empty current-task inventory. Historical tasks are never substituted.
+Other missing task associations, unknown states and repository or commit
+mismatches still reject the whole inventory. The adapter can therefore retrieve
+the executed jobs and their logs when a sibling job was skipped, without claiming
+that the skipped job ran or changing the provider's run conclusion.
+
 ## Exact boundaries
 
 Forgejo 12 records `action_task_step.log_index` and `log_length` as logical line
