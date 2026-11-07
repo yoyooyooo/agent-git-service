@@ -106,6 +106,13 @@ func TestForgejoStepLogsFallbackPreservesEntireJob(t *testing.T) {
 
 func forgejoStepLogFixture(t *testing.T, compressed ...bool) (Backend, *gorm.DB, string, []string) {
 	t.Helper()
+	run := forgejoFixtureRun()
+	run["status"] = "failure"
+	return forgejoStepLogRunFixture(t, run, compressed...)
+}
+
+func forgejoStepLogRunFixture(t *testing.T, run map[string]any, compressed ...bool) (Backend, *gorm.DB, string, []string) {
+	t.Helper()
 	head := strings.Repeat("a", 40)
 	parts := []string{"setup 😅\r\n", "install passed\r\n", "test passed inside failed step\r\n", "assertion failed\r\n", "post cleanup"}
 	text := strings.Join(parts, "")
@@ -164,8 +171,6 @@ func forgejoStepLogFixture(t *testing.T, compressed ...bool) (Backend, *gorm.DB,
 		if r.Header.Get("Authorization") != "token provider-only" {
 			t.Error("unexpected provider credential")
 		}
-		run := forgejoFixtureRun()
-		run["status"] = "failure"
 		switch r.URL.Path {
 		case "/api/v1/repos/ci/project/actions/runs/17":
 			_ = json.NewEncoder(w).Encode(run)

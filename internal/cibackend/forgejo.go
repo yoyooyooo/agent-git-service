@@ -32,6 +32,7 @@ type forgejoRun struct {
 	Ref             string     `json:"prettyref"`
 	Head            string     `json:"commit_sha"`
 	Event           string     `json:"event"`
+	TriggerEvent    string     `json:"trigger_event"`
 	Status          string     `json:"status"`
 	URL             string     `json:"html_url"`
 	Created         time.Time  `json:"created"`
@@ -52,6 +53,12 @@ func (r forgejoRun) run() (Run, error) {
 		if e == nil && n > 0 {
 			prs = append(prs, n)
 		}
+	}
+	// Forgejo 12 can omit the public event family for workflow dispatches
+	// while preserving the exact trigger. Do not infer other missing events
+	// or replace an explicit public event with its trigger.
+	if r.Event == "" && r.TriggerEvent == "workflow_dispatch" {
+		r.Event = "workflow_dispatch"
 	}
 	// Synchronized PR runs have a provider-specific trigger name. The log
 	// bridge and GitHub Actions API expose the standard pull_request event.
@@ -477,11 +484,19 @@ func (f *Forgejo) boundJobObservation(ctx context.Context, repo string, run Run,
 		pr = run.PullRequests[0]
 		expectedRef = fmt.Sprintf("refs/pull/%d/head", pr)
 	}
+	refMatches := log.ProviderRef == expectedRef
+	// A commit can also be a literal branch name. Keep that branch binding
+	// first; accept a detached dispatch only when the bridge reports the
+	// exact canonical commit ref rather than refs/heads/<branch>.
+	if !refMatches && len(run.PullRequests) == 0 && run.Event == "workflow_dispatch" &&
+		run.Branch == run.HeadSHA && len(run.HeadSHA) == 40 && strings.Trim(run.HeadSHA, "0123456789abcdef") == "" {
+		refMatches = log.ProviderRef == run.HeadSHA
+	}
 	schema := "ags.internal-provider-log.v1"
 	if steps {
 		schema = "ags.internal-provider-steps.v1"
 	}
-	if log.Schema != schema || log.Repo != repo || log.TaskID != task || log.RunNumber != run.Number || log.Head != run.HeadSHA || log.JobName != job.Name || log.ProviderPR != pr || log.ProviderRef != expectedRef || log.Event != run.Event {
+	if log.Schema != schema || log.Repo != repo || log.TaskID != task || log.RunNumber != run.Number || log.Head != run.HeadSHA || log.JobName != job.Name || log.ProviderPR != pr || !refMatches || log.Event != run.Event {
 		return nil, ErrInvalid
 	}
 	if steps {

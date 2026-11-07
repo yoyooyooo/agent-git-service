@@ -257,6 +257,13 @@ func verifyBinding(binding logBinding, expected expectedBinding) (verifiedBindin
 	if expected.HeadRef != "" && providerRef == branchRef && (event == "workflow_dispatch" || event == "push") {
 		return verifiedBinding{HeadRef: expected.HeadRef, ProviderRef: providerRef, Event: event}, nil
 	}
+	// An exact-commit workflow dispatch has no branch or PR ref. Match its
+	// raw stored ref and event only after all three commit bindings agree.
+	// Do not trim either value or reinterpret a same-named ordinary branch.
+	if expected.ProviderPR == 0 && expected.HeadRef == expected.HeadSHA && canonicalSHA(expected.HeadSHA) &&
+		binding.ProviderRef == expected.HeadSHA && binding.Event == "workflow_dispatch" {
+		return verifiedBinding{HeadRef: expected.HeadRef, ProviderRef: binding.ProviderRef, Event: binding.Event}, nil
+	}
 	return verifiedBinding{}, errors.New("provider log ref binding mismatch")
 }
 
