@@ -71,8 +71,8 @@ func inspectNative(name, architecture string) (observedImage, bool, error) {
 		}
 		return result, true, nil
 	}
-	order := binary.LittleEndian.Uint32(magic)
-	if order == macho.Magic64 || order == macho.Magic32 {
+	little, big := binary.LittleEndian.Uint32(magic), binary.BigEndian.Uint32(magic)
+	if little == macho.Magic64 || little == macho.Magic32 || big == macho.Magic64 || big == macho.Magic32 {
 		image, err := macho.NewFile(file)
 		if err != nil {
 			return observedImage{}, true, refusal("authority_macho_invalid")
@@ -85,14 +85,9 @@ func inspectNative(name, architecture string) (observedImage, bool, error) {
 			return observedImage{}, true, refusal("authority_native_architecture")
 		}
 		result := observedImage{format: "macho"}
-		result.needed, err = image.ImportedLibraries()
+		result.needed, result.rpath, err = machoDynamic(image)
 		if err != nil {
-			return result, true, refusal("authority_macho_invalid")
-		}
-		for _, load := range image.Loads {
-			if row, ok := load.(*macho.Rpath); ok {
-				result.rpath = append(result.rpath, row.Path)
-			}
+			return result, true, err
 		}
 		return result, true, nil
 	}
