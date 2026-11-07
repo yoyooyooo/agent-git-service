@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exact-source cold-window component tests; not native host evidence."""
 import copy
+from pathlib import Path
 import unittest
 
 import upgrade_backup_contract as contract
@@ -50,6 +51,47 @@ class ExactSourceColdTests(ColdFixture):
         with self.assertRaises(contract.ContractError):
             self.window.start()
         self.assertEqual(self.manager.starts, 1)
+
+    def test_large_recovery_group_uses_snapshot_budget_and_keeps_validation(self):
+        assets = self.root / 'config-assets'
+        assets.mkdir(mode=0o700)
+        dependencies = []
+        for index in range(48):
+            identity = 'config-' + str(index) + '-' + 'a' * 64
+            path = assets / (str(index) + '.json')
+            engine.save(path, {'fixture': index})
+            self.group['objects'].append({
+                'id': identity, 'role': 'config', 'source': str(path),
+                'restore_target': str(path), 'kind': 'file',
+                'depends_on': list(dependencies)})
+            dependencies.append(identity)
+        self.window.group = copy.deepcopy(self.group)
+        group_raw = contract.canonical(self.group)
+        self.assertGreater(len(group_raw), 65536)
+        self.assertLess(len(group_raw), contract.MAX_JSON)
+        contract.validate_group(self.group)
+
+        self.prepare(until='restore_verified')
+        backup = Path(self.window.journal['backup_dir'])
+        stored_group = backup / 'recovery-group.json'
+        self.assertEqual(stored_group.read_bytes(), group_raw)
+        self.assertEqual(self.window.journal['phase'], 'restore_verified')
+        report = contract.strict_json((backup / 'restore-report.json').read_bytes())
+        self.assertTrue(all(report['checks'].values()))
+        self.assertEqual(contract.strict_json((backup / 'restore-publication.json').read_bytes()),
+                         {'state': 'published', 'manifest_sha256': report['manifest_sha256']})
+        self.assertEqual(self.binary.read_bytes(), self.old)
+        self.assertEqual((self.root / 'state/installation.json').read_bytes(), self.raw_old_receipt)
+        self.assertEqual(self.manager.starts, 0)
+
+        changed_group = copy.deepcopy(self.group)
+        changed_group['dependency_review_sha256'] = '9' * 64
+        stored_group.write_bytes(contract.canonical(changed_group))
+        with self.assertRaisesRegex(contract.ContractError, '^group_mismatch$'):
+            self.window.verified_backup()
+        stored_group.write_bytes(group_raw + b' ' * (contract.MAX_JSON - len(group_raw) + 1))
+        with self.assertRaisesRegex(cold.Failure, '^invalid_request$'):
+            self.window.verified_backup()
 
     def test_release_or_wrong_candidate_identity_cannot_be_installed_as_exact_source(self):
         self.prepare()

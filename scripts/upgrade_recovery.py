@@ -17,7 +17,7 @@ import re
 import uuid
 
 from upgrade import Failure, directory_fd, private_json
-from upgrade_backup_contract import (ContractError, MAX_ENTRIES, canonical, digest, fields, fingerprint,
+from upgrade_backup_contract import (ContractError, MAX_ENTRIES, MAX_JSON, canonical, digest, fields, fingerprint,
                                      identifier, require, text, timestamp, validate_cold_binding,
                                      validate_group, validate_restore_report)
 from upgrade_backup import (create_sealed_backup, durable_bytes, group_object, metadata_fields,
@@ -365,7 +365,7 @@ class ColdWindow:
                 and manifest['quiescence'] == self.journal['quiescence']
                 and manifest['source_before_sha256'] == self.journal['tq_sha256'], 'backup_binding_mismatch')
         load_inventory(path, manifest, self.group, self.schema, self.dsn)
-        stored_group, _ = private_json(path / 'recovery-group.json')
+        stored_group, _ = private_json(path / 'recovery-group.json', maximum=MAX_JSON)
         require(stored_group == self.group, 'group_mismatch')
         verify_payload(path, manifest['entries'], auxiliary=AUXILIARY)
         report, _ = private_json(path / 'restore-report.json')
