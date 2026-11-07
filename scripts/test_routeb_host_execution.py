@@ -4,7 +4,9 @@
 These component tests do not replace native manager or M6 acceptance evidence.
 """
 import copy
+import contextlib
 import hashlib
+import io
 import os
 from pathlib import Path
 import tempfile
@@ -13,10 +15,13 @@ import unittest
 from unittest.mock import Mock, patch
 
 import routeb_host_execution as execution
+import routeb_host_transaction as transaction
+import upgrade_inventory as inventory
 import upgrade_recovery as cold
 import upgrade_state
 from upgrade_backup_contract import ContractError, canonical
 import test_routeb_cold_window as cold_fixtures
+import test_upgrade_inventory as inventory_fixtures
 
 
 class PreflightCaptureTests(unittest.TestCase):
@@ -53,6 +58,72 @@ class PreflightCaptureTests(unittest.TestCase):
     def test_unclassified_value_error_is_not_a_preflight_blocker(self):
         with self.assertRaisesRegex(ValueError, 'synthetic programming error'):
             self.preflight(ValueError('synthetic programming error'))
+
+
+class PreflightSchemaTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = inventory_fixtures.InventoryTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.package = SimpleNamespace(
+            root=self.fixture.root / 'host', pending=self.fixture.root / 'pending',
+            dsn='sqlite:' + str(self.fixture.dbpath),
+            authorize=Mock(), execution_blockers=Mock(return_value=[]),
+            host=SimpleNamespace(scope='isolated-native'),
+            profile={'schema_sha256': self.fixture.admission, 'trash_root': '/unused', 'capture': {}},
+            group={'storage': {'backup_root': '/unused', 'restore_root': '/unused'}},
+            package={'host': 'fixture', 'host_instance': 'fixture-host',
+                     'transaction_id': 'fixture-transaction', 'tool_sha256': 'a' * 64},
+            package_raw=b'{}', candidate=SimpleNamespace(revision='b' * 40, tree='c' * 40))
+        self.manager = Mock()
+        self.manager.preflight.return_value = {'runtime': {'generation': 'live-fixture'}}
+
+    def assert_refused_before_execution(self, code):
+        before = self.fixture.dbpath.read_bytes()
+        args = transaction.parse(['run', '--execute', '--host', 'fixture',
+                                  '--package', '/unused', '--approval', '/unused'])
+        with patch.object(execution, 'lifecycle_blockers', return_value=[]), \
+                patch.object(execution, 'FixedManager', return_value=self.manager), \
+                patch.object(execution, 'old_installation_unchanged'), \
+                patch.object(execution, 'WriterProbe'), patch.object(execution, 'SystemTrash'), \
+                patch.object(execution, 'preflight_space'), patch.object(execution, 'log_baselines'), \
+                patch.object(transaction, 'package_for', return_value=self.package), \
+                patch.object(transaction, 'HostExecution') as effects:
+            result = execution.preflight(self.package)
+            self.assertEqual(result['blockers'], [code])
+            self.assertFalse(result['execution_allowed'])
+            self.assertEqual(result['effects'], [])
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(transaction.dispatch(args), 78)
+            effects.assert_not_called()
+        self.manager.stop.assert_not_called()
+        self.manager.start.assert_not_called()
+        self.assertFalse(self.package.pending.exists())
+        self.assertFalse(self.package.root.exists())
+        self.assertEqual(self.fixture.dbpath.read_bytes(), before)
+
+    def test_unknown_table_is_refused_before_claim_or_stop(self):
+        with inventory_fixtures.fixture_db(self.fixture.dbpath) as db:
+            db.execute('CREATE TABLE future_data (id INTEGER)')
+        self.package.profile['schema_sha256'] = inventory.schema_digest(self.fixture.dbpath)
+        self.assert_refused_before_execution('unknown_table')
+
+    def test_changed_schema_is_refused_before_claim_or_stop(self):
+        with inventory_fixtures.fixture_db(self.fixture.dbpath) as db:
+            db.execute('CREATE INDEX changed_schema ON labels (id)')
+        self.assert_refused_before_execution('schema_not_admitted')
+
+    def test_missing_required_table_is_refused_before_claim_or_stop(self):
+        with inventory_fixtures.fixture_db(self.fixture.dbpath) as db:
+            db.execute('DROP TABLE deployments')
+        self.package.profile['schema_sha256'] = inventory.schema_digest(self.fixture.dbpath)
+        self.assert_refused_before_execution('required_table_missing')
+
+    def test_missing_required_column_is_refused_before_claim_or_stop(self):
+        with inventory_fixtures.fixture_db(self.fixture.dbpath) as db:
+            db.execute('ALTER TABLE repositories RENAME COLUMN full_name TO unsupported_name')
+        self.package.profile['schema_sha256'] = inventory.schema_digest(self.fixture.dbpath)
+        self.assert_refused_before_execution('required_column_missing')
 
 
 class InstallerTests(unittest.TestCase):

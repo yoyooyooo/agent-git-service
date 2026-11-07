@@ -19,7 +19,7 @@ import time
 from upgrade import Failure, directory_fd, private_json
 from upgrade_backup import durable_bytes, preflight_space
 from upgrade_backup_contract import ContractError, canonical, fingerprint, require
-from upgrade_inventory import file_digest
+from upgrade_inventory import check_database_schema, file_digest, sqlite_path
 from upgrade_recovery import ColdWindow, MARKER, read_window, replace_json
 import routeb_native_capture as capture
 from routeb_host_native import FixedManager, SystemTrash, WriterProbe
@@ -113,6 +113,7 @@ def preflight(package):
     try:
         old_installation_unchanged(package)
         observed = manager.preflight()
+        check_database_schema(sqlite_path(package.dsn), package.profile['schema_sha256'])
         WriterProbe(manager, package.group, lambda: 'preflight')
         SystemTrash(package.group['storage']['restore_root'], package.profile['trash_root'])
         preflight_space(package.group, Path(package.group['storage']['backup_root']),
