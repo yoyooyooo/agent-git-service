@@ -13,6 +13,7 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
+	formatcfg "github.com/go-git/go-git/v5/plumbing/format/config"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
 	"github.com/go-git/go-billy/v5/osfs"
@@ -44,6 +45,17 @@ func (s *Store) Init(ctx context.Context, fullName, defaultBranch string, seed b
 	})
 	if err != nil {
 		return fmt.Errorf("gitstore: git init: %w", err)
+	}
+	// go-git omits the default format version. Native Git needs it to
+	// recognize core.bare when callers select this repository with --git-dir.
+	cfg, err := repo.Config()
+	if err != nil {
+		return fmt.Errorf("gitstore: read new repository config: %w", err)
+	}
+	cfg.Core.IsBare = true
+	cfg.Core.RepositoryFormatVersion = formatcfg.Version_0
+	if err := repo.SetConfig(cfg); err != nil {
+		return fmt.Errorf("gitstore: write new repository config: %w", err)
 	}
 
 	// Install a pre-receive hook that protects the default branch from
