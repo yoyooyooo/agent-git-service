@@ -122,12 +122,13 @@ func forgejoStepLogFixture(t *testing.T, compressed ...bool) (Backend, *gorm.DB,
 	for _, statement := range []string{
 		`CREATE TABLE repository (id integer primary key, owner_name text, lower_name text)`,
 		`CREATE TABLE action_run (id integer primary key, repo_id integer, "index" integer, ref text, commit_sha text, event text)`,
-		`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text)`,
+		`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text, status integer DEFAULT 0, started integer DEFAULT 0, stopped integer DEFAULT 0)`,
 		`CREATE TABLE action_task (id integer primary key, repo_id integer, commit_sha text, log_filename text, log_in_storage boolean, log_expired boolean, status integer, log_length integer, log_size integer, log_indexes blob)`,
 		`CREATE TABLE action_task_step (id integer primary key, task_id integer, repo_id integer, name text, "index" integer, status integer, started integer, stopped integer, log_index integer, log_length integer)`,
 		`INSERT INTO repository VALUES (1,'ci','project')`,
 		`INSERT INTO action_run VALUES (17,1,9,'refs/heads/feature','` + head + `','push')`,
-		`INSERT INTO action_run_job VALUES (31,17,1,41,'test','` + head + `')`,
+		`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha) VALUES (31,17,1,41,'test','` + head + `')`,
+		`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped) VALUES (32,17,1,0,'conditional','` + head + `',4,0,0)`,
 		`INSERT INTO action_task_step VALUES (1,41,1,'Install',0,1,0,0,1,1),(2,41,1,'Test',1,2,0,0,2,2)`,
 	} {
 		if err := database.Exec(statement).Error; err != nil {

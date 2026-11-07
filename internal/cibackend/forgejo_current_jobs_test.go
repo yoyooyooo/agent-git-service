@@ -18,7 +18,7 @@ import (
 )
 
 func TestForgejoJobsKeepOnlyCurrentTasksThroughRealBridge(t *testing.T) {
-	for _, mode := range []string{"valid", "job-repository", "task-repository", "hidden-foreign-job", "missing-task", "missing-public-task", "no-bridge", "missing-endpoint"} {
+	for _, mode := range []string{"valid", "skipped", "job-repository", "task-repository", "hidden-foreign-job", "missing-task", "missing-public-task", "no-bridge", "missing-endpoint"} {
 		t.Run(mode, func(t *testing.T) {
 			head := strings.Repeat("a", 40)
 			database, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "forgejo.db")), &gorm.Config{})
@@ -29,18 +29,20 @@ func TestForgejoJobsKeepOnlyCurrentTasksThroughRealBridge(t *testing.T) {
 			for _, statement := range []string{
 				`CREATE TABLE repository (id integer primary key, owner_name text, lower_name text)`,
 				`CREATE TABLE action_run (id integer primary key, repo_id integer, "index" integer, ref text, commit_sha text, event text)`,
-				`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text)`,
+				`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text, status integer DEFAULT 0, started integer DEFAULT 0, stopped integer DEFAULT 0)`,
 				`CREATE TABLE action_task (id integer primary key, repo_id integer, commit_sha text)`,
 				`INSERT INTO repository VALUES (1, 'ci', 'project'), (2, 'ci', 'other')`,
 			} {
 				require.NoError(t, database.Exec(statement).Error)
 			}
 			require.NoError(t, database.Exec(`INSERT INTO action_run VALUES (17, 1, 9, 'refs/heads/feature', ?, 'push')`, head).Error)
-			require.NoError(t, database.Exec(`INSERT INTO action_run_job VALUES (31, 17, 1, 43, 'unit', ?)`, head).Error)
+			require.NoError(t, database.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha) VALUES (31, 17, 1, 43, 'unit', ?)`, head).Error)
 			for _, task := range []int{41, 42, 43} {
 				require.NoError(t, database.Exec(`INSERT INTO action_task VALUES (?, 1, ?)`, task, head).Error)
 			}
 			switch mode {
+			case "skipped":
+				require.NoError(t, database.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped) VALUES (32,17,1,0,'conditional',?,4,0,0)`, head).Error)
 			case "job-repository":
 				require.NoError(t, database.Exec(`UPDATE action_run_job SET repo_id=2 WHERE id=31`).Error)
 			case "task-repository":
@@ -49,7 +51,7 @@ func TestForgejoJobsKeepOnlyCurrentTasksThroughRealBridge(t *testing.T) {
 				// Keep a valid current job beside the corrupt row. Filtering that row
 				// out in SQL must not turn a partial inventory into successful evidence.
 				require.NoError(t, database.Exec(`INSERT INTO action_task VALUES (44, 2, ?)`, head).Error)
-				require.NoError(t, database.Exec(`INSERT INTO action_run_job VALUES (32, 17, 2, 44, 'foreign', ?)`, head).Error)
+				require.NoError(t, database.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha) VALUES (32, 17, 2, 44, 'foreign', ?)`, head).Error)
 			case "missing-task":
 				require.NoError(t, database.Exec(`UPDATE action_run_job SET task_id=999 WHERE id=31`).Error)
 			}
@@ -101,7 +103,7 @@ func TestForgejoJobsKeepOnlyCurrentTasksThroughRealBridge(t *testing.T) {
 			backend, err := NewHTTP(config, "provider-only", "bridge-only")
 			require.NoError(t, err)
 			jobs, err := backend.Jobs(t.Context(), "ci/project", "17")
-			if mode != "valid" {
+			if mode != "valid" && mode != "skipped" {
 				expected := ErrUnavailable
 				if mode == "no-bridge" {
 					expected = ErrUnsupported
