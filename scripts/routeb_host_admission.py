@@ -13,8 +13,9 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from upgrade_backup_contract import ContractError, digest, fields, identifier, require, text
+from upgrade_backup_contract import ContractError, digest, fields, identifier, require, text, timestamp
 from upgrade_wireup_safety import object_with_unique_keys, package_digest, require_unexpired
+from routeb_native_delegation import is_delegated, require_delegation, SCHEMAS as DELEGATED_SCHEMAS
 
 
 SCHEMA = 'ags.routeb-host-package.v1'
@@ -57,10 +58,16 @@ def admit(package, approval, verified, *, now, raw=None):
                     'recovery_group_sha256', 'native_profile_sha256'):
             digest(package[key])
         text(package['candidate_revision']); text(package['candidate_tree'])
-        fields(approval, APPROVAL_FIELDS)
-        require(approval['schema'] == APPROVAL_SCHEMA and approval['decision'] == 'approve',
+        delegated = is_delegated(approval, 'host-window')
+        fields(approval, (*APPROVAL_FIELDS, 'delegation') if delegated else APPROVAL_FIELDS)
+        require(approval['schema'] in (APPROVAL_SCHEMA, DELEGATED_SCHEMAS['host-window'])
+                and approval['decision'] == 'approve',
                 'approval_invalid')
-        require(approval['actor'].startswith('human:'), 'actor_not_human')
+        if delegated:
+            context = require_delegation(approval, 'host-window', host_instance=package['host_instance'])
+            require(context['registration_id'] == package['transaction_id'], 'transaction_mismatch')
+        else:
+            require(type(approval['actor']) is str and approval['actor'].startswith('human:'), 'actor_not_human')
         require(approval['authorization_id'] == package['authorization_id'], 'approval_mismatch')
         require(approval['host'] == package['host'], 'host_mismatch')
         require(approval['transaction_id'] == package['transaction_id'], 'transaction_mismatch')
@@ -69,6 +76,10 @@ def admit(package, approval, verified, *, now, raw=None):
         encoded = raw if raw is not None else json.dumps(package, sort_keys=True).encode()
         digest_value = package_digest(encoded)
         require(approval['package_sha256'] == digest_value, 'package_replaced')
+        # Historical consumption uses the recorded admission time; ordinary
+        # transaction calls still pass the current time. Neither path accepts
+        # an invalid interval or grants a new restore/start from this window.
+        require(timestamp(approval['issued_at']) < timestamp(approval['expires_at']), 'time_invalid')
         require_unexpired(approval['issued_at'], approval['expires_at'], now)
         require(package['host'] == verified.host, 'host_mismatch')
         require(package['candidate_revision'] == verified.revision

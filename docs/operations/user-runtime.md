@@ -131,9 +131,27 @@ The launcher reads `config/runtime.env`, preserves ordinary authentication, star
 one owning primary with `<root>` as its working directory, forwards termination
 to its process group, and waits for the child. It never starts a second primary
 against a live Git directory. The service manager owns restart policy. The program
-identity query completes before spawning the primary; failures after spawn always
-reap the child. Requested shutdown permits an 80-second drain before terminating
-the remaining process group, so the service manager needs a longer exit time.
+identity query completes before spawning the primary; the launcher keeps
+ownership until the child is reaped. Ordinary requested shutdown permits an
+80-second drain before terminating the remaining process group, so the service
+manager needs a longer exit time.
+
+The isolated native entry has a stricter stop contract. Only its live registered
+root-parent context selects this behavior; a CLI or environment flag cannot.
+After 80 seconds it records `native_stop_timeout` and continues supervising,
+holding the runtime lock and draining the output pipe until the owned child and
+process group exit naturally. An exception after spawn follows the same ownership
+rule and records `native_supervision_failed`. A broken log becomes a discard sink;
+it cannot close the read end and deliver SIGPIPE to the primary. Failure facts
+also go to stderr if the state or log write fails. No forced stop is attempted.
+
+Even if that child subsequently exits zero, the supervisor returns 78. Its
+runtime record preserves the actual child exit and adds `supervision_failed`,
+`stop_timed_out`, and `supervisor_exit_code`; these failure fields cannot satisfy
+the native normal-stop check. Both native manager verifiers require the protected
+unit and effective `SendSIGKILL=no`, so systemd cannot supply a hidden escalation.
+The timeout and unresolved live processes require operator reconciliation;
+neither another transaction nor an automatic restart is admitted.
 
 Before launch, and once per minute while running, it checks the installed primary
 hash, interrupted-install marker, environment, durable Git/database paths and
@@ -181,7 +199,8 @@ stream checks remain authoritative.
 Malformed, unsafe or out-of-range retention configuration fails startup rather
 than silently falling back to normal operation. A bounded diagnostic still records
 the failed check. Program-identity and process-lifecycle failures update the fixed
-`state/runtime-failure.json` with stage and error type only, never exception text,
+`state/runtime-failure.json` with stage, error type and, for the native path, a
+fixed failure reason, never exception text,
 subprocess output, credentials or user request content. A failed state write after
 spawn cannot leave an unowned primary running.
 

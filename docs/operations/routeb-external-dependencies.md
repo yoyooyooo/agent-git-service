@@ -6,12 +6,12 @@ It does not back up or restore the live objects. A missing owner contract
 makes `scripts/ags-maintenance-transaction plan` refuse the claim. The host-package page is [routeb-host-package](routeb-host-package.md).
 
 Shared Forgejo and Multica state are not rolled back by restoring one AGS
-data directory. Rollback of AGS remains the whole AGS cold backup to
-`0013aa744c8c90637ec54562ffc248a1bf7c9a52` after stop. There is no down
-migration for `lifecycle_generation`, `forgejo_reopen_pending` or
-`forgejo_lifecycle_at`.
+data directory. The transaction's installed receipt and sealed whole-group
+cold backup determine its recovery target. Historical rehearsal revisions
+do not select a current candidate or rollback binary; see the
+[preparation runbook](routeb-runbook.md). There is no down migration for
+`lifecycle_generation`, `forgejo_reopen_pending` or `forgejo_lifecycle_at`.
 
-Candidate source is `f63aa88e0c82b1e17174cf07f8033552457185b1`.
 `/readyz` does not prove these dependencies. `forgejo_authority_policy` is
 `diagnostic_only`. `/readyz` is not a webhook proof.
 

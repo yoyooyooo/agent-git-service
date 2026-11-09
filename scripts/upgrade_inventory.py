@@ -74,7 +74,7 @@ KNOWN_TABLES = frozenset('''users organization_members organization_invitations 
 agent_bindings agent_invites teams team_members team_repositories repositories issue_pr_number_counters
 repo_redirects tokens execution_context_snapshots access_grants access_grant_invocations
 delegated_agent_sessions team_authority_epochs principal_binding_revocations user_identities device_codes
-device_code_audit_logs authorization_codes labels deploy_keys milestones issues issue_comments issue_events
+device_code_audit_logs authorization_codes labels issue_labels pr_labels deploy_keys milestones issues issue_comments issue_events
 issue_references pages_configs pages_builds audit_log_entries pull_requests pull_request_multica_links
 pull_request_projections pull_request_projection_jobs pull_request_projection_job_attempts
 pull_request_action_intents authority_boundary_receipts outbound_deliveries projection_events
@@ -212,12 +212,16 @@ def oid(value, *, symbolic=False):
     return value
 
 
-def git(repo, *args, input=None):
+def git(repo, *args, input=None, discover=False):
     env = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': '/nonexistent',
            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_COUNT': '0',
            'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_REPLACE_OBJECTS': '1', 'GIT_TERMINAL_PROMPT': '0',
            'GIT_NO_LAZY_FETCH': '1', 'GIT_ALLOW_PROTOCOL': ''}
-    command = ['git', '--git-dir=' + str(repo), '-c', 'core.hooksPath=/dev/null',
+    location = ['--git-dir=' + str(repo)]
+    if discover:
+        location = ['-C', str(repo)]
+        env['GIT_CEILING_DIRECTORIES'] = str(repo.parent)
+    command = ['git', *location, '-c', 'core.hooksPath=/dev/null',
                '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', *args]
     try:
         result = subprocess.run(command, env=env, input=input, capture_output=True, timeout=120)
@@ -229,16 +233,32 @@ def git(repo, *args, input=None):
 
 
 def check_repo(repo):
+    require(not any((repo / marker).exists() for marker in ('commondir', '.git')),
+            'git_directory_redirect_unsupported')
     for marker in ('objects/info/alternates', 'objects/info/http-alternates', 'shallow'):
         require(not (repo / marker).exists(), 'git_external_objects_unsupported')
     require(not list((repo / 'objects').rglob('*.promisor')), 'git_promisor_unsupported')
-    require(git(repo, 'rev-parse', '--is-bare-repository').strip() == b'true', 'git_not_bare')
     config = git(repo, 'config', '--no-includes', '--local', '--list').lower().splitlines()
     require(all(not line.startswith((b'include.', b'includeif.', b'extensions.', b'core.worktree=',
                                     b'core.repositoryformatversion=1', b'core.alternate', b'fsck.'))
                 and b'.promisor=' not in line and b'.partialclonefilter=' not in line
                 and not line.startswith((b'core.fsmonitor=', b'core.sshcommand=', b'core.attributesfile='))
-                for line in config), 'git_config_unsupported')
+                 for line in config), 'git_config_unsupported')
+    if git(repo, 'rev-parse', '--is-bare-repository').strip() != b'true':
+        # Older go-git omitted format 0. Explicit --git-dir then loses the bare
+        # flag during Git's format read; discovery recognizes the same repository.
+        # Admit only that producer shape and prove discovery did not select a
+        # parent, worktree or shared repository. Never rewrite stored config.
+        require([line for line in config if line.startswith(b'core.bare=')] == [b'core.bare=true']
+                and not any(line.startswith(b'core.repositoryformatversion=') for line in config),
+                'git_not_bare')
+        # Values in --list may contain newlines; verify the actual key as well.
+        require(git(repo, 'config', '--no-includes', '--local', '--bool', '--get-all',
+                    'core.bare') == b'true\n', 'git_not_bare')
+        identity = git(repo, 'rev-parse', '--path-format=absolute', '--absolute-git-dir',
+                       '--git-common-dir', '--is-bare-repository', discover=True)
+        path = os.fsencode(repo)
+        require(identity == path + b'\n' + path + b'\ntrue\n', 'git_not_bare')
     git(repo, 'fsck', '--full', '--strict')
     return {'refs_sha256': hashlib.sha256(git(repo, 'for-each-ref', '--format=%(refname) %(objectname)')).hexdigest(),
             'head_sha256': hashlib.sha256((repo / 'HEAD').read_bytes()).hexdigest()}
@@ -353,15 +373,46 @@ def store_inventory(root, repositories, limit):
             'auxiliary': auxiliary, 'cas': cas}, actual
 
 
-def database_inventory(path, root, reviewed_schema_sha256, limit=MAX_ENTRIES):
-    integer(limit, 1, MAX_ENTRIES); digest(reviewed_schema_sha256)
+def _database_schema(db, reviewed_schema_sha256):
+    digest(reviewed_schema_sha256)
+    require(fingerprint(schema_description(db)) == reviewed_schema_sha256, 'schema_not_admitted')
+    tables = {decode(row[0]) for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    require(tables <= KNOWN_TABLES | {'sqlite_sequence'}, 'unknown_table')
+    required = RECOVERY_TABLES | WIKI_TABLES | {q[0] for q in ROOT_QUERIES} | set(EXTERNAL_COLUMNS) | {'deployments'}
+    require(required <= tables, 'required_table_missing')
+    # These columns define the accepted semantic mapping even for empty tables.
+    required_columns = {'repositories': {'id', 'full_name'}, 'deployments': {'repository_id', 'ref'}}
+    for table, where, _, columns in ROOT_QUERIES:
+        required_columns.setdefault(table, set()).update(columns)
+        required_columns[table].add('pull_request_id' if 'pull_request_id IN' in where else 'repository_id')
+        if 'head_repository_id' in where:
+            required_columns[table].add('head_repository_id')
+    for table, column in CONSTRAINT_COLUMNS:
+        required_columns.setdefault(table, set()).add(column)
+    for table, columns in EXTERNAL_COLUMNS.items():
+        required_columns.setdefault(table, set()).update(columns)
+    for table, columns in WIKI_COLUMNS.items():
+        required_columns.setdefault(table, set()).update(columns)
+    for table, columns in required_columns.items():
+        observed = {decode(row[1]) for row in db.execute('PRAGMA table_info(' + sqlname(table) + ')')}
+        require(columns <= observed, 'required_column_missing')
+    return tables
+
+
+def check_database_schema(path, reviewed_schema_sha256):
+    """Check schema support before stopping a service, without reading business rows.
+
+    The cold inventory repeats these checks in its own read transaction. This
+    early check neither admits a discovered schema nor proves quiescence.
+    """
     with readonly(path) as db:
-        schema = schema_description(db)
-        require(fingerprint(schema) == reviewed_schema_sha256, 'schema_not_admitted')
-        tables = {decode(row[0]) for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        require(tables <= KNOWN_TABLES | {'sqlite_sequence'}, 'unknown_table')
-        required = RECOVERY_TABLES | WIKI_TABLES | {q[0] for q in ROOT_QUERIES} | set(EXTERNAL_COLUMNS) | {'deployments'}
-        require(required <= tables, 'required_table_missing')
+        _database_schema(db, reviewed_schema_sha256)
+
+
+def database_inventory(path, root, reviewed_schema_sha256, limit=MAX_ENTRIES):
+    integer(limit, 1, MAX_ENTRIES)
+    with readonly(path) as db:
+        tables = _database_schema(db, reviewed_schema_sha256)
         integrity = db.execute('PRAGMA integrity_check').fetchmany(2)
         require(len(integrity) == 1 and integrity[0][0] == b'ok', 'sqlite_integrity_failed')
         require(not db.execute('PRAGMA foreign_key_check').fetchone(), 'sqlite_fk_failed')
@@ -381,22 +432,6 @@ def database_inventory(path, root, reviewed_schema_sha256, limit=MAX_ENTRIES):
             require(byte_count <= 64 * 1024 * 1024, 'inventory_budget')
             row_digests[table] = {'rows': len(data), 'sha256': hashlib.sha256(b''.join(encoded)).hexdigest()}
             all_rows[table] = data
-        # These columns define the accepted semantic mapping even for empty tables.
-        required_columns = {'repositories': {'id', 'full_name'}, 'deployments': {'repository_id', 'ref'}}
-        for table, where, _, columns in ROOT_QUERIES:
-            required_columns.setdefault(table, set()).update(columns)
-            required_columns[table].add('pull_request_id' if 'pull_request_id IN' in where else 'repository_id')
-            if 'head_repository_id' in where:
-                required_columns[table].add('head_repository_id')
-        for table, column in CONSTRAINT_COLUMNS:
-            required_columns.setdefault(table, set()).add(column)
-        for table, columns in EXTERNAL_COLUMNS.items():
-            required_columns.setdefault(table, set()).update(columns)
-        for table, columns in WIKI_COLUMNS.items():
-            required_columns.setdefault(table, set()).update(columns)
-        for table, columns in required_columns.items():
-            observed = {decode(row[1]) for row in db.execute('PRAGMA table_info(' + sqlname(table) + ')')}
-            require(columns <= observed, 'required_column_missing')
         store, actual = store_inventory(root, all_rows['repositories'], limit)
         repos = {}
         for row in all_rows['repositories']:
@@ -553,6 +588,9 @@ def inspect_group(group, dsn, reviewed_schema_sha256, limit=MAX_ENTRIES):
     summaries = {}
     total_entries = 0
     for key, item in objects.items():
+        if 'immutable_authority' in item:
+            from routeb_immutable_authority import verify
+            verify(item)
         path = safe_path(item['source'], item['kind'])
         by_role.setdefault(item['role'], []).append(path)
         files, size = scan_tree(path, limit) if path.is_dir() else (None, path.stat().st_size)

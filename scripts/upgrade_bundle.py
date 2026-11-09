@@ -14,13 +14,18 @@ from pathlib import Path
 import stat
 
 REQUIRED = (
+    'routeb_stage0_client.py', 'routeb_stage0_probe.py',
+    'routeb_native_delegation.py', 'routeb_native_recovery.py',
     'upgrade', 'ags-python.sh', 'ags-runtime.py', 'upgrade.py', 'upgrade_host.py',
     'upgrade_engine.py', 'upgrade_identity.py', 'upgrade_host_evidence.py',
     'upgrade_bootstrap.py', 'upgrade_adapter_launchd.py', 'upgrade_adapter_systemd.py',
     'upgrade_native_runner.py', 'upgrade_native_parse.py',
     'upgrade_metadata.py', 'upgrade_metadata_darwin.py', 'upgrade_trash.py', 'upgrade_bundle.py', 'upgrade_wireup.py',
     'upgrade_wireup_safety.py', 'routeb_candidate.py', 'routeb_host_admission.py',
-    'routeb_writer_probe.py', 'routeb_native_harness.py',
+    'routeb_writer_probe.py', 'routeb_native_harness.py', 'routeb_native_capture.py',
+    'routeb_host_identity.py', 'routeb_host_package.py', 'routeb_host_native.py',
+    'routeb_launcher.py', 'routeb_host_execution.py', 'routeb_immutable_authority.py',
+    'routeb_native_bootstrap.py',
     'upgrade_backup_contract.py', 'upgrade_inventory.py', 'upgrade_backup.py',
     'upgrade_restore_verify.py', 'upgrade_recovery.py', 'upgrade_manual_approval.py',
     'upgrade_lifecycle.py', 'upgrade_recovery_cli.py', 'upgrade_forward_recovery.py',

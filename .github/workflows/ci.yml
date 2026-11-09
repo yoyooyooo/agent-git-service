@@ -124,7 +124,7 @@ jobs:
           - name: fork-integrations
             packages: ./internal/attribution ./cmd/forgejo-authority ./internal/cibackend ./internal/delegationpolicy ./internal/executioncontext ./internal/forgejointegration ./internal/githubappmanifest ./internal/githubappreceiver ./internal/githubintegration ./internal/gitlabintegration ./internal/integrations ./internal/multicafailures ./internal/multicaprojection ./internal/notifications ./internal/operationcatalog ./internal/operationconstraints ./internal/projectionwatch ./internal/providerlogbridge ./internal/providerlogprotocol ./internal/sessionauthority ./internal/tenant ./internal/workloadidentity
           - name: misc
-            packages: ./auth ./cmd/gh-server ./config ./e2e/cmd/mock-embedding-server ./e2e/cmd/mock-oidc-server ./internal/apperrors ./internal/buildinfo ./internal/connectedlogin ./internal/crypto ./internal/embedding ./internal/httputil ./internal/logging ./internal/mentions ./internal/metrics ./internal/middleware ./internal/oauth ./internal/oidc ./internal/randutil ./internal/ratelimit
+            packages: ./auth ./cmd/ags-routeb-stage0 ./cmd/gh-server ./internal/interpreterauthority ./internal/routebstage0 ./config ./e2e/cmd/mock-embedding-server ./e2e/cmd/mock-oidc-server ./internal/apperrors ./internal/buildinfo ./internal/connectedlogin ./internal/crypto ./internal/embedding ./internal/httputil ./internal/logging ./internal/mentions ./internal/metrics ./internal/middleware ./internal/oauth ./internal/oidc ./internal/randutil ./internal/ratelimit
     env:
       TEST_DB_DSN: 'root:@tcp(127.0.0.1:45400)/?parseTime=true&timeout=10s'
       PACKAGES: ${{ matrix.packages }}

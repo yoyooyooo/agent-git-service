@@ -46,6 +46,26 @@ class FullGroupRestoreTests(BackupTests):
             routeb_full_restore.apply_restore(bad)
         self.assertEqual((self.root / 'installation').read_bytes(), before)
 
+    def test_missing_target_is_recreated_before_restore_is_observed(self):
+        request = self.sealed_request()
+        target = self.root / 'installation'
+        original = target.read_bytes()
+        preserved = target.with_name('installation.moved-before-restore')
+        target.rename(preserved)
+        journal = []
+        import routeb_full_restore
+
+        result = routeb_full_restore.apply_restore(request, journal=journal)
+
+        self.assertTrue(result['applied'])
+        self.assertTrue(target.is_file())
+        self.assertEqual(target.read_bytes(), original)
+        self.assertEqual(preserved.read_bytes(), original)
+        self.assertFalse(target.with_name('.installation.routeb-restore').exists())
+        self.assertIn('installation', result['switched'])
+        self.assertEqual([item['status'] for item in journal
+                          if item['member'] == 'installation'], ['intent', 'observed'])
+
     def test_audit_member_is_not_rolled_back(self):
         request = self.sealed_request()
         audit = self.root / 'journal.json'

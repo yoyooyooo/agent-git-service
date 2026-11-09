@@ -29,6 +29,8 @@ BINDING_FIELDS = ('host_instance deployment_id transaction_id attempt_id authori
 EXACT_BINDING_FIELDS = ('artifact_kind host_instance deployment_id transaction_id attempt_id '
                         'authorization_id old new runtime_tree manifest_sha256 build_review_sha256 '
                         'ci_evidence_sha256 tool_sha256 policy_sha256 target').split()
+EXACT_COLD_SCHEMA = 'ags.exact-source-cold-binding.v1'
+EXACT_COLD_FIELDS = EXACT_BINDING_FIELDS + ['schema', 'old_binary_sha256', 'new_binary_sha256']
 
 
 class ContractError(ValueError):
@@ -149,11 +151,32 @@ def validate_binding_version(value):
     require(type(value) is dict, 'fields_invalid')
     kind = value.get('artifact_kind')
     if kind == 'exact-source':
+        if 'schema' in value:
+            return validate_exact_cold_binding(value)
         return validate_binding_v2(value)
     if kind is None and 'release_id' in value:
         validate_binding(value)
         return value
     raise ContractError('kind_invalid')
+
+
+def validate_exact_cold_binding(value):
+    """Executable exact-source binding, distinct from the earlier backup-only v2."""
+    fields(value, EXACT_COLD_FIELDS)
+    require(value['schema'] == EXACT_COLD_SCHEMA, 'binding_schema_invalid')
+    validate_binding_v2({key: value[key] for key in EXACT_BINDING_FIELDS})
+    for key in ('old_binary_sha256', 'new_binary_sha256'):
+        digest(value[key])
+        require(value[key] != '0' * 64, 'digest_invalid')
+    return value
+
+
+def validate_cold_binding(value):
+    """A cold window needs both binary hashes. Backup-only bindings cannot start."""
+    if type(value) is dict and value.get('artifact_kind') == 'exact-source':
+        return validate_exact_cold_binding(value)
+    validate_binding(value)
+    return value
 
 
 def validate_binding(value):
@@ -184,7 +207,7 @@ def timestamp(value):
 def validate_group(value):
     """An operator-reviewed dependency graph, never an inferred production inventory."""
     fields(value, ('schema', 'objects', 'dependency_review_sha256', 'storage', 'retention', 'capacity'))
-    require(value['schema'] == 'ags.recovery-group.v1', 'schema_invalid')
+    require(value['schema'] in ('ags.recovery-group.v1', 'ags.recovery-group.v2'), 'schema_invalid')
     digest(value['dependency_review_sha256'])
     validate_retention(value['retention'])
     validate_capacity(value['capacity'])
@@ -192,7 +215,13 @@ def validate_group(value):
     require(type(objects) is list and 0 < len(objects) <= MAX_ENTRIES, 'inventory_budget')
     ids, paths, roles = set(), [], []
     for item in objects:
-        fields(item, ('id', 'role', 'source', 'restore_target', 'kind', 'depends_on'))
+        names = ('id', 'role', 'source', 'restore_target', 'kind', 'depends_on')
+        if value['schema'] == 'ags.recovery-group.v2' and 'immutable_authority' in item:
+            from routeb_immutable_authority import validate
+            names += ('immutable_authority',)
+        fields(item, names)
+        if 'immutable_authority' in item:
+            validate(item)
         identifier(item['id'])
         require(item['id'] not in ids, 'duplicate_object')
         ids.add(item['id'])
@@ -263,13 +292,30 @@ def validate_seal(manifest_raw, receipt_raw, group):
     """Validate evidence shape/digests; S2 must prove copy, stability and restore."""
     objects = validate_group(group)
     manifest, receipt = strict_json(manifest_raw), strict_json(receipt_raw)
-    fields(manifest, ('schema', 'snapshot_id', 'binding', 'quiescence', 'inventory_sha256',
-                      'started_at', 'ended_at', 'recovery_group_sha256', 'source_before_sha256',
-                      'source_after_sha256', 'retention', 'capacity', 'entries'))
-    require(manifest['schema'] == 'ags.backup-manifest.v1', 'schema_invalid')
+    names = ('schema', 'snapshot_id', 'binding', 'quiescence', 'inventory_sha256',
+             'started_at', 'ended_at', 'recovery_group_sha256', 'source_before_sha256',
+             'source_after_sha256', 'retention', 'capacity', 'entries')
+    version2 = group['schema'] == 'ags.recovery-group.v2'
+    if version2:
+        names += ('authority_evidence',)
+    fields(manifest, names)
+    require(manifest['schema'] == ('ags.backup-manifest.v2' if version2 else 'ags.backup-manifest.v1'),
+            'schema_invalid')
+    if version2:
+        from routeb_immutable_authority import validate_evidence
+        evidence = manifest['authority_evidence']
+        require(type(evidence) is dict and set(evidence) ==
+                {key for key, item in objects.items() if 'immutable_authority' in item},
+                'immutable_authority_coverage')
+        for key, observed in evidence.items():
+            validate_evidence(objects[key], observed)
     require(canonical(manifest) == manifest_raw, 'manifest_not_canonical')
     identifier(manifest['snapshot_id'])
     validate_binding_version(manifest['binding'])
+    if version2:
+        require(all(item['host_instance'] == manifest['binding']['host_instance']
+                    and item['tool_manifest_sha256'] == manifest['binding']['tool_sha256']
+                    for item in manifest['authority_evidence'].values()), 'immutable_authority_binding_mismatch')
     fields(manifest['quiescence'], ('nonce', 'stop_evidence_sha256', 'writers_evidence_sha256'))
     identifier(manifest['quiescence']['nonce'])
     for key in ('stop_evidence_sha256', 'writers_evidence_sha256'):
@@ -301,6 +347,11 @@ def validate_seal(manifest_raw, receipt_raw, group):
                 'restore_mapping_invalid')
         if len(suffix) == 1:
             require(item['kind'] == obj['kind'], 'kind_invalid')
+        if 'immutable_authority' in obj:
+            expected_authority = obj['immutable_authority']
+            require(item['kind'] == 'file' and item['mode'] == 0o600 and item['uid'] > 0
+                    and item['sha256'] == expected_authority['asset_sha256']
+                    and item['size'] == expected_authority['size'], 'immutable_archive_invalid')
         require(path not in paths and str(target) not in targets, 'duplicate_entry')
         paths.add(path); targets.add(str(target)); covered.add(key); by_path[path] = item
     require(covered == set(objects), 'coverage_incomplete')
@@ -312,7 +363,8 @@ def validate_seal(manifest_raw, receipt_raw, group):
             require(parent in by_path and by_path[parent]['kind'] == 'directory', 'parent_missing')
     fields(receipt, ('schema', 'state', 'snapshot_id', 'manifest_sha256', 'inventory_sha256',
                      'binding_sha256'))
-    require(receipt['schema'] == 'ags.local-backup.v2' and receipt['state'] == 'sealed', 'schema_invalid')
+    require(receipt['schema'] == ('ags.local-backup.v3' if version2 else 'ags.local-backup.v2')
+            and receipt['state'] == 'sealed', 'schema_invalid')
     for key in ('manifest_sha256', 'inventory_sha256', 'binding_sha256'):
         digest(receipt[key])
     require(receipt['snapshot_id'] == manifest['snapshot_id']
@@ -324,15 +376,22 @@ def validate_seal(manifest_raw, receipt_raw, group):
 
 def validate_restore_report(raw, receipt):
     value = strict_json(raw)
-    fields(value, ('schema', 'snapshot_id', 'manifest_sha256', 'restore_copy_id', 'verified_at',
-                   'checks', 'report_sha256'))
-    require(value['schema'] == 'ags.restore-verification.v1', 'schema_invalid')
+    require(type(value) is dict, 'fields_invalid')
+    names = ('schema', 'snapshot_id', 'manifest_sha256', 'restore_copy_id', 'verified_at', 'checks', 'report_sha256')
+    version2 = value.get('schema') == 'ags.restore-verification.v2'
+    require(version2 == (receipt.get('schema') == 'ags.local-backup.v3'), 'restore_schema_mismatch')
+    if version2:
+        names += ('authority_evidence_sha256',)
+        digest(value['authority_evidence_sha256'])
+    fields(value, names)
+    require(value['schema'] in ('ags.restore-verification.v1', 'ags.restore-verification.v2'), 'schema_invalid')
     identifier(value['snapshot_id']); identifier(value['restore_copy_id'])
     timestamp(value['verified_at']); digest(value['manifest_sha256']); digest(value['report_sha256'])
     require(value['snapshot_id'] == receipt['snapshot_id']
             and value['manifest_sha256'] == receipt['manifest_sha256'], 'restore_binding_mismatch')
-    fields(value['checks'], ('independent_copy', 'manifest', 'sqlite_integrity', 'sqlite_fk',
-                            'sqlite_logical_digest', 'git_fsck', 'db_oids', 'wiki_cas', 'dependencies'))
+    checks = ('independent_copy', 'manifest', 'sqlite_integrity', 'sqlite_fk',
+              'sqlite_logical_digest', 'git_fsck', 'db_oids', 'wiki_cas', 'dependencies')
+    fields(value['checks'], checks + (('immutable_authorities',) if version2 else ()))
     require(all(type(v) is bool and v for v in value['checks'].values()), 'restore_check_failed')
     require(value['report_sha256'] == fingerprint({k: v for k, v in value.items()
                                                  if k != 'report_sha256'}), 'restore_digest_mismatch')

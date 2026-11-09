@@ -20,7 +20,9 @@ class ProductionWireTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=Path.home(), prefix='s6b-b2-')
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name).resolve()
+        # Parent-path refusal checks must never inspect the operator's HOME.
+        self.root = Path(self.tmp.name).resolve() / 'ags'
+        self.root.mkdir(mode=0o700)
         (self.root / 'state').mkdir(mode=0o700)
         self.ledger = Mock()
         self.addCleanup(lambda: self.assertEqual(self.ledger.mock_calls, []))

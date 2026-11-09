@@ -29,6 +29,12 @@ Unknown tables, a changed schema, missing required semantic tables/columns,
 unknown store paths, missing objects/dependencies, unsupported backends and
 budget overruns are errors. No truncation is accepted as success.
 
+Native host preflight checks the reviewed schema digest, supported table names
+and required semantic columns in a read-only SQLite transaction before creating
+a claim or stopping the service. It does not scan business rows or establish
+quiescence. The cold inventory repeats the same schema checks after shutdown,
+alongside its full data and Git/Wiki checks.
+
 The group schema `ags.recovery-group.v1` has exactly `schema`, `objects`,
 `dependency_review_sha256`, `storage`, `retention` and `capacity`. Each object has
 `id`, `role`, `source`, `restore_target`, `kind` and `depends_on`. IDs and edges
@@ -79,6 +85,10 @@ The inventory records an exact schema digest (including user_version/application
 per-table counts, all Git-root paths (including empty directories), file digests,
 Git refs/HEAD digests, local OIDs, external OIDs and legacy synthetic Wiki OIDs.
 SQLite NULL, BLOB, non-UTF-8 TEXT and numeric storage classes remain distinct.
+The supported table set includes GORM's `issue_labels` and `pr_labels` join
+tables; their associations contribute to the per-table and logical digests.
+An isolated SQLite migration test compares the actual complete migrated table
+set with the inventory contract, including implicitly created join tables.
 Limits are closed and bounded: at most 100,000 rows/paths/OIDs, 64 MiB encoded row
 facts, 16 MiB individual SQLite values/JSON and 64 MiB individual CAS content.
 Exceeding limits fails; a future larger supported deployment needs reviewed

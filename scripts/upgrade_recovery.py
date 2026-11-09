@@ -17,8 +17,8 @@ import re
 import uuid
 
 from upgrade import Failure, directory_fd, private_json
-from upgrade_backup_contract import (ContractError, MAX_ENTRIES, canonical, digest, fields, fingerprint,
-                                     identifier, require, text, timestamp, validate_binding,
+from upgrade_backup_contract import (ContractError, MAX_ENTRIES, MAX_JSON, canonical, digest, fields, fingerprint,
+                                     identifier, require, text, timestamp, validate_cold_binding,
                                      validate_group, validate_restore_report)
 from upgrade_backup import (create_sealed_backup, durable_bytes, group_object, metadata_fields,
                             source_fingerprint, supported_metadata, verify_payload)
@@ -91,7 +91,7 @@ def read_window(root):
             and journal.get('binding_sha256') == marker['binding_sha256']
             and type(journal.get('phase')) is str and journal.get('phase') in PHASES
             and type(journal.get('start_attempted')) is bool, 'cold_journal_invalid')
-    validate_binding(journal['backup_binding'])
+    validate_cold_binding(journal['backup_binding'])
     require(all(journal['backup_binding'][k] == v for k, v in binding.items()
                 if k in journal['backup_binding']), 'cold_binding_mismatch')
     return marker, journal, pending
@@ -222,7 +222,7 @@ class ColdWindow:
 
     def begin(self):
         require(self.owner is not None, 'hostops_required')
-        validate_binding(self.backup_binding); validate_group(self.group)
+        validate_cold_binding(self.backup_binding); validate_group(self.group)
         require(all(self.backup_binding[k] == v for k, v in self.binding.items()
                     if k in self.backup_binding), 'cold_binding_mismatch')
         require(callable(self.trash), 'trash_unavailable')
@@ -365,11 +365,16 @@ class ColdWindow:
                 and manifest['quiescence'] == self.journal['quiescence']
                 and manifest['source_before_sha256'] == self.journal['tq_sha256'], 'backup_binding_mismatch')
         load_inventory(path, manifest, self.group, self.schema, self.dsn)
-        stored_group, _ = private_json(path / 'recovery-group.json')
+        stored_group, _ = private_json(path / 'recovery-group.json', maximum=MAX_JSON)
         require(stored_group == self.group, 'group_mismatch')
         verify_payload(path, manifest['entries'], auxiliary=AUXILIARY)
         report, _ = private_json(path / 'restore-report.json')
         validate_restore_report(canonical(report), receipt)
+        if 'authority_evidence' in manifest:
+            from routeb_immutable_authority import verify_group
+            verify_group(self.group, manifest['authority_evidence'])
+            require(report.get('authority_evidence_sha256') == fingerprint(manifest['authority_evidence']),
+                    'immutable_authority_evidence_mismatch')
         require(timestamp(report['verified_at']) >= timestamp(manifest['ended_at']), 'time_order_invalid')
         publication, _ = private_json(path / 'restore-publication.json')
         require(publication == {'state': 'published', 'manifest_sha256': receipt['manifest_sha256']},
@@ -398,14 +403,24 @@ class ColdWindow:
         self.unchanged(full=False)
         binary = self.root / 'bin/gh-server'
         receipt, _ = private_json(self.state / 'installation.json')
+        if self.backup_binding.get('artifact_kind') == 'exact-source':
+            require(receipt.get('artifact_kind') == 'exact-source'
+                    and not any(key in receipt for key in ('release_id', 'release_tag', 'control_revision'))
+                    and receipt.get('candidate_manifest_sha256') == self.backup_binding['manifest_sha256']
+                    and receipt.get('tool_sha256') == self.backup_binding['tool_sha256']
+                    and receipt.get('version') == expected_identity.get('version')
+                    and expected_identity.get('tree') == self.backup_binding['runtime_tree'],
+                    'installed_identity_mismatch')
+        else:
+            require(receipt.get('control_revision') == self.backup_binding['control_revision']
+                    and receipt.get('release_id') == self.backup_binding['release_id']
+                    and receipt.get('version') == self.backup_binding['release_tag'],
+                    'installed_identity_mismatch')
         require(not (self.state / 'installing.json').exists()
                 and not (self.state / 'installing.json').is_symlink()
                 and file_digest(binary) == self.backup_binding['new_binary_sha256']
                 and receipt['source'] == self.binding['new']
                 and receipt.get('runtime_tree') == self.backup_binding['runtime_tree']
-                and receipt.get('control_revision') == self.backup_binding['control_revision']
-                and receipt.get('release_id') == self.backup_binding['release_id']
-                and receipt.get('version') == self.backup_binding['release_tag']
                 and expected_identity.get('revision') == self.binding['new']
                 and receipt['binaries']['gh-server']['sha256'] == file_digest(binary)
                 and receipt['binaries']['gh-server']['identity'] == expected_identity
@@ -418,7 +433,7 @@ class ColdWindow:
         require(file_digest(self.root / 'bin/gh-server') == self.backup_binding['new_binary_sha256']
                 and file_digest(self.state / 'installation.json') == self.journal['installed_receipt_sha256'],
                 'installed_identity_mismatch')
-        self.phase('start_attempted', start_attempted=True,
+        self.phase('start_attempted', start_attempted=True, start_called=False,
                    handoff={'token': uuid.uuid4().hex, 'generation': self.journal['generation'],
                             'consumed': False, 'binary_sha256': self.backup_binding['new_binary_sha256'],
                             'receipt_sha256': self.journal['installed_receipt_sha256'],
@@ -432,14 +447,19 @@ class ColdWindow:
         _, current, _ = read_window(self.root)
         require(current['phase'] == 'start_attempted' and current['start_attempted'] is True
                 and current['generation'] == self.journal['generation']
+                and current.get('start_called') is False
                 and current.get('handoff', {}).get('consumed') is False
                 and current.get('handoff', {}).get('manager_requested') is False, 'start_already_requested')
-        current['handoff']['manager_requested'] = True
+        # Claim this entry durably before interruption can make a retry ambiguous.
+        # The claim grants no launcher capability; final approval must come first.
+        current['start_called'] = True
         replace_json(self.pending / 'cold-journal.json', current)
-        checkpoint('manager-start-intent')
         self.journal = current
+        checkpoint('manager-start-intent')
         if authorize is not None:
             authorize()
+        current['handoff']['manager_requested'] = True
+        replace_json(self.pending / 'cold-journal.json', current)
         self.manager.start()
 
 
