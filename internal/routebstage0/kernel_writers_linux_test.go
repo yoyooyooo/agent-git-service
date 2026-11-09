@@ -185,17 +185,27 @@ func TestKernelObserverBudgetsAndZeroBootTicks(t *testing.T) {
 	}
 }
 
-func TestIdentityFailureReapsOnlyItsOwnChildWithinBound(t *testing.T) {
+func TestIdentityFailureObservesExitWithoutEscalation(t *testing.T) {
 	if os.Getenv("AGS_STAGE0_TEST_IGNORE_TERM") == "1" {
 		signals := make(chan os.Signal, 1)
 		signal.Notify(signals, syscall.SIGTERM)
 		fmt.Println("ready")
-		for {
-			<-signals
-		}
+		go func() {
+			for range signals {
+				fmt.Println("term-observed")
+			}
+		}()
+		// Only the test parent's explicit release ends this child normally.
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+		return
 	}
-	command := exec.Command(os.Args[0], "-test.run=^TestIdentityFailureReapsOnlyItsOwnChildWithinBound$", "-test.count=1")
+	command := exec.Command(os.Args[0], "-test.run=^TestIdentityFailureObservesExitWithoutEscalation$", "-test.count=1")
 	command.Env = append(os.Environ(), "AGS_STAGE0_TEST_IGNORE_TERM=1")
+	input, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
 	pipe, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -203,20 +213,43 @@ func TestIdentityFailureReapsOnlyItsOwnChildWithinBound(t *testing.T) {
 	if err = command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer command.Process.Kill()
-	ready := make(chan string, 1)
-	go func() { line, _ := bufio.NewReader(pipe).ReadString('\n'); ready <- line }()
+	lines := make(chan string, 8)
+	go func() {
+		scanner := bufio.NewScanner(pipe)
+		for scanner.Scan() {
+			lines <- scanner.Text()
+		}
+	}()
+	line := func(want string) {
+		t.Helper()
+		select {
+		case got := <-lines:
+			if got != want {
+				t.Fatalf("got %q, want %q", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("child observation timed out", want)
+		}
+	}
+	line("ready")
+	done := make(chan error, 1)
+	go func() { done <- stopSpawnedChild(command) }()
+	line("term-observed")
 	select {
-	case line := <-ready:
-		if line != "ready\n" {
-			t.Fatal(line)
+	case err := <-done:
+		t.Fatal("identity failure stopped observing a living child", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err = command.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatal("child did not survive TERM", err)
+	}
+	input.Close()
+	select {
+	case err := <-done:
+		if err != nil || command.ProcessState == nil || !command.ProcessState.Success() {
+			t.Fatal("natural child exit was not observed", err, command.ProcessState)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("child not ready")
-	}
-	start := time.Now()
-	forced := stopSpawnedChild(command, 30*time.Millisecond)
-	if !forced || time.Since(start) > 2*time.Second || command.ProcessState == nil || command.ProcessState.Success() {
-		t.Fatal("unbounded or falsely normal reap", forced, command.ProcessState)
+		t.Fatal("released child was not reaped")
 	}
 }

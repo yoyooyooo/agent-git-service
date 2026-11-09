@@ -5,6 +5,7 @@ package routebstage0
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -190,7 +191,7 @@ func Run(id, operation string) error {
 		return err
 	}
 	if operation == "restore" || operation == "old-start" {
-		if err = l.loadRecovery(); err != nil {
+		if err = l.loadRecovery(operation); err != nil {
 			return err
 		}
 	}
@@ -263,7 +264,25 @@ func Run(id, operation string) error {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !identityObserved {
-		stopSpawnedChild(command, 5*time.Second)
+		// The invocation claim remains consumed even if recording fails. Do
+		// not accept a peer or return while this unverified child is alive.
+		failure := map[string]any{"schema": "ags.routeb-stage0-identity-unavailable.v1",
+			"registration_sha256": l.registrationSHA, "invocation_id": l.invocation.ID,
+			"boot_id": platform.boot, "child_pid": command.Process.Pid,
+			"reason": "stage0_child_identity_unavailable", "retry_allowed": false}
+		recordErr := writeExclusive(l.statePath("failures", l.invocation.ID), failure)
+		fmt.Fprintln(os.Stderr, "code=stage0_child_identity_unavailable child_exit=unobserved retry_allowed=false")
+		waitErr := stopSpawnedChild(command)
+		failure["child_exit_observed"] = command.ProcessState != nil
+		failure["wait_succeeded"] = waitErr == nil
+		failure["child_exit_code"] = -1
+		if command.ProcessState != nil {
+			failure["child_exit_code"] = command.ProcessState.ExitCode()
+		}
+		exitRecordErr := writeExclusive(l.statePath("failure-exits", l.invocation.ID), failure)
+		if recordErr != nil || exitRecordErr != nil {
+			return refused("stage0_identity_failure_record_unavailable")
+		}
 		return refused("stage0_child_identity_unavailable")
 	}
 	i := l.invocation

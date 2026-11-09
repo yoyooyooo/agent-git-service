@@ -45,9 +45,25 @@ func machoDynamic(image *macho.File) (needed, rpath []string, err error) {
 				return nil, nil, err
 			}
 			rpath = append(rpath, path)
-		// Legacy fixed-VM/prebound loads and embedded dyld environment are
-		// outside this catalog's dependency and search-path model.
-		case 0x6, 0x9, 0x10, 0x27:
+		// These commands describe this image's segments, symbols, identity,
+		// debug/link-edit metadata, minimum OS or entry point. They introduce
+		// neither another image nor a library search path.
+		case 0x1, 0x19, // LC_SEGMENT, LC_SEGMENT_64
+			0x2, 0xb, // LC_SYMTAB, LC_DYSYMTAB
+			0x4, 0x5, // LC_THREAD, LC_UNIXTHREAD
+			0xd, 0x1b, // LC_ID_DYLIB, LC_UUID
+			0x1d, 0x1e, // LC_CODE_SIGNATURE, LC_SEGMENT_SPLIT_INFO
+			0x21, 0x2c, // LC_ENCRYPTION_INFO, LC_ENCRYPTION_INFO_64
+			0x24, 0x25, 0x2a, // LC_VERSION_MIN_MACOSX/IPHONEOS, LC_SOURCE_VERSION
+			0x26, 0x29, 0x2b, // LC_FUNCTION_STARTS, LC_DATA_IN_CODE, LC_DYLIB_CODE_SIGN_DRS
+			0x2d, 0x2e, // LC_LINKER_OPTION, LC_LINKER_OPTIMIZATION_HINT
+			0x2f, 0x30, // LC_VERSION_MIN_TVOS, LC_VERSION_MIN_WATCHOS
+			0x31, 0x32, // LC_NOTE, LC_BUILD_VERSION
+			0x80000028: // LC_MAIN
+		// Every other command, including unknown LC_REQ_DYLD commands and
+		// unmodeled dyld fixup/export commands, fails closed. A new loader
+		// semantic needs an explicit model before catalog admission.
+		default:
 			return nil, nil, refusal("authority_macho_loader_unsupported")
 		}
 	}

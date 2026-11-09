@@ -103,7 +103,7 @@ func TestMachORejectsMalformedLoaderStrings(t *testing.T) {
 
 func TestMachORejectsUnmodeledLoaderCommands(t *testing.T) {
 	directory := retainedMachODirectory(t)
-	for label, kind := range map[string]uint32{"load-fvmlib": 0x6, "fvmfile": 0x9, "prebound-dylib": 0x10, "dyld-environment": 0x27} {
+	for label, kind := range map[string]uint32{"load-fvmlib": 0x6, "fvmfile": 0x9, "prebound-dylib": 0x10, "dyld-environment": 0x27, "unknown-optional": 0x7e, "chained-fixups": 0x80000034, "exports-trie": 0x80000033} {
 		t.Run(label, func(t *testing.T) {
 			name := writeMachO(t, directory, label, machoFixture(machoStringCommand(kind, 24, "DYLD_LIBRARY_PATH=/unbound")))
 			if _, _, err := inspectNative(name, "arm64"); err == nil {
@@ -180,5 +180,16 @@ func TestMachOLoaderByteOrdersAndRawCommandSize(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestReviewUnknownRequiredLoaderCommandMustRefuse(t *testing.T) {
+	directory := retainedMachODirectory(t)
+	for _, kind := range []uint32{0x8000007e, 0x80000035} {
+		name := writeMachO(t, directory, "unknown", machoFixture(machoStringCommand(kind, 32, "/unbound/image")))
+		actual, native, err := inspectNative(name, "arm64")
+		if err == nil {
+			t.Errorf("unmodeled required load command %#x accepted: native=%v observed=%#v", kind, native, actual)
+		}
 	}
 }

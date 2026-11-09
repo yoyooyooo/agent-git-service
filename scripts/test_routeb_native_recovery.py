@@ -76,6 +76,7 @@ class OrchestrationTests(unittest.TestCase):
         self.stack = ExitStack(); self.addCleanup(self.stack.close)
         def patched(name, **kwargs): return self.stack.enter_context(patch.object(recovery, name, **kwargs))
         patched('packet', return_value=(self.context, self.late, self.package))
+        patched('authorize_recovery', side_effect=lambda *_args: self.events.append('authorize'))
         patched('recovery_binding', return_value=(self.context, self.late))
         patched('approval', return_value={'approval_id': 'restore-approval'})
         patched('FixedManager', return_value=self.manager)
@@ -177,6 +178,146 @@ class OldGenerationTests(unittest.TestCase):
             decision['expires_at'] = (now - timedelta(seconds=1)).isoformat()
             with self.assertRaisesRegex(ContractError, 'recovery_approval_expired'):
                 recovery.approval(late, 'full-restore', Path('/fixture'))
+
+
+class PacketWindowTests(unittest.TestCase):
+    """Real disk packet/load/admit/authorize; synthetic native/host boundaries.
+
+    These fixtures neither provision a root peer nor execute a native operation.
+    The package, window, candidate, original claim and snapshot are real bytes.
+    """
+    def setUp(self):
+        import routeb_host_package as package
+        from test_routeb_host_admission import AdmissionTests, package as make_package, approval as make_approval
+        self.module = package
+        self.fixture = AdmissionTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.base = self.fixture.root.resolve()
+        self.root = self.base / 'txn-1/ags'
+        self.root.mkdir(parents=True, mode=0o700)
+        self.pending = self.root / 'state/ags-autodeploy/local-v2/pending'
+        self.pending.mkdir(parents=True, mode=0o700)
+        self.snapshot = self.root.parent / 'recovery/backups/snapshot-one'
+        self.snapshot.mkdir(parents=True, mode=0o700)
+        for directory in self.base.rglob('*'):
+            if directory.is_dir():
+                directory.chmod(0o700)
+        self.now = datetime.now(timezone.utc)
+        self.consumed = self.now - timedelta(hours=3)
+        self.group = {'objects': []}
+        self.profile = {key: 'b' * 64 for key in package.PROFILE_FIELDS}
+        self.profile.update(schema=package.NATIVE_PROFILE_SCHEMA, root=str(self.root),
+            tool_revision='c' * 40, tool_tree='d' * 40,
+            interpreter={'path': '/synthetic/python', 'sha256': 'e' * 64},
+            stage0={'registration_id': 'txn-1'}, capture={'manager': {'definition': str(self.base / 'unit')}})
+        c = self.fixture.verified
+        self.policy = dict(schema='ags.routeb-host-policy.v1', host='mini',
+            old_revision=c.revision, old_tree=c.tree, candidate_revision=c.revision,
+            candidate_tree=c.tree, schema_sha256=self.profile['schema_sha256'], allow_schema_change=False)
+        build = dict(schema='ags.routeb-build-review.v1', revision=c.revision, tree=c.tree,
+            binary_sha256=c.sha256, manifest_sha256=c.raw_manifest_sha256, decision='approve', reviewer='fixture')
+        ci = dict(schema='ags.routeb-ci-evidence.v1', repository='yoyooyooo/agent-git-service',
+            revision=c.revision, tree=c.tree, run_id=1, attempt=1, conclusion='success', evidence_sha256='f' * 64)
+        for name, value, key in [('build-review.json', build, 'build_review_sha256'),
+                ('ci-evidence.json', ci, 'ci_evidence_sha256'), ('recovery-review.json', {}, 'recovery_review_sha256')]:
+            self.profile[key] = self.write(self.base / name, value)
+        hashes = {name: self.write(self.base / name, value) for name, value in
+                  [('native-profile.json', self.profile), ('policy.json', self.policy), ('recovery-group.json', self.group)]}
+        self.pkg = make_package(c.raw_manifest_sha256, native_profile_sha256=hashes['native-profile.json'],
+            policy_sha256=hashes['policy.json'], recovery_group_sha256=hashes['recovery-group.json'])
+        self.path = self.base / 'package.json'
+        self.approval_path = self.base / 'approval.json'
+        self.package_sha = self.write(self.path, self.pkg)
+        self.window = make_approval(self.package_sha, issued_at=(self.consumed-timedelta(hours=1)).isoformat(),
+                                   expires_at=(self.consumed+timedelta(hours=1)).isoformat())
+        self.approval_sha = self.write(self.approval_path, self.window)
+        # Candidate loader verifies real binary and manifest bytes on every pass.
+        (self.base / 'candidate-manifest.json').write_bytes((self.base / 'manifest.json').read_bytes())
+        self.old = dict(schema='ags.installation.v2', source=c.revision,
+                        binaries={'gh-server': {'sha256': 'a'*64, 'identity': {'tree': c.tree}}})
+        self.write(self.root / 'state/installation.json', self.old)
+        self.context = {'registration_id': 'txn-1', 'tool_revision': self.profile['tool_revision'],
+            'tool_tree': self.profile['tool_tree'], 'tool_manifest_sha256': self.pkg['tool_sha256']}
+        self.host = SimpleNamespace(scope='isolated-native', bundle=self.base,
+            identity=SimpleNamespace(root=str(self.root), logical_host='mini', host_instance=self.pkg['host_instance']),
+            recheck=Mock())
+        self.stack = ExitStack(); self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.object(recovery, 'recovery_binding', side_effect=lambda *a, **kw: (self.context, self.late)))
+        self.stack.enter_context(patch.object(recovery, 'read_trusted', return_value=canonical({'logical_host':'mini'})))
+        self.stack.enter_context(patch.object(package, 'require_interpreter_closure', return_value=self.context))
+        self.stack.enter_context(patch.object(package, 'resolve_for_root', return_value=self.host))
+        for name in ('validate_capture_profile', 'bundle_engine', 'verify_launch_dependencies',
+                     'validate_native_paths', 'validate_authority_coverage', 'validate_group'):
+            self.stack.enter_context(patch.object(package, name))
+        self.stack.enter_context(patch.object(package, 'file_digest', return_value='a'*64))
+        paths = dict(old_binary=self.root/'bin/gh-server', installation=self.root/'state/installation.json',
+                     runtime_env=self.root/'config/runtime.env', launcher=self.root/'bin/ags-runtime.py',
+                     manager=self.base/'unit', sqlite=self.root/'main.db', git_root=self.root/'git')
+        self.stack.enter_context(patch.object(package, 'group_object', side_effect=lambda group, role: {'source':str(paths[role])}))
+        self.stack.enter_context(patch.object(package, '_runtime_environment',
+            return_value={'DB_DSN':'sqlite:'+str(paths['sqlite']), 'GIT_REPO_DIR':str(paths['git_root'])}))
+        loaded = package.load(self.path, self.approval_path, 'mini', consumed_at=self.consumed)
+        self.binding = loaded.cold_binding()
+        self.write(self.pending/'claim.json', {'schema':'ags.local-claim.v2', 'binding':self.binding})
+        self.journal = dict(schema='ags.routeb-host-journal.v1', root=str(self.root), transaction_id='txn-1',
+            host_instance=self.pkg['host_instance'], package_sha256=self.package_sha, approval_sha256=self.approval_sha,
+            binding_sha256=recovery.fingerprint(self.binding), started_at=self.consumed.isoformat())
+        self.write(self.pending/'host-execution.json', self.journal)
+        self.manifest = dict(schema='ags.backup-manifest.v2', snapshot_id='snapshot-one',
+            recovery_group_sha256=recovery.fingerprint(self.group), authority_evidence={}, binding=self.binding,
+            started_at=(self.consumed+timedelta(minutes=1)).isoformat(),
+            ended_at=(self.consumed+timedelta(minutes=2)).isoformat())
+        self.late = dict(snapshot_id='snapshot-one', group_sha256=recovery.fingerprint(self.group),
+            host_instance=self.pkg['host_instance'], backup_directory=str(self.snapshot),
+            manifest_sha256=self.write(self.snapshot/'manifest.json', self.manifest))
+        for purpose, key in [('full-restore','restore_approval'), ('old-start','old_start_approval')]:
+            decision = dict(schema='ags.routeb-recovery-approval.v1', approval_id=purpose+'-one',
+                actor='human:fixture', purpose=purpose, decision='approve',
+                issued_at=(self.now-timedelta(minutes=1)).isoformat(), expires_at=(self.now+timedelta(hours=1)).isoformat(),
+                **{k:self.late[k] for k in ('host_instance','snapshot_id','manifest_sha256')},
+                data_loss_acknowledged=True, external_reconciliation_acknowledged=True)
+            path = self.base/(key+'.json'); sha = self.write(path, decision)
+            self.late[key] = {'path':str(path), 'sha256':sha, 'size':path.stat().st_size}
+
+    def write(self, path, value):
+        raw = canonical(value); path.write_bytes(raw); path.chmod(0o600)
+        return hashlib.sha256(raw).hexdigest()
+
+    def test_packet_accepts_consumed_expired_window_for_both_independent_operations(self):
+        for operation, purpose in [('restore','full-restore'), ('old-start','old-start')]:
+            with self.subTest(operation=operation):
+                _, late, loaded = recovery.packet(self.root, self.path, self.approval_path, operation)
+                self.assertEqual(recovery.approval(late, purpose, self.root)['purpose'], purpose)
+                recovery.authorize_recovery(loaded, self.context, late)
+                # The same expired window still cannot admit a transaction.
+                with self.assertRaisesRegex(ContractError, '^approval_expired$'):
+                    loaded.authorize()
+
+    def test_recovery_rejects_changed_history_and_invalid_consumption_time(self):
+        _, _, loaded = recovery.packet(self.root, self.path, self.approval_path, 'restore')
+        for change in ({'approval_sha256':'f'*64}, {'package_sha256':'f'*64},
+                       {'started_at':(self.consumed-timedelta(hours=2)).isoformat()},
+                       {'started_at':self.now.isoformat()}):
+            with self.subTest(change=change):
+                self.write(self.pending/'host-execution.json', dict(self.journal, **change))
+                with self.assertRaises(ContractError):
+                    recovery.authorize_recovery(loaded, self.context, self.late)
+        self.write(self.pending/'host-execution.json', self.journal)
+        (self.snapshot/'manifest.json').write_bytes(canonical(self.manifest)+b' ')
+        with self.assertRaisesRegex(ContractError, '^recovery_consumption_snapshot$'):
+            recovery.packet(self.root, self.path, self.approval_path, 'old-start')
+
+    def test_expired_late_approval_still_refuses_a_new_operation(self):
+        for operation, purpose, key in [('restore','full-restore','restore_approval'), ('old-start','old-start','old_start_approval')]:
+            with self.subTest(operation=operation):
+                _, late, _ = recovery.packet(self.root, self.path, self.approval_path, operation)
+                path = Path(late[key]['path']); decision = json.loads(path.read_bytes())
+                decision['issued_at'] = (self.now-timedelta(hours=2)).isoformat()
+                decision['expires_at'] = (self.now-timedelta(hours=1)).isoformat()
+                late[key]['sha256'] = self.write(path, decision); late[key]['size'] = path.stat().st_size
+                with self.assertRaisesRegex(ContractError, '^recovery_approval_expired$'):
+                    recovery.approval(late, purpose, self.root)
 
 
 if __name__ == '__main__':

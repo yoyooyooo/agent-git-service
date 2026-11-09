@@ -27,7 +27,7 @@ It was not deployed. It is not the current target and not the rollback target.
 
 | Role | Revision |
 |---|---|
-| Application baseline verified on 2026-11-05 | `4c963c9ff7ef03f283bf628ad213777713469532` |
+| Application baseline | Determine the exact revision and tree from the currently installed receipt and the approved private candidate manifest |
 | Host-package candidate | Explicit private candidate manifest; current execution policy requires the same application revision and tree as the installed baseline |
 | Host tooling | Separately reviewed tool revision, tree and complete bundle manifest |
 | Recovery target | Exact old binary and whole Tq group from that transaction's sealed backup |

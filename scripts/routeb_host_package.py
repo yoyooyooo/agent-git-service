@@ -166,7 +166,7 @@ class HostPackage:
     def pending(self):
         return self.root / 'state/ags-autodeploy/local-v2/pending'
 
-    def authorize(self):
+    def authorize(self, *, consumed_at=None):
         if self.profile.get('schema') == NATIVE_PROFILE_SCHEMA:
             require_interpreter_closure(self.root, operations=('plan', 'transaction', 'restore', 'old-start'))
         self.host.recheck()
@@ -183,7 +183,7 @@ class HostPackage:
         bundle_engine(self.host.bundle, self.package['tool_sha256'])
         verify_launch_dependencies(self.profile, self.host)
         return routeb_host_admission.admit(self.package, approval, current,
-                    now=datetime.now(timezone.utc), raw=raw)
+                    now=consumed_at if consumed_at is not None else datetime.now(timezone.utc), raw=raw)
 
     def cold_binding(self):
         value = {key: self.package[key] for key in
@@ -309,7 +309,7 @@ def validate_authority_coverage(group, host, tool_sha256):
                 'tool_authority_binding_mismatch')
 
 
-def load(package_path, approval_path, expected_host):
+def load(package_path, approval_path, expected_host, *, consumed_at=None):
     path, approval_path = Path(package_path), Path(approval_path)
     package, raw, _ = read_document(path)
     approval, _, approval_sha = read_document(approval_path)
@@ -336,7 +336,7 @@ def load(package_path, approval_path, expected_host):
     digest(profile['interpreter']['sha256'])
     candidate = routeb_candidate.load_candidate(path.parent / 'candidate-manifest.json',
                  {'revision': package.get('candidate_revision'), 'tree': package.get('candidate_tree')})
-    routeb_host_admission.admit(package, approval, candidate, now=datetime.now(timezone.utc), raw=raw)
+    routeb_host_admission.admit(package, approval, candidate, now=consumed_at if consumed_at is not None else datetime.now(timezone.utc), raw=raw)
     require(package['host'] == expected_host and documents['native-profile.json'] == package['native_profile_sha256']
             and documents['policy.json'] == package['policy_sha256']
             and documents['recovery-group.json'] == package['recovery_group_sha256'], 'package_dependency_mismatch')

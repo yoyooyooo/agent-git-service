@@ -2,6 +2,7 @@ package routebstage0
 
 import (
 	"encoding/json"
+	"github.com/ngaut/agent-git-service/internal/interpreterauthority"
 	"os"
 	"path/filepath"
 	"strings"
@@ -275,5 +276,71 @@ func TestEffectiveCompletionCommandIsExactlyOneFixedArgv(t *testing.T) {
 		if validEffectiveStopPost(value, command) {
 			t.Fatal("effective manager extension accepted", value)
 		}
+	}
+}
+
+func TestRecoveryPurposesHaveIndependentExecutionWindows(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "ags")
+	approvals := filepath.Join(dir, "recovery/approvals")
+	if err := os.MkdirAll(approvals, 0700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	l := loaded{host: HostProfile{Root: root, UID: uint32(os.Getuid())},
+		registration: Registration{Invocations: []Invocation{
+			{Operation: "restore", AuthorizationID: "restore-one"},
+			{Operation: "old-start", AuthorizationID: "start-one"}}},
+		recovery: &RecoveryRegistration{HostInstance: "fixture-host", SnapshotID: "snapshot-one", ManifestSHA256: strings.Repeat("a", 64)}}
+	write := func(purpose, id string, issued, expires time.Time) {
+		t.Helper()
+		a := RecoveryApproval{Schema: "ags.routeb-recovery-approval.v1", ApprovalID: id, Actor: "human:fixture",
+			Purpose: purpose, Decision: "approve", IssuedAt: issued.Format(time.RFC3339), ExpiresAt: expires.Format(time.RFC3339),
+			HostInstance: l.recovery.HostInstance, SnapshotID: l.recovery.SnapshotID, ManifestSHA256: l.recovery.ManifestSHA256,
+			DataLossAcknowledged: true, ExternalReconciliationAcknowledged: true}
+		raw, _ := json.Marshal(a)
+		path := filepath.Join(approvals, id+".json")
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		ref := interpreterauthority.File{Path: path, SHA256: hash(raw), Size: int64(len(raw))}
+		if purpose == "full-restore" {
+			l.recovery.RestoreApproval = ref
+		} else {
+			l.recovery.OldStartApproval = ref
+		}
+	}
+	// Restore now; old-start is intentionally authorized for a later window.
+	write("full-restore", "restore-one", now.Add(-time.Hour), now.Add(time.Hour))
+	write("old-start", "start-one", now.Add(2*time.Hour), now.Add(3*time.Hour))
+	if err := l.checkRecoveryApprovals("restore"); err != nil {
+		t.Fatal("future old-start blocked restore", err)
+	}
+	if l.checkRecoveryApprovals("old-start") == nil {
+		t.Fatal("future old-start admitted")
+	}
+	// Restore completed earlier; its expired approval must not fence old-start.
+	write("full-restore", "restore-one", now.Add(-3*time.Hour), now.Add(-2*time.Hour))
+	write("old-start", "start-one", now.Add(-time.Hour), now.Add(time.Hour))
+	if err := l.checkRecoveryApprovals("old-start"); err != nil {
+		t.Fatal("expired restore blocked independently approved old-start/serve-old", err)
+	}
+	if l.checkRecoveryApprovals("restore") == nil {
+		t.Fatal("expired restore admitted")
+	}
+	// Completion evidence cannot renew execution authority, and even historical
+	// evidence must retain exact bytes and a well-formed original time interval.
+	if err := l.checkRecoveryApprovals(""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(l.recovery.RestoreApproval.Path, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if l.checkRecoveryApprovals("old-start") == nil {
+		t.Fatal("changed historical restore bytes ignored")
+	}
+	write("full-restore", "restore-one", now, now)
+	if l.checkRecoveryApprovals("old-start") == nil {
+		t.Fatal("invalid historical restore interval ignored")
 	}
 }

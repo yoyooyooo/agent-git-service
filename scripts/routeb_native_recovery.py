@@ -37,7 +37,7 @@ from upgrade_backup_contract import (ContractError, canonical, digest, fields, f
                                      identifier, require, strict_json, timestamp)
 from upgrade_identity import read_trusted
 from upgrade_inventory import file_digest
-from upgrade_recovery import ColdWindow
+from upgrade_recovery import ColdWindow, read_original_binding
 from routeb_full_restore import apply_restore, old_start, plan_restore, verify_recovered_group
 from routeb_host_native import FixedManager, WriterProbe
 from routeb_host_package import load as load_package, read_document, NATIVE_PROFILE_SCHEMA
@@ -156,15 +156,57 @@ def restored_result(root, context, late):
     return value, proof
 
 
+def consumed_window(root, context, late, package_path, approval_path):
+    """Validate original consumption against the root-pinned sealed snapshot.
+
+    This historical time is only for authenticating the original package. The
+    live root peer and this operation's independent late approval admit effects.
+    """
+    pending = Path(root) / 'state/ags-autodeploy/local-v2/pending'
+    binding = read_original_binding(pending)
+    journal, _ = private_json(pending / 'host-execution.json')
+    package, _, sha = read_document(package_path)
+    _, _, approval_sha = read_document(approval_path)
+    manifest, _, manifest_sha = read_document(Path(late['backup_directory']) / 'manifest.json')
+    require(manifest_sha == late['manifest_sha256']
+            and manifest.get('schema') == 'ags.backup-manifest.v2'
+            and manifest.get('snapshot_id') == late['snapshot_id']
+            and manifest.get('recovery_group_sha256') == late['group_sha256']
+            and manifest.get('authority_evidence') is not None
+            and manifest.get('binding') == binding, 'recovery_consumption_snapshot')
+    require(journal.get('schema') == 'ags.routeb-host-journal.v1'
+            and journal.get('root') == str(root)
+            and journal.get('transaction_id') == binding.get('transaction_id') == context['registration_id']
+            and journal.get('host_instance') == binding.get('host_instance') == late['host_instance']
+            and journal.get('package_sha256') == sha
+            and journal.get('approval_sha256') == approval_sha
+            and journal.get('binding_sha256') == fingerprint(binding)
+            and all(package.get(key) == binding.get(key) for key in
+                    ('host_instance', 'transaction_id', 'attempt_id', 'authorization_id', 'tool_sha256', 'policy_sha256')),
+            'recovery_consumption_binding')
+    consumed = timestamp(journal['started_at'])
+    require(consumed <= timestamp(manifest['started_at']) <= timestamp(manifest['ended_at'])
+            <= datetime.now(timezone.utc), 'recovery_consumption_time')
+    return consumed, binding
+
+
+def authorize_recovery(package, context, late):
+    consumed, binding = consumed_window(package.root, context, late, package.path, package.approval_path)
+    require(package.cold_binding() == binding, 'recovery_consumption_binding')
+    return package.authorize(consumed_at=consumed)
+
+
 def packet(root, package_path, approval_path, operation):
     context, late = recovery_binding(root, operations=(operation,))
     profile_raw = read_trusted(REGISTRY / context['registration_id'] / 'host-profile.json', maximum=65536)
     host = strict_json(profile_raw)
-    package = load_package(package_path, approval_path, host['logical_host'])
+    consumed, binding = consumed_window(root, context, late, package_path, approval_path)
+    package = load_package(package_path, approval_path, host['logical_host'], consumed_at=consumed)
     require(package.root == Path(root) and package.profile['schema'] == NATIVE_PROFILE_SCHEMA
             and package.host.scope == 'isolated-native' and fingerprint(package.group) == late['group_sha256']
             and not package.execution_blockers(), 'native_recovery_package_blocked')
-    package.authorize()
+    require(package.cold_binding() == binding, 'recovery_consumption_binding')
+    authorize_recovery(package, context, late)
     return context, late, package
 
 
@@ -186,7 +228,9 @@ def restore(root, package_path, approval_path):
     window.acquire_owner()
     try:
         recovery_binding(root, operations=('restore',), expected=context)
-        package.authorize(); manager.preflight(); manager.suppress_restart()
+        authorize_recovery(package, context, late)
+        approval(late, 'full-restore', root)
+        manager.preflight(); manager.suppress_restart()
         effects.append({'effect_id': 'normal-stop', 'status': 'intent'})
         stopped = manager.stop()
         effects.append({'effect_id': 'normal-stop', 'status': 'observed', 'record_sha256': fingerprint(stopped)})

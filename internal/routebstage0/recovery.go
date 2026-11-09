@@ -138,7 +138,8 @@ func (l *loaded) recoveryActor(a RecoveryApproval, checkTime bool) bool {
 		seen[key] = true
 	}
 	reviewed, err := time.Parse(time.RFC3339, d.Review.ReviewedAt)
-	return err == nil && (!checkTime || !reviewed.After(time.Now()))
+	issued, issuedErr := time.Parse(time.RFC3339, a.IssuedAt)
+	return err == nil && issuedErr == nil && !reviewed.After(issued) && (!checkTime || !reviewed.After(time.Now()))
 }
 
 func (l *loaded) recoveryPath() string {
@@ -188,19 +189,25 @@ func recoveryApprovalTime(value RecoveryApproval, checkTime bool, now time.Time)
 	return e1 == nil && e2 == nil && expires.After(issued) && (!checkTime || (!now.Before(issued) && now.Before(expires)))
 }
 
-func (l *loaded) loadRecovery() error {
-	return l.loadRecoveryEvidence(true)
+func (l *loaded) loadRecovery(operation string) error {
+	if operation != "restore" && operation != "old-start" {
+		return refused("stage0_recovery_operation_invalid")
+	}
+	return l.loadRecoveryEvidence(operation)
 }
 
 // A completion observes an already authorized invocation; it cannot authorize
 // a new restore/start. Run and ticket admission keep the fresh-time check.
 func (l *loaded) loadRecoveryCompletion() error {
-	return l.loadRecoveryEvidence(false)
+	return l.loadRecoveryEvidence("")
 }
 
-func (l *loaded) loadRecoveryEvidence(checkTime bool) error {
+func (l *loaded) loadRecoveryEvidence(operation string) error {
 	if l.recovery != nil {
-		return l.recheckRecovery()
+		if err := l.recheckRecovery(); err != nil {
+			return err
+		}
+		return l.checkRecoveryApprovals(operation)
 	}
 	raw, err := interpreterauthority.ReadProtected(l.recoveryPath(), 1<<20)
 	if err != nil {
@@ -218,13 +225,23 @@ func (l *loaded) loadRecoveryEvidence(checkTime bool) error {
 	}
 	l.recovery = &r
 	l.recoverySHA = hash(raw)
-	if _, err = l.readRecoveryApproval(r.RestoreApproval, "full-restore", checkTime); err != nil {
-		return err
-	}
-	if _, err = l.readRecoveryApproval(r.OldStartApproval, "old-start", checkTime); err != nil {
+	if err = l.checkRecoveryApprovals(operation); err != nil {
 		return err
 	}
 	return l.verifySnapshotReference()
+}
+
+// Both exact documents remain mandatory evidence. Only the purpose about to
+// execute needs a current window; completion observation admits no new work.
+func (l *loaded) checkRecoveryApprovals(operation string) error {
+	if operation != "" && operation != "restore" && operation != "old-start" {
+		return refused("stage0_recovery_operation_invalid")
+	}
+	if _, err := l.readRecoveryApproval(l.recovery.RestoreApproval, "full-restore", operation == "restore"); err != nil {
+		return err
+	}
+	_, err := l.readRecoveryApproval(l.recovery.OldStartApproval, "old-start", operation == "old-start")
+	return err
 }
 
 func (l *loaded) verifySnapshotReference() error {

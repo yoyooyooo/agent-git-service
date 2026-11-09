@@ -97,11 +97,16 @@ func TestRecoveryReviewBindsDistinctPurposeAndSnapshot(t *testing.T) {
 	f.Path = rootFor(r.ID) + "/scope-grant.json"
 	r.ScopeGrant = &f
 	l := loaded{registration: r}
-	a := RecoveryApproval{Schema: "ags.routeb-recovery-approval.v2", ApprovalID: "restore-one", Actor: "agent:reviewer", Purpose: "full-restore", HostInstance: "fixture-host", SnapshotID: "snapshot-one", ManifestSHA256: strings.Repeat("b", 64), DataLossAcknowledged: true, ExternalReconciliationAcknowledged: true}
+	a := RecoveryApproval{IssuedAt: "2020-01-01T00:00:00Z", Schema: "ags.routeb-recovery-approval.v2", ApprovalID: "restore-one", Actor: "agent:reviewer", Purpose: "full-restore", HostInstance: "fixture-host", SnapshotID: "snapshot-one", ManifestSHA256: strings.Repeat("b", 64), DataLossAcknowledged: true, ExternalReconciliationAcknowledged: true}
 	a.Delegation = &Delegation{ScopeGrantSHA256: f.SHA256, Review: DelegatedReview{Actor: a.Actor, SubjectSHA256: a.subject(), ReviewedAt: "2020-01-01T00:00:00Z", EvidenceRefs: []EvidenceReference{{Kind: "review", SHA256: strings.Repeat("c", 64)}}}}
 	if !l.recoveryActor(a, true) {
 		t.Fatal("exact delegated review refused")
 	}
+	a.IssuedAt = "2019-12-31T00:00:00Z"
+	if l.recoveryActor(a, false) {
+		t.Fatal("historical review after original issue time accepted")
+	}
+	a.IssuedAt = "2020-01-01T00:00:00Z"
 	a.Purpose = "old-start"
 	if l.recoveryActor(a, true) {
 		t.Fatal("restore review reused for old start")

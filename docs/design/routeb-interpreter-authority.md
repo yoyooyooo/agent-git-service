@@ -254,7 +254,7 @@ addition to the durable proof. This remains usable after inactive-unit GC has
 zeroed `ExecMainCode`, `ExecMainPID` and `InvocationID`; missing or mismatched
 proof still refuses. Recovery completion reads the same pinned authorization
 and snapshot without requiring a new execution window after the work exits.
-New restore/old-start execution retains its fresh authorization-time check.
+New restore/old-start execution retains its own fresh authorization-time check. The original package and transaction window remain exact historical consumption evidence; their expiry does not authorize or block the independent recovery approval, and one recovery purpose does not renew the other.
 
 Ordinary full-group restore preserves and rechecks the live root interpreter
 authority and its independent recovery material. It does not reconstruct a

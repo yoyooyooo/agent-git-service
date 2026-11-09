@@ -138,7 +138,7 @@ func (l *loaded) readTicket(i Invocation) (Ticket, error) {
 		}
 	}
 	if i.Phase == "serve-old" {
-		if err := l.loadRecovery(); err != nil {
+		if err := l.loadRecovery("old-start"); err != nil {
 			return t, err
 		}
 		if t.RecoveryRegistrationSHA256 != l.recoverySHA {

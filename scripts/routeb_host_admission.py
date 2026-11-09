@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from upgrade_backup_contract import ContractError, digest, fields, identifier, require, text
+from upgrade_backup_contract import ContractError, digest, fields, identifier, require, text, timestamp
 from upgrade_wireup_safety import object_with_unique_keys, package_digest, require_unexpired
 from routeb_native_delegation import is_delegated, require_delegation, SCHEMAS as DELEGATED_SCHEMAS
 
@@ -76,6 +76,10 @@ def admit(package, approval, verified, *, now, raw=None):
         encoded = raw if raw is not None else json.dumps(package, sort_keys=True).encode()
         digest_value = package_digest(encoded)
         require(approval['package_sha256'] == digest_value, 'package_replaced')
+        # Historical consumption uses the recorded admission time; ordinary
+        # transaction calls still pass the current time. Neither path accepts
+        # an invalid interval or grants a new restore/start from this window.
+        require(timestamp(approval['issued_at']) < timestamp(approval['expires_at']), 'time_invalid')
         require_unexpired(approval['issued_at'], approval['expires_at'], now)
         require(package['host'] == verified.host, 'host_mismatch')
         require(package['candidate_revision'] == verified.revision

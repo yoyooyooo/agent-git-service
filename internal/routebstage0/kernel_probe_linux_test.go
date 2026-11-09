@@ -120,7 +120,7 @@ func nativeHolder(t *testing.T, path, mode string, uid uint32) (int, func(), map
 	reaped := false
 	t.Cleanup(func() {
 		if !reaped {
-			stopSpawnedChild(command, 100*time.Millisecond)
+			stopSpawnedChild(command)
 		}
 	})
 	ready := make(chan []byte, 1)
