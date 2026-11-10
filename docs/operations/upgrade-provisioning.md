@@ -21,7 +21,9 @@ with exit 69. A missing member, extra executable, tampered file, wrong owner,
 or symlink also fails. `manifest.json` itself must be a regular file owned by
 the current user; verification does not follow a symlink in its final
 component, and an executable bit is refused by default. An incomplete directory
-is not executed.
+is not executed. Ordinary members are hashed from the same no-follow
+descriptor that was checked, not from a later path read. See
+[Offline staging members](#offline-staging-members).
 
 Root provision, helper installation, and the first launcher transition remain
 separate approved operations. See
@@ -55,20 +57,73 @@ any depth, even when both values are identical. The only top-level fields are
 strings. A shape, encoding, duplicate-key, empty, truncated, or
 nonstandard-constant failure is `manifest_invalid`. A larger original file is
 `manifest_budget_exceeded`. Neither code echoes the input. No caller, flag, or
-environment variable can raise the budget.
+environment variable can raise the budget. That cap is the manifest document
+only. It is not a limit on member size, and the member reader does not reuse
+it as one. Member bytes are hashed in separate chunks of at most 65536 bytes.
+Input, flags, and the environment cannot widen either rule.
 
-Those manifest failures exit 69. Refusals for the member set, an unexpected
-member, member type, owner, digest, or executable bit keep their existing
-codes. Manifest file type, readability, and identity use the codes above;
-manifest owner and executable bit use `owner_rejected` and
-`unexpected_executable`. Success is still `verified=true` and
-`installable=false`. `manifest_sha256` is the SHA256 of the original bytes,
-not of a re-encoded document.
+Those manifest failures exit 69. A directory listing that does not match the
+closed member set is still `unexpected_member`. Member type, owner, digest,
+and executable bit keep `member_type_rejected`, `owner_rejected`,
+`digest_rejected`, and `unexpected_executable`. A member that disappears
+after that listing and before its first lookup is `member_missing`. A change
+of identity or length, or a final-path mismatch, is `member_changed`.
+Member permission and IO failures are `member_unreadable` and do not surface
+as a normal permission exception. Manifest file type, readability, and
+identity use the manifest codes above; manifest owner and executable bit use
+`owner_rejected` and `unexpected_executable`. Success is still
+`verified=true` and `installable=false`. `manifest_sha256` is the SHA256 of
+the original bytes, not of a re-encoded document.
 
 This check does not replace the root-owned runtime bundle check in
 [local upgrade](local-upgrade.md#fixed-bundle-and-execution-identity). It does
 not prove a native or M6 run and does not bind recovery assets. The runtime
 parser is unchanged, including its handling of duplicate keys.
+
+## Offline staging members
+
+After the manifest is accepted, each closed member is checked on one
+descriptor. Verification `lstat`s the path, rejects a symlink or other
+non-regular file, then opens it `O_RDONLY` without following the final
+component and without blocking. It `fstat`s that descriptor and compares
+device, inode, mode, uid, size, mtime, and ctime with the pre-open `lstat`.
+Atime is ignored because a read may change it. The current UID is checked
+next. Unless the caller passes `executable=False`, any executable bit is
+`unexpected_executable`. SHA256 is updated from that same descriptor in
+chunks of at most 65536 bytes. The read stops at the size from the first
+`fstat`, plus one extra byte so a growing file is noticed and is not followed
+to its new end. A later `fstat` and a final path `lstat` must still name that
+same file. The digest is compared only after those checks. Every success and
+failure path closes the descriptor. If the platform cannot open without
+following, or cannot open nonblocking, verification refuses with
+`member_type_rejected` instead of following the path. No input, flag, or
+environment variable selects a larger chunk or removes the extra-byte stop.
+The chunk size is not the manifest's 65536-byte document budget. A member
+may be larger than that budget, and an empty member is valid when its
+digest matches.
+
+`executable=False` skips only the executable-bit check. It does not accept
+another type, owner, identity change, or digest, and it does not make the
+bundle installable. This current-UID rule is the offline staging rule, not
+the root-owned runtime bundle rule.
+
+A static symlink, including an internal, external, relative, absolute,
+dangling, or chained link, is `member_type_rejected`, as is a directory,
+fifo, or other non-regular file. Replacing the path with one of those before
+the open uses the same code. An identity, length, or final-path change
+observed around the read is `member_changed`. That includes a different
+inode with the same bytes, a rewrite, truncation, or growth of the open
+file, and a permission change after the open. A permission or other member
+IO failure is `member_unreadable`. Disappearance after the directory listing
+and before the first member `lstat` or open is `member_missing`. A listing
+that already lacks a required name stays `unexpected_member`. These member
+failures are `BundleError`, exit 69, and the message is only the fixed code.
+
+The check does not snapshot the whole staging directory, trust every
+ancestor, or freeze a member after that member's own check returns. It does
+not bound the bundle by total bytes or elapsed time. It does not change
+production admission, and success remains `verified=true` /
+`installable=false`.
 
 ## S6.12 release inputs
 

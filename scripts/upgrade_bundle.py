@@ -5,9 +5,13 @@ The manifest file itself must be a regular file owned by the current user.
 Verification does not follow a symlink at that final path component. The
 manifest does not contain its own digest. Verification accepts only the
 fixed v2 document: at most 65536 original bytes, strict UTF-8, no duplicate
-keys, and exactly schema, entry and files. Success still sets installable
-false. A bundle missing a required member, or containing an unexpected
-executable, symlink, or owner, is refused.
+keys, and exactly schema, entry and files. Each ordinary member is then
+opened once, without following its final component. That descriptor supplies
+the metadata, the current-UID and executable-bit checks, and a streamed
+SHA256 capped at the observed size plus one byte. The member chunk is not
+the manifest budget. Success still sets installable false. A bundle missing
+a required member, or containing an unexpected executable, symlink, owner,
+or a member whose path changes around the read, is refused.
 """
 import sys
 sys.dont_write_bytecode = True
@@ -44,6 +48,7 @@ REQUIRED = (
 SCHEMA = 'ags.upgrade-tool-bundle.v2'
 ENTRY = 'upgrade_host.py'
 _MANIFEST_BUDGET = 65536
+_MEMBER_CHUNK = 65536
 _MAX_MANIFEST_DEPTH = 2
 _MANIFEST_FIELDS = {'schema', 'entry', 'files'}
 
@@ -238,6 +243,111 @@ def _load_manifest(raw):
     return files
 
 
+def _member_owner_uid():
+    """UID compared with a member descriptor. Not an input, CLI, or environment override."""
+    return os.getuid()
+
+
+def _member_access_error(exc):
+    if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+        code = 'member_missing'
+    elif exc.errno in (errno.ELOOP, errno.EISDIR, errno.ENXIO):
+        code = 'member_type_rejected'
+    else:
+        code = 'member_unreadable'
+    raise BundleError(code) from None
+
+
+def _member_fstat(fd):
+    while True:
+        try:
+            return os.fstat(fd)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            _member_access_error(exc)
+
+
+def _open_member(path):
+    """Open the final component without following it. Never fall back to a following open."""
+    nofollow = getattr(os, 'O_NOFOLLOW', None)
+    nonblock = getattr(os, 'O_NONBLOCK', None)
+    if nofollow is None or nonblock is None:
+        raise BundleError('member_type_rejected')
+    flags = os.O_RDONLY | nofollow | nonblock
+    while True:
+        try:
+            return os.open(path, flags)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            _member_access_error(exc)
+
+
+def _hash_member_fd(fd, size):
+    """Stream SHA256 for the observed size, plus one byte so growth stops the read."""
+    digest = hashlib.sha256()
+    remaining = size
+    extra = True
+    while remaining > 0 or extra:
+        request = 1 if remaining == 0 else min(_MEMBER_CHUNK, remaining)
+        while True:
+            try:
+                chunk = os.read(fd, request)
+                break
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    continue
+                _member_access_error(exc)
+        if remaining == 0:
+            if chunk:
+                raise BundleError('member_changed')
+            break
+        if not chunk or len(chunk) > remaining:
+            raise BundleError('member_changed')
+        digest.update(chunk)
+        remaining -= len(chunk)
+    return digest.hexdigest()
+
+
+def _verify_member(path, digest, *, executable):
+    """Check one member and hash it from the same no-follow descriptor."""
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        _member_access_error(exc)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise BundleError('member_type_rejected')
+    fd = _open_member(path)
+    try:
+        opened = _member_fstat(fd)
+        if stat.S_ISLNK(opened.st_mode) or not stat.S_ISREG(opened.st_mode):
+            raise BundleError('member_type_rejected')
+        if _manifest_identity(opened) != _manifest_identity(info):
+            raise BundleError('member_changed')
+        if opened.st_uid != _member_owner_uid():
+            raise BundleError('owner_rejected')
+        if executable and stat.S_IMODE(opened.st_mode) & 0o111:
+            raise BundleError('unexpected_executable')
+        actual = _hash_member_fd(fd, opened.st_size)
+        after = _member_fstat(fd)
+        if _manifest_identity(after) != _manifest_identity(opened):
+            raise BundleError('member_changed')
+        try:
+            current = path.lstat()
+        except OSError:
+            raise BundleError('member_changed') from None
+        if _manifest_identity(current) != _manifest_identity(after):
+            raise BundleError('member_changed')
+        if actual != digest:
+            raise BundleError('digest_rejected')
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def verify(staging, *, executable=True):
     staging = Path(staging)
     raw = _read_manifest_bytes(staging / 'manifest.json', executable=executable)
@@ -246,14 +356,5 @@ def verify(staging, *, executable=True):
     if present != set(REQUIRED) | {'manifest.json'}:
         raise BundleError('unexpected_member')
     for name, digest in files.items():
-        path = staging / name
-        info = path.lstat()
-        if path.is_symlink() or not stat.S_ISREG(info.st_mode):
-            raise BundleError('member_type_rejected')
-        if info.st_uid != os.getuid():
-            raise BundleError('owner_rejected')
-        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-            raise BundleError('digest_rejected')
-        if executable and stat.S_IMODE(info.st_mode) & 0o111:
-            raise BundleError('unexpected_executable')
+        _verify_member(staging / name, digest, executable=executable)
     return {'verified': True, 'installable': False, 'manifest_sha256': hashlib.sha256(raw).hexdigest()}

@@ -32,12 +32,15 @@ unexpected programming errors remain errors rather than capability blockers.
 
 The package policy requires the same application revision and tree on
 both sides of the transaction. The tool bundle has a separate revision, tree
-and byte manifest. The offline staging manifest check,
+and byte manifest. The offline staging check,
 [upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-manifest),
-checks that file and its closed content. It does not admit production use.
-Tool revision and tree, the unchanged application revision, and recovery-asset
-binding remain separate facts. Production admission, Darwin entry, and
-`application_source_transition_not_admitted` stay refused. This permits
+checks the manifest file, its closed content, and each ordinary member
+through one no-follow descriptor
+([members](upgrade-provisioning.md#offline-staging-members)). It does not
+admit production use. Tool revision and tree, the unchanged application
+revision, and recovery-asset binding remain separate facts. Production
+admission, Darwin entry, and `application_source_transition_not_admitted`
+stay refused. This permits
 validating host tooling without introducing the mainline database migration
 or losing an already deployed CI hotfix.
 An exact-source candidate is not a Release and supplies no release pin.
@@ -145,9 +148,11 @@ Ordinary source CI does not run the launchd experiment. Set
 `AGS_ROUTEB_NATIVE=1` only for an explicitly authorized disposable label.
 That run is not a source-CI pass and does not authorize deployment.
 
-Staging manifest acceptance is the offline file and content check in
+Staging acceptance is the offline manifest and member-descriptor check in
 [upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-manifest).
-It is not a tool, application, or recovery binding.
+It is not a tool, application, or recovery binding, and it does not remove
+the production `native_full_closure_required` gate, the Darwin stage0
+refusal, or `application_source_transition_not_admitted`.
 
 Related pages: [runbook](routeb-runbook.md), [mini](routeb-runbook-mini.md),
 [backup and recovery](backup-recovery.md), [local upgrade](local-upgrade.md),

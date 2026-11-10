@@ -51,6 +51,11 @@ regular file owned by the current user, does not follow that final component
 if it is a symlink, and applies the fixed identity plus a 65536-byte
 original-byte budget before it checks members; see
 [upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-manifest).
+Each ordinary member is then opened without following its final component.
+The metadata and the member SHA256 come from that same descriptor, with a
+separate read chunk that does not reuse the manifest budget as a member-size
+cap; see
+[offline staging members](upgrade-provisioning.md#offline-staging-members).
 `executable=False` there skips only the staging executable-bit check. The user
 who builds a staging directory owns those files. That current-UID staging rule
 is not the runtime rule: a provisioned bundle and its ancestors must be
