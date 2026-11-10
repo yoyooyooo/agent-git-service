@@ -93,6 +93,11 @@ and namespace checks, and the kernel-authenticated fixed child must all hold.
 The catalog alone cannot remove a blocker. The full contract and actual
 acceptance boundaries are in the
 [interpreter authority design](../design/routeb-interpreter-authority.md).
+A fat or universal Mach-O file, including the byte-swapped `FAT_CIGAM` and
+`FAT_CIGAM_64` markers, is refused by that file check as
+`authority_fat_image_unsupported`. The check does not parse slices or admit
+a host slice. See the
+[Mach-O library inventory](../design/routeb-interpreter-authority.md#mach-o-library-inventory).
 
 Without that live authority, bootstrap activation, host execution and fixed
 manager stop/start calls refuse before their first effect. Managed `serve`
@@ -101,6 +106,8 @@ infer readiness from files. Bootstrap refusal exits 78. Read-only transaction
 `status` remains available. No CLI or environment flag overrides this check.
 Darwin entry remains refused pending its distinct platform authority and
 native acceptance. Production retains its separate full-acceptance gate.
+Refusing those file markers does not open Darwin entry, the production
+full-acceptance gate, or a source-CI native pass.
 
 This refusal prevents native effects. It does not claim that a Python process
 has verified its own imports before starting. A prepared interpreter, a

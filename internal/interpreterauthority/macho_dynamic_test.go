@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"debug/macho"
 	"encoding/binary"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -178,6 +179,189 @@ func TestMachOLoaderByteOrdersAndRawCommandSize(t *testing.T) {
 						t.Fatal("accepted malformed raw loader command")
 					}
 				})
+			}
+		})
+	}
+}
+
+func fatContainer(magic []byte, wide, swapped bool) []byte {
+	order := binary.ByteOrder(binary.BigEndian)
+	if swapped {
+		order = binary.LittleEndian
+	}
+	numeric := uint32(0xcafebabe)
+	entrySize := 20
+	if wide {
+		numeric = 0xcafebabf
+		entrySize = 32
+	}
+	raw := make([]byte, 128)
+	order.PutUint32(raw[:4], numeric)
+	order.PutUint32(raw[4:8], 2)
+	for index, cpu := range []uint32{0x0100000c, 0x01000007} {
+		entry := raw[8+index*entrySize:]
+		offset := 128 + index*32
+		order.PutUint32(entry, cpu)
+		if wide {
+			order.PutUint64(entry[8:], uint64(offset))
+			order.PutUint64(entry[16:], 32)
+			order.PutUint32(entry[24:], 3)
+		} else {
+			order.PutUint32(entry[8:], uint32(offset))
+			order.PutUint32(entry[12:], 32)
+			order.PutUint32(entry[16:], 3)
+		}
+		thin := machoFixture()
+		binary.LittleEndian.PutUint32(thin[4:], cpu)
+		raw = append(raw, thin...)
+	}
+	return raw
+}
+
+func hostileFatTail(magic []byte) []byte {
+	raw := bytes.Repeat([]byte{0xff}, 32)
+	copy(raw, magic)
+	return raw
+}
+
+func requireFatRefusal(t *testing.T, raw []byte, architecture string) {
+	t.Helper()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "container")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	image, native, err := inspectNative(path, architecture)
+	t.Logf("magic=%x architecture=%s native=%v inspect_error=%v", raw[:4], architecture, native, err)
+	if !native || err == nil || err.Error() != "authority_fat_image_unsupported" {
+		t.Errorf("unsupported fat signature escaped explicit refusal: native=%v error=%v image=%#v", native, err, image)
+	}
+}
+
+func requireFatInventoryRefusal(t *testing.T, raw []byte, external bool) {
+	t.Helper()
+	directory := t.TempDir()
+	executable := writeMachO(t, directory, "python", machoFixture())
+	container := writeMachO(t, directory, "container", raw)
+	document := Document{
+		Binding:      Binding{Platform: "darwin", Architecture: "arm64"},
+		Prefix:       Tree{Root: directory, Entries: []Entry{{Path: "python", Kind: "file"}}},
+		Executable:   "python",
+		NativeImages: []NativeImage{{Path: executable, Format: "macho", Needed: []string{}, RPath: []string{}, RunPath: []string{}, Resolution: map[string]string{}}},
+	}
+	if external {
+		document.External = []External{{Entry: Entry{Path: container, Kind: "file"}}}
+	} else {
+		document.Prefix.Entries = append(document.Prefix.Entries, Entry{Path: "container", Kind: "file"})
+	}
+	err := verifyNativeImages(document)
+	t.Logf("external=%v inventory_error=%v", external, err)
+	if err == nil || err.Error() != "authority_fat_image_unsupported" {
+		t.Errorf("native inventory accepted an omitted unsupported container: %v", err)
+	}
+}
+
+func requireFatCatalogRefusal(t *testing.T, raw []byte) {
+	t.Helper()
+	fixture := newFixture(t, false)
+	externalPath := filepath.Join(fixture.policy.boundary, "external-container")
+	assetPath := filepath.Join(fixture.policy.boundary, "recovery-copy")
+	for _, path := range []string{externalPath, assetPath} {
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture.catalog.External = []External{{
+		Entry: Entry{Path: externalPath, Kind: "file", Metadata: metadataFor(t, externalPath), File: &Content{SHA256: hashBytes(raw), Size: int64(len(raw))}},
+		Asset: &File{Path: assetPath, SHA256: hashBytes(raw), Size: int64(len(raw))},
+	}}
+	catalogJSON, err := json.Marshal(fixture.catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(catalogJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := verifyFiles(parsed, fixture.policy)
+	t.Logf("catalog_error=%v catalog_verified=%v native_execution_allowed=%v", err, evidence.CatalogVerified, evidence.NativeExecutionAllowed)
+	if err == nil || err.Error() != "authority_fat_image_unsupported" || evidence.CatalogVerified {
+		t.Errorf("complete offline catalog accepted an unsupported external container: error=%v verified=%v", err, evidence.CatalogVerified)
+	}
+	if evidence.NativeExecutionAllowed {
+		t.Fatal("offline fixture must never authorize native execution")
+	}
+}
+
+func TestFatMarkersRefuseWithoutSelectingHostSlice(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Fatal("fat refusal test must run without root")
+	}
+	for _, marker := range []struct {
+		name    string
+		magic   []byte
+		wide    bool
+		swapped bool
+	}{
+		{"FAT_MAGIC", []byte{0xca, 0xfe, 0xba, 0xbe}, false, false},
+		{"FAT_CIGAM", []byte{0xbe, 0xba, 0xfe, 0xca}, false, true},
+		{"FAT_MAGIC_64", []byte{0xca, 0xfe, 0xba, 0xbf}, true, false},
+		{"FAT_CIGAM_64", []byte{0xbf, 0xba, 0xfe, 0xca}, true, true},
+	} {
+		t.Run(marker.name, func(t *testing.T) {
+			container := fatContainer(marker.magic, marker.wide, marker.swapped)
+			if !bytes.Equal(container[:4], marker.magic) {
+				t.Fatalf("synthetic container magic = %x, want %x", container[:4], marker.magic)
+			}
+			for _, shape := range []struct {
+				name string
+				raw  []byte
+			}{
+				{"four_bytes", append([]byte{}, marker.magic...)},
+				{"container", container},
+				{"truncated", append(append([]byte{}, marker.magic...), 0x00, 0x00, 0x02)},
+				{"hostile_tail", hostileFatTail(marker.magic)},
+			} {
+				t.Run(shape.name, func(t *testing.T) {
+					for _, architecture := range []string{"arm64", "amd64"} {
+						requireFatRefusal(t, shape.raw, architecture)
+					}
+				})
+			}
+			t.Run("prefix_inventory", func(t *testing.T) {
+				requireFatInventoryRefusal(t, container, false)
+			})
+			t.Run("external_inventory", func(t *testing.T) {
+				requireFatInventoryRefusal(t, container, true)
+			})
+			t.Run("offline_catalog", func(t *testing.T) {
+				requireFatCatalogRefusal(t, container)
+			})
+		})
+	}
+}
+
+func TestShortAndOrdinaryFilesRemainNonNative(t *testing.T) {
+	directory := t.TempDir()
+	for _, item := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"empty", nil},
+		{"one_byte", []byte{0xca}},
+		{"two_bytes", []byte{0xca, 0xfe}},
+		{"three_bytes", []byte{0xca, 0xfe, 0xba}},
+		{"ordinary_text", []byte("print('not native')\n")},
+		{"unrelated_four_bytes", []byte{0x00, 0x01, 0x02, 0x03}},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			path := filepath.Join(directory, item.name)
+			if err := os.WriteFile(path, item.raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			image, native, err := inspectNative(path, "arm64")
+			if native || err != nil || image.format != "" {
+				t.Fatalf("short or ordinary file became native: native=%v error=%v image=%#v", native, err, image)
 			}
 		})
 	}
