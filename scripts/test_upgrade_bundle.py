@@ -1046,7 +1046,11 @@ class MemberFileTests(unittest.TestCase):
         self.assertEqual(identity, (
             info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
             info.st_mtime_ns, info.st_ctime_ns))
-        self.assertNotIn(info.st_atime_ns, identity)
+        self.assertEqual(len(identity), 7)
+        # A fresh file can stamp atime equal to mtime or ctime. That shared
+        # number is not an atime field in the identity.
+        if info.st_atime_ns not in (info.st_mtime_ns, info.st_ctime_ns):
+            self.assertNotIn(info.st_atime_ns, identity)
         self._expect(staging, None)
 
     def _assert_probe(self, name, expected, executable, action, expect_hook):
