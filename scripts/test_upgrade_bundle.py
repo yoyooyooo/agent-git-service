@@ -1322,8 +1322,9 @@ class MemberFileTests(unittest.TestCase):
             return os.path.normpath(os.fspath(path)) == staging_path
 
         def drop():
-            if state['mutation'] is not None:
+            if state.get('dropped'):
                 return
+            state['dropped'] = True
             target.unlink()
             state['mutation'] = snap(root)
 
