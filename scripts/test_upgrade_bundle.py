@@ -1720,5 +1720,1138 @@ class MemberFileTests(unittest.TestCase):
             view = view[wrote:]
 
 
+def _build_source_fifo(mode, source, staging, name):
+    """Subprocess entry. A source fifo must be refused without waiting for a writer."""
+    import upgrade_bundle as bundle
+    source, staging = Path(source), Path(staging)
+    target = source / name
+    state = {'done': False}
+    if mode == 'static':
+        os.rename(target, source.parent / 'fifo-static-held')
+        os.mkfifo(target, 0o600)
+    elif mode == 'race':
+        real_open, real_path_open = os.open, Path.open
+
+        def swap(path):
+            if state['done'] or isinstance(path, int):
+                return
+            if os.path.normpath(os.fspath(path)) != str(target):
+                return
+            state['done'] = True
+            os.rename(target, source.parent / 'fifo-race-held')
+            os.mkfifo(target, 0o600)
+
+        def os_open(path, flags, *args, **kwargs):
+            swap(path)
+            return real_open(path, flags, *args, **kwargs)
+
+        def path_open(path, *args, **kwargs):
+            swap(path)
+            return real_path_open(path, *args, **kwargs)
+
+        os.open, Path.open = os_open, path_open
+    code = None
+    try:
+        bundle.build(source, staging)
+    except bundle.BundleError as error:
+        code = error.code if error.exit_code == 69 and str(error) == error.code else 'bad-error'
+    except OSError as error:
+        code = type(error).__name__
+    if mode == 'race' and not state['done']:
+        sys.stdout.write('hook-not-used\n')
+        return 4
+    if code == 'member_missing' and not (staging / 'manifest.json').exists():
+        return 0
+    sys.stdout.write((code or 'accepted') + '\n')
+    return 2
+
+
+class BuilderSourceTests(unittest.TestCase):
+    """Builder source descriptor contract. Fixtures are inert and never executed.
+
+    Race and IO seams call the real open, read, and fstat. Injected errno values
+    are error-mapping tests, not hardware faults.
+    """
+
+    def setUp(self):
+        import upgrade_bundle as bundle
+        self.bundle = bundle
+        actual = Path(bundle.__file__).resolve()
+        expected = (HERE / 'upgrade_bundle.py').resolve()
+        print(f'upgrade_bundle={actual}', file=sys.stderr)
+        self.assertEqual(actual, expected, 'refusing to test an imported module outside this tree')
+        self.assertNotEqual(os.getuid(), 0)
+        self.tmp = tempfile.TemporaryDirectory(dir=Path.home(), prefix='bundle-source-')
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self._relax_tree)
+        self.root = Path(self.tmp.name).resolve()
+        self.root.chmod(0o700)
+
+    def test_recorded_builder_source_contract(self):
+        """Eight source-window failures plus four controls. Hooks call the real open."""
+        cases = (
+            ('regular', 'none', None, False),
+            ('source-executable', 'executable-source', None, False),
+            ('static-symlink', 'static-symlink', 'member_missing', False),
+            ('unreadable-source', 'unreadable', 'source_unreadable', False),
+            ('symlink-before-read', 'symlink-before', 'member_missing', False),
+            ('regular-before-read', 'regular-before', 'source_changed', False),
+            ('path-after-open', 'path-after', 'source_changed', False),
+            ('chmod-after-open', 'chmod-after', 'source_changed', False),
+            ('truncate-after-open', 'truncate-after', 'source_changed', False),
+            ('fallback-regular', 'none', None, True),
+            ('fallback-symlink-before-read', 'symlink-before', 'member_missing', True),
+            ('dangling-primary-with-fallback', 'dangling-primary', 'member_missing', False),
+        )
+        for label, action, expected, fallback in cases:
+            with self.subTest(case=label):
+                self._recorded(label, action, expected, fallback)
+
+    def test_source_modes_hardlink_and_stable_manifest(self):
+        payload = b'STABLE SOURCE BYTES\n'
+        hashes = {}
+        for mode in (0o600, 0o644, 0o700, 0o755):
+            with self.subTest(mode=oct(mode)):
+                source = self._fill('mode-' + oct(mode)[2:])
+                target = source / self.bundle.REQUIRED[0]
+                target.write_bytes(payload)
+                target.chmod(mode)
+                before = self._identity(target)
+                staging = self.root / ('mode-staging-' + oct(mode)[2:])
+                built = self._build_ok(source, staging)
+                self.assertEqual(self._identity(target), before)
+                self.assertEqual(stat.S_IMODE(target.lstat().st_mode), mode)
+                staged = staging / self.bundle.REQUIRED[0]
+                self.assertEqual(staged.read_bytes(), payload)
+                self.assertEqual(stat.S_IMODE(staged.lstat().st_mode), 0o644)
+                self.assertFalse(stat.S_IMODE(staged.lstat().st_mode) & 0o111)
+                hashes[mode] = built['manifest_sha256']
+        self.assertEqual(len(set(hashes.values())), 1)
+
+        source = self._fill('hardlink')
+        target = source / self.bundle.REQUIRED[0]
+        payload = target.read_bytes()
+        linked = self.root / 'hardlink-bytes'
+        linked.write_bytes(payload)
+        linked.chmod(0o644)
+        target.unlink()
+        os.link(linked, target)
+        self.assertGreaterEqual(target.lstat().st_nlink, 2)
+        before = self._identity(linked)
+        staging = self.root / 'hardlink-staging'
+        self._build_ok(source, staging)
+        self.assertEqual((staging / self.bundle.REQUIRED[0]).read_bytes(), payload)
+        self.assertEqual(stat.S_IMODE((staging / self.bundle.REQUIRED[0]).lstat().st_mode), 0o644)
+        self.assertEqual(self._identity(linked), before)
+        self.assertGreaterEqual(target.lstat().st_nlink, 2)
+
+    def test_static_source_types_refuse_without_following(self):
+        kinds = ('absolute', 'relative', 'internal', 'external', 'dangling', 'chain', 'directory')
+        for kind in kinds:
+            with self.subTest(kind=kind):
+                source = self._fill('static-' + kind)
+                target = source / self.bundle.REQUIRED[0]
+                outside = self._outside('static-' + kind)
+                raw = target.read_bytes()
+                outside.write_bytes(raw)
+                self._make_nonregular(target, kind, outside)
+                opened = []
+                real_open, real_path_open = os.open, Path.open
+
+                def os_open(path, flags, *args, **kwargs):
+                    if not isinstance(path, int):
+                        opened.append(os.path.normpath(os.fspath(path)))
+                    return real_open(path, flags, *args, **kwargs)
+
+                def path_open(path, *args, **kwargs):
+                    opened.append(os.path.normpath(os.fspath(path)))
+                    return real_path_open(path, *args, **kwargs)
+
+                before = self._identity(outside)
+                os.open, Path.open = os_open, path_open
+                try:
+                    self._refuse(source, self.root / ('static-staging-' + kind), 'member_missing')
+                finally:
+                    os.open, Path.open = real_open, real_path_open
+                self.assertNotIn(str(outside), opened)
+                self.assertEqual(outside.read_bytes(), raw)
+                self.assertEqual(self._identity(outside), before)
+
+    def test_fifo_source_does_not_block(self):
+        for mode in ('static', 'race'):
+            with self.subTest(mode=mode):
+                source = self._fill('fifo-' + mode)
+                staging = self.root / ('fifo-staging-' + mode)
+                name = self.bundle.REQUIRED[0]
+                held_name = 'fifo-static-held' if mode == 'static' else 'fifo-race-held'
+                original = (source / name).read_bytes()
+                self._fifo_child(mode, source, staging, name)
+                held = self.root / held_name
+                self.assertEqual(held.read_bytes(), original)
+                self.assertTrue(stat.S_ISFIFO((source / name).lstat().st_mode))
+                self.assertFalse((staging / 'manifest.json').exists())
+
+    def test_fallback_selection_rules(self):
+        primary_bytes = b'PRIMARY RELEASE SOURCE\n'
+        fallback_bytes = b'FALLBACK RELEASE SOURCE\n'
+        source = self._fill('fallback-primary-wins')
+        self._write_fallback(source, fallback_bytes)
+        primary = source / 'release-source.json'
+        primary.write_bytes(primary_bytes)
+        primary.chmod(0o600)
+        staging = self.root / 'fallback-primary-staging'
+        self._build_ok(source, staging)
+        self.assertEqual((staging / 'release-source.json').read_bytes(), primary_bytes)
+
+        source = self._fill('fallback-missing-primary')
+        primary = source / 'release-source.json'
+        primary.unlink()
+        fallback = self._write_fallback(source, fallback_bytes)
+        before = self._identity(fallback)
+        staging = self.root / 'fallback-missing-staging'
+        self._build_ok(source, staging)
+        self.assertEqual((staging / 'release-source.json').read_bytes(), fallback_bytes)
+        self.assertEqual(self._identity(fallback), before)
+
+        source = self._fill('fallback-dangling')
+        self._write_fallback(source, fallback_bytes)
+        primary = source / 'release-source.json'
+        primary.unlink()
+        primary.symlink_to('absent-primary-target')
+        self._refuse(source, self.root / 'fallback-dangling-staging', 'member_missing')
+        self.assertEqual(fallback.read_bytes(), fallback_bytes)
+
+        source = self._fill('fallback-unreadable-primary')
+        self._write_fallback(source, fallback_bytes)
+        primary = source / 'release-source.json'
+        primary.chmod(0)
+        try:
+            self._refuse(source, self.root / 'fallback-unreadable-staging', 'source_unreadable')
+        finally:
+            primary.chmod(0o600)
+        self.assertEqual(fallback.read_bytes(), fallback_bytes)
+
+        source = self._fill('fallback-directory-primary')
+        self._write_fallback(source, fallback_bytes)
+        primary = source / 'release-source.json'
+        primary.unlink()
+        primary.mkdir(mode=0o700)
+        self._refuse(source, self.root / 'fallback-directory-staging', 'member_missing')
+
+        source = self._fill('fallback-bad-type')
+        primary = source / 'release-source.json'
+        primary.unlink()
+        fallback = self._write_fallback(source, fallback_bytes)
+        fallback.unlink()
+        fallback.symlink_to(self.root / 'absent-fallback')
+        self._refuse(source, self.root / 'fallback-bad-type-staging', 'member_missing')
+
+        source = self._fill('fallback-unreadable')
+        primary = source / 'release-source.json'
+        primary.unlink()
+        fallback = self._write_fallback(source, fallback_bytes)
+        fallback.chmod(0)
+        try:
+            self._refuse(source, self.root / 'fallback-unreadable-file-staging', 'source_unreadable')
+        finally:
+            fallback.chmod(0o600)
+
+        source = self._fill('fallback-absent')
+        primary = source / 'release-source.json'
+        primary.unlink()
+        stale = source.parent / 'fork' / 'release-source.json'
+        if stale.is_symlink() or stale.exists():
+            stale.unlink()
+        self._refuse(source, self.root / 'fallback-absent-staging', 'member_missing')
+
+        source = self._fill('selected-primary-disappears')
+        fallback = self._write_fallback(source, fallback_bytes)
+        self._replace_on_open(source, source / self.bundle.REQUIRED[0], 'disappear', 'member_missing',
+                              forbidden=fallback)
+        source = self._fill('selected-fallback-disappears')
+        primary = source / 'release-source.json'
+        primary.unlink()
+        fallback = self._write_fallback(source, fallback_bytes)
+        self._replace_on_open(source, fallback, 'disappear', 'member_missing', forbidden=primary)
+
+    def test_replacement_before_open_refuses_type_and_identity(self):
+        for kind in ('absolute', 'relative', 'internal', 'external', 'dangling', 'chain', 'directory', 'same-bytes'):
+            expected = 'source_changed' if kind == 'same-bytes' else 'member_missing'
+            with self.subTest(kind=kind):
+                source = self._fill('before-' + kind)
+                target = source / self.bundle.REQUIRED[0]
+                self._replace_on_open(source, target, kind, expected)
+
+    def test_changes_after_open_and_during_read(self):
+        source = self._fill('after-path')
+        self._replace_on_open(source, source / self.bundle.REQUIRED[0], 'path-after', 'source_changed')
+        source = self._fill('after-unlink')
+        self._replace_on_open(source, source / self.bundle.REQUIRED[0], 'unlink-after', 'source_changed')
+        for kind in ('rewrite', 'truncate', 'chmod', 'grow'):
+            with self.subTest(kind=kind):
+                source = self._fill('during-' + kind)
+                self._during_read(source, kind)
+
+    def test_streamed_copy_bounds_reads_and_matches_bytes(self):
+        sizes = (0, 65535, 65536, 65537, 2 * 1024 * 1024)
+        marker = bytes((0, 255, 10, 13))
+        for size in sizes:
+            with self.subTest(size=size):
+                source = self._fill('stream-' + str(size))
+                payload = (marker * ((size // len(marker)) + 1))[:size]
+                self.assertEqual(len(payload), size)
+                if size:
+                    self.assertIn(0, payload)
+                    self.assertIn(255, payload)
+                target = source / self.bundle.REQUIRED[0]
+                target.write_bytes(payload)
+                target.chmod(0o600)
+                before = self._identity(target)
+                staging = self.root / ('stream-staging-' + str(size))
+                observed = self._observe_source_io(source, staging, target, size)
+                built = observed['outcome']
+                self.assertEqual(self._identity(target), before)
+                staged = staging / self.bundle.REQUIRED[0]
+                self.assertEqual(staged.read_bytes(), payload)
+                self.assertEqual(staged.stat().st_size, size)
+                self.assertEqual(stat.S_IMODE(staged.lstat().st_mode), 0o644)
+                manifest = json.loads((staging / 'manifest.json').read_bytes())
+                self.assertEqual(manifest['files'][self.bundle.REQUIRED[0]], hashlib.sha256(payload).hexdigest())
+                self._assert_verified(staging, built)
+                self.assertFalse(observed['path_open'])
+                self.assertEqual(observed['opens'], 1)
+                self.assertGreaterEqual(observed['fstats'], 2)
+                self.assertEqual(observed['flags'], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                self.assertTrue(observed['requests'])
+                self.assertLessEqual(max(observed['requests']), self.bundle._MEMBER_CHUNK)
+                self.assertLessEqual(observed['read'], size + 1)
+                self.assertEqual(observed['read'], size)
+                self.assertIn(1, observed['requests'])
+                self._assert_closed(observed['closed'])
+
+    def test_short_read_and_eintr_continue(self):
+        source = self._fill('short-read')
+        self._short_read(source)
+        for where in ('open', 'read', 'fstat'):
+            with self.subTest(where=where):
+                source = self._fill('eintr-' + where)
+                self._eintr(source, where)
+
+    def test_missing_open_flags_do_not_follow(self):
+        for flag, symlink in (('O_NOFOLLOW', True), ('O_NOFOLLOW', False), ('O_NONBLOCK', True), ('O_NONBLOCK', False)):
+            with self.subTest(flag=flag, symlink=symlink):
+                source = self._fill('flag-' + flag + '-' + str(symlink).lower())
+                target = source / self.bundle.REQUIRED[0]
+                outside = self._outside('flag-' + flag + '-' + str(symlink).lower())
+                outside.write_bytes(b'OUTSIDE FLAG BYTES\n')
+                if symlink:
+                    target.unlink()
+                    target.symlink_to(outside)
+                self._hide_flag(source, target, outside, flag)
+
+    def test_source_io_error_mapping_is_not_a_hardware_fault(self):
+        """Injected errno values cover the mapping. They are not hardware failures."""
+        self._inject_open(errno.ENOENT, 'member_missing')
+        self._inject_open(errno.ENOTDIR, 'member_missing')
+        self._inject_open(errno.ELOOP, 'member_missing')
+        self._inject_open(errno.EISDIR, 'member_missing')
+        self._inject_open(errno.ENXIO, 'member_missing')
+        self._inject_open(errno.EACCES, 'source_unreadable')
+        self._inject_open(errno.EIO, 'source_unreadable')
+        self._inject_lstat(errno.ENOTDIR, 'member_missing', release=False)
+        self._inject_lstat(errno.EACCES, 'source_unreadable', release=True)
+        self._inject_lstat(errno.ENOENT, 'member_missing', release=False)
+        self._inject_member_io('read', errno.EIO, 'source_unreadable')
+        self._inject_member_io('read', errno.EACCES, 'source_unreadable')
+        self._inject_member_io('fstat', errno.EIO, 'source_unreadable')
+
+    def test_programming_error_closes_source_fd(self):
+        source = self._fill('programming-error')
+        target = source / self.bundle.REQUIRED[0]
+        real_open, real_fstat, real_close = os.open, os.fstat, os.close
+        state = {'fds': set(), 'done': False, 'closed': []}
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if self._same(path, target):
+                state['fds'].add(fd)
+            return fd
+
+        def os_fstat(fd):
+            if fd in state['fds'] and not state['done']:
+                state['done'] = True
+                raise RuntimeError('programming-error')
+            return real_fstat(fd)
+
+        def os_close(fd):
+            if fd in state['fds']:
+                state['closed'].append(fd)
+            return real_close(fd)
+
+        os.open, os.fstat, os.close = os_open, os_fstat, os_close
+        fds = self._fds()
+        try:
+            with self.assertRaises(RuntimeError) as caught:
+                self.bundle.build(source, self.root / 'programming-staging')
+        finally:
+            os.open, os.fstat, os.close = real_open, real_fstat, real_close
+            self.assertEqual(self._fds(), fds)
+        self.assertTrue(state['done'])
+        self.assertEqual(str(caught.exception), 'programming-error')
+        self._assert_closed(state['closed'])
+        self.assertFalse((self.root / 'programming-staging' / 'manifest.json').exists())
+
+    def test_destination_write_failure_is_not_source_unreadable(self):
+        """Destination seam only. This is not a source-device failure and must not change source selection."""
+        source = self._fill('dest-write')
+        primary = source / 'release-source.json'
+        primary_bytes = b'PRIMARY DEST FAILURE\n'
+        fallback_bytes = b'FALLBACK DEST FAILURE\n'
+        primary.write_bytes(primary_bytes)
+        primary.chmod(0o600)
+        fallback = self._write_fallback(source, fallback_bytes)
+        before = self._identity(primary)
+        fallback_before = self._identity(fallback)
+        dest = self.root / 'dest-write-staging' / 'release-source.json'
+        real_open, real_write = os.open, os.write
+        state = {'dest': set(), 'injected': False, 'opened': []}
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if not isinstance(path, int):
+                state['opened'].append(os.path.normpath(os.fspath(path)))
+                if self._same(path, dest):
+                    state['dest'].add(fd)
+            return fd
+
+        def os_write(fd, data):
+            if fd in state['dest'] and not state['injected']:
+                state['injected'] = True
+                raise OSError(errno.EIO, 'injected destination seam')
+            return real_write(fd, data)
+
+        os.open, os.write = os_open, os_write
+        fds = self._fds()
+        try:
+            with self.assertRaises(OSError) as caught:
+                self.bundle.build(source, self.root / 'dest-write-staging')
+        finally:
+            os.open, os.write = real_open, real_write
+            self.assertEqual(self._fds(), fds)
+        self.assertTrue(state['injected'])
+        self.assertEqual(caught.exception.errno, errno.EIO)
+        self.assertFalse(isinstance(caught.exception, self.bundle.BundleError))
+        self.assertNotEqual(getattr(caught.exception, 'code', None), 'source_unreadable')
+        self.assertNotIn(str(fallback), state['opened'])
+        self.assertFalse((self.root / 'dest-write-staging' / 'manifest.json').exists())
+        self.assertEqual(self._identity(primary), before)
+        self.assertEqual(self._identity(fallback), fallback_before)
+        self.assertEqual(fallback.read_bytes(), fallback_bytes)
+
+    def test_refusal_does_not_publish_manifest_or_touch_sentinels(self):
+        sentinel = self.root / 'sentinel'
+        sentinel.write_bytes(b'SENTINEL\n')
+        sentinel.chmod(0o600)
+        outside = self._outside('sentinel-case')
+        outside.write_bytes(b'OUTSIDE SENTINEL\n')
+        before = (self._identity(sentinel), self._identity(outside))
+        source = self._fill('refusal-partial')
+        target = source / self.bundle.REQUIRED[1]
+        raw = target.read_bytes()
+        target.unlink()
+        target.symlink_to('absent-second-member')
+        source_before = self._tree_identity(source)
+        staging = self.root / 'refusal-partial-staging'
+        self._refuse(source, staging, 'member_missing')
+        self.assertTrue((staging / self.bundle.REQUIRED[0]).is_file())
+        self.assertFalse((staging / 'manifest.json').exists())
+        with self.assertRaises(self.bundle.BundleError):
+            self.bundle.verify(staging)
+        self.assertEqual(self._tree_identity(source), source_before)
+        self.assertEqual((self._identity(sentinel), self._identity(outside)), before)
+        self.assertEqual(sentinel.read_bytes(), b'SENTINEL\n')
+        self.assertEqual(outside.read_bytes(), b'OUTSIDE SENTINEL\n')
+        self.assertNotEqual(raw, b'')
+
+    def test_existing_staging_is_not_reused(self):
+        source = self._fill('staging-exists')
+        staging = self.root / 'staging-exists-dir'
+        built = self._build_ok(source, staging)
+        manifest = (staging / 'manifest.json').read_bytes()
+        with self.assertRaises(self.bundle.BundleError) as caught:
+            self.bundle.build(source, staging)
+        self.assertEqual(caught.exception.code, 'staging_exists')
+        self.assertEqual(caught.exception.exit_code, 69)
+        self.assertEqual(str(caught.exception), 'staging_exists')
+        self.assertEqual((staging / 'manifest.json').read_bytes(), manifest)
+        self.assertEqual(hashlib.sha256(manifest).hexdigest(), built['manifest_sha256'])
+
+    def _recorded(self, label, action, expected, fallback):
+        root = self.root / label
+        root.mkdir(mode=0o700)
+        source = root / 'source'
+        self._fill_at(source)
+        name = 'release-source.json' if fallback or action == 'dangling-primary' else self.bundle.REQUIRED[0]
+        primary = source / name
+        target = primary
+        original = primary.read_bytes()
+        outside = root / 'synthetic-alternate'
+        replacement = b'SYNTHETIC ALTERNATE BYTES\n'
+        outside.write_bytes(replacement)
+        outside.chmod(0o600)
+        if fallback or action == 'dangling-primary':
+            fork = root / 'fork'
+            fork.mkdir(mode=0o700)
+            target = fork / name
+            target.write_bytes(original)
+            target.chmod(0o600)
+            primary.rename(root / 'held-primary')
+            if action == 'dangling-primary':
+                primary.symlink_to('absent-synthetic-target')
+        if action == 'static-symlink':
+            target.rename(root / 'held-static')
+            target.symlink_to(outside)
+        elif action == 'unreadable':
+            target.chmod(0)
+        elif action == 'executable-source':
+            target.chmod(0o700)
+        before = self._identity(target)
+        outside_before = self._identity(outside)
+        state = {'hook_count': 0, 'injected': None}
+        real_path_open, real_open = Path.open, os.open
+        raced = action in ('symlink-before', 'regular-before', 'path-after', 'chmod-after', 'truncate-after')
+
+        def mutate():
+            state['hook_count'] += 1
+            if action == 'symlink-before':
+                target.rename(root / 'held-before')
+                target.symlink_to(outside)
+            elif action in ('regular-before', 'path-after'):
+                target.rename(root / 'held-replaced')
+                target.write_bytes(original)
+                target.chmod(0o600)
+            elif action == 'chmod-after':
+                target.chmod(0o700)
+            elif action == 'truncate-after':
+                with real_path_open(target, 'wb') as output:
+                    output.write(replacement)
+            else:
+                raise AssertionError(action)
+            state['injected'] = self._identity(target)
+
+        def selected(path):
+            return not isinstance(path, int) and os.path.normpath(os.fspath(path)) == str(target)
+
+        def around(open_fn, path, *args, **kwargs):
+            hit = selected(path) and state['hook_count'] == 0 and raced
+            if hit and action.endswith('-before'):
+                mutate()
+            opened = open_fn(path, *args, **kwargs)
+            if hit and action.endswith('-after'):
+                mutate()
+            return opened
+
+        def path_open(path, *args, **kwargs):
+            return around(real_path_open, path, *args, **kwargs)
+
+        def os_open(path, *args, **kwargs):
+            return around(real_open, path, *args, **kwargs)
+
+        staging = root / 'staging'
+        Path.open, os.open = path_open, os_open
+        try:
+            try:
+                built = self.bundle.build(source, staging)
+            except self.bundle.BundleError as exc:
+                outcome = ('BundleError', exc.code, exc.exit_code, str(exc), exc.__cause__)
+            except OSError as exc:
+                outcome = (type(exc).__name__, getattr(exc, 'errno', None))
+            else:
+                verified = self.bundle.verify(staging)
+                copied = (staging / name).read_bytes()
+                outcome = ('success', verified['verified'], verified['installable'],
+                           verified['manifest_sha256'] == built['manifest_sha256'],
+                           copied == original, copied == replacement,
+                           oct(stat.S_IMODE((staging / name).lstat().st_mode)))
+            self.assertEqual(self._identity(target), state['injected'] or before)
+            self.assertEqual(self._identity(outside), outside_before)
+        finally:
+            Path.open, os.open = real_path_open, real_open
+            if action == 'unreadable':
+                target.chmod(0o600)
+        self.assertEqual(state['hook_count'], 1 if raced else 0)
+        self.assertEqual(outside.read_bytes(), replacement)
+        if expected is None:
+            self.assertEqual(outcome, ('success', True, False, True, True, False, '0o644'), outcome)
+        else:
+            self.assertEqual(outcome, ('BundleError', expected, 69, expected, None), outcome)
+            self.assertFalse((staging / 'manifest.json').exists())
+            staged_member = staging / name
+            if staged_member.exists() and action in ('symlink-before', 'truncate-after'):
+                self.assertNotEqual(staged_member.read_bytes(), replacement)
+
+    def _replace_on_open(self, source, target, kind, expected, forbidden=None):
+        original = target.read_bytes() if target.is_symlink() is False and target.is_file() else b''
+        if kind == 'disappear':
+            original = target.read_bytes()
+        outside = self._outside(source.name + '-' + kind)
+        outside.write_bytes(b'EXTERNAL REPLACEMENT\n')
+        state = {'done': False, 'opened': [], 'closed': [], 'fds': set()}
+        real_open, real_close = os.open, os.close
+
+        def mutate():
+            state['done'] = True
+            if kind == 'disappear':
+                target.rename(self.root / (source.name + '-held'))
+                return
+            if kind == 'path-after':
+                target.rename(self.root / (source.name + '-held'))
+                target.write_bytes(original)
+                target.chmod(0o600)
+                return
+            if kind == 'unlink-after':
+                target.rename(self.root / (source.name + '-held'))
+                return
+            self._swap_nonregular(target, kind, outside, original)
+
+        def os_open(path, flags, *args, **kwargs):
+            hit = not state['done'] and not isinstance(path, int) and self._same(path, target)
+            if hit and kind not in ('path-after', 'unlink-after'):
+                mutate()
+            fd = real_open(path, flags, *args, **kwargs)
+            if not isinstance(path, int):
+                state['opened'].append(os.path.normpath(os.fspath(path)))
+                if self._same(path, target):
+                    state['fds'].add(fd)
+            if hit and kind in ('path-after', 'unlink-after'):
+                mutate()
+            return fd
+
+        def os_close(fd):
+            if fd in state['fds']:
+                state['closed'].append(fd)
+            return real_close(fd)
+
+        os.open, os.close = os_open, os_close
+        try:
+            self._refuse(source, self.root / (source.name + '-staging'), expected)
+        finally:
+            os.open, os.close = real_open, real_close
+        self.assertTrue(state['done'])
+        if kind == 'same-bytes':
+            held = self.root / (source.name + '-held')
+            self.assertEqual(held.read_bytes(), target.read_bytes())
+            self.assertNotEqual(held.lstat().st_ino, target.lstat().st_ino)
+        if state['closed']:
+            self._assert_closed(state['closed'])
+        if forbidden is not None:
+            self.assertNotIn(str(forbidden), state['opened'])
+
+    def _during_read(self, source, kind):
+        target = source / self.bundle.REQUIRED[0]
+        original = target.read_bytes()
+        inode = target.lstat().st_ino
+        state = {'done': False, 'read': 0, 'requests': [], 'fds': set(), 'closed': [], 'flags': 0, 'fstats': 0}
+        real_open, real_read, real_close, real_fstat = os.open, os.read, os.close, os.fstat
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if self._same(path, target):
+                state['fds'].add(fd)
+                state['flags'] = flags
+            return fd
+
+        def os_close(fd):
+            if fd in state['fds']:
+                state['closed'].append(fd)
+                state['fds'].discard(fd)
+            return real_close(fd)
+
+        def mutate():
+            if kind == 'rewrite':
+                writer = real_open(target, os.O_RDWR | os.O_NOFOLLOW)
+                try:
+                    self._write_all(writer, b'X' * len(original))
+                finally:
+                    real_close(writer)
+            elif kind == 'truncate':
+                writer = real_open(target, os.O_RDWR | os.O_NOFOLLOW)
+                try:
+                    os.ftruncate(writer, 0)
+                finally:
+                    real_close(writer)
+            elif kind == 'chmod':
+                os.chmod(target, 0o700)
+            else:
+                writer = real_open(target, os.O_RDWR | os.O_NOFOLLOW)
+                try:
+                    os.lseek(writer, 0, os.SEEK_END)
+                    self._write_all(writer, b'Y' * (1024 * 1024))
+                finally:
+                    real_close(writer)
+
+        def os_read(fd, size):
+            data = real_read(fd, size)
+            if fd in state['fds']:
+                state['requests'].append(size)
+                if not state['done']:
+                    state['done'] = True
+                    mutate()
+                state['read'] += len(data)
+            return data
+
+        def os_fstat(fd):
+            if fd in state['fds']:
+                state['fstats'] += 1
+            return real_fstat(fd)
+
+        os.open, os.read, os.close, os.fstat = os_open, os_read, os_close, os_fstat
+        fds = self._fds()
+        try:
+            self._refuse(source, self.root / (source.name + '-staging'), 'source_changed')
+        finally:
+            os.open, os.read, os.close, os.fstat = real_open, real_read, real_close, real_fstat
+            self.assertEqual(self._fds(), fds)
+        self.assertTrue(state['done'])
+        self.assertTrue(state['flags'] & os.O_NOFOLLOW)
+        self.assertTrue(state['flags'] & os.O_NONBLOCK)
+        self.assertTrue(state['requests'])
+        self.assertLessEqual(max(state['requests']), self.bundle._MEMBER_CHUNK)
+        self.assertLessEqual(state['read'], len(original) + 1)
+        self.assertGreaterEqual(state['fstats'], 1)
+        self._assert_closed(state['closed'])
+        self.assertEqual(target.lstat().st_ino, inode)
+        if kind == 'grow':
+            self.assertEqual(state['read'], len(original) + 1)
+            self.assertEqual(target.stat().st_size, len(original) + 1024 * 1024)
+        elif kind == 'rewrite':
+            self.assertEqual(target.read_bytes(), b'X' * len(original))
+        elif kind == 'truncate':
+            self.assertEqual(target.stat().st_size, 0)
+        else:
+            self.assertTrue(stat.S_IMODE(target.lstat().st_mode) & 0o111)
+
+    def _observe_source_io(self, source, staging, target, size):
+        state = {'read': 0, 'requests': [], 'flags': 0, 'path_open': False, 'fds': set(),
+                 'closed': [], 'opens': 0, 'fstats': 0, 'outcome': None}
+        real_open, real_read, real_close, real_fstat, real_path_open = os.open, os.read, os.close, os.fstat, Path.open
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if self._same(path, target):
+                state['fds'].add(fd)
+                state['flags'] = flags
+                state['opens'] += 1
+            return fd
+
+        def os_close(fd):
+            if fd in state['fds']:
+                state['closed'].append(fd)
+                state['fds'].discard(fd)
+            return real_close(fd)
+
+        def os_read(fd, request):
+            if fd in state['fds']:
+                state['requests'].append(request)
+            data = real_read(fd, request)
+            if fd in state['fds']:
+                state['read'] += len(data)
+            return data
+
+        def os_fstat(fd):
+            if fd in state['fds']:
+                state['fstats'] += 1
+            return real_fstat(fd)
+
+        def path_open(path, *args, **kwargs):
+            if self._same(path, target):
+                state['path_open'] = True
+            return real_path_open(path, *args, **kwargs)
+
+        os.open, os.read, os.close, os.fstat, Path.open = os_open, os_read, os_close, os_fstat, path_open
+        fds = self._fds()
+        try:
+            try:
+                state['outcome'] = self.bundle.build(source, staging)
+            except self.bundle.BundleError as error:
+                state['outcome'] = error
+        finally:
+            os.open, os.read, os.close, os.fstat, Path.open = real_open, real_read, real_close, real_fstat, real_path_open
+            self.assertEqual(self._fds(), fds)
+        return state
+
+    def _short_read(self, source):
+        target = source / self.bundle.REQUIRED[0]
+        payload = target.read_bytes()
+        state = {'fds': set(), 'short': False, 'closed': []}
+        real_open, real_read, real_close = os.open, os.read, os.close
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if self._same(path, target):
+                state['fds'].add(fd)
+            return fd
+
+        def os_read(fd, size):
+            if fd in state['fds'] and not state['short'] and size > 1:
+                data = real_read(fd, size)
+                if len(data) > 1:
+                    state['short'] = True
+                    os.lseek(fd, 1 - len(data), os.SEEK_CUR)
+                    return data[:1]
+            return real_read(fd, size)
+
+        def os_close(fd):
+            if fd in state['fds']:
+                state['closed'].append(fd)
+            return real_close(fd)
+
+        os.open, os.read, os.close = os_open, os_read, os_close
+        try:
+            staging = self.root / 'short-staging'
+            built = self.bundle.build(source, staging)
+        finally:
+            os.open, os.read, os.close = real_open, real_read, real_close
+        self.assertTrue(state['short'])
+        self.assertEqual((staging / self.bundle.REQUIRED[0]).read_bytes(), payload)
+        self._assert_verified(staging, built)
+        self._assert_closed(state['closed'])
+
+    def _eintr(self, source, where):
+        target = source / self.bundle.REQUIRED[0]
+        state = {'fds': set(), 'once': False, 'closed': []}
+        real_open, real_read, real_fstat, real_close = os.open, os.read, os.fstat, os.close
+
+        def os_open(path, flags, *args, **kwargs):
+            if where == 'open' and self._same(path, target) and not state['once']:
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted open seam')
+            fd = real_open(path, flags, *args, **kwargs)
+            if self._same(path, target):
+                state['fds'].add(fd)
+            return fd
+
+        def os_read(fd, size):
+            if where == 'read' and fd in state['fds'] and not state['once']:
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted read seam')
+            return real_read(fd, size)
+
+        def os_fstat(fd):
+            if where == 'fstat' and fd in state['fds'] and not state['once']:
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted fstat seam')
+            return real_fstat(fd)
+
+        def os_close(fd):
+            if fd in state['fds']:
+                state['closed'].append(fd)
+            return real_close(fd)
+
+        os.open, os.read, os.fstat, os.close = os_open, os_read, os_fstat, os_close
+        try:
+            staging = self.root / ('eintr-staging-' + where)
+            built = self.bundle.build(source, staging)
+        finally:
+            os.open, os.read, os.fstat, os.close = real_open, real_read, real_fstat, real_close
+        self.assertTrue(state['once'])
+        self._assert_verified(staging, built)
+        self._assert_closed(state['closed'])
+
+    def _hide_flag(self, source, target, outside, flag):
+        saved = getattr(os, flag)
+        real_lstat, real_open, real_path_open = os.lstat, os.open, Path.open
+        opened = []
+
+        def wrapped_lstat(path, *args, **kwargs):
+            if self._same(path, target) and hasattr(os, flag):
+                delattr(os, flag)
+            return real_lstat(path, *args, **kwargs)
+
+        def os_open(path, *args, **kwargs):
+            if not isinstance(path, int) and (self._same(path, target) or self._same(path, outside)):
+                opened.append(os.path.normpath(os.fspath(path)))
+            return real_open(path, *args, **kwargs)
+
+        def path_open(path, *args, **kwargs):
+            if self._same(path, target) or self._same(path, outside):
+                opened.append('path:' + os.path.normpath(os.fspath(path)))
+            return real_path_open(path, *args, **kwargs)
+
+        before = outside.read_bytes()
+        os.lstat, os.open, Path.open = wrapped_lstat, os_open, path_open
+        try:
+            self._refuse(source, self.root / (source.name + '-staging'), 'member_missing')
+        finally:
+            os.lstat, os.open, Path.open = real_lstat, real_open, real_path_open
+            setattr(os, flag, saved)
+        self.assertEqual(opened, [])
+        self.assertEqual(outside.read_bytes(), before)
+
+    def _inject_open(self, number, expected):
+        source = self._fill('open-' + str(number))
+        target = source / self.bundle.REQUIRED[0]
+        real_open = os.open
+        state = {'done': False}
+
+        def os_open(path, flags, *args, **kwargs):
+            if self._same(path, target) and not state['done']:
+                state['done'] = True
+                raise OSError(number, 'injected source open seam')
+            return real_open(path, flags, *args, **kwargs)
+
+        os.open = os_open
+        try:
+            self._refuse(source, self.root / ('open-staging-' + str(number)), expected)
+        finally:
+            os.open = real_open
+        self.assertTrue(state['done'])
+
+    def _inject_lstat(self, number, expected, *, release):
+        source = self._fill('lstat-' + str(number) + '-' + str(release).lower())
+        target = source / ('release-source.json' if release else self.bundle.REQUIRED[0])
+        if release and number == errno.EACCES:
+            fallback = self._write_fallback(source, b'FALLBACK MUST STAY UNREAD\n')
+        else:
+            fallback = None
+        real_lstat = os.lstat
+        state = {'done': False, 'opened': []}
+        real_open = os.open
+
+        def os_lstat(path, *args, **kwargs):
+            if self._same(path, target) and not state['done']:
+                state['done'] = True
+                raise OSError(number, 'injected source lstat seam')
+            return real_lstat(path, *args, **kwargs)
+
+        def os_open(path, flags, *args, **kwargs):
+            if not isinstance(path, int):
+                state['opened'].append(os.path.normpath(os.fspath(path)))
+            return real_open(path, flags, *args, **kwargs)
+
+        os.lstat, os.open = os_lstat, os_open
+        try:
+            self._refuse(source, self.root / ('lstat-staging-' + str(number) + '-' + str(release).lower()), expected)
+        finally:
+            os.lstat, os.open = real_lstat, real_open
+        self.assertTrue(state['done'])
+        if fallback is not None:
+            self.assertNotIn(str(fallback), state['opened'])
+
+    def _inject_member_io(self, where, number, expected):
+        source = self._fill(where + '-' + str(number))
+        target = source / self.bundle.REQUIRED[0]
+        real_open, real_read, real_fstat, real_close = os.open, os.read, os.fstat, os.close
+        state = {'fds': set(), 'done': False, 'closed': []}
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if self._same(path, target):
+                state['fds'].add(fd)
+            return fd
+
+        def os_read(fd, size):
+            if where == 'read' and fd in state['fds'] and not state['done']:
+                state['done'] = True
+                raise OSError(number, 'injected source read seam')
+            return real_read(fd, size)
+
+        def os_fstat(fd):
+            if where == 'fstat' and fd in state['fds'] and not state['done']:
+                state['done'] = True
+                raise OSError(number, 'injected source fstat seam')
+            return real_fstat(fd)
+
+        def os_close(fd):
+            if fd in state['fds']:
+                state['closed'].append(fd)
+            return real_close(fd)
+
+        os.open, os.read, os.fstat, os.close = os_open, os_read, os_fstat, os_close
+        fds = self._fds()
+        try:
+            self._refuse(source, self.root / (where + '-staging-' + str(number)), expected)
+        finally:
+            os.open, os.read, os.fstat, os.close = real_open, real_read, real_fstat, real_close
+            self.assertEqual(self._fds(), fds)
+        self.assertTrue(state['done'])
+        self._assert_closed(state['closed'])
+
+    def _swap_nonregular(self, target, kind, outside, original):
+        held = self.root / (target.parent.name + '-held')
+        if kind == 'same-bytes':
+            outside.write_bytes(original)
+            outside.chmod(0o600)
+        target.rename(held)
+        if kind == 'absolute' or kind == 'external':
+            target.symlink_to(outside)
+        elif kind == 'relative':
+            target.symlink_to(Path('..') / outside.name)
+        elif kind == 'internal':
+            target.symlink_to(self.bundle.REQUIRED[1])
+        elif kind == 'dangling':
+            target.symlink_to('missing-source-target')
+        elif kind == 'chain':
+            inner = self.root / (target.parent.name + '-inner')
+            outer = self.root / (target.parent.name + '-outer')
+            inner.write_bytes(original)
+            inner.chmod(0o600)
+            outer.symlink_to(inner)
+            target.symlink_to(Path('..') / outer.name)
+        elif kind == 'directory':
+            target.mkdir(mode=0o700)
+        elif kind == 'same-bytes':
+            outside.rename(target)
+        else:
+            self.fail('unknown replacement ' + kind)
+
+    def _make_nonregular(self, target, kind, outside):
+        raw = target.read_bytes()
+        target.unlink()
+        if kind == 'absolute' or kind == 'external':
+            target.symlink_to(outside if kind == 'absolute' else outside.resolve())
+        elif kind == 'relative':
+            target.symlink_to(Path('..') / outside.name)
+        elif kind == 'internal':
+            target.symlink_to(self.bundle.REQUIRED[1])
+        elif kind == 'dangling':
+            target.symlink_to('missing-source-target')
+        elif kind == 'chain':
+            inner = self.root / (target.parent.name + '-inner')
+            outer = self.root / (target.parent.name + '-outer')
+            inner.write_bytes(raw)
+            inner.chmod(0o600)
+            outer.symlink_to(inner)
+            target.symlink_to(Path('..') / outer.name)
+        elif kind == 'directory':
+            target.mkdir(mode=0o700)
+        else:
+            self.fail('unknown static kind ' + kind)
+
+    def _fifo_child(self, mode, source, staging, name):
+        try:
+            completed = subprocess.run(
+                [sys.executable, '-B', '-c',
+                 'import sys; sys.path.insert(0, sys.argv[1]); '
+                 'import test_upgrade_bundle as tests; '
+                 'raise SystemExit(tests._build_source_fifo(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]))',
+                 str(HERE), mode, str(source), str(staging), name],
+                cwd=self.root, timeout=5, capture_output=True, text=True,
+                env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+        except subprocess.TimeoutExpired as expired:
+            self.fail('fifo source build was still blocked after 5s\n'
+                      + (expired.stdout or '') + (expired.stderr or ''))
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertNotIn('SYNTHETIC', completed.stdout)
+        self.assertNotIn(str(self.root), completed.stdout)
+
+    def _fill(self, name):
+        source = self.root / name
+        self._fill_at(source)
+        return source
+
+    def _fill_at(self, source):
+        source.mkdir(mode=0o700)
+        for name in self.bundle.REQUIRED:
+            path = source / name
+            path.write_bytes(b'SYNTHETIC INERT SOURCE ' + name.encode() + b'\n')
+            path.chmod(0o600)
+
+    def _write_fallback(self, source, payload):
+        fork = source.parent / 'fork'
+        fork.mkdir(mode=0o700, exist_ok=True)
+        path = fork / 'release-source.json'
+        if path.is_symlink() or path.exists():
+            path.unlink()
+        path.write_bytes(payload)
+        path.chmod(0o600)
+        return path
+
+    def _outside(self, name):
+        path = self.root / (name + '-outside')
+        path.touch(mode=0o600)
+        return path
+
+    def _build_ok(self, source, staging):
+        sentinel = self.root / (source.name + '-sentinel')
+        sentinel.write_bytes(b'SENTINEL\n')
+        before = self._identity(sentinel)
+        built = self.bundle.build(source, staging)
+        self._assert_verified(staging, built)
+        self.assertEqual(sentinel.read_bytes(), b'SENTINEL\n')
+        self.assertEqual(self._identity(sentinel), before)
+        return built
+
+    def _assert_verified(self, staging, built):
+        self.assertIsInstance(built, dict)
+        verified = self.bundle.verify(staging)
+        self.assertTrue(verified['verified'])
+        self.assertFalse(verified['installable'])
+        self.assertEqual(verified['manifest_sha256'], built['manifest_sha256'])
+        raw = (staging / 'manifest.json').read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), built['manifest_sha256'])
+
+    def _refuse(self, source, staging, code):
+        fds = self._fds()
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.build(source, staging)
+        finally:
+            self.assertEqual(self._fds(), fds)
+        self.assertEqual(caught.exception.code, code)
+        self.assertEqual(caught.exception.exit_code, 69)
+        self.assertEqual(str(caught.exception), code)
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertNotIn(str(self.root), str(caught.exception))
+        self.assertNotIn('SYNTHETIC', str(caught.exception))
+        self.assertFalse((staging / 'manifest.json').exists())
+        return caught.exception
+
+    def _assert_closed(self, closed):
+        self.assertTrue(closed)
+        for fd in closed:
+            with self.assertRaises(OSError) as caught:
+                os.fstat(fd)
+            self.assertEqual(caught.exception.errno, errno.EBADF)
+
+    def _identity(self, path):
+        info = path.lstat()
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    def _tree_identity(self, root):
+        rows = []
+        for path in sorted(root.rglob('*'), key=lambda item: item.as_posix()):
+            rows.append((str(path.relative_to(root)), self._identity(path)))
+        return tuple(rows)
+
+    def _same(self, path, target):
+        return not isinstance(path, int) and os.path.normpath(os.fspath(path)) == str(target)
+
+    def _fds(self):
+        base = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
+        return frozenset(os.listdir(base))
+
+    def _relax_tree(self):
+        if not self.root.exists():
+            return
+        for path in [self.root, *self.root.rglob('*')]:
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                continue
+            os.chmod(path, 0o700 if stat.S_ISDIR(info.st_mode) else 0o600)
+
+    def _write_all(self, fd, data):
+        view = memoryview(data)
+        while view:
+            wrote = os.write(fd, view)
+            if wrote <= 0:
+                self.fail('fixture write stalled')
+            view = view[wrote:]
+
+
 if __name__ == '__main__':
     unittest.main()

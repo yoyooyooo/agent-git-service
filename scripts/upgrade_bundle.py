@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 """Offline bundle builder and verifier. Staging only; no host provision.
 
+The builder lstats each closed source path and does not follow that final
+component. Only release-source.json may use another path, and only when that
+first lstat is ENOENT; the other path is fork/release-source.json beside the
+source directory. The selected file is opened once, without following and
+without blocking. Its bytes and SHA256 come from that same descriptor, capped
+at the first fstat size plus one probe byte. A symlink or other non-regular
+source is member_missing. A change around the read is source_changed. Any
+other source access failure is source_unreadable. Those codes carry no path
+or body. The manifest is written only after every member copy has checked
+out. This does not prove a Git revision and does not make the bundle
+installable.
+
 The manifest file itself must be a regular file owned by the current user.
 Verification does not follow a symlink at that final path component. The
 manifest does not contain its own digest. Verification accepts only the
@@ -68,16 +80,10 @@ def build(source, staging):
     staging.mkdir(mode=0o700)
     files = {}
     for name in REQUIRED:
-        path = source / name
-        if name == 'release-source.json' and not path.exists():
-            path = source.parent / 'fork/release-source.json'
-        if not path.is_file() or path.is_symlink():
-            raise BundleError('member_missing')
-        raw = path.read_bytes()
+        path = _choose_source_path(source, name)
         dest = staging / name
-        dest.write_bytes(raw)
-        dest.chmod(0o644)
-        files[name] = hashlib.sha256(raw).hexdigest()
+        files[name] = _copy_source_member(path, dest)
+        os.chmod(dest, 0o644)
     manifest = {'schema': SCHEMA, 'entry': ENTRY, 'files': files}
     raw = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()
     (staging / 'manifest.json').write_bytes(raw)
@@ -93,6 +99,154 @@ def _manifest_identity(info):
     """Stable file identity. atime is excluded because a read may update it."""
     return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
             info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _source_io_error(exc, *, started):
+    """Map one source OSError. The message is only the fixed code."""
+    missing = exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR, errno.ENXIO)
+    if not started and missing:
+        code = 'member_missing'
+    elif started and exc.errno in (errno.ENOENT, errno.ENOTDIR):
+        code = 'source_changed'
+    else:
+        code = 'source_unreadable'
+    raise BundleError(code) from None
+
+
+def _lstat_source(path):
+    while True:
+        try:
+            return os.lstat(path)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise
+
+
+def _choose_source_path(source, name):
+    """Fallback only when release-source.json itself is missing. Do not choose twice."""
+    primary = source / name
+    try:
+        _lstat_source(primary)
+    except OSError as exc:
+        if name == 'release-source.json' and exc.errno == errno.ENOENT:
+            return source.parent / 'fork' / 'release-source.json'
+        _source_io_error(exc, started=False)
+    return primary
+
+
+def _open_source(path):
+    """Open the final component without following it. Never fall back to a following open."""
+    nofollow = getattr(os, 'O_NOFOLLOW', None)
+    nonblock = getattr(os, 'O_NONBLOCK', None)
+    if nofollow is None or nonblock is None:
+        raise BundleError('member_missing')
+    flags = os.O_RDONLY | nofollow | nonblock
+    while True:
+        try:
+            return os.open(path, flags)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            _source_io_error(exc, started=False)
+
+
+def _source_fstat(fd):
+    while True:
+        try:
+            return os.fstat(fd)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise BundleError('source_unreadable') from None
+
+
+def _read_source(fd, size):
+    while True:
+        try:
+            return os.read(fd, size)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise BundleError('source_unreadable') from None
+
+
+def _write_dest(fd, data):
+    """Write staging bytes. Failures stay destination errors and do not select another source."""
+    view = memoryview(data)
+    while len(view):
+        try:
+            wrote = os.write(fd, view)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise
+        if wrote <= 0:
+            raise OSError(errno.EIO, 'incomplete destination write')
+        view = view[wrote:]
+
+
+def _stream_source(fd, dest, size):
+    """Copy and hash one descriptor. The extra probe byte is not written."""
+    digest = hashlib.sha256()
+    remaining = size
+    out = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        while True:
+            request = 1 if remaining == 0 else min(_MEMBER_CHUNK, remaining)
+            chunk = _read_source(fd, request)
+            if remaining == 0:
+                if chunk:
+                    raise BundleError('source_changed')
+                break
+            if not chunk or len(chunk) > remaining:
+                raise BundleError('source_changed')
+            digest.update(chunk)
+            _write_dest(out, chunk)
+            remaining -= len(chunk)
+    finally:
+        try:
+            os.close(out)
+        except OSError:
+            pass
+    return digest.hexdigest()
+
+
+def _copy_source_member(path, dest):
+    """Read, copy, and hash one selected source from a single no-follow descriptor."""
+    try:
+        info = _lstat_source(path)
+    except OSError as exc:
+        _source_io_error(exc, started=False)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise BundleError('member_missing')
+    fd = _open_source(path)
+    try:
+        opened = _source_fstat(fd)
+        if stat.S_ISLNK(opened.st_mode) or not stat.S_ISREG(opened.st_mode):
+            raise BundleError('member_missing')
+        if _manifest_identity(opened) != _manifest_identity(info):
+            raise BundleError('source_changed')
+        digest = _stream_source(fd, dest, opened.st_size)
+        after = _source_fstat(fd)
+        if _manifest_identity(after) != _manifest_identity(opened):
+            raise BundleError('source_changed')
+        while True:
+            try:
+                current = os.lstat(path)
+                break
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    continue
+                raise BundleError('source_changed') from None
+        if _manifest_identity(current) != _manifest_identity(after):
+            raise BundleError('source_changed')
+        return digest
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _manifest_access_error(exc):

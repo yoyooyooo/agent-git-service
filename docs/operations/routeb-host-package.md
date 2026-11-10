@@ -36,8 +36,12 @@ and byte manifest. The offline staging check,
 [upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-manifest),
 checks the manifest file, its closed content, and each ordinary member
 through one no-follow descriptor
-([members](upgrade-provisioning.md#offline-staging-members)). It does not
-admit production use. Tool revision and tree, the unchanged application
+([members](upgrade-provisioning.md#offline-staging-members)). The builder's
+source read is a separate input check: one descriptor supplies the copy and
+the digest, and the fallback file is used only when the primary path is
+missing
+([sources](upgrade-provisioning.md#offline-staging-sources)). Neither check
+admits production use. Tool revision and tree, the unchanged application
 revision, and recovery-asset binding remain separate facts. Production
 admission, Darwin entry, and `application_source_transition_not_admitted`
 stay refused. This permits
@@ -148,11 +152,15 @@ Ordinary source CI does not run the launchd experiment. Set
 `AGS_ROUTEB_NATIVE=1` only for an explicitly authorized disposable label.
 That run is not a source-CI pass and does not authorize deployment.
 
-Staging acceptance is the offline manifest and member-descriptor check in
-[upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-manifest).
-It is not a tool, application, or recovery binding, and it does not remove
-the production `native_full_closure_required` gate, the Darwin stage0
-refusal, or `application_source_transition_not_admitted`.
+Staging acceptance is the offline source, manifest, and member-descriptor
+check in
+[upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-sources).
+The manifest and member checks remain
+[manifest](upgrade-provisioning.md#offline-staging-manifest) and
+[members](upgrade-provisioning.md#offline-staging-members). That acceptance
+is not a tool, application, or recovery binding, and it does not remove the
+production `native_full_closure_required` gate, the Darwin stage0 refusal, or
+`application_source_transition_not_admitted`.
 
 Related pages: [runbook](routeb-runbook.md), [mini](routeb-runbook-mini.md),
 [backup and recovery](backup-recovery.md), [local upgrade](local-upgrade.md),

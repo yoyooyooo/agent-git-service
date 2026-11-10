@@ -62,6 +62,12 @@ is not the runtime rule: a provisioned bundle and its ancestors must be
 root-owned and not group/world writable. The runtime bundle check remains a
 separate implementation. This page does not claim that the runtime parser
 rejects duplicate JSON keys.
+Before those staged copies exist, the builder checks each selected source file
+on one no-follow descriptor and uses the `release-source.json` fallback only
+when the primary path is actually missing. See
+[offline staging sources](upgrade-provisioning.md#offline-staging-sources).
+That input check is not the root-owned runtime bundle rule and does not make
+the staging directory a host trust root.
 Required files include the wrapper, host adapter, transaction engine, policy,
 installer, v2 consumer, verifier, shared archive contract, `upgrade_smoke.py`,
 `upgrade_backup_contract.py`, `upgrade_inventory.py`, `upgrade_backup.py`,
