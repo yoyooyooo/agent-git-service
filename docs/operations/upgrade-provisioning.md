@@ -9,7 +9,10 @@ does not install.
 `scripts/upgrade_bundle.py` builds a closed staging bundle. It copies only the
 reviewed member list, writes a manifest that does not include its own digest,
 and verifies that staging directory read-only. Verification success sets
-`installable` false. The manifest must match the fixed shape in
+`installable` false. Source bytes are copied from the same no-follow
+descriptor that was checked; see
+[Offline staging sources](#offline-staging-sources). The manifest must match
+the fixed shape in
 [Offline staging manifest](#offline-staging-manifest). It does not rename the
 staging directory onto `/usr/local/libexec/ags-autodeploy` and does not change
 a host.
@@ -29,6 +32,57 @@ Root provision, helper installation, and the first launcher transition remain
 separate approved operations. See
 [local upgrade](local-upgrade.md#fixed-bundle-and-execution-identity) and
 [user runtime](user-runtime.md#cold-window-startup-fence).
+
+## Offline staging sources
+
+`upgrade_bundle.build` checks each closed member before copying it. It
+`lstat`s the source path and does not follow that final component. The only
+alternate path is `release-source.json`. When the first `lstat` of the primary
+path returns `ENOENT`, the builder reads `fork/release-source.json` beside the
+source directory. A symlink, including a dangling link or a chain, a directory,
+a fifo, or a permission error is not absence and does not select that fallback.
+If both files exist, the primary file is used. After a path is selected, a
+later absence does not switch to the other file.
+
+The selected path is opened once, `O_RDONLY`, without following the final
+component and without blocking. If the platform cannot open that way, the
+builder refuses with `member_missing` and does not fall back to a following
+read. The descriptor must be a regular file whose device, inode, mode, uid,
+size, mtime, and ctime match the pre-open `lstat`. Atime is ignored. The
+builder does not require the current UID, mode 0600, a link count of one, or a
+clear executable bit. A stable hard link is accepted. Source modes 0600, 0644,
+0700, and 0755 remain compatible. The staged copy is still mode 0644, so a
+source executable bit is not a staging executable bit.
+
+Bytes and the SHA256 are taken from that same descriptor. Each read is at most
+65536 bytes. The read stops at the size from the first `fstat`, plus one extra
+byte so growth is noticed and is not copied. A short read continues. An
+interrupted open, read, `fstat`, or `lstat` is retried only at that call. An
+early end or a longer file is `source_changed`. The copy is the original bytes,
+not decoded or normalized text. Neither the copy nor the digest reopens the
+source path.
+
+A static miss, a non-regular file, or a final symlink is `member_missing`,
+including one substituted before the open. That is the builder's existing code,
+not the verifier's `member_type_rejected`. An identity, length, mode, or
+final-path change observed around the read is `source_changed`, including the
+same bytes on a new inode. A source permission failure, or another source read
+or `fstat` failure, is `source_unreadable`. It is not raised as a normal
+permission exception. A destination write failure stays a destination failure:
+it is not `source_unreadable` and it does not select the fallback. The message
+is only the fixed code. The exit code is 69.
+
+The descriptor is closed on success, on refusal, and when a programming error
+leaves the copy. The manifest is written only after every selected member has
+been copied and still matches its opening identity. A refusal may leave an
+incomplete staging directory. That directory is not success, is not reused, and
+is not deleted by the builder. An existing staging directory is still
+`staging_exists`. Success is `verified=true` and `installable=false` only after
+the checks in [Offline staging manifest](#offline-staging-manifest) and
+[Offline staging members](#offline-staging-members). The builder does not prove
+a Git revision or tree, does not admit production, and does not bind a host,
+tool revision, or recovery asset. It does not snapshot every ancestor or bound
+the whole bundle by total bytes or time.
 
 ## Offline staging manifest
 
@@ -123,7 +177,9 @@ The check does not snapshot the whole staging directory, trust every
 ancestor, or freeze a member after that member's own check returns. It does
 not bound the bundle by total bytes or elapsed time. It does not change
 production admission, and success remains `verified=true` /
-`installable=false`.
+`installable=false`. The source-file check that produced the staging directory
+is separate and is described in
+[Offline staging sources](#offline-staging-sources).
 
 ## S6.12 release inputs
 
