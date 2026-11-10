@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Offline bundle builder and verifier. Staging only; no host provision.
 
-The manifest does not contain its own digest. A bundle missing a required
-member, or containing an unexpected executable, symlink, or owner, is refused.
+The manifest does not contain its own digest. Verification accepts only the
+fixed v2 document: at most 65536 original bytes, strict UTF-8, no duplicate
+keys, and exactly schema, entry and files. Success still sets installable
+false. A bundle missing a required member, or containing an unexpected
+executable, symlink, or owner, is refused.
 """
 import sys
 sys.dont_write_bytecode = True
@@ -36,6 +39,10 @@ REQUIRED = (
     'upgrade_policy.json', 'release-source.json',
 )
 SCHEMA = 'ags.upgrade-tool-bundle.v2'
+ENTRY = 'upgrade_host.py'
+_MANIFEST_BUDGET = 65536
+_MAX_MANIFEST_DEPTH = 2
+_MANIFEST_FIELDS = {'schema', 'entry', 'files'}
 
 
 class BundleError(ValueError):
@@ -63,10 +70,80 @@ def build(source, staging):
         dest.write_bytes(raw)
         dest.chmod(0o644)
         files[name] = hashlib.sha256(raw).hexdigest()
-    manifest = {'schema': SCHEMA, 'entry': 'upgrade_host.py', 'files': files}
+    manifest = {'schema': SCHEMA, 'entry': ENTRY, 'files': files}
     raw = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()
     (staging / 'manifest.json').write_bytes(raw)
     return {'manifest_sha256': hashlib.sha256(raw).hexdigest(), 'members': len(files)}
+
+
+def _read_manifest_bytes(path):
+    """Read at most one byte past the budget, then refuse the oversize file."""
+    with path.open('rb') as handle:
+        raw = handle.read(_MANIFEST_BUDGET + 1)
+    if len(raw) > _MANIFEST_BUDGET:
+        raise BundleError('manifest_budget_exceeded')
+    return raw
+
+
+def _reject_deep(text):
+    """The closed manifest is only the top object plus the files object."""
+    depth = 0
+    in_string = False
+    escape = False
+    for char in text:
+        if in_string:
+            if escape:
+                escape = False
+            elif char == '\\':
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in '{[':
+            depth += 1
+            if depth > _MAX_MANIFEST_DEPTH:
+                raise BundleError('manifest_invalid')
+        elif char in '}]' and depth:
+            depth -= 1
+
+
+def _unique_pairs(items):
+    result = {}
+    for key, value in items:
+        if key in result:
+            raise BundleError('manifest_invalid')
+        result[key] = value
+    return result
+
+
+def _reject_constant(_value):
+    raise BundleError('manifest_invalid')
+
+
+def _load_manifest(raw):
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeError:
+        raise BundleError('manifest_invalid') from None
+    _reject_deep(text)
+    try:
+        manifest = json.loads(text, object_pairs_hook=_unique_pairs, parse_constant=_reject_constant)
+    except BundleError:
+        raise
+    except (UnicodeError, ValueError, RecursionError):
+        raise BundleError('manifest_invalid') from None
+    if (type(manifest) is not dict or set(manifest) != _MANIFEST_FIELDS
+            or manifest['schema'] != SCHEMA or manifest['entry'] != ENTRY
+            or type(manifest['files']) is not dict):
+        raise BundleError('manifest_invalid')
+    files = manifest['files']
+    if set(files) != set(REQUIRED):
+        raise BundleError('member_set_rejected')
+    if any(type(digest) is not str for digest in files.values()):
+        raise BundleError('manifest_invalid')
+    return files
 
 
 def verify(staging, *, executable=True):
@@ -74,11 +151,8 @@ def verify(staging, *, executable=True):
     manifest_path = staging / 'manifest.json'
     if not manifest_path.is_file():
         raise BundleError('manifest_missing')
-    raw = manifest_path.read_bytes()
-    manifest = json.loads(raw)
-    files = manifest.get('files', {})
-    if set(files) != set(REQUIRED):
-        raise BundleError('member_set_rejected')
+    raw = _read_manifest_bytes(manifest_path)
+    files = _load_manifest(raw)
     present = {path.name for path in staging.iterdir()}
     if present != set(REQUIRED) | {'manifest.json'}:
         raise BundleError('unexpected_member')
