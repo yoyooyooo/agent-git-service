@@ -12,7 +12,7 @@ import stat
 from urllib.parse import urlsplit
 
 from upgrade import bundle_engine, directory_fd
-from upgrade_backup_contract import (ContractError, EXACT_COLD_SCHEMA, digest, fields, require, strict_json,
+from upgrade_backup_contract import (MAX_JSON, ContractError, EXACT_COLD_SCHEMA, digest, fields, require, strict_json,
                                      validate_cold_binding, validate_group)
 from upgrade_backup import group_object
 from upgrade_inventory import file_digest, sqlite_path
@@ -31,6 +31,13 @@ POLICY_FIELDS = ('schema host old_revision old_tree candidate_revision candidate
 SIDE_FILES = ('native-profile.json', 'policy.json', 'recovery-group.json', 'build-review.json',
               'ci-evidence.json', 'recovery-review.json')
 INTERPRETER_CLOSURE_BLOCKER = 'interpreter_full_closure_required'
+PRIVATE_DOCUMENT_LIMIT = 1024 * 1024
+# Original-byte cap shared with upgrade_backup_contract.MAX_JSON and Go's
+# verifyRestoreArtifact. A caller selects a lower budget; document content,
+# CLI, environment and reference.size cannot raise this cap.
+RESTORE_RESULT_LIMIT = 16 * 1024 * 1024
+if RESTORE_RESULT_LIMIT != MAX_JSON:
+    raise ContractError('private_document_budget')
 
 
 def require_interpreter_closure(root=None, operations=None):
@@ -48,7 +55,13 @@ def require_interpreter_closure(root=None, operations=None):
         raise ContractError(INTERPRETER_CLOSURE_BLOCKER) from error
 
 
-def read_document(path):
+def read_document(path, *, maximum=PRIVATE_DOCUMENT_LIMIT):
+    """Read one private JSON document within a source-selected byte budget.
+
+    The default remains the ordinary package, approval and sidecar limit.
+    Only the fixed restore-result caller selects RESTORE_RESULT_LIMIT.
+    """
+    require(type(maximum) is int and 0 < maximum <= RESTORE_RESULT_LIMIT, 'private_document_budget')
     path = Path(path)
     require(path.is_absolute(), 'private_path_invalid')
     with directory_fd(path.parent, private=True) as parent:
@@ -57,11 +70,12 @@ def read_document(path):
             before = os.fstat(fd)
             require(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid()
                     and stat.S_IMODE(before.st_mode) == 0o600 and before.st_nlink == 1
-                    and 0 < before.st_size <= 1024 * 1024, 'private_document_unsafe')
-            raw = os.read(fd, 1024 * 1024 + 1)
+                    and 0 < before.st_size <= maximum, 'private_document_unsafe')
+            raw = os.read(fd, maximum + 1)
             after = os.fstat(fd)
             signature = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-            require(len(raw) == before.st_size and signature(before) == signature(after), 'private_document_changed')
+            require(len(raw) == before.st_size and len(raw) <= maximum
+                    and signature(before) == signature(after), 'private_document_changed')
         finally:
             os.close(fd)
     value = strict_json(raw)

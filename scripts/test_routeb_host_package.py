@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Read-only package validation and fixed native target boundaries."""
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -306,6 +307,128 @@ class HostPackageBoundaryTests(unittest.TestCase):
             changed[0].pop('immutable_authority')
             with self.assertRaisesRegex(ContractError, 'coverage_incomplete'):
                 package.validate_authority_coverage({'objects': changed}, host, sha)
+
+
+class PrivateDocumentBudgetTests(unittest.TestCase):
+    """Real private files. Budgets come from the caller, not from file content."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='routeb-document-budget-', dir=Path.home())
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.root.chmod(0o700)
+
+    def write(self, name, raw):
+        path = self.root / name
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        return path
+
+    def padded(self, value, size):
+        raw = canonical(value).rstrip(b'\n')
+        self.assertLessEqual(len(raw), size)
+        return raw + b' ' * (size - len(raw))
+
+    def test_default_budget_accepts_one_mib_and_refuses_the_next_byte_before_read(self):
+        marker = {'schema': 'ags.synthetic-private-document.v1', 'marker': 'synthetic-not-a-secret'}
+        accepted = self.write('one.json', self.padded(marker, package.PRIVATE_DOCUMENT_LIMIT))
+        self.assertEqual(package.read_document(accepted)[0]['schema'], marker['schema'])
+        refused = self.write('over.json', self.padded(marker, package.PRIVATE_DOCUMENT_LIMIT + 1))
+        calls = []
+        with patch.object(package.os, 'read', side_effect=lambda *_args: calls.append(1)):
+            with self.assertRaisesRegex(ContractError, '^private_document_unsafe$') as raised:
+                package.read_document(refused)
+        self.assertEqual(calls, [])
+        self.assertNotIn(b'synthetic-not-a-secret', str(raised.exception).encode())
+
+    def test_caller_budget_cannot_be_taken_from_content_or_environment(self):
+        missing = self.root / 'missing.json'
+        for maximum in (0, -1, True, False, 1.5, '1024', package.RESTORE_RESULT_LIMIT + 1, None):
+            with self.subTest(maximum=maximum):
+                with self.assertRaisesRegex(ContractError, '^private_document_budget$'):
+                    package.read_document(missing, maximum=maximum)
+        self.assertFalse(missing.exists())
+        path = self.write('env.json', self.padded({'a': 1}, package.PRIVATE_DOCUMENT_LIMIT + 1))
+        with patch.dict(os.environ, {'ROUTEB_DOCUMENT_BUDGET': str(package.RESTORE_RESULT_LIMIT),
+                                     'AGS_PRIVATE_DOCUMENT_LIMIT': str(package.RESTORE_RESULT_LIMIT)}, clear=False):
+            with self.assertRaisesRegex(ContractError, '^private_document_unsafe$'):
+                package.read_document(path)
+
+    def test_package_approval_and_sidecar_entries_stay_at_one_mib(self):
+        parent = self.root / 'pkg'
+        parent.mkdir(mode=0o700)
+        names = ('package.json', 'approval.json', *package.SIDE_FILES)
+        original = b'{"schema":"synthetic"}\n'
+        for name in names:
+            self.write(Path('pkg') / name, original)
+        for name in names:
+            with self.subTest(name=name):
+                target = parent / name
+                target.write_bytes(self.padded({'schema': 'synthetic', 'marker': 'synthetic-not-a-secret'},
+                                               package.PRIVATE_DOCUMENT_LIMIT + 1))
+                target.chmod(0o600)
+                with self.assertRaisesRegex(ContractError, '^private_document_unsafe$') as raised:
+                    package.load(parent / 'package.json', parent / 'approval.json', 'mini')
+                self.assertNotIn('synthetic-not-a-secret', str(raised.exception))
+                target.write_bytes(original)
+                target.chmod(0o600)
+
+    def test_unsafe_files_and_json_still_fail_closed(self):
+        from upgrade import Failure
+        good = self.write('good.json', b'{"a":1}\n')
+        # strict_json catches ValueError, and ContractError is a ValueError, so
+        # an in-parser duplicate key is reported as json_invalid. It still refuses.
+        self.write('dup.json', b'{"a":1,"a":2}\n')
+        with self.assertRaisesRegex(ContractError, '^json_invalid$'):
+            package.read_document(self.root / 'dup.json')
+        self.write('list.json', b'[1]\n')
+        with self.assertRaisesRegex(ContractError, '^private_document_invalid$'):
+            package.read_document(self.root / 'list.json')
+        self.write('text.json', b'not-json\n')
+        with self.assertRaisesRegex(ContractError, '^json_invalid$'):
+            package.read_document(self.root / 'text.json')
+        self.write('utf.json', b'{"a":"\xff"}')
+        with self.assertRaisesRegex(ContractError, '^json_invalid$'):
+            package.read_document(self.root / 'utf.json')
+        good.chmod(0o644)
+        with self.assertRaisesRegex(ContractError, '^private_document_unsafe$'):
+            package.read_document(good)
+        good.chmod(0o600)
+        os.link(good, self.root / 'hard.json')
+        with self.assertRaisesRegex(ContractError, '^private_document_unsafe$'):
+            package.read_document(good)
+        fifo = self.root / 'fifo.json'
+        os.mkfifo(fifo)
+        fifo.chmod(0o600)
+        with self.assertRaises((ContractError, OSError)):
+            package.read_document(fifo)
+        link = self.root / 'link.json'
+        link.symlink_to(good)
+        with self.assertRaises(OSError):
+            package.read_document(link)
+        self.root.chmod(0o755)
+        with self.assertRaisesRegex(Failure, '^invalid_request$'):
+            package.read_document(good)
+        self.root.chmod(0o700)
+
+    def test_a_change_during_the_read_is_not_reread_or_accepted(self):
+        path = self.write('race.json', b'{"a":1}\n')
+        real = os.read
+        calls = []
+
+        def once(fd, count):
+            calls.append(count)
+            extra = os.open(path, os.O_WRONLY | os.O_APPEND)
+            try:
+                os.write(extra, b' ')
+            finally:
+                os.close(extra)
+            return real(fd, count)
+
+        with patch.object(package.os, 'read', side_effect=once):
+            with self.assertRaisesRegex(ContractError, '^private_document_changed$'):
+                package.read_document(path)
+        self.assertEqual(calls, [package.PRIVATE_DOCUMENT_LIMIT + 1])
 
 
 if __name__ == '__main__':

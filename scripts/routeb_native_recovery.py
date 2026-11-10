@@ -40,7 +40,8 @@ from upgrade_inventory import file_digest
 from upgrade_recovery import ColdWindow, read_original_binding
 from routeb_full_restore import apply_restore, old_start, plan_restore, verify_recovered_group
 from routeb_host_native import FixedManager, WriterProbe
-from routeb_host_package import load as load_package, read_document, NATIVE_PROFILE_SCHEMA
+from routeb_host_package import (NATIVE_PROFILE_SCHEMA, PRIVATE_DOCUMENT_LIMIT, RESTORE_RESULT_LIMIT,
+                                  load as load_package, read_document)
 from routeb_native_delegation import is_delegated, require_delegation
 import routeb_native_capture as capture
 import routeb_stage0_client as client
@@ -54,12 +55,19 @@ APPROVAL_FIELDS = ('schema approval_id actor purpose decision issued_at expires_
                    'snapshot_id manifest_sha256 data_loss_acknowledged external_reconciliation_acknowledged').split()
 
 
-def read_reference(reference):
+def read_reference(reference, *, maximum=PRIVATE_DOCUMENT_LIMIT):
+    """Read an exact reference. ``maximum`` is chosen by the source caller.
+
+    ``reference.size`` is a declared original length. It cannot raise ``maximum``.
+    Approval callers keep the default. Only the fixed restore-result path
+    passes RESTORE_RESULT_LIMIT.
+    """
     fields(reference, ('path', 'sha256', 'size'))
     digest(reference['sha256'])
-    require(type(reference['size']) is int and 0 < reference['size'] <= 16 * 1024 * 1024,
+    require(type(maximum) is int and 0 < maximum <= RESTORE_RESULT_LIMIT, 'recovery_reference_invalid')
+    require(type(reference['size']) is int and 0 < reference['size'] <= maximum,
             'recovery_reference_invalid')
-    value, raw, sha = read_document(reference['path'])
+    value, raw, sha = read_document(reference['path'], maximum=maximum)
     require(sha == reference['sha256'] and len(raw) == reference['size'], 'recovery_reference_changed')
     return value
 
@@ -146,7 +154,7 @@ def restored_result(root, context, late):
                     ('registration_sha256', 'recovery_registration_sha256', 'boot_id'))
             and proof['result']['path'] == str(Path(root).parent / 'recovery/native-recovery/restore-result.json'),
             'recovery_completion_binding')
-    value = read_reference(proof['result'])
+    value = read_reference(proof['result'], maximum=RESTORE_RESULT_LIMIT)
     fields(value, ('schema', 'root', 'registration_sha256', 'recovery_registration_sha256', 'snapshot_id',
                    'manifest_sha256', 'group_sha256', 'restored', 'verification'))
     require(value['schema'] == 'ags.routeb-native-restore-result.v1' and value['root'] == str(root)
