@@ -222,7 +222,22 @@ and performs the existing complete-group restoration. Each member's intent
 is durable before its switch; failures retain incident material and never
 start a process. Full Tq and immutable-authority checks run before a result
 is sealed by the root parent. An editable result JSON alone is not a restore
-completion proof. Old-start requires the root seal, actual successful exits
+completion proof.
+
+The Python restore-result consumer and Go `verifyRestoreArtifact` use the same
+original-byte budgets. A restore-result document on the fixed
+`recovery/native-recovery/restore-result.json` path may be at most 16 MiB.
+Each recovery approval, and every ordinary private package or sidecar
+document, stays at most 1 MiB. The source call site for that fixed purpose
+selects the budget before the read. Document content, a CLI flag, an
+environment variable, or `reference.size` cannot raise it. `reference.size`
+is only the declared length and must equal the original bytes. The reader
+still requires a private no-follow ancestor walk, the current owner, mode
+0600, a regular file, one link, identical stat before and after the read,
+strict JSON, and the original-byte SHA-256. Being able to read a result does
+not authorize a process start.
+
+Old-start requires the root seal, actual successful exits
 of both restore processes, an empty control cgroup, the original snapshot,
 fresh exact-byte verification and a separate one-use approval.
 

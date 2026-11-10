@@ -2,10 +2,12 @@
 """Recovery orchestration contracts. Mock peers do not prove native entry."""
 from contextlib import ExitStack
 import copy
+import ast
 from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -318,6 +320,244 @@ class PacketWindowTests(unittest.TestCase):
                 late[key]['sha256'] = self.write(path, decision); late[key]['size'] = path.stat().st_size
                 with self.assertRaisesRegex(ContractError, '^recovery_approval_expired$'):
                     recovery.approval(late, purpose, self.root)
+
+
+class RestoreResultBudgetTests(unittest.TestCase):
+    """Real private-file consumer. The peer response is synthetic only.
+
+    Whitespace padding covers exact byte boundaries and does not claim that a
+    business-sized restore result was executed. One case uses synthetic
+    restored-group members instead of padding. No seal, manager, old start or
+    production input is run.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='routeb-result-budget-', dir=Path.home())
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.base.chmod(0o700)
+        self.root = self.base / 'ags'
+        self.root.mkdir(mode=0o700)
+        self.result_dir = self.base / 'recovery' / 'native-recovery'
+        self.result_dir.mkdir(parents=True, mode=0o700)
+        self.result_dir.parent.chmod(0o700)
+        self.target = self.result_dir / 'restore-result.json'
+        self.context = {'registration_sha256': 'a' * 64, 'recovery_registration_sha256': 'b' * 64,
+                        'boot_id': 'synthetic'}
+        self.late = {'snapshot_id': 'synthetic-snapshot', 'manifest_sha256': 'c' * 64,
+                     'group_sha256': 'd' * 64, 'host_instance': 'synthetic-host'}
+
+    def minimal(self):
+        return {'schema': 'ags.routeb-native-restore-result.v1', 'root': str(self.root),
+                'registration_sha256': self.context['registration_sha256'],
+                'recovery_registration_sha256': self.context['recovery_registration_sha256'],
+                'snapshot_id': self.late['snapshot_id'], 'manifest_sha256': self.late['manifest_sha256'],
+                'group_sha256': self.late['group_sha256'],
+                'restored': {'schema': 'ags.routeb-restored-group.v2', 'applied': True, 'started': False,
+                             'snapshot_id': self.late['snapshot_id']},
+                'verification': {'manifest_sha256': self.late['manifest_sha256']}}
+
+    def store(self, value, size=None):
+        raw = json.dumps(value, separators=(',', ':')).encode()
+        if size is not None:
+            self.assertLessEqual(len(raw), size)
+            raw += b' ' * (size - len(raw))
+        self.target.write_bytes(raw)
+        self.target.chmod(0o600)
+        return raw
+
+    def proof(self, raw, **changes):
+        reference = {'path': str(self.target), 'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
+        reference.update(changes)
+        return {'schema': 'ags.routeb-stage0-restoration.v1', **self.context,
+                'restore_invocation_id': 'synthetic-restore', 'stopped_invocation_id': 'synthetic-stopped',
+                'context_sha256': 'e' * 64, 'result': reference}
+
+    def consume(self, raw):
+        with patch.object(recovery.client, 'restore_result', return_value=self.proof(raw)):
+            return recovery.restored_result(self.root, self.context, self.late)
+
+    def test_fixed_result_path_accepts_the_go_budget_and_refuses_one_extra_byte(self):
+        # Exact boundaries use legal JSON whitespace, matching the baseline probe.
+        for size in (1024 * 1024, 1024 * 1024 + 1, 2 * 1024 * 1024, 16 * 1024 * 1024):
+            with self.subTest(size=size):
+                raw = self.store(self.minimal(), size)
+                observed, proof = self.consume(raw)
+                self.assertEqual(observed, self.minimal())
+                self.assertEqual(proof['result']['size'], size)
+        raw = self.store(self.minimal(), 16 * 1024 * 1024 + 1)
+        calls = []
+        with patch.object(recovery, 'read_document', side_effect=lambda *_args, **_kwargs: calls.append(1)):
+            with self.assertRaisesRegex(ContractError, '^recovery_reference_invalid$'):
+                self.consume(raw)
+        self.assertEqual(calls, [])
+
+    def test_a_large_result_can_carry_synthetic_restored_members(self):
+        value = self.minimal()
+        members, switched = [], []
+        raw = b''
+        index = 0
+        while len(raw) <= 2 * 1024 * 1024:
+            for _ in range(1000):
+                item_id = 'member-%06d' % index
+                members.append({'id': item_id, 'role': 'config',
+                                'target': str(self.root / 'state' / (item_id + '.json')),
+                                'provision_separately': False})
+                switched.append(item_id)
+                index += 1
+            restored = dict(value['restored'], members=members, switched=switched,
+                            approval_id='restore-approval',
+                            recovery_context={'backup_dir': str(self.base / 'recovery/backups/synthetic-snapshot'),
+                                              'group_sha256': self.late['group_sha256'],
+                                              'manifest_sha256': self.late['manifest_sha256'],
+                                              'dsn': 'sqlite:/synthetic/main.db', 'schema_sha256': 'e' * 64,
+                                              'host_instance': self.late['host_instance']},
+                            journal_root=str(self.base / 'recovery/.backups-old-start-consumption'))
+            value = dict(value, restored=restored)
+            raw = json.dumps(value, separators=(',', ':')).encode()
+        self.assertGreater(len(raw), 1024 * 1024)
+        self.assertLessEqual(len(raw), 16 * 1024 * 1024)
+        self.store(value)
+        observed, _ = self.consume(raw)
+        self.assertEqual(observed['restored']['members'], members)
+        self.assertGreater(len(observed['restored']['members']), 1)
+        self.assertTrue(all(set(item) == {'id', 'role', 'target', 'provision_separately'} for item in members))
+
+    def test_only_restored_result_selects_the_sixteen_mib_budget(self):
+        owners = []
+        for path in Path(recovery.__file__).parent.glob('*.py'):
+            tree = ast.parse(path.read_text())
+            for node in tree.body:
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                for child in ast.walk(node):
+                    if not isinstance(child, ast.Call):
+                        continue
+                    for keyword in child.keywords:
+                        if keyword.arg == 'maximum' and isinstance(keyword.value, ast.Name) \
+                                and keyword.value.id == 'RESTORE_RESULT_LIMIT':
+                            owners.append((path.name, node.name))
+        self.assertEqual(owners, [('routeb_native_recovery.py', 'restored_result')])
+
+    def test_reference_size_budget_and_environment_cannot_raise_an_approval(self):
+        now = datetime.now(timezone.utc)
+        approvals = self.base / 'recovery' / 'approvals'
+        approvals.mkdir(mode=0o700)
+        approvals.parent.chmod(0o700)
+        for purpose, key in (('full-restore', 'restore_approval'), ('old-start', 'old_start_approval')):
+            decision = {'schema': 'ags.routeb-recovery-approval.v1', 'approval_id': purpose + '-one',
+                        'actor': 'human:fixture', 'purpose': purpose, 'decision': 'approve',
+                        'issued_at': (now - timedelta(minutes=1)).isoformat(),
+                        'expires_at': (now + timedelta(hours=1)).isoformat(),
+                        'host_instance': self.late['host_instance'], 'snapshot_id': self.late['snapshot_id'],
+                        'manifest_sha256': self.late['manifest_sha256'],
+                        'data_loss_acknowledged': True, 'external_reconciliation_acknowledged': True}
+            body = json.dumps(decision, separators=(',', ':')).encode()
+            path = approvals / (key + '.json')
+            within = body + b' ' * (1024 * 1024 - len(body))
+            path.write_bytes(within)
+            path.chmod(0o600)
+            late = dict(self.late, **{key: {'path': str(path), 'sha256': hashlib.sha256(within).hexdigest(),
+                                            'size': len(within)}})
+            self.assertEqual(recovery.approval(late, purpose, self.root)['purpose'], purpose)
+            over = within + b' '
+            path.write_bytes(over)
+            path.chmod(0o600)
+            declared = {'path': str(path), 'sha256': hashlib.sha256(over).hexdigest(), 'size': len(over)}
+            with self.assertRaisesRegex(ContractError, '^recovery_reference_invalid$'):
+                recovery.read_reference(declared)
+            lied = dict(declared, size=1024 * 1024)
+            with self.assertRaisesRegex(ContractError, '^private_document_unsafe$'):
+                recovery.read_reference(lied)
+            claimed = dict(lied, size=16 * 1024 * 1024)
+            with self.assertRaisesRegex(ContractError, '^recovery_reference_invalid$'):
+                recovery.read_reference(claimed)
+            with self.assertRaisesRegex(ContractError, '^fields_invalid$'):
+                recovery.read_reference(dict(declared, budget=16 * 1024 * 1024))
+            for bad in (0, -1, True, False, 1.5, '1'):
+                with self.subTest(purpose=purpose, size=bad):
+                    with self.assertRaisesRegex(ContractError, '^recovery_reference_invalid$'):
+                        recovery.read_reference(dict(declared, size=bad))
+            with patch.dict(os.environ, {'ROUTEB_DOCUMENT_BUDGET': str(16 * 1024 * 1024)}, clear=False), \
+                    patch.object(recovery.sys, 'argv', ['routeb_native_recovery.py', '--budget', str(16 * 1024 * 1024)]):
+                with self.assertRaisesRegex(ContractError, '^recovery_reference_invalid$'):
+                    recovery.approval(dict(self.late, **{key: declared}), purpose, self.root)
+
+    def test_declared_length_and_digest_must_match_original_bytes(self):
+        raw = self.store(self.minimal())
+        short = dict(self.proof(raw)['result'], size=len(raw) - 1)
+        with patch.object(recovery.client, 'restore_result', return_value=self.proof(raw, **short)):
+            with self.assertRaisesRegex(ContractError, '^recovery_reference_changed$'):
+                recovery.restored_result(self.root, self.context, self.late)
+        self.target.write_bytes(raw + b' ')
+        self.target.chmod(0o600)
+        with patch.object(recovery.client, 'restore_result', return_value=self.proof(raw)):
+            with self.assertRaisesRegex(ContractError, '^recovery_reference_changed$'):
+                recovery.restored_result(self.root, self.context, self.late)
+
+    def test_wrong_binding_or_forged_peer_rejects_before_any_effect(self):
+        raw = self.store(self.minimal())
+        proof = self.proof(raw)
+        cases = (
+            ('schema', {**proof, 'schema': 'ags.forged-restoration.v1'}, 'recovery_completion_binding'),
+            ('registration', {**proof, 'registration_sha256': 'f' * 64}, 'recovery_completion_binding'),
+            ('path', {**proof, 'result': {**proof['result'], 'path': str(self.base / 'other.json')}},
+             'recovery_completion_binding'),
+        )
+        with patch.object(recovery, 'FixedManager') as manager, patch.object(recovery, 'apply_restore') as apply:
+            with self.assertRaises(ContractError) as missing:
+                recovery.restored_result(self.root, self.context, self.late)
+            self.assertNotIn('synthetic-not-a-secret', str(missing.exception))
+            for name, forged, code in cases:
+                with self.subTest(name=name), patch.object(recovery.client, 'restore_result', return_value=forged):
+                    with self.assertRaisesRegex(ContractError, '^' + code + '$'):
+                        recovery.restored_result(self.root, self.context, self.late)
+            for key, replacement in (('root', '/synthetic/other'), ('registration_sha256', 'f' * 64),
+                                     ('snapshot_id', 'other-snapshot'), ('manifest_sha256', 'f' * 64),
+                                     ('group_sha256', 'e' * 64)):
+                changed = self.minimal()
+                if key == 'root':
+                    changed['root'] = replacement
+                elif key in changed:
+                    changed[key] = replacement
+                body = self.store(changed)
+                with self.subTest(field=key), patch.object(recovery.client, 'restore_result', return_value=self.proof(body)):
+                    with self.assertRaisesRegex(ContractError, '^recovery_result_binding$'):
+                        recovery.restored_result(self.root, self.context, self.late)
+            manager.assert_not_called()
+            apply.assert_not_called()
+
+    def test_oversized_result_fails_before_manager_start_or_consumption(self):
+        raw = self.store(self.minimal(), 16 * 1024 * 1024 + 1)
+        package = SimpleNamespace()
+        with patch.object(recovery, 'packet', return_value=(self.context, self.late, package)), \
+                patch.object(recovery.client, 'restore_result', return_value=self.proof(raw)), \
+                patch.object(recovery, 'FixedManager') as manager, \
+                patch.object(recovery, 'approval') as approval, \
+                patch.object(recovery, 'apply_restore') as apply, \
+                patch.object(recovery, 'old_start') as launch:
+            with self.assertRaisesRegex(ContractError, '^recovery_reference_invalid$'):
+                recovery.start_old(self.root, self.root / 'package.json', self.root / 'approval.json')
+        manager.assert_not_called()
+        approval.assert_not_called()
+        apply.assert_not_called()
+        launch.assert_not_called()
+        self.assertEqual(list(self.result_dir.glob('effect-*.json')), [])
+
+    def test_a_readable_large_result_still_cannot_start_without_the_peer(self):
+        value = self.minimal()
+        value['restored'] = dict(value['restored'], members=[{'id': 'member-000000', 'role': 'config',
+            'target': str(self.root / 'state/member-000000.json'), 'provision_separately': False}])
+        raw = self.store(value, 1024 * 1024 + 1)
+        with patch.object(recovery.client, 'restore_result', return_value=self.proof(raw)), \
+                patch.object(recovery, 'FixedManager') as manager, \
+                patch.object(recovery, 'apply_restore') as apply:
+            observed, _ = recovery.restored_result(self.root, self.context, self.late)
+            self.assertEqual(observed['restored']['members'][0]['id'], 'member-000000')
+            with self.assertRaises(ContractError):
+                recovery.start_old(self.root, self.root / 'package.json', self.root / 'approval.json')
+        manager.assert_not_called()
+        apply.assert_not_called()
 
 
 if __name__ == '__main__':

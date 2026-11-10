@@ -10,7 +10,13 @@ A host plan without a private package writes nothing (`package_missing`).
 Host mode does not accept `--manager-dir` or `--fault-after`.
 
 Host mode loads a private package and its fixed sidecars through
-`routeb_host_package.py`. `plan` reads the real registered host, manager,
+`routeb_host_package.py`. Ordinary private documents, package sidecars and
+both recovery approvals are limited to 1 MiB of original bytes. The fixed
+restore-result path may use the existing 16 MiB JSON hard cap; nothing in
+the document, CLI, environment or declared `reference.size` selects that
+larger budget. The check and the cross-language contract are in
+[separate recovery authority](../design/routeb-interpreter-authority.md#separate-recovery-authority-and-one-use-generations).
+`plan` reads the real registered host, manager,
 running generation, lifecycle authority, recovery group and native capabilities.
 `status` reads the existing transaction journal. Direct `run --execute`
 refuses with `interpreter_full_closure_required` before a claim or native
