@@ -18,7 +18,10 @@ The member list includes the S6.01 identity module, S6.02 evidence and bootstrap
 modules, both OS adapters, the metadata and trash clients, this builder, and
 `ags-python.sh`. A three-file bundle fails the existing bundle digest check
 with exit 69. A missing member, extra executable, tampered file, wrong owner,
-or symlink also fails. An incomplete directory is not executed.
+or symlink also fails. `manifest.json` itself must be a regular file owned by
+the current user; verification does not follow a symlink in its final
+component, and an executable bit is refused by default. An incomplete directory
+is not executed.
 
 Root provision, helper installation, and the first launcher transition remain
 separate approved operations. See
@@ -27,22 +30,40 @@ separate approved operations. See
 
 ## Offline staging manifest
 
-`upgrade_bundle.verify` accepts a staging manifest only when every condition
-below holds. The original file is at most 65536 bytes, and the reader stops
-after one extra byte. Those bytes are strict UTF-8. No JSON object contains a
-duplicate key at any depth, even when both values are identical. The only
-top-level fields are `schema`, `entry` and `files`. `schema` is
-`ags.upgrade-tool-bundle.v2` and `entry` is `upgrade_host.py`. `files` maps
-the closed member list to SHA256 strings. A shape, encoding, duplicate-key,
-empty, truncated, or nonstandard-constant failure is `manifest_invalid`. A
-larger original file is `manifest_budget_exceeded`. Neither code echoes the
-input. No caller, flag, or environment variable can raise the budget.
+`upgrade_bundle.verify` accepts a staging manifest only when the manifest file
+and every condition below hold. The final path component is not followed. A
+missing path is `manifest_missing`. A symlink, including a dangling link, a
+link chain, or a link to a file inside or outside staging, is
+`manifest_type_rejected`, as is a directory, fifo, or other non-regular file.
+An unreadable file is `manifest_unreadable`. The opened descriptor must still
+be that regular file and be owned by the current UID (`owner_rejected`). Any
+executable bit is `unexpected_executable` unless the caller passes
+`executable=False`. That flag skips only the executable-bit check. It does not
+accept another file type, owner, or budget, and it does not make the bundle
+installable. If the platform cannot open without following a final symlink, or
+cannot open nonblocking, verification refuses with `manifest_type_rejected`
+instead of following the path. The reader then takes at most 65536 original
+bytes plus one extra byte from that descriptor only. A metadata or path
+identity change observed across the read is `manifest_changed`. None of these
+codes echoes the path or the file body.
+
+The original file is at most 65536 bytes, and the reader stops after one extra
+byte. Those bytes are strict UTF-8. No JSON object contains a duplicate key at
+any depth, even when both values are identical. The only top-level fields are
+`schema`, `entry` and `files`. `schema` is `ags.upgrade-tool-bundle.v2` and
+`entry` is `upgrade_host.py`. `files` maps the closed member list to SHA256
+strings. A shape, encoding, duplicate-key, empty, truncated, or
+nonstandard-constant failure is `manifest_invalid`. A larger original file is
+`manifest_budget_exceeded`. Neither code echoes the input. No caller, flag, or
+environment variable can raise the budget.
 
 Those manifest failures exit 69. Refusals for the member set, an unexpected
 member, member type, owner, digest, or executable bit keep their existing
-codes. Success is still `verified=true` and `installable=false`.
-`manifest_sha256` is the SHA256 of the original bytes, not of a re-encoded
-document.
+codes. Manifest file type, readability, and identity use the codes above;
+manifest owner and executable bit use `owner_rejected` and
+`unexpected_executable`. Success is still `verified=true` and
+`installable=false`. `manifest_sha256` is the SHA256 of the original bytes,
+not of a re-encoded document.
 
 This check does not replace the root-owned runtime bundle check in
 [local upgrade](local-upgrade.md#fixed-bundle-and-execution-identity). It does
@@ -73,7 +94,7 @@ The AST import-closure regression checks actual staged source, not a synthetic
 member list. `bundle_engine` independently requires the full exact-digest set.
 This fixes the earlier staging builder's missing transitive dependencies but
 does not supply a native adapter, privileged helper or bootstrap authority.
-A manifest that passes the offline shape check still supplies none of those
+A manifest that passes the offline file and content check still supplies none of those
 and does not bind recovery.
 S6b.09 preserves this boundary: metadata and Trash operations require explicit provisioned callbacks and fail before claim when absent. A fixture readback cannot become ownership or deletion evidence.
 No factory may return a no-op Trash or writer probe as production capability.

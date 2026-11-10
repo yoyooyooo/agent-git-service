@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock
@@ -331,6 +333,469 @@ class StrictManifestTests(unittest.TestCase):
 
     def _executable_member(self, staging):
         (staging / self.bundle.REQUIRED[0]).chmod(0o755)
+
+
+def _verify_fifo_manifest(mode, staging):
+    """Subprocess entry. A fifo must be rejected without waiting for a writer."""
+    import upgrade_bundle as bundle
+    staging = Path(staging)
+    manifest = staging / 'manifest.json'
+    state = {'done': False}
+    if mode == 'race':
+        real_open = os.open
+
+        def wrapped(path, flags, *args, **kwargs):
+            if not state['done'] and os.fspath(path) == os.fspath(manifest):
+                state['done'] = True
+                os.rename(manifest, staging.parent / 'fifo-held-race.json')
+                os.mkfifo(manifest, 0o600)
+            return real_open(path, flags, *args, **kwargs)
+
+        os.open = wrapped
+    code = None
+    try:
+        bundle.verify(staging)
+    except bundle.BundleError as error:
+        code = error.code if error.exit_code == 69 and str(error) == error.code else 'bad-error'
+    if mode == 'race' and not state['done']:
+        sys.stdout.write('hook-not-used\n')
+        return 4
+    if code == 'manifest_type_rejected':
+        return 0
+    sys.stdout.write((code or 'accepted') + '\n')
+    return 2
+
+
+class ManifestFileTests(unittest.TestCase):
+    """Manifest path checks. Fixtures are inert and are not executed or imported."""
+
+    def setUp(self):
+        import upgrade_bundle as bundle
+        self.bundle = bundle
+        self.tmp = tempfile.TemporaryDirectory(dir=Path.home(), prefix='bundle-manifest-file-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.source = self.root / 'source'
+        self.source.mkdir(mode=0o700)
+        for name in bundle.REQUIRED:
+            path = self.source / name
+            path.write_bytes(b'SYNTHETIC NON-EXECUTABLE ' + name.encode() + b'\n')
+            path.chmod(0o600)
+
+    def test_manifest_file_contract(self):
+        for name, expected, executable, mutate in self._cases():
+            with self.subTest(case=name):
+                self._assert_case(name, expected, executable, mutate)
+
+    def test_open_is_nofollow_nonblocking_and_bounded(self):
+        """The descriptor read stops one byte past the budget and does not follow."""
+        staging = self._stage('bounded-read')
+        manifest = staging / 'manifest.json'
+        raw = manifest.read_bytes()
+        padded = raw + b' ' * (200000 - len(raw))
+        self.assertGreater(len(padded), 65537)
+        manifest.write_bytes(padded)
+        before = self._metadata(self.root)
+        observed = self._observe(manifest)
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.verify(staging)
+        finally:
+            observed['restore']()
+            self.assertEqual(self._metadata(self.root), before)
+            self.assertEqual(self._fds(), observed['fds'])
+        self.assertTrue(observed['opened'])
+        self.assertGreaterEqual(observed['fstats'], 2)
+        self.assertTrue(observed['flags'] & os.O_NOFOLLOW)
+        self.assertTrue(observed['flags'] & os.O_NONBLOCK)
+        self.assertFalse(observed['flags'] & (os.O_WRONLY | os.O_RDWR))
+        self.assertEqual(observed['read'], 65537)
+        self.assertTrue(observed['requests'])
+        self.assertLessEqual(max(observed['requests']), 65537)
+        self.assertEqual(caught.exception.code, 'manifest_budget_exceeded')
+        self.assertEqual(caught.exception.exit_code, 69)
+        self.assertEqual(str(caught.exception), 'manifest_budget_exceeded')
+
+    def test_checked_file_is_not_replaced_by_a_later_path(self):
+        """Hooks call the real open/read. They do not invent the stat or bytes."""
+        self._replace_before_open('replace-symlink', 'symlink', 'manifest_type_rejected')
+        self._replace_before_open('replace-directory', 'directory', 'manifest_type_rejected')
+        self._replace_after_open()
+        self._truncate_during_read()
+
+    def test_fifo_manifest_does_not_block(self):
+        static = self._stage('fifo-static')
+        manifest = static / 'manifest.json'
+        held = self.root / 'fifo-static-held.json'
+        held.write_bytes(manifest.read_bytes())
+        held.chmod(0o600)
+        manifest.unlink()
+        os.mkfifo(manifest, 0o600)
+        before = self._metadata(self.root)
+        self._fifo_child('static', static)
+        self.assertEqual(self._metadata(self.root), before)
+
+        raced = self._stage('fifo-race')
+        digest = hashlib.sha256((raced / 'manifest.json').read_bytes()).hexdigest()
+        self._fifo_child('race', raced)
+        saved = self.root / 'fifo-held-race.json'
+        self.assertEqual(hashlib.sha256(saved.read_bytes()).hexdigest(), digest)
+        self.assertTrue(stat.S_ISFIFO((raced / 'manifest.json').lstat().st_mode))
+
+    def test_owner_compares_fstat_uid_with_expected_uid(self):
+        """Expected-UID seam only. fstat is real; this is not a foreign-owner proof."""
+        for name, executable in (('owner-default', True), ('owner-exec-false', False)):
+            with self.subTest(case=name):
+                staging = self._stage(name)
+                manifest = staging / 'manifest.json'
+                manifest.chmod(0o700 if not executable else 0o600)
+                real_uid = os.getuid()
+                self.assertNotEqual(real_uid, 0)
+                self.assertEqual(manifest.lstat().st_uid, real_uid)
+                if not hasattr(self.bundle, '_manifest_owner_uid'):
+                    self.fail('manifest owner comparison seam is absent')
+                original = self.bundle._manifest_owner_uid
+                self.bundle._manifest_owner_uid = lambda: real_uid + 1
+                try:
+                    with self.assertRaises(self.bundle.BundleError) as caught:
+                        self.bundle.verify(staging, executable=executable)
+                    self.assertEqual(caught.exception.code, 'owner_rejected')
+                    self.assertEqual(caught.exception.exit_code, 69)
+                    self.assertEqual(str(caught.exception), 'owner_rejected')
+                    self.assertNotIn(str(self.root), str(caught.exception))
+                finally:
+                    self.bundle._manifest_owner_uid = original
+
+    def test_missing_nofollow_or_nonblock_does_not_follow(self):
+        cases = (
+            ('hide-nofollow-symlink', 'O_NOFOLLOW', True),
+            ('hide-nofollow-regular', 'O_NOFOLLOW', False),
+            ('hide-nonblock-symlink', 'O_NONBLOCK', True),
+            ('hide-nonblock-regular', 'O_NONBLOCK', False),
+        )
+        for name, flag, symlink in cases:
+            with self.subTest(case=name):
+                staging = self._stage(name)
+                if symlink:
+                    self._point_symlink(staging, self.root / (name + '.json'), relative=False)
+                saved = getattr(os, flag)
+                before = self._metadata(self.root)
+                try:
+                    delattr(os, flag)
+                    with self.assertRaises(self.bundle.BundleError) as caught:
+                        self.bundle.verify(staging)
+                finally:
+                    setattr(os, flag, saved)
+                    self.assertEqual(self._metadata(self.root), before)
+                self.assertEqual(caught.exception.code, 'manifest_type_rejected')
+                self.assertEqual(caught.exception.exit_code, 69)
+                self.assertEqual(str(caught.exception), 'manifest_type_rejected')
+
+    def _cases(self):
+        def symlink(relative):
+            def mutate(staging):
+                self._point_symlink(staging, self.root / (staging.name + '.json'), relative=relative)
+            return mutate
+
+        def mode(bits):
+            def mutate(staging):
+                (staging / 'manifest.json').chmod(bits)
+            return mutate
+
+        def chain(staging):
+            manifest = staging / 'manifest.json'
+            inner = self.root / (staging.name + '-inner.json')
+            outer = self.root / (staging.name + '-outer.json')
+            inner.write_bytes(manifest.read_bytes())
+            inner.chmod(0o600)
+            outer.symlink_to(inner)
+            manifest.unlink()
+            manifest.symlink_to(Path('..') / outer.name)
+
+        def internal(staging):
+            manifest = staging / 'manifest.json'
+            manifest.unlink()
+            manifest.symlink_to(self.bundle.REQUIRED[0])
+
+        def dangling(staging):
+            manifest = staging / 'manifest.json'
+            manifest.unlink()
+            manifest.symlink_to('missing-manifest-target.json')
+
+        def directory(staging):
+            manifest = staging / 'manifest.json'
+            manifest.unlink()
+            manifest.mkdir(mode=0o700)
+
+        def linked_directory(staging):
+            folder = self.root / (staging.name + '-dir')
+            folder.mkdir(mode=0o700)
+            manifest = staging / 'manifest.json'
+            manifest.unlink()
+            manifest.symlink_to(folder)
+
+        def remove(staging):
+            (staging / 'manifest.json').unlink()
+
+        def hardlink(staging):
+            os.link(staging / 'manifest.json', self.root / (staging.name + '-link.json'))
+
+        def rewrite(suffix):
+            def mutate(staging):
+                manifest = staging / 'manifest.json'
+                raw = manifest.read_bytes()
+                if suffix == 'junk':
+                    updated = raw + b'x'
+                elif suffix == 'second':
+                    updated = raw + b'{}'
+                elif suffix == 'escape':
+                    value = json.loads(raw)
+                    updated = (b'{"\\u0073chema":' + json.dumps(value['schema']).encode()
+                               + b',' + raw[1:])
+                else:
+                    updated = raw + b' ' * (int(suffix) - len(raw))
+                manifest.write_bytes(updated)
+                manifest.chmod(0o644)
+            return mutate
+
+        return (
+            ('manifest_symlink_absolute', 'manifest_type_rejected', True, symlink(False)),
+            ('manifest_symlink_relative', 'manifest_type_rejected', True, symlink(True)),
+            ('manifest_symlink_executable_false', 'manifest_type_rejected', False, symlink(False)),
+            ('manifest_executable', 'unexpected_executable', True, mode(0o700)),
+            ('manifest_unreadable', 'manifest_unreadable', True, mode(0)),
+            ('manifest_user_executable', 'unexpected_executable', True, mode(0o601)),
+            ('dangling_symlink', 'manifest_type_rejected', True, dangling),
+            ('symlink_chain', 'manifest_type_rejected', True, chain),
+            ('internal_symlink', 'manifest_type_rejected', True, internal),
+            ('symlink_to_directory', 'manifest_type_rejected', True, linked_directory),
+            ('directory_manifest', 'manifest_type_rejected', True, directory),
+            ('manifest_missing', 'manifest_missing', True, remove),
+            ('builder_regular', None, True, lambda staging: None),
+            ('manifest_0600', None, True, mode(0o600)),
+            ('manifest_0644', None, True, mode(0o644)),
+            ('manifest_0400', None, True, mode(0o400)),
+            ('manifest_executable_opt_out', None, False, mode(0o700)),
+            ('manifest_hardlink', None, True, hardlink),
+            ('trailing_junk_under_budget', 'manifest_invalid', True, rewrite('junk')),
+            ('second_document_under_budget', 'manifest_invalid', True, rewrite('second')),
+            ('escaped_duplicate_schema', 'manifest_invalid', True, rewrite('escape')),
+            ('budget_65536', None, True, rewrite('65536')),
+            ('budget_65537', 'manifest_budget_exceeded', True, rewrite('65537')),
+            ('executable_false_over_budget', 'manifest_budget_exceeded', False, rewrite('65537')),
+        )
+
+    def _assert_case(self, name, expected, executable, mutate):
+        staging = self._stage(name)
+        mutate(staging)
+        before = self._metadata(self.root)
+        fds = self._fds()
+        try:
+            try:
+                outcome = self.bundle.verify(staging, executable=executable)
+            except self.bundle.BundleError as error:
+                outcome = error
+        finally:
+            self.assertEqual(self._metadata(self.root), before)
+            self.assertEqual(self._fds(), fds)
+        self._assert_outcome(staging, expected, outcome)
+        forbidden = {'approval.json', 'host-profile.json', 'registration.json', 'pin.json'}
+        self.assertTrue(forbidden.isdisjoint(path.name for path in self.root.rglob('*')))
+
+    def _assert_outcome(self, staging, expected, outcome):
+        if isinstance(outcome, self.bundle.BundleError):
+            self.assertEqual(outcome.code, expected)
+            self.assertEqual(outcome.exit_code, 69)
+            self.assertEqual(str(outcome), expected)
+            self.assertNotIn(str(self.root), str(outcome))
+            self.assertNotIn('SYNTHETIC', str(outcome))
+            return
+        self.assertIsNone(expected)
+        manifest = staging / 'manifest.json'
+        info = manifest.lstat()
+        self.assertTrue(stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode))
+        raw = manifest.read_bytes()
+        self.assertEqual(outcome, {
+            'verified': True, 'installable': False,
+            'manifest_sha256': hashlib.sha256(raw).hexdigest(),
+        })
+
+    def _replace_before_open(self, name, kind, expected):
+        staging = self._stage(name)
+        manifest = staging / 'manifest.json'
+        held = self.root / (name + '-held.json')
+        digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        state = {'done': False}
+        real_open = os.open
+
+        def wrapped(path, flags, *args, **kwargs):
+            if not state['done'] and os.fspath(path) == os.fspath(manifest):
+                state['done'] = True
+                os.rename(manifest, held)
+                if kind == 'symlink':
+                    os.symlink(held, manifest)
+                else:
+                    os.mkdir(manifest, 0o700)
+            return real_open(path, flags, *args, **kwargs)
+
+        os.open = wrapped
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.verify(staging)
+        finally:
+            os.open = real_open
+        self.assertTrue(state['done'])
+        self.assertEqual(caught.exception.code, expected)
+        self.assertEqual(caught.exception.exit_code, 69)
+        self.assertEqual(hashlib.sha256(held.read_bytes()).hexdigest(), digest)
+
+    def _replace_after_open(self):
+        staging = self._stage('replace-after-open')
+        manifest = staging / 'manifest.json'
+        held = self.root / 'replace-after-open-held.json'
+        digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        state = {'done': False}
+        real_open = os.open
+
+        def wrapped(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if not state['done'] and os.fspath(path) == os.fspath(manifest):
+                state['done'] = True
+                os.rename(manifest, held)
+                replacement = real_open(manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+                os.write(replacement, b'{}\n')
+                os.close(replacement)
+            return fd
+
+        os.open = wrapped
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.verify(staging)
+        finally:
+            os.open = real_open
+        self.assertTrue(state['done'])
+        self.assertEqual(caught.exception.code, 'manifest_changed')
+        self.assertEqual(caught.exception.exit_code, 69)
+        self.assertEqual(hashlib.sha256(held.read_bytes()).hexdigest(), digest)
+
+    def _truncate_during_read(self):
+        staging = self._stage('truncate-during-read')
+        manifest = staging / 'manifest.json'
+        state = {'done': False, 'fds': set()}
+        real_open = os.open
+        real_read = os.read
+
+        def wrapped_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if os.fspath(path) == os.fspath(manifest):
+                state['fds'].add(fd)
+            return fd
+
+        def wrapped_read(fd, size):
+            data = real_read(fd, size)
+            if fd in state['fds'] and not state['done']:
+                state['done'] = True
+                writer = real_open(manifest, os.O_RDWR | os.O_NOFOLLOW)
+                try:
+                    os.ftruncate(writer, 0)
+                finally:
+                    os.close(writer)
+            return data
+
+        os.open = wrapped_open
+        os.read = wrapped_read
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.verify(staging)
+        finally:
+            os.open = real_open
+            os.read = real_read
+        self.assertTrue(state['done'])
+        self.assertEqual(caught.exception.code, 'manifest_changed')
+        self.assertEqual(caught.exception.exit_code, 69)
+        self.assertEqual(manifest.lstat().st_size, 0)
+
+    def _fifo_child(self, mode, staging):
+        try:
+            completed = subprocess.run(
+                [sys.executable, '-B', '-c',
+                 'import sys; sys.path.insert(0, sys.argv[1]); '
+                 'import test_upgrade_bundle as tests; '
+                 'raise SystemExit(tests._verify_fifo_manifest(sys.argv[2], sys.argv[3]))',
+                 str(HERE), mode, str(staging)],
+                cwd=self.root, timeout=5, capture_output=True, text=True,
+                env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+        except subprocess.TimeoutExpired:
+            self.fail('fifo manifest verify was still blocked after 5s')
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertNotIn('SYNTHETIC', completed.stdout)
+        self.assertNotIn(str(self.root), completed.stdout)
+
+    def _observe(self, manifest):
+        observed = {'opened': False, 'flags': 0, 'read': 0, 'requests': [], 'fstats': 0,
+                    'fds': self._fds(), 'restore': None}
+        real_open, real_read, real_fstat = os.open, os.read, os.fstat
+        fds = set()
+
+        def wrapped_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if os.fspath(path) == os.fspath(manifest):
+                observed['opened'] = True
+                observed['flags'] = flags
+                fds.add(fd)
+            return fd
+
+        def wrapped_read(fd, size):
+            if fd in fds:
+                observed['requests'].append(size)
+            data = real_read(fd, size)
+            if fd in fds:
+                observed['read'] += len(data)
+            return data
+
+        def wrapped_fstat(fd):
+            if fd in fds:
+                observed['fstats'] += 1
+            return real_fstat(fd)
+
+        os.open, os.read, os.fstat = wrapped_open, wrapped_read, wrapped_fstat
+
+        def restore():
+            os.open, os.read, os.fstat = real_open, real_read, real_fstat
+
+        observed['restore'] = restore
+        return observed
+
+    def _point_symlink(self, staging, target, *, relative):
+        manifest = staging / 'manifest.json'
+        target.write_bytes(manifest.read_bytes())
+        target.chmod(0o600)
+        manifest.unlink()
+        manifest.symlink_to(Path('..') / target.name if relative else target)
+
+    def _stage(self, name):
+        staging = self.root / name
+        self.bundle.build(self.source, staging)
+        return staging
+
+    def _metadata(self, root):
+        rows = []
+        for path in sorted(root.rglob('*'), key=lambda item: item.as_posix()):
+            info = path.lstat()
+            digest = None
+            link = None
+            if stat.S_ISLNK(info.st_mode):
+                link = os.readlink(path)
+            elif stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) & 0o400:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            rows.append((str(path.relative_to(root)), stat.S_IFMT(info.st_mode),
+                         stat.S_IMODE(info.st_mode), info.st_uid, info.st_dev, info.st_ino,
+                         info.st_size, info.st_mtime_ns, info.st_ctime_ns, digest, link))
+        return tuple(rows)
+
+    def _fds(self):
+        base = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
+        return frozenset(os.listdir(base))
 
 
 if __name__ == '__main__':
