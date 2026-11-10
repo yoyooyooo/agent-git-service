@@ -98,6 +98,17 @@ prebound library commands and embedded dyld environment commands are refused.
 This bounded library view does not establish dyld shared-cache authority,
 signature policy, process provenance or Darwin native admission.
 
+Thin Mach-O images stay on the checks above. A file whose first four bytes
+are `FAT_MAGIC` (`0xcafebabe`), `FAT_CIGAM` (`0xbebafeca`), `FAT_MAGIC_64`
+(`0xcafebabf`) or `FAT_CIGAM_64` (`0xbfbafeca`) is an unsupported fat or
+universal image. Recognition reports it as native and returns
+`authority_fat_image_unsupported`. It does not parse slices, allocate from
+the archive count, or select a host slice and continue. The two `CIGAM`
+values are a conservative refusal of byte-swapped markers, not an accepted
+Darwin load format. Passing or failing this file check cannot authorize
+native execution. The [platform boundary](#process-and-platform-boundary)
+and [retained gates](#integration-points-and-retained-gates) are unchanged.
+
 ## Process and platform boundary
 
 The OS kernel, privileged service manager and the explicitly registered

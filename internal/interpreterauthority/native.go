@@ -11,6 +11,14 @@ import (
 	"strings"
 )
 
+// On-disk fat/universal markers. The CIGAM values are byte-swapped forms.
+// They are refused without treating that layout as a supported load format.
+const (
+	fatMagic64 = 0xcafebabf
+	fatCigam   = 0xbebafeca
+	fatCigam64 = 0xbfbafeca
+)
+
 type observedImage struct {
 	format                 string
 	interpreter            string
@@ -91,7 +99,8 @@ func inspectNative(name, architecture string) (observedImage, bool, error) {
 		}
 		return result, true, nil
 	}
-	if binary.BigEndian.Uint32(magic) == macho.MagicFat {
+	switch binary.BigEndian.Uint32(magic) {
+	case macho.MagicFat, fatMagic64, fatCigam, fatCigam64:
 		return observedImage{}, true, refusal("authority_fat_image_unsupported")
 	}
 	return observedImage{}, false, nil
