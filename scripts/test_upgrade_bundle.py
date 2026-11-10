@@ -1970,7 +1970,7 @@ class BuilderSourceTests(unittest.TestCase):
 
         source = self._fill('selected-primary-disappears')
         fallback = self._write_fallback(source, fallback_bytes)
-        self._replace_on_open(source, source / self.bundle.REQUIRED[0], 'disappear', 'member_missing',
+        self._replace_on_open(source, source / 'release-source.json', 'disappear', 'member_missing',
                               forbidden=fallback)
         source = self._fill('selected-fallback-disappears')
         primary = source / 'release-source.json'
@@ -2151,6 +2151,17 @@ class BuilderSourceTests(unittest.TestCase):
         self.assertEqual(self._identity(primary), before)
         self.assertEqual(self._identity(fallback), fallback_before)
         self.assertEqual(fallback.read_bytes(), fallback_bytes)
+
+    def test_close_eio_after_real_write_is_not_published(self):
+        """Close EIO after the bytes exist is not success. The errno is an injected mapping, not a device fault."""
+        for role in ('destination', 'source'):
+            with self.subTest(role=role):
+                self._inject_delayed_close(role)
+
+    def test_close_error_keeps_the_earlier_refusal(self):
+        """A later close error must not replace the refusal that already happened, and must not close twice."""
+        self._close_after_destination_write_error()
+        self._close_after_programming_error()
 
     def test_refusal_does_not_publish_manifest_or_touch_sentinels(self):
         sentinel = self.root / 'sentinel'
@@ -2641,6 +2652,176 @@ class BuilderSourceTests(unittest.TestCase):
         self.assertTrue(state['done'])
         if fallback is not None:
             self.assertNotIn(str(fallback), state['opened'])
+
+    def _inject_delayed_close(self, role):
+        source = self._fill('close-' + role)
+        primary = source / 'release-source.json'
+        primary_bytes = b'PRIMARY CLOSE FAILURE\n'
+        fallback_bytes = b'FALLBACK CLOSE FAILURE\n'
+        primary.write_bytes(primary_bytes)
+        primary.chmod(0o600)
+        fallback = self._write_fallback(source, fallback_bytes)
+        before = self._identity(primary)
+        fallback_before = self._identity(fallback)
+        member = self.bundle.REQUIRED[0]
+        watched = source / member if role == 'source' else self.root / ('close-' + role + '-staging') / member
+        original = (source / member).read_bytes()
+        real_open, real_close, real_fstat = os.open, os.close, os.fstat
+        state = {'fds': set(), 'hits': 0, 'real_closed': False, 'opened': [], 'closed': []}
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if not isinstance(path, int):
+                state['opened'].append(os.path.normpath(os.fspath(path)))
+                if self._same(path, watched):
+                    state['fds'].add(fd)
+            return fd
+
+        def os_close(fd):
+            if fd in state['fds'] and state['hits'] == 0:
+                real_close(fd)
+                state['hits'] += 1
+                state['closed'].append(fd)
+                try:
+                    real_fstat(fd)
+                except OSError as exc:
+                    state['real_closed'] = exc.errno == errno.EBADF
+                raise OSError(errno.EIO, 'injected delayed close failure')
+            if fd in state['fds']:
+                state['closed'].append(fd)
+            return real_close(fd)
+
+        os.open, os.close = os_open, os_close
+        fds = self._fds()
+        staging = self.root / ('close-' + role + '-staging')
+        try:
+            if role == 'destination':
+                with self.assertRaises(OSError) as caught:
+                    self.bundle.build(source, staging)
+            else:
+                with self.assertRaises(self.bundle.BundleError) as caught:
+                    self.bundle.build(source, staging)
+        finally:
+            os.open, os.close = real_open, real_close
+            self.assertEqual(self._fds(), fds)
+        self.assertEqual(state['hits'], 1)
+        self.assertTrue(state['real_closed'])
+        self._assert_closed(state['closed'])
+        self.assertFalse((staging / 'manifest.json').exists())
+        self.assertNotIn(str(fallback), state['opened'])
+        self.assertEqual((staging / member).read_bytes(), original)
+        self.assertEqual(self._identity(primary), before)
+        self.assertEqual(self._identity(fallback), fallback_before)
+        self.assertEqual(fallback.read_bytes(), fallback_bytes)
+        if role == 'destination':
+            self.assertEqual(caught.exception.errno, errno.EIO)
+            self.assertFalse(isinstance(caught.exception, self.bundle.BundleError))
+            self.assertNotEqual(getattr(caught.exception, 'code', None), 'source_unreadable')
+        else:
+            self.assertEqual(caught.exception.code, 'source_unreadable')
+            self.assertEqual(caught.exception.exit_code, 69)
+            self.assertEqual(str(caught.exception), 'source_unreadable')
+            self.assertIsNone(caught.exception.__cause__)
+        self.assertNotIn(str(self.root), str(caught.exception))
+        self.assertNotIn('SYNTHETIC', str(caught.exception))
+        with self.assertRaises(self.bundle.BundleError):
+            self.bundle.verify(staging)
+
+    def _close_after_destination_write_error(self):
+        source = self._fill('close-after-write')
+        member = self.bundle.REQUIRED[0]
+        watched = self.root / 'close-after-write-staging' / member
+        real_open, real_write, real_close, real_fstat = os.open, os.write, os.close, os.fstat
+        state = {'fds': set(), 'hits': 0, 'real_closed': False, 'wrote': False, 'closed': []}
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if self._same(path, watched):
+                state['fds'].add(fd)
+            return fd
+
+        def os_write(fd, data):
+            if fd in state['fds'] and not state['wrote']:
+                state['wrote'] = True
+                raise OSError(errno.EACCES, 'injected destination write')
+            return real_write(fd, data)
+
+        def os_close(fd):
+            if fd in state['fds'] and state['hits'] == 0:
+                real_close(fd)
+                state['hits'] += 1
+                state['closed'].append(fd)
+                try:
+                    real_fstat(fd)
+                except OSError as exc:
+                    state['real_closed'] = exc.errno == errno.EBADF
+                raise OSError(errno.EIO, 'injected delayed close failure')
+            return real_close(fd)
+
+        os.open, os.write, os.close = os_open, os_write, os_close
+        fds = self._fds()
+        staging = self.root / 'close-after-write-staging'
+        try:
+            with self.assertRaises(OSError) as caught:
+                self.bundle.build(source, staging)
+        finally:
+            os.open, os.write, os.close = real_open, real_write, real_close
+            self.assertEqual(self._fds(), fds)
+        self.assertTrue(state['wrote'])
+        self.assertEqual(state['hits'], 1)
+        self.assertTrue(state['real_closed'])
+        self._assert_closed(state['closed'])
+        self.assertEqual(caught.exception.errno, errno.EACCES)
+        self.assertIn('injected destination write', str(caught.exception))
+        self.assertNotIn('injected delayed close failure', str(caught.exception))
+        self.assertFalse(isinstance(caught.exception, self.bundle.BundleError))
+        self.assertFalse((staging / 'manifest.json').exists())
+
+    def _close_after_programming_error(self):
+        source = self._fill('close-after-programming')
+        target = source / self.bundle.REQUIRED[0]
+        real_open, real_fstat, real_close = os.open, os.fstat, os.close
+        state = {'fds': set(), 'hits': 0, 'real_closed': False, 'done': False, 'closed': []}
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if self._same(path, target):
+                state['fds'].add(fd)
+            return fd
+
+        def os_fstat(fd):
+            if fd in state['fds'] and not state['done']:
+                state['done'] = True
+                raise RuntimeError('programming-error')
+            return real_fstat(fd)
+
+        def os_close(fd):
+            if fd in state['fds'] and state['hits'] == 0:
+                real_close(fd)
+                state['hits'] += 1
+                state['closed'].append(fd)
+                try:
+                    real_fstat(fd)
+                except OSError as exc:
+                    state['real_closed'] = exc.errno == errno.EBADF
+                raise OSError(errno.EIO, 'injected delayed close failure')
+            return real_close(fd)
+
+        os.open, os.fstat, os.close = os_open, os_fstat, os_close
+        fds = self._fds()
+        staging = self.root / 'close-after-programming-staging'
+        try:
+            with self.assertRaises(RuntimeError) as caught:
+                self.bundle.build(source, staging)
+        finally:
+            os.open, os.fstat, os.close = real_open, real_fstat, real_close
+            self.assertEqual(self._fds(), fds)
+        self.assertTrue(state['done'])
+        self.assertEqual(state['hits'], 1)
+        self.assertTrue(state['real_closed'])
+        self._assert_closed(state['closed'])
+        self.assertEqual(str(caught.exception), 'programming-error')
+        self.assertFalse((staging / 'manifest.json').exists())
 
     def _inject_member_io(self, where, number, expected):
         source = self._fill(where + '-' + str(number))
