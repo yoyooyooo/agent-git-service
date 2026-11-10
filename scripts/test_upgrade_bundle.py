@@ -1312,14 +1312,30 @@ class MemberFileTests(unittest.TestCase):
     def _missing_after_listing(self):
         staging = self._stage('missing-after-list')
         target = staging / 'upgrade.py'
-        real_scandir = os.scandir
+        real_scandir, real_listdir = os.scandir, os.listdir
         state = {'mutation': None}
         snap = self._metadata
         root = self.root
+        staging_path = os.path.normpath(os.fspath(staging))
 
-        def wrapped(path, *args, **kwargs):
+        def matches(path):
+            return os.path.normpath(os.fspath(path)) == staging_path
+
+        def drop():
+            if state['mutation'] is not None:
+                return
+            target.unlink()
+            state['mutation'] = snap(root)
+
+        def wrapped_listdir(path, *args, **kwargs):
+            names = real_listdir(path, *args, **kwargs)
+            if matches(path):
+                drop()
+            return names
+
+        def wrapped_scandir(path, *args, **kwargs):
             inner = real_scandir(path, *args, **kwargs)
-            if Path(path) != staging:
+            if not matches(path):
                 return inner
 
             class _Scan:
@@ -1331,15 +1347,15 @@ class MemberFileTests(unittest.TestCase):
                     try:
                         return inner.__exit__(exc_type, exc, tb)
                     finally:
-                        target.unlink()
-                        state['mutation'] = snap(root)
+                        drop()
 
                 def __iter__(self):
                     return iter(inner)
 
             return _Scan()
 
-        os.scandir = wrapped
+        os.scandir = wrapped_scandir
+        os.listdir = wrapped_listdir
         fds = self._fds()
         try:
             try:
@@ -1348,6 +1364,7 @@ class MemberFileTests(unittest.TestCase):
                 outcome = error
         finally:
             os.scandir = real_scandir
+            os.listdir = real_listdir
             self.assertEqual(self._fds(), fds)
         self.assertIsNotNone(state['mutation'])
         self.assertEqual(self._metadata(self.root), state['mutation'])
