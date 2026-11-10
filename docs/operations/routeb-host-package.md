@@ -32,8 +32,14 @@ unexpected programming errors remain errors rather than capability blockers.
 
 The package policy requires the same application revision and tree on
 both sides of the transaction. The tool bundle has a separate revision, tree
-and byte manifest. This permits validating host tooling without introducing
-the mainline database migration or losing an already deployed CI hotfix.
+and byte manifest. The offline staging manifest check,
+[upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-manifest),
+only accepts that closed tool-bundle shape. Tool revision and tree, the
+unchanged application revision, and recovery-asset binding remain separate
+facts. Production admission, Darwin entry, and
+`application_source_transition_not_admitted` stay refused. This permits
+validating host tooling without introducing the mainline database migration
+or losing an already deployed CI hotfix.
 An exact-source candidate is not a Release and supplies no release pin.
 
 Native roots are fixed under the runtime account's real home at
@@ -138,6 +144,10 @@ does not replace full-restore, old-start, business or cleanup evidence.
 Ordinary source CI does not run the launchd experiment. Set
 `AGS_ROUTEB_NATIVE=1` only for an explicitly authorized disposable label.
 That run is not a source-CI pass and does not authorize deployment.
+
+Staging manifest acceptance is only the offline shape check in
+[upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-manifest).
+It is not a tool, application, or recovery binding.
 
 Related pages: [runbook](routeb-runbook.md), [mini](routeb-runbook-mini.md),
 [backup and recovery](backup-recovery.md), [local upgrade](local-upgrade.md),
