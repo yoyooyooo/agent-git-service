@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Offline bundle builder and verifier. Staging only; no host provision.
 
-The manifest does not contain its own digest. Verification accepts only the
+The manifest file itself must be a regular file owned by the current user.
+Verification does not follow a symlink at that final path component. The
+manifest does not contain its own digest. Verification accepts only the
 fixed v2 document: at most 65536 original bytes, strict UTF-8, no duplicate
 keys, and exactly schema, entry and files. Success still sets installable
 false. A bundle missing a required member, or containing an unexpected
@@ -10,6 +12,7 @@ executable, symlink, or owner, is refused.
 import sys
 sys.dont_write_bytecode = True
 sys.pycache_prefix = None
+import errno
 import hashlib
 import json
 import os
@@ -76,13 +79,102 @@ def build(source, staging):
     return {'manifest_sha256': hashlib.sha256(raw).hexdigest(), 'members': len(files)}
 
 
-def _read_manifest_bytes(path):
-    """Read at most one byte past the budget, then refuse the oversize file."""
-    with path.open('rb') as handle:
-        raw = handle.read(_MANIFEST_BUDGET + 1)
-    if len(raw) > _MANIFEST_BUDGET:
-        raise BundleError('manifest_budget_exceeded')
-    return raw
+def _manifest_owner_uid():
+    """UID compared with the manifest descriptor. Not an input, CLI, or environment override."""
+    return os.getuid()
+
+
+def _manifest_identity(info):
+    """Stable file identity. atime is excluded because a read may update it."""
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _manifest_access_error(exc):
+    if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+        code = 'manifest_missing'
+    elif exc.errno in (errno.ELOOP, errno.EISDIR, errno.ENXIO):
+        code = 'manifest_type_rejected'
+    else:
+        code = 'manifest_unreadable'
+    raise BundleError(code) from None
+
+
+def _read_fd_bounded(fd, limit):
+    chunks = []
+    remaining = limit
+    while remaining > 0:
+        try:
+            chunk = os.read(fd, remaining)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            _manifest_access_error(exc)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b''.join(chunks)
+
+
+def _open_manifest(path):
+    """Open the final component without following it. Never fall back to a following open."""
+    nofollow = getattr(os, 'O_NOFOLLOW', None)
+    nonblock = getattr(os, 'O_NONBLOCK', None)
+    if nofollow is None or nonblock is None:
+        raise BundleError('manifest_type_rejected')
+    flags = os.O_RDONLY | nofollow | nonblock
+    while True:
+        try:
+            return os.open(path, flags)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            _manifest_access_error(exc)
+
+
+def _read_manifest_bytes(path, *, executable):
+    """Read one no-follow descriptor, capped at one byte past the budget."""
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        _manifest_access_error(exc)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise BundleError('manifest_type_rejected')
+    fd = _open_manifest(path)
+    try:
+        try:
+            opened = os.fstat(fd)
+            if stat.S_ISLNK(opened.st_mode) or not stat.S_ISREG(opened.st_mode):
+                raise BundleError('manifest_type_rejected')
+            if _manifest_identity(opened) != _manifest_identity(info):
+                raise BundleError('manifest_changed')
+            if opened.st_uid != _manifest_owner_uid():
+                raise BundleError('owner_rejected')
+            if executable and stat.S_IMODE(opened.st_mode) & 0o111:
+                raise BundleError('unexpected_executable')
+            raw = _read_fd_bounded(fd, _MANIFEST_BUDGET + 1)
+            after = os.fstat(fd)
+            if _manifest_identity(after) != _manifest_identity(opened):
+                raise BundleError('manifest_changed')
+            try:
+                current = path.lstat()
+            except OSError:
+                raise BundleError('manifest_changed') from None
+            if _manifest_identity(current) != _manifest_identity(after):
+                raise BundleError('manifest_changed')
+            if len(raw) > _MANIFEST_BUDGET:
+                raise BundleError('manifest_budget_exceeded')
+            return raw
+        except BundleError:
+            raise
+        except OSError as exc:
+            _manifest_access_error(exc)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _reject_deep(text):
@@ -148,10 +240,7 @@ def _load_manifest(raw):
 
 def verify(staging, *, executable=True):
     staging = Path(staging)
-    manifest_path = staging / 'manifest.json'
-    if not manifest_path.is_file():
-        raise BundleError('manifest_missing')
-    raw = _read_manifest_bytes(manifest_path)
+    raw = _read_manifest_bytes(staging / 'manifest.json', executable=executable)
     files = _load_manifest(raw)
     present = {path.name for path in staging.iterdir()}
     if present != set(REQUIRED) | {'manifest.json'}:

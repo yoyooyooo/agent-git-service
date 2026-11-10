@@ -46,13 +46,17 @@ original `manifest.json` bytes, not a normalized re-encoding, through
 `verification_policy.tool_bundle_manifest_sha256`.
 The manifest schema is `ags.upgrade-tool-bundle.v2`, its entry is
 `upgrade_host.py`, and its only top-level fields are `schema`, `entry` and
-`files`. Offline staging verification uses that fixed identity and a
-65536-byte original-byte budget before it checks members; see
+`files`. Offline staging verification checks that `manifest.json` is a
+regular file owned by the current user, does not follow that final component
+if it is a symlink, and applies the fixed identity plus a 65536-byte
+original-byte budget before it checks members; see
 [upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-manifest).
-The user who builds a staging directory owns those files. That ownership is
-not the runtime rule: a provisioned bundle and its ancestors must be
-root-owned and not group/world writable. This page does not claim that the
-runtime parser rejects duplicate JSON keys.
+`executable=False` there skips only the staging executable-bit check. The user
+who builds a staging directory owns those files. That current-UID staging rule
+is not the runtime rule: a provisioned bundle and its ancestors must be
+root-owned and not group/world writable. The runtime bundle check remains a
+separate implementation. This page does not claim that the runtime parser
+rejects duplicate JSON keys.
 Required files include the wrapper, host adapter, transaction engine, policy,
 installer, v2 consumer, verifier, shared archive contract, `upgrade_smoke.py`,
 `upgrade_backup_contract.py`, `upgrade_inventory.py`, `upgrade_backup.py`,

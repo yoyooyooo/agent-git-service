@@ -34,9 +34,9 @@ The package policy requires the same application revision and tree on
 both sides of the transaction. The tool bundle has a separate revision, tree
 and byte manifest. The offline staging manifest check,
 [upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-manifest),
-only accepts that closed tool-bundle shape. Tool revision and tree, the
-unchanged application revision, and recovery-asset binding remain separate
-facts. Production admission, Darwin entry, and
+checks that file and its closed content. It does not admit production use.
+Tool revision and tree, the unchanged application revision, and recovery-asset
+binding remain separate facts. Production admission, Darwin entry, and
 `application_source_transition_not_admitted` stay refused. This permits
 validating host tooling without introducing the mainline database migration
 or losing an already deployed CI hotfix.
@@ -145,7 +145,7 @@ Ordinary source CI does not run the launchd experiment. Set
 `AGS_ROUTEB_NATIVE=1` only for an explicitly authorized disposable label.
 That run is not a source-CI pass and does not authorize deployment.
 
-Staging manifest acceptance is only the offline shape check in
+Staging manifest acceptance is the offline file and content check in
 [upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-manifest).
 It is not a tool, application, or recovery binding.
 
