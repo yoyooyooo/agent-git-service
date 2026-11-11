@@ -24,6 +24,16 @@ SHA256 capped at the observed size plus one byte. The member chunk is not
 the manifest budget. Success still sets installable false. A bundle missing
 a required member, or containing an unexpected executable, symlink, owner,
 or a member whose path changes around the read, is refused.
+
+Each manifest or member descriptor is closed once. That close is not retried,
+including after EINTR, and it is not attempted a second time. The read is
+finished only when the close succeeds. A close OSError after the read itself
+succeeded is manifest_unreadable or member_unreadable: exit 69, and the
+message is only that code. The manifest is not parsed and later members are
+not opened. A close OSError does not replace an exception this read already
+raised. An exception the caller is already handling is not this read's
+failure. One close attempt does not prove that every OS released the
+descriptor after an unknown close error.
 """
 import sys
 sys.dont_write_bytecode = True
@@ -308,7 +318,12 @@ def _open_manifest(path):
 
 
 def _read_manifest_bytes(path, *, executable):
-    """Read one no-follow descriptor, capped at one byte past the budget."""
+    """Read one no-follow descriptor, capped at one byte past the budget.
+
+    Close that descriptor once. A close OSError after this read succeeded is
+    manifest_unreadable and the bytes are not parsed. A close OSError after
+    this read already failed is discarded. Close is not retried.
+    """
     try:
         info = path.lstat()
     except OSError as exc:
@@ -339,16 +354,25 @@ def _read_manifest_bytes(path, *, executable):
                 raise BundleError('manifest_changed')
             if len(raw) > _MANIFEST_BUDGET:
                 raise BundleError('manifest_budget_exceeded')
-            return raw
+            result = raw
         except BundleError:
             raise
         except OSError as exc:
             _manifest_access_error(exc)
-    finally:
+    except BaseException:
+        # This read already failed. Close once and keep that error.
         try:
             os.close(fd)
         except OSError:
             pass
+        raise
+    # A caller's handled exception is not this read's failure.
+    # Close once, including after EINTR. Do not retry or close again.
+    try:
+        os.close(fd)
+    except OSError:
+        raise BundleError('manifest_unreadable') from None
+    return result
 
 
 def _reject_deep(text):
@@ -480,7 +504,12 @@ def _hash_member_fd(fd, size):
 
 
 def _verify_member(path, digest, *, executable):
-    """Check one member and hash it from the same no-follow descriptor."""
+    """Check one member and hash it from the same no-follow descriptor.
+
+    Close that descriptor once. A close OSError after the checks succeeded is
+    member_unreadable and stops later members. A close OSError after this
+    member already failed is discarded. Close is not retried.
+    """
     try:
         info = path.lstat()
     except OSError as exc:
@@ -510,11 +539,19 @@ def _verify_member(path, digest, *, executable):
             raise BundleError('member_changed')
         if actual != digest:
             raise BundleError('digest_rejected')
-    finally:
+    except BaseException:
+        # This member already failed. Close once and keep that error.
         try:
             os.close(fd)
         except OSError:
             pass
+        raise
+    # A caller's handled exception is not this member's failure.
+    # Close once, including after EINTR. Do not retry or close again.
+    try:
+        os.close(fd)
+    except OSError:
+        raise BundleError('member_unreadable') from None
 
 
 def verify(staging, *, executable=True):

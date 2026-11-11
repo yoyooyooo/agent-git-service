@@ -103,6 +103,23 @@ bytes plus one extra byte from that descriptor only. A metadata or path
 identity change observed across the read is `manifest_changed`. None of these
 codes echoes the path or the file body.
 
+The opened descriptor is closed once, whether this read returns or raises.
+The close is not retried, including when it returns EINTR, and verification
+does not close that descriptor again. The read is finished only when the
+close succeeds; only then are the original bytes parsed. A close OSError
+after the read itself succeeded is `manifest_unreadable`, exit 69, and the
+message is only that code. Parsing, the directory listing, and member reads
+do not continue. EIO, EINTR, EBADF, and every other close errno use that same
+code. The close does not select `manifest_missing` or `manifest_type_rejected`.
+If this read had already raised, including a budget, identity, owner, or
+executable refusal, a programming error, or cancellation, that earlier
+exception is kept. A close OSError does not replace it. An exception the
+caller is already handling is not this read's failure. `executable=False`
+does not ignore a close failure. One close attempt does not prove that the
+descriptor was released after an unknown close error. The failure does not
+modify the manifest or write a marker. Success remains `verified=true` and
+`installable=false`.
+
 The original file is at most 65536 bytes, and the reader stops after one extra
 byte. Those bytes are strict UTF-8. No JSON object contains a duplicate key at
 any depth, even when both values are identical. The only top-level fields are
@@ -147,8 +164,16 @@ next. Unless the caller passes `executable=False`, any executable bit is
 chunks of at most 65536 bytes. The read stops at the size from the first
 `fstat`, plus one extra byte so a growing file is noticed and is not followed
 to its new end. A later `fstat` and a final path `lstat` must still name that
-same file. The digest is compared only after those checks. Every success and
-failure path closes the descriptor. If the platform cannot open without
+same file. The digest is compared only after those checks. The descriptor is
+then closed once. The close is not retried, including after EINTR, and it is
+not closed again. This member is accepted only if that close succeeds. A
+close OSError is `member_unreadable`, exit 69, and the message is only that
+code; later members are not opened. Every close errno uses that code, not
+`member_missing` or `member_type_rejected`. If this member had already
+raised, that earlier exception is kept and a close OSError does not replace
+it. An exception the caller is already handling is not this member's failure.
+One close attempt does not prove that the descriptor was released after an
+unknown close error. If the platform cannot open without
 following, or cannot open nonblocking, verification refuses with
 `member_type_rejected` instead of following the path. No input, flag, or
 environment variable selects a larger chunk or removes the extra-byte stop.
@@ -157,8 +182,8 @@ may be larger than that budget, and an empty member is valid when its
 digest matches.
 
 `executable=False` skips only the executable-bit check. It does not accept
-another type, owner, identity change, or digest, and it does not make the
-bundle installable. This current-UID rule is the offline staging rule, not
+another type, owner, identity change, or digest, it does not ignore a close
+failure, and it does not make the bundle installable. This current-UID rule is the offline staging rule, not
 the root-owned runtime bundle rule.
 
 A static symlink, including an internal, external, relative, absolute,
