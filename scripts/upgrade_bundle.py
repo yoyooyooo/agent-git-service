@@ -10,8 +10,10 @@ at the first fstat size plus one probe byte. A symlink or other non-regular
 source is member_missing. A change around the read is source_changed. Any
 other source access failure is source_unreadable. Those codes carry no path
 or body. The manifest is written only after every member copy has checked
-out. This does not prove a Git revision and does not make the bundle
-installable.
+out. The destination file is created exclusively and is not truncated or
+followed. Member mode 0644 is fchmod on that same descriptor. A path that
+no longer names it is destination_changed. This does not prove a Git
+revision and does not make the bundle installable.
 
 The manifest file itself must be a regular file owned by the current user.
 Verification does not follow a symlink at that final path component. The
@@ -93,10 +95,9 @@ def build(source, staging):
         path = _choose_source_path(source, name)
         dest = staging / name
         files[name] = _copy_source_member(path, dest)
-        os.chmod(dest, 0o644)
     manifest = {'schema': SCHEMA, 'entry': ENTRY, 'files': files}
     raw = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()
-    (staging / 'manifest.json').write_bytes(raw)
+    _write_exclusive(staging / 'manifest.json', raw, 0o666, None)
     return {'manifest_sha256': hashlib.sha256(raw).hexdigest(), 'members': len(files)}
 
 
@@ -181,6 +182,109 @@ def _read_source(fd, size):
             raise BundleError('source_unreadable') from None
 
 
+def _open_destination(path, mode):
+    """Create the final component. Never truncate, follow, or reuse an existing object."""
+    nofollow = getattr(os, 'O_NOFOLLOW', None)
+    nonblock = getattr(os, 'O_NONBLOCK', None)
+    if nofollow is None or nonblock is None or not hasattr(os, 'fchmod'):
+        raise OSError(errno.ENOTSUP, 'destination creation unavailable')
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow | nonblock
+    while True:
+        try:
+            return os.open(path, flags, mode)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise
+
+
+def _destination_fstat(fd):
+    """fstat one output descriptor. Another errno stays a destination OSError."""
+    while True:
+        try:
+            return os.fstat(fd)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise
+
+
+def _destination_fchmod(fd, mode):
+    """Set mode on the held descriptor. Do not chmod the path."""
+    while True:
+        try:
+            os.fchmod(fd, mode)
+            return
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise
+
+
+def _destination_owner(info):
+    """Identity that our own write and fchmod do not change."""
+    return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode), info.st_uid)
+
+
+def _destination_snapshot(info):
+    """Metadata after our own writes. atime is excluded because a read may change it."""
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _require_new_regular(info):
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise BundleError('destination_changed')
+
+
+def _bind_destination(fd, path, created, nbytes):
+    """The final path must still name this regular descriptor. Ignore atime."""
+    _require_new_regular(created)
+    finished = _destination_fstat(fd)
+    _require_new_regular(finished)
+    if _destination_owner(finished) != _destination_owner(created) or finished.st_size != nbytes:
+        raise BundleError('destination_changed')
+    try:
+        current = _lstat_source(path)
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            raise BundleError('destination_changed') from None
+        raise
+    if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode)
+            or _destination_snapshot(current) != _destination_snapshot(finished)):
+        raise BundleError('destination_changed')
+    again = _destination_fstat(fd)
+    if _destination_snapshot(again) != _destination_snapshot(current):
+        raise BundleError('destination_changed')
+
+
+def _close_output_keep(fd):
+    """Close once after this output already failed. Keep the earlier error."""
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _write_exclusive(path, data, mode, chmod_mode):
+    """Create, write, and close one output. chmod_mode None keeps the creation mode."""
+    fd = _open_destination(path, mode)
+    try:
+        created = _destination_fstat(fd)
+        _require_new_regular(created)
+        _write_dest(fd, data)
+        if chmod_mode is not None:
+            _destination_fchmod(fd, chmod_mode)
+        _bind_destination(fd, path, created, len(data))
+    except BaseException:
+        _close_output_keep(fd)
+        raise
+    try:
+        os.close(fd)
+    except OSError:
+        raise
+
+
 def _write_dest(fd, data):
     """Write staging bytes. Failures stay destination errors and do not select another source."""
     view = memoryview(data)
@@ -200,8 +304,10 @@ def _stream_source(fd, dest, size):
     """Copy and hash one descriptor. The extra probe byte is not written."""
     digest = hashlib.sha256()
     remaining = size
-    out = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    out = _open_destination(dest, 0o644)
     try:
+        created = _destination_fstat(out)
+        _require_new_regular(created)
         while True:
             request = 1 if remaining == 0 else min(_MEMBER_CHUNK, remaining)
             chunk = _read_source(fd, request)
@@ -214,15 +320,15 @@ def _stream_source(fd, dest, size):
             digest.update(chunk)
             _write_dest(out, chunk)
             remaining -= len(chunk)
+        _destination_fchmod(out, 0o644)
+        _bind_destination(out, dest, created, size)
     except BaseException:
         # This copy already failed. Close once and keep that error.
         # Do not close again: close leaves the descriptor state unspecified.
-        try:
-            os.close(out)
-        except OSError:
-            pass
+        _close_output_keep(out)
         raise
     # A caller's handled exception is not this copy's failure.
+    # Close once, including after EINTR. Do not retry or close again.
     try:
         os.close(out)
     except OSError:

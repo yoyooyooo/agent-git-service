@@ -72,6 +72,13 @@ when the primary path is actually missing. See
 [offline staging sources](upgrade-provisioning.md#offline-staging-sources).
 That input check is not the root-owned runtime bundle rule and does not make
 the staging directory a host trust root.
+The copies and `manifest.json` are new files created exclusively. The member
+mode is set on that same descriptor, and the builder refuses when the final
+path no longer names it. See
+[offline staging outputs](upgrade-provisioning.md#offline-staging-outputs).
+That output check does not `fsync`, does not publish the directory atomically,
+and does not turn the current-UID staging directory into a root-owned host
+trust root.
 Required files include the wrapper, host adapter, transaction engine, policy,
 installer, v2 consumer, verifier, shared archive contract, `upgrade_smoke.py`,
 `upgrade_backup_contract.py`, `upgrade_inventory.py`, `upgrade_backup.py`,

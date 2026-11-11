@@ -3671,5 +3671,1207 @@ class VerifierCloseTests(unittest.TestCase):
     def _same(self, path, target):
         return not isinstance(path, int) and os.path.normpath(os.fspath(path)) == str(target)
 
+def _occupy_destination(role, kind, source, staging, sentinel, outside):
+    """Subprocess entry. An occupied fifo or dangling link must fail without waiting or following."""
+    import upgrade_bundle as bundle
+    source, staging = Path(source), Path(staging)
+    sentinel, outside = Path(sentinel), Path(outside)
+    name = 'manifest.json' if role == 'manifest' else bundle.REQUIRED[0]
+    target = staging / name
+    real_mkdir = os.mkdir
+
+    def mkdir(path, mode=0o777, *args, **kwargs):
+        real_mkdir(path, mode, *args, **kwargs)
+        if Path(path) == staging:
+            if kind == 'fifo':
+                os.mkfifo(target, 0o600)
+            elif kind == 'dangling':
+                target.symlink_to(outside)
+            else:
+                raise AssertionError(kind)
+
+    os.mkdir = mkdir
+    before = sentinel.read_bytes()
+    try:
+        bundle.build(source, staging)
+    except FileExistsError as exc:
+        if exc.errno != errno.EEXIST:
+            return 2
+    else:
+        return 3
+    info = target.lstat()
+    if sentinel.read_bytes() != before or outside.exists():
+        return 4
+    if kind == 'fifo' and not stat.S_ISFIFO(info.st_mode):
+        return 5
+    if kind == 'dangling' and not stat.S_ISLNK(info.st_mode):
+        return 6
+    if role == 'member' and (staging / 'manifest.json').exists():
+        return 7
+    if role == 'manifest' and stat.S_ISREG(info.st_mode):
+        return 8
+    return 0
+
+
+class BuilderDestinationTests(unittest.TestCase):
+    """Destination ownership for files this build creates.
+
+    Hooks call the real open, write, and chmod. Fixtures are inert bytes and
+    are never executed. The eight reproduced windows are exclusive-create or
+    destination_changed refusals. The four controls keep the previous result.
+    """
+
+    def setUp(self):
+        import upgrade_bundle as bundle
+        self.bundle = bundle
+        actual = Path(bundle.__file__).resolve()
+        expected = (HERE / 'upgrade_bundle.py').resolve()
+        self.assertEqual(actual, expected, 'refusing to test an imported module outside this tree')
+        self.assertNotEqual(os.getuid(), 0)
+        self.tmp = tempfile.TemporaryDirectory(dir=Path.home(), prefix='bundle-dest-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.root.chmod(0o700)
+
+    def test_recorded_probe_cases(self):
+        """Eight destination windows plus four controls. One real build each."""
+        cases = (
+            ('manifest-regular', 'manifest', 'regular', 'exclusive'),
+            ('manifest-hardlink', 'manifest', 'hardlink', 'exclusive'),
+            ('manifest-absolute', 'manifest', 'absolute', 'exclusive'),
+            ('manifest-relative', 'manifest', 'relative', 'exclusive'),
+            ('member-regular', 'member', 'regular', 'destination_changed'),
+            ('member-hardlink', 'member', 'hardlink', 'destination_changed'),
+            ('member-absolute', 'member', 'absolute', 'destination_changed'),
+            ('member-relative', 'member', 'relative', 'destination_changed'),
+            ('regular-control', 'control', 'normal', 'success'),
+            ('source-executable-control', 'control', 'source-executable', 'success'),
+            ('member-collision-control', 'collision', 'regular', 'exclusive'),
+            ('source-symlink-control', 'control', 'source-symlink', 'member_missing'),
+        )
+        self.assertEqual(len(cases), 12)
+        for label, role, kind, expected in cases:
+            with self.subTest(case=label):
+                self._recorded(label, role, kind, expected)
+
+    def _recorded(self, label, role, kind, expected):
+        root = self.root / label
+        root.mkdir(mode=0o700)
+        source, staging = root / 'source', root / 'staging'
+        source.mkdir(mode=0o700)
+        for name in self.bundle.REQUIRED:
+            path = source / name
+            path.write_bytes(b'SYNTHETIC INERT\x00\xff ' + name.encode() + b'\n')
+            path.chmod(0o600)
+        member = self.bundle.REQUIRED[0]
+        target = staging / ('manifest.json' if role == 'manifest' else member)
+        sentinel = root / 'sentinel'
+        sentinel.write_bytes((source / member).read_bytes() if role == 'member' else b'UNRELATED SYNTHETIC SENTINEL\n')
+        sentinel.chmod(0o600)
+        if kind == 'source-executable':
+            (source / member).chmod(0o700)
+        if kind == 'source-symlink':
+            (source / member).rename(root / 'held-source')
+            (source / member).symlink_to(sentinel)
+        sources_before = {path.name: self._identity(path) for path in source.iterdir()}
+        state = {'injections': 0, 'tracked_fd': None, 'writes': 0, 'close_calls': 0,
+                 'chmod_calls': 0, 'protected_before': None, 'sentinel_before': self._identity(sentinel)}
+        real_open, real_write, real_close = os.open, os.write, os.close
+        real_path_open, real_chmod = Path.open, os.chmod
+
+        def inject():
+            self.assertEqual(state['injections'], 0, label)
+            state['injections'] += 1
+            if role == 'member':
+                target.rename(root / 'held-output')
+            if kind in ('absolute', 'relative'):
+                target.symlink_to(sentinel if kind == 'absolute' else Path('..') / 'sentinel')
+            elif kind == 'hardlink':
+                os.link(sentinel, target)
+            else:
+                target.write_bytes(sentinel.read_bytes())
+                real_chmod(target, 0o600)
+            state['protected_before'] = self._identity(target)
+            state['sentinel_before'] = self._identity(sentinel)
+
+        def match(path):
+            return not isinstance(path, int) and Path(path) == target
+
+        def opening(path, writable):
+            if match(path) and writable and not state['injections'] and role in ('manifest', 'collision'):
+                inject()
+
+        def open_hook(path, flags, *args, **kwargs):
+            opening(path, bool(flags & (os.O_WRONLY | os.O_RDWR)))
+            fd = real_open(path, flags, *args, **kwargs)
+            if match(path) and flags & (os.O_WRONLY | os.O_RDWR):
+                state['tracked_fd'] = fd
+            return fd
+
+        def path_open_hook(path, mode='r', *args, **kwargs):
+            opening(path, any(mark in mode for mark in 'wax+'))
+            return real_path_open(path, mode, *args, **kwargs)
+
+        def write_hook(fd, data):
+            written = real_write(fd, data)
+            if fd == state['tracked_fd']:
+                state['writes'] += 1
+                if role == 'member' and not state['injections']:
+                    inject()
+            return written
+
+        def close_hook(fd):
+            if fd == state['tracked_fd']:
+                state['close_calls'] += 1
+                state['tracked_fd'] = None
+            return real_close(fd)
+
+        def chmod_hook(path, mode, *args, **kwargs):
+            if match(path) and state['injections']:
+                state['chmod_calls'] += 1
+            return real_chmod(path, mode, *args, **kwargs)
+
+        before_fds = self._fds()
+        os.open, os.write, os.close = open_hook, write_hook, close_hook
+        Path.open, os.chmod = path_open_hook, chmod_hook
+        outcome = None
+        try:
+            try:
+                outcome = self.bundle.build(source, staging)
+            except FileExistsError as exc:
+                outcome = exc
+            except self.bundle.BundleError as exc:
+                outcome = exc
+            except OSError as exc:
+                outcome = exc
+        finally:
+            os.open, os.write, os.close = real_open, real_write, real_close
+            Path.open, os.chmod = real_path_open, real_chmod
+        self.assertEqual(self._fds(), before_fds, label)
+        self.assertEqual({path.name: self._identity(path) for path in source.iterdir()}, sources_before, label)
+        if role in ('member', 'manifest', 'collision'):
+            self.assertEqual(state['injections'], 1, label)
+        if role == 'member':
+            self.assertGreaterEqual(state['writes'], 1, label)
+        unchanged = True
+        if state['protected_before'] is not None:
+            unchanged = (self._identity(sentinel) == state['sentinel_before'] and
+                         self._identity(target) == state['protected_before'])
+        else:
+            unchanged = self._identity(sentinel) == state['sentinel_before']
+        print('recorded case=%s outcome=%s unchanged=%s chmod_calls=%s writes=%s' % (
+            label, self._outcome_name(outcome), unchanged, state['chmod_calls'], state['writes']),
+            file=sys.stderr)
+        if expected == 'success':
+            self.assertIsInstance(outcome, dict, label)
+            verified = self.bundle.verify(staging)
+            self.assertIs(verified['verified'], True, label)
+            self.assertIs(verified['installable'], False, label)
+            self.assertEqual(verified['manifest_sha256'], outcome['manifest_sha256'], label)
+            self.assertTrue(unchanged, label)
+            if kind == 'source-executable':
+                staged = staging / member
+                self.assertEqual(staged.read_bytes(), (source / member).read_bytes(), label)
+                self.assertEqual(stat.S_IMODE(staged.lstat().st_mode), 0o644, label)
+                self.assertFalse(stat.S_IMODE(staged.lstat().st_mode) & 0o111, label)
+                self.assertEqual(stat.S_IMODE((source / member).lstat().st_mode), 0o700, label)
+                self.assertEqual(staged.read_bytes(), (source / member).read_bytes(), label)
+            return
+        self.assertTrue(unchanged, '%s changed an occupied object chmod_calls=%s' % (label, state['chmod_calls']))
+        self.assertFalse((staging / 'manifest.json').exists() and role != 'manifest', label)
+        if expected == 'exclusive':
+            self.assertIsInstance(outcome, FileExistsError, '%s build=%s chmod_calls=%s' % (
+                label, self._outcome_name(outcome), state['chmod_calls']))
+            self.assertEqual(outcome.errno, errno.EEXIST, label)
+            self.assertFalse(isinstance(outcome, self.bundle.BundleError), label)
+            if role == 'collision':
+                self.assertFalse((staging / 'manifest.json').exists(), label)
+            return
+        self.assertIsInstance(outcome, self.bundle.BundleError, '%s build=%s unchanged=%s chmod_calls=%s' % (
+            label, self._outcome_name(outcome), unchanged, state['chmod_calls']))
+        self.assertEqual(outcome.code, expected, label)
+        self.assertEqual(outcome.exit_code, 69, label)
+        self.assertEqual(str(outcome), expected, label)
+        self.assertEqual(outcome.args, (expected,), label)
+        self.assertIsNone(outcome.__cause__, label)
+        self.assertNotIn(str(root), str(outcome), label)
+        self.assertNotIn('SYNTHETIC', str(outcome), label)
+        if expected == 'destination_changed':
+            self.assertFalse((staging / 'manifest.json').exists(), label)
+            self.assertFalse((staging / self.bundle.REQUIRED[1]).exists(), label)
+            self.assertEqual(state['chmod_calls'], 0, label)
+
+    def test_preexisting_objects_fail_exclusive_open(self):
+        """An occupied final component is not truncated, followed, or reused."""
+        kinds = ('regular', 'same-bytes', 'hardlink', 'absolute', 'relative', 'dangling', 'chain', 'directory')
+        for role in ('member', 'manifest'):
+            for kind in kinds:
+                with self.subTest(role=role, kind=kind):
+                    self._preexisting(role, kind)
+
+    def test_fifo_and_dangling_do_not_block_or_follow(self):
+        """A fifo must not wait for a writer, and a dangling link must not create its target."""
+        for role in ('member', 'manifest'):
+            for kind in ('fifo', 'dangling'):
+                with self.subTest(role=role, kind=kind):
+                    self._occupy_subprocess(role, kind)
+
+    def test_replacement_after_create_write_and_mode(self):
+        """A different inode, link, or removed path is destination_changed even when bytes match."""
+        points = {
+            'member': ('after-open', 'after-write', 'before-fchmod', 'after-fchmod'),
+            'manifest': ('after-open', 'after-write', 'before-lstat'),
+        }
+        kinds = ('same-bytes', 'absolute', 'unlink')
+        for role, selected in points.items():
+            for point in selected:
+                for kind in kinds:
+                    with self.subTest(role=role, point=point, kind=kind):
+                        self._replace(role, point, kind)
+
+    def test_member_bytes_and_mode_use_the_created_fd(self):
+        """Mode 0644 and the copied bytes belong to the exclusive descriptor, not a path chmod."""
+        marker = bytes((0, 255, 10, 13))
+        for size in (0, 65535, 65536, 65537, 2 * 1024 * 1024):
+            with self.subTest(size=size):
+                payload = (marker * ((size // len(marker)) + 1))[:size]
+                self.assertEqual(len(payload), size)
+                self._observe_member(size, payload)
+
+    def test_short_write_eintr_and_rejected_counts(self):
+        """A real short write and write EINTR continue. Zero and negative counts do not."""
+        for role in ('member', 'manifest'):
+            for mode in ('short', 'eintr', 'open-eintr', 'fstat-eintr'):
+                with self.subTest(role=role, mode=mode):
+                    self._write_seam(role, mode, success=True)
+            if role == 'member':
+                with self.subTest(role=role, mode='fchmod-eintr'):
+                    self._write_seam(role, 'fchmod-eintr', success=True)
+            for mode in ('zero', 'negative'):
+                with self.subTest(role=role, mode=mode):
+                    self._write_seam(role, mode, success=False)
+
+    def test_output_errors_stay_destination_errors(self):
+        """Injected write, fstat, fchmod, and close failures are seams, not device faults."""
+        for role in ('member', 'manifest'):
+            seams = ('write', 'fstat', 'close-eio', 'close-eintr')
+            if role == 'member':
+                seams = seams + ('fchmod',)
+            for seam in seams:
+                for handled in (False, True):
+                    with self.subTest(role=role, seam=seam, handled=handled):
+                        self._output_error(role, seam, handled)
+
+    def test_one_close_keeps_the_earlier_failure(self):
+        """Close EIO must not replace an earlier refusal, and it must not close a reused descriptor."""
+        for role in ('member', 'manifest'):
+            for kind in ('destination_changed', 'write', 'programming', 'cancel', 'source_changed'):
+                if role == 'manifest' and kind == 'source_changed':
+                    continue
+                with self.subTest(role=role, kind=kind):
+                    self._close_preserves(role, kind)
+
+    def test_manifest_residue_is_not_success(self):
+        """A manifest created before a later failure is not deleted and is not a successful build."""
+        for seam in ('write', 'close'):
+            with self.subTest(seam=seam):
+                self._manifest_residue(seam)
+
+    def test_umask_members_and_manifest_modes(self):
+        """Members stay 0644. Manifest keeps 0666 masked by umask. The directory stays 0700."""
+        observed = self._umask()
+        self.assertEqual(observed, self._umask())
+        for mask in (0o022, 0o077):
+            with self.subTest(umask=oct(mask)):
+                self._umask_once(mask)
+
+    def test_missing_destination_flags_do_not_truncate_or_follow(self):
+        for flag in ('O_NOFOLLOW', 'O_NONBLOCK', 'fchmod'):
+            with self.subTest(flag=flag):
+                self._hide_destination_flag(flag)
+
+    def _fill(self, label):
+        root = self.root / label
+        root.mkdir(mode=0o700)
+        source = root / 'source'
+        source.mkdir(mode=0o700)
+        payloads = {}
+        for name in self.bundle.REQUIRED:
+            path = source / name
+            payload = b'SYNTHETIC INERT\x00\xff ' + name.encode() + b'\n'
+            path.write_bytes(payload)
+            path.chmod(0o600)
+            payloads[name] = payload
+        return root, source, payloads
+
+    def _preexisting(self, role, kind):
+        root, source, payloads = self._fill('pre-' + role + '-' + kind)
+        sentinel = root / 'sentinel'
+        member = self.bundle.REQUIRED[0]
+        sentinel.write_bytes(payloads[member] if kind == 'same-bytes' and role == 'member' else b'UNRELATED SENTINEL\n')
+        sentinel.chmod(0o600)
+        staging = root / 'staging'
+        target_name = 'manifest.json' if role == 'manifest' else member
+        manifest_bytes = b''
+        if role == 'manifest' and kind == 'same-bytes':
+            clean = root / 'clean'
+            self.bundle.build(source, clean)
+            manifest_bytes = (clean / 'manifest.json').read_bytes()
+        state = {'planted': None, 'flags': None, 'mode': None, 'opens': 0, 'followed': []}
+        real_mkdir, real_open = os.mkdir, os.open
+
+        def plant(target):
+            absent = root / 'absent-target'
+            if kind == 'regular':
+                self._raw_write(real_open, target, b'OCCUPIED DESTINATION\n', 0o600)
+            elif kind == 'same-bytes':
+                raw = manifest_bytes if role == 'manifest' else sentinel.read_bytes()
+                self._raw_write(real_open, target, raw, 0o600)
+            elif kind == 'hardlink':
+                os.link(sentinel, target)
+            elif kind == 'absolute':
+                target.symlink_to(sentinel)
+            elif kind == 'relative':
+                target.symlink_to(Path('..') / 'sentinel')
+            elif kind == 'dangling':
+                target.symlink_to(absent.name)
+            elif kind == 'chain':
+                inner = root / 'chain-inner'
+                outer = root / 'chain-outer'
+                inner.write_bytes(b'CHAIN INNER\n')
+                inner.chmod(0o600)
+                outer.symlink_to(inner.name)
+                target.symlink_to(Path('..') / outer.name)
+            elif kind == 'directory':
+                target.mkdir(mode=0o700)
+            else:
+                self.fail(kind)
+            state['planted'] = self._identity(target)
+            state['sentinel'] = self._identity(sentinel)
+            state['absent'] = absent
+
+        def mkdir(path, mode=0o777, *args, **kwargs):
+            real_mkdir(path, mode, *args, **kwargs)
+            if Path(path) == staging:
+                plant(staging / target_name)
+
+        def os_open(path, flags, *args, **kwargs):
+            if not isinstance(path, int) and Path(path) == staging / target_name:
+                state['opens'] += 1
+                state['flags'] = flags
+                state['mode'] = args[0] if args else kwargs.get('mode')
+            if not isinstance(path, int) and Path(path) == sentinel:
+                state['followed'].append(str(path))
+            return real_open(path, flags, *args, **kwargs)
+
+        os.mkdir, os.open = mkdir, os_open
+        fds = self._fds()
+        try:
+            with self.assertRaises(FileExistsError) as caught:
+                self.bundle.build(source, staging)
+        finally:
+            os.mkdir, os.open = real_mkdir, real_open
+            self.assertEqual(self._fds(), fds)
+        self.assertEqual(caught.exception.errno, errno.EEXIST)
+        self.assertFalse(isinstance(caught.exception, self.bundle.BundleError))
+        self.assertEqual(state['opens'], 1)
+        self.assertEqual(state['flags'] & (os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK),
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK)
+        self.assertFalse(state['flags'] & getattr(os, 'O_TRUNC', 0))
+        self.assertEqual(state['mode'], 0o666 if role == 'manifest' else 0o644)
+        self.assertEqual(state['followed'], [])
+        target = staging / target_name
+        self.assertEqual(self._identity(target), state['planted'])
+        self.assertEqual(self._identity(sentinel), state['sentinel'])
+        if kind == 'dangling':
+            self.assertFalse(state['absent'].exists())
+        if kind == 'chain':
+            self.assertEqual((root / 'chain-inner').read_bytes(), b'CHAIN INNER\n')
+        if role == 'member':
+            self.assertFalse((staging / 'manifest.json').exists())
+            self.assertFalse((staging / self.bundle.REQUIRED[1]).exists())
+
+    def _occupy_subprocess(self, role, kind):
+        root, source, _payloads = self._fill('sub-' + role + '-' + kind)
+        sentinel = root / 'sentinel'
+        sentinel.write_bytes(b'UNRELATED SENTINEL\n')
+        sentinel.chmod(0o600)
+        outside = root / 'outside-target'
+        staging = root / 'staging'
+        try:
+            completed = subprocess.run(
+                [sys.executable, '-B', '-c',
+                 'import sys; sys.path.insert(0, sys.argv[1]); '
+                 'import test_upgrade_bundle as tests; '
+                 'raise SystemExit(tests._occupy_destination(*sys.argv[2:]))',
+                 str(HERE), role, kind, str(source), str(staging), str(sentinel), str(outside)],
+                cwd=root, timeout=5, capture_output=True, text=True,
+                env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+        except subprocess.TimeoutExpired as expired:
+            self.fail('destination %s %s was still blocked after 5s\n%s%s' % (
+                role, kind, expired.stdout or '', expired.stderr or ''))
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertNotIn(str(root), completed.stdout)
+        self.assertEqual(sentinel.read_bytes(), b'UNRELATED SENTINEL\n')
+        self.assertFalse(outside.exists())
+
+    def _replace(self, role, point, kind):
+        root, source, payloads = self._fill('repl-' + role + '-' + point + '-' + kind)
+        member = self.bundle.REQUIRED[0]
+        sentinel = root / 'sentinel'
+        sentinel.write_bytes(b'UNRELATED SENTINEL\n')
+        sentinel.chmod(0o600)
+        sentinel_before = self._identity(sentinel)
+        source_before = {path.name: self._identity(path) for path in source.iterdir()}
+        staging = root / 'staging'
+        target = staging / ('manifest.json' if role == 'manifest' else member)
+        state = {'done': False, 'fd': None, 'opens': 0, 'flags': 0, 'mode': None,
+                 'chmod': 0, 'fchmod': [], 'closed': [], 'ebadf': [], 'protected': None}
+        real_open, real_write = os.open, os.write
+        real_fchmod, real_lstat, real_close, real_chmod = os.fchmod, os.lstat, os.close, os.chmod
+
+        def replace():
+            self.assertFalse(state['done'])
+            state['done'] = True
+            payload = b''
+            if target.is_file() and not target.is_symlink():
+                payload = target.read_bytes()
+            if target.exists() or target.is_symlink():
+                target.rename(root / 'held-output')
+            if kind == 'unlink':
+                state['protected'] = 'absent'
+                return
+            if kind == 'absolute':
+                target.symlink_to(sentinel)
+            elif kind == 'same-bytes':
+                self._raw_write(real_open, target, payload, 0o600)
+            else:
+                self.fail(kind)
+            state['protected'] = self._identity(target)
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if not isinstance(path, int) and Path(path) == target and flags & (os.O_WRONLY | os.O_RDWR):
+                state['fd'] = fd
+                state['opens'] += 1
+                state['flags'] = flags
+                state['mode'] = args[0] if args else kwargs.get('mode')
+                if point == 'after-open':
+                    replace()
+            return fd
+
+        def os_write(fd, data):
+            written = real_write(fd, data)
+            if fd == state['fd'] and point == 'after-write' and not state['done'] and written > 0:
+                replace()
+            return written
+
+        def os_fchmod(fd, mode):
+            if fd == state['fd'] and point == 'before-fchmod' and not state['done']:
+                replace()
+            result = real_fchmod(fd, mode)
+            if fd == state['fd']:
+                state['fchmod'].append(mode)
+                if point == 'after-fchmod' and not state['done']:
+                    replace()
+            return result
+
+        def os_lstat(path, *args, **kwargs):
+            if point == 'before-lstat' and not state['done'] and not isinstance(path, int) and Path(path) == target:
+                replace()
+            return real_lstat(path, *args, **kwargs)
+
+        def os_chmod(path, mode, *args, **kwargs):
+            if not isinstance(path, int) and Path(path) == target:
+                state['chmod'] += 1
+            return real_chmod(path, mode, *args, **kwargs)
+
+        def os_close(fd):
+            if fd == state['fd']:
+                state['closed'].append(fd)
+            result = real_close(fd)
+            if fd == state['fd']:
+                try:
+                    os.fstat(fd)
+                except OSError as exc:
+                    state['ebadf'].append(exc.errno == errno.EBADF)
+            return result
+
+        os.open, os.write, os.fchmod = os_open, os_write, os_fchmod
+        os.lstat, os.chmod, os.close = os_lstat, os_chmod, os_close
+        fds = self._fds()
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.build(source, staging)
+        finally:
+            os.open, os.write, os.fchmod = real_open, real_write, real_fchmod
+            os.lstat, os.chmod, os.close = real_lstat, real_chmod, real_close
+            self.assertEqual(self._fds(), fds)
+        self.assertTrue(state['done'])
+        self.assertEqual(caught.exception.code, 'destination_changed')
+        self.assertEqual(caught.exception.exit_code, 69)
+        self.assertEqual(str(caught.exception), 'destination_changed')
+        self.assertEqual(caught.exception.args, ('destination_changed',))
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertNotIn(str(root), str(caught.exception))
+        self.assertEqual(state['opens'], 1)
+        self.assertFalse(state['flags'] & getattr(os, 'O_TRUNC', 0))
+        self.assertEqual(state['chmod'], 0)
+        self.assertEqual(state['closed'], [state['fd']])
+        self.assertEqual(state['ebadf'], [True])
+        self.assertEqual(self._identity(sentinel), sentinel_before)
+        self.assertEqual({path.name: self._identity(path) for path in source.iterdir()}, source_before)
+        if state['protected'] == 'absent':
+            self.assertFalse(target.exists())
+            self.assertFalse(target.is_symlink())
+        else:
+            self.assertEqual(self._identity(target), state['protected'])
+        if role == 'member':
+            self.assertFalse((staging / 'manifest.json').exists())
+            self.assertFalse((staging / self.bundle.REQUIRED[1]).exists())
+            self.assertEqual(state['fchmod'], [0o644] if point in ('after-open', 'after-write', 'before-fchmod', 'after-fchmod') else [])
+        held = root / 'held-output'
+        self.assertTrue(held.exists() or held.is_symlink())
+        if state['fchmod']:
+            self.assertEqual(stat.S_IMODE(held.lstat().st_mode), 0o644)
+
+    def _observe_member(self, size, payload):
+        root, source, _payloads = self._fill('bytes-' + str(size))
+        member = self.bundle.REQUIRED[0]
+        target = source / member
+        target.write_bytes(payload)
+        target.chmod(0o600)
+        before = self._identity(target)
+        staging = root / 'staging'
+        dest = staging / member
+        manifest_path = staging / 'manifest.json'
+        state = {'source': set(), 'dest': None, 'manifest': None, 'reads': [], 'read_bytes': 0,
+                 'requests': [], 'fchmod': [], 'chmod': [], 'chown': [], 'truncate': [],
+                 'closed': [], 'ebadf': [], 'dest_flags': 0, 'dest_mode': None,
+                 'manifest_flags': 0, 'manifest_mode': None, 'manifest_fchmod': []}
+        real_open, real_read, real_close = os.open, os.read, os.close
+        real_fchmod, real_chmod = os.fchmod, os.chmod
+        real_chown = getattr(os, 'chown', None)
+        real_truncate = getattr(os, 'truncate', None)
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if isinstance(path, int):
+                return fd
+            if Path(path) == target:
+                state['source'].add(fd)
+            elif Path(path) == dest and flags & (os.O_WRONLY | os.O_RDWR):
+                state['dest'] = fd
+                state['dest_ino'] = os.fstat(fd).st_ino
+                state['dest_flags'] = flags
+                state['dest_mode'] = args[0] if args else kwargs.get('mode')
+            elif Path(path) == manifest_path and flags & (os.O_WRONLY | os.O_RDWR):
+                state['manifest'] = fd
+                state['manifest_flags'] = flags
+                state['manifest_mode'] = args[0] if args else kwargs.get('mode')
+            return fd
+
+        def os_read(fd, count):
+            if fd in state['source']:
+                state['requests'].append(count)
+            data = real_read(fd, count)
+            if fd in state['source']:
+                state['read_bytes'] += len(data)
+            return data
+
+        def os_fchmod(fd, mode):
+            state['fchmod'].append((os.fstat(fd).st_ino, mode))
+            if fd == state['manifest']:
+                state['manifest_fchmod'].append(mode)
+            return real_fchmod(fd, mode)
+
+        def os_chmod(path, mode, *args, **kwargs):
+            state['chmod'].append(os.fspath(path))
+            return real_chmod(path, mode, *args, **kwargs)
+
+        def os_chown(path, *args, **kwargs):
+            state['chown'].append(os.fspath(path))
+            return real_chown(path, *args, **kwargs)
+
+        def os_truncate(path, length):
+            state['truncate'].append(os.fspath(path))
+            return real_truncate(path, length)
+
+        def os_close(fd):
+            role = None
+            if state['manifest'] is not None and fd == state['manifest']:
+                role = 'manifest'
+                state['manifest'] = None
+            elif state['dest'] is not None and fd == state['dest']:
+                role = 'dest'
+                state['dest'] = None
+            elif fd in state['source']:
+                role = 'source'
+                state['source'].discard(fd)
+            if role:
+                state['closed'].append(role)
+            result = real_close(fd)
+            if role:
+                try:
+                    os.fstat(fd)
+                except OSError as exc:
+                    state['ebadf'].append(exc.errno == errno.EBADF)
+            return result
+
+        os.open, os.read, os.close = os_open, os_read, os_close
+        os.fchmod, os.chmod = os_fchmod, os_chmod
+        if real_chown is not None:
+            os.chown = os_chown
+        if real_truncate is not None:
+            os.truncate = os_truncate
+        fds = self._fds()
+        try:
+            built = self.bundle.build(source, staging)
+        finally:
+            os.open, os.read, os.close = real_open, real_read, real_close
+            os.fchmod, os.chmod = real_fchmod, real_chmod
+            if real_chown is not None:
+                os.chown = real_chown
+            if real_truncate is not None:
+                os.truncate = real_truncate
+            self.assertEqual(self._fds(), fds)
+        self.assertEqual(self._identity(target), before)
+        self.assertEqual(dest.read_bytes(), payload)
+        self.assertEqual(dest.lstat().st_ino, state['dest_ino'])
+        self.assertEqual(stat.S_IMODE(dest.lstat().st_mode), 0o644)
+        manifest = json.loads(manifest_path.read_bytes())
+        self.assertEqual(manifest['files'][member], hashlib.sha256(payload).hexdigest())
+        verified = self.bundle.verify(staging)
+        self.assertIs(verified['verified'], True)
+        self.assertIs(verified['installable'], False)
+        self.assertEqual(verified['manifest_sha256'], built['manifest_sha256'])
+        self.assertEqual(state['dest_flags'], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK)
+        self.assertEqual(state['dest_mode'], 0o644)
+        self.assertEqual([mode for ino, mode in state['fchmod'] if ino == state['dest_ino']], [0o644])
+        self.assertEqual(len(state['fchmod']), len(self.bundle.REQUIRED))
+        self.assertTrue(all(mode == 0o644 for _ino, mode in state['fchmod']))
+        self.assertEqual(state['manifest_flags'], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK)
+        self.assertEqual(state['manifest_mode'], 0o666)
+        self.assertEqual(state['manifest_fchmod'], [])
+        self.assertEqual(state['chmod'], [])
+        self.assertEqual(state['chown'], [])
+        self.assertEqual(state['truncate'], [])
+        self.assertEqual(state['source'], set())
+        self.assertLessEqual(max(state['requests']), self.bundle._MEMBER_CHUNK)
+        self.assertIn(1, state['requests'])
+        self.assertEqual(state['read_bytes'], size)
+        self.assertEqual(state['ebadf'], [True] * len(state['closed']))
+        self.assertEqual(state['closed'].count('dest'), 1)
+        self.assertEqual(state['closed'].count('manifest'), 1)
+        self.assertEqual(state['closed'].count('source'), 1)
+
+    def _write_seam(self, role, mode, success):
+        root, source, payloads = self._fill('seam-' + role + '-' + mode)
+        member = self.bundle.REQUIRED[0]
+        if role == 'member':
+            payload = b'ABCDEFGH'
+            (source / member).write_bytes(payload)
+            (source / member).chmod(0o600)
+        else:
+            payload = None
+        staging = root / 'staging'
+        target = staging / ('manifest.json' if role == 'manifest' else member)
+        state = {'fds': set(), 'once': False, 'written': bytearray()}
+        real_open, real_write, real_fstat, real_fchmod = os.open, os.write, os.fstat, os.fchmod
+
+        def selected(fd):
+            return fd in state['fds']
+
+        def os_open(path, flags, *args, **kwargs):
+            if mode == 'open-eintr' and not state['once'] and not isinstance(path, int) and Path(path) == target:
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted destination open')
+            fd = real_open(path, flags, *args, **kwargs)
+            if not isinstance(path, int) and Path(path) == target and flags & (os.O_WRONLY | os.O_RDWR):
+                state['fds'].add(fd)
+            return fd
+
+        def os_write(fd, data):
+            if selected(fd) and mode in ('short', 'eintr', 'zero', 'negative') and not state['once']:
+                state['once'] = True
+                if mode == 'eintr':
+                    raise OSError(errno.EINTR, 'interrupted destination write')
+                if mode == 'zero':
+                    return 0
+                if mode == 'negative':
+                    return -1
+                if len(data) > 1:
+                    wrote = real_write(fd, data[:1])
+                    state['written'].extend(data[:wrote])
+                    return wrote
+            wrote = real_write(fd, data)
+            if selected(fd) and wrote > 0:
+                state['written'].extend(data[:wrote])
+            return wrote
+
+        def os_fstat(fd):
+            if selected(fd) and mode == 'fstat-eintr' and not state['once']:
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted destination fstat')
+            return real_fstat(fd)
+
+        def os_fchmod(fd, bits):
+            if selected(fd) and mode == 'fchmod-eintr' and not state['once']:
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted destination fchmod')
+            return real_fchmod(fd, bits)
+
+        os.open, os.write, os.fstat, os.fchmod = os_open, os_write, os_fstat, os_fchmod
+        fds = self._fds()
+        try:
+            if success:
+                built = self.bundle.build(source, staging)
+            else:
+                with self.assertRaises(OSError) as caught:
+                    self.bundle.build(source, staging)
+        finally:
+            os.open, os.write, os.fstat, os.fchmod = real_open, real_write, real_fstat, real_fchmod
+            self.assertEqual(self._fds(), fds)
+        self.assertTrue(state['once'])
+        if success:
+            self.assertIsInstance(built, dict)
+            if role == 'member':
+                self.assertEqual((staging / member).read_bytes(), payload)
+                self.assertEqual(bytes(state['written'])[:len(payload)], payload)
+            else:
+                raw = target.read_bytes()
+                self.assertEqual(bytes(state['written']), raw)
+                self.assertGreater(len(raw), 1)
+            verified = self.bundle.verify(staging)
+            self.assertIs(verified['installable'], False)
+            self.assertEqual(verified['manifest_sha256'], built['manifest_sha256'])
+            return
+        self.assertEqual(caught.exception.errno, errno.EIO)
+        self.assertFalse(isinstance(caught.exception, self.bundle.BundleError))
+        self.assertNotEqual(getattr(caught.exception, 'code', None), 'source_unreadable')
+        self.assertIn('incomplete destination write', str(caught.exception))
+        if role == 'member':
+            self.assertFalse((staging / 'manifest.json').exists())
+            self.assertNotEqual((staging / member).read_bytes() if (staging / member).is_file() else b'', payload)
+        else:
+            self.assertTrue(target.is_file())
+            self.assertNotEqual(target.read_bytes(), bytes(state['written']) + payloads[member])
+
+    def _output_error(self, role, seam, handled):
+        root, source, _payloads = self._fill('err-' + role + '-' + seam + '-' + str(handled))
+        member = self.bundle.REQUIRED[0]
+        fallback_bytes = b'FALLBACK MUST STAY UNREAD\n'
+        primary = source / 'release-source.json'
+        fork = root / 'fork'
+        fork.mkdir(mode=0o700)
+        fallback = fork / 'release-source.json'
+        fallback.write_bytes(fallback_bytes)
+        fallback.chmod(0o600)
+        fallback_before = self._identity(fallback)
+        sentinel = root / 'sentinel'
+        sentinel.write_bytes(b'SENTINEL\n')
+        sentinel.chmod(0o600)
+        sentinel_before = self._identity(sentinel)
+        staging = root / 'staging'
+        target = staging / ('manifest.json' if role == 'manifest' else member)
+        number = errno.EINTR if seam == 'close-eintr' else errno.EACCES if seam == 'fchmod' else errno.EIO
+        state = {'fds': set(), 'done': False, 'closed': [], 'double': 0, 'occupied': None,
+                 'ebadf': False, 'opened': []}
+        real_open, real_write, real_fstat = os.open, os.write, os.fstat
+        real_fchmod, real_close = os.fchmod, os.close
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if not isinstance(path, int):
+                state['opened'].append(os.path.normpath(os.fspath(path)))
+                if Path(path) == target and flags & (os.O_WRONLY | os.O_RDWR):
+                    state['fds'].add(fd)
+            return fd
+
+        def os_write(fd, data):
+            if seam == 'write' and fd in state['fds'] and not state['done']:
+                state['done'] = True
+                raise OSError(errno.EIO, 'injected destination write')
+            return real_write(fd, data)
+
+        def os_fstat(fd):
+            if seam == 'fstat' and fd in state['fds'] and not state['done']:
+                state['done'] = True
+                raise OSError(errno.EIO, 'injected destination fstat')
+            return real_fstat(fd)
+
+        def os_fchmod(fd, mode):
+            if seam == 'fchmod' and fd in state['fds'] and not state['done']:
+                state['done'] = True
+                raise OSError(errno.EACCES, 'injected destination fchmod')
+            return real_fchmod(fd, mode)
+
+        def os_close(fd):
+            if fd == state['occupied']:
+                state['double'] += 1
+                return real_close(fd)
+            if fd in state['fds'] and seam.startswith('close') and not state['done']:
+                real_close(fd)
+                state['done'] = True
+                state['closed'].append(fd)
+                try:
+                    real_fstat(fd)
+                except OSError as exc:
+                    state['ebadf'] = exc.errno == errno.EBADF
+                state['occupied'] = real_open(sentinel, os.O_RDONLY)
+                raise OSError(number, 'injected destination close')
+            if fd in state['fds']:
+                state['closed'].append(fd)
+            return real_close(fd)
+
+        def invoke():
+            if not handled:
+                self.bundle.build(source, staging)
+                return
+            try:
+                raise ValueError('already-handled-caller-error')
+            except ValueError:
+                self.bundle.build(source, staging)
+
+        os.open, os.write, os.fstat = os_open, os_write, os_fstat
+        os.fchmod, os.close = os_fchmod, os_close
+        fds = self._fds()
+        try:
+            with self.assertRaises(OSError) as caught:
+                invoke()
+        finally:
+            os.open, os.write, os.fstat = real_open, real_write, real_fstat
+            os.fchmod, os.close = real_fchmod, real_close
+            if state['occupied'] is not None:
+                try:
+                    os.fstat(state['occupied'])
+                except OSError:
+                    self.fail('reused descriptor was closed')
+                os.close(state['occupied'])
+            self.assertEqual(self._fds(), fds)
+        self.assertTrue(state['done'])
+        self.assertEqual(caught.exception.errno, number)
+        self.assertFalse(isinstance(caught.exception, self.bundle.BundleError))
+        self.assertNotEqual(getattr(caught.exception, 'code', None), 'source_unreadable')
+        self.assertNotIn(str(fallback), state['opened'])
+        self.assertEqual(self._identity(fallback), fallback_before)
+        self.assertEqual(fallback.read_bytes(), fallback_bytes)
+        self.assertEqual(sentinel.read_bytes(), b'SENTINEL\n')
+        self.assertEqual(self._identity(sentinel), sentinel_before)
+        self.assertEqual(state['double'], 0)
+        self.assertEqual(len(state['closed']), 1)
+        if seam.startswith('close'):
+            self.assertTrue(state['ebadf'])
+        if role == 'member':
+            self.assertFalse((staging / 'manifest.json').exists())
+
+    def _close_preserves(self, role, kind):
+        root, source, payloads = self._fill('keep-' + role + '-' + kind)
+        member = self.bundle.REQUIRED[0]
+        (source / member).write_bytes(b'KEEP PRIOR ' + kind.encode())
+        (source / member).chmod(0o600)
+        sentinel = root / 'sentinel'
+        sentinel.write_bytes(b'SENTINEL\n')
+        sentinel.chmod(0o600)
+        sentinel_before = self._identity(sentinel)
+        staging = root / 'staging'
+        target = staging / ('manifest.json' if role == 'manifest' else member)
+        source_fd = {'value': None}
+        marker = ProgrammingMarker('SYNTHETIC PROGRAMMING MARKER') if kind == 'programming' else CancelMarker('SYNTHETIC CANCEL')
+        state = {'dest': None, 'done': False, 'closed': [], 'occupied': None, 'double': 0, 'ebadf': False,
+                 'grew': False}
+        real_open, real_read, real_write = os.open, os.read, os.write
+        real_fstat, real_close, real_lstat = os.fstat, os.close, os.lstat
+        append_fd = None
+
+        def os_open(path, flags, *args, **kwargs):
+            nonlocal append_fd
+            fd = real_open(path, flags, *args, **kwargs)
+            if isinstance(path, int):
+                return fd
+            if Path(path) == source / member and not flags & (os.O_WRONLY | os.O_RDWR):
+                source_fd['value'] = fd
+                if kind == 'source_changed' and append_fd is None:
+                    append_fd = real_open(path, os.O_WRONLY | os.O_APPEND)
+            if Path(path) == target and flags & (os.O_WRONLY | os.O_RDWR):
+                state['dest'] = fd
+            return fd
+
+        def os_read(fd, count):
+            if kind == 'source_changed' and fd == source_fd['value'] and count == 1 and not state['grew']:
+                state['grew'] = True
+                real_write(append_fd, b'X')
+            return real_read(fd, count)
+
+        def os_write(fd, data):
+            if kind == 'write' and fd == state['dest'] and not state['done']:
+                state['done'] = True
+                raise OSError(errno.EACCES, 'injected destination write')
+            return real_write(fd, data)
+
+        def os_fstat(fd):
+            if kind in ('programming', 'cancel') and fd == state['dest'] and not state['done']:
+                state['done'] = True
+                raise marker
+            return real_fstat(fd)
+
+        def os_lstat(path, *args, **kwargs):
+            if (kind == 'destination_changed' and state['dest'] is not None and not state['done']
+                    and not isinstance(path, int) and Path(path) == target):
+                state['done'] = True
+                os.rename(target, root / 'held-output')
+                self._raw_write(real_open, target, b'SAME OR NOT\n', 0o600)
+            return real_lstat(path, *args, **kwargs)
+
+        def os_close(fd):
+            if fd == state['occupied']:
+                state['double'] += 1
+                return real_close(fd)
+            if fd == state['dest'] and fd not in state['closed']:
+                real_close(fd)
+                state['closed'].append(fd)
+                try:
+                    real_fstat(fd)
+                except OSError as exc:
+                    state['ebadf'] = exc.errno == errno.EBADF
+                state['occupied'] = real_open(sentinel, os.O_RDONLY)
+                raise OSError(errno.EIO, 'injected destination close')
+            return real_close(fd)
+
+        os.open, os.read, os.write = os_open, os_read, os_write
+        os.fstat, os.lstat, os.close = os_fstat, os_lstat, os_close
+        fds = self._fds()
+        try:
+            with self.assertRaises((self.bundle.BundleError, OSError, ProgrammingMarker, CancelMarker)) as caught:
+                self.bundle.build(source, staging)
+        finally:
+            os.open, os.read, os.write = real_open, real_read, real_write
+            os.fstat, os.lstat, os.close = real_fstat, real_lstat, real_close
+            if append_fd is not None:
+                os.close(append_fd)
+            if state['occupied'] is not None:
+                self.assertEqual(state['double'], 0)
+                os.fstat(state['occupied'])
+                os.close(state['occupied'])
+            self.assertEqual(self._fds(), fds)
+        self.assertEqual(state['closed'], [state['dest']])
+        self.assertTrue(state['ebadf'])
+        self.assertEqual(self._identity(sentinel), sentinel_before)
+        error = caught.exception
+        if kind == 'destination_changed':
+            self.assertIsInstance(error, self.bundle.BundleError)
+            self.assertEqual(error.code, 'destination_changed')
+            self.assertEqual(str(error), 'destination_changed')
+            self.assertEqual(self._identity(target)['sha256'], hashlib.sha256(b'SAME OR NOT\n').hexdigest())
+            self.assertEqual(stat.S_IMODE(target.lstat().st_mode), 0o600)
+        elif kind == 'write':
+            self.assertIsInstance(error, OSError)
+            self.assertEqual(error.errno, errno.EACCES)
+            self.assertIn('injected destination write', str(error))
+            self.assertNotIn('injected destination close', str(error))
+        elif kind == 'programming':
+            self.assertIs(error, marker)
+        elif kind == 'cancel':
+            self.assertIs(error, marker)
+        else:
+            self.assertIsInstance(error, self.bundle.BundleError)
+            self.assertEqual(error.code, 'source_changed')
+            self.assertTrue(state['grew'])
+        if role == 'member':
+            self.assertFalse((staging / 'manifest.json').exists())
+        self.assertNotIn('approval', {path.name for path in staging.rglob('*')} if staging.exists() else set())
+        self.assertNotEqual(payloads[member], b'')
+
+    def _manifest_residue(self, seam):
+        root, source, _payloads = self._fill('residue-' + seam)
+        sentinel = root / 'sentinel'
+        sentinel.write_bytes(b'SENTINEL\n')
+        sentinel.chmod(0o600)
+        before = self._identity(sentinel)
+        source_before = {path.name: self._identity(path) for path in source.iterdir()}
+        staging = root / 'staging'
+        target = staging / 'manifest.json'
+        state = {'opens': 0, 'done': False}
+        real_open, real_write, real_close = os.open, os.write, os.close
+        manifest_fd = {'value': None}
+
+        def os_open2(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if not isinstance(path, int) and Path(path) == target and flags & (os.O_WRONLY | os.O_RDWR):
+                state['opens'] += 1
+                manifest_fd['value'] = fd
+            return fd
+
+        def os_write2(fd, data):
+            if seam == 'write' and fd == manifest_fd['value'] and not state['done']:
+                state['done'] = True
+                raise OSError(errno.EIO, 'injected manifest write')
+            return real_write(fd, data)
+
+        def os_close2(fd):
+            if seam == 'close' and fd == manifest_fd['value'] and not state['done']:
+                state['done'] = True
+                real_close(fd)
+                raise OSError(errno.EIO, 'injected manifest close')
+            return real_close(fd)
+
+        os.open, os.write, os.close = os_open2, os_write2, os_close2
+        fds = self._fds()
+        try:
+            with self.assertRaises(OSError) as caught:
+                self.bundle.build(source, staging)
+        finally:
+            os.open, os.write, os.close = real_open, real_write, real_close
+            self.assertEqual(self._fds(), fds)
+        self.assertTrue(state['done'])
+        self.assertEqual(state['opens'], 1)
+        self.assertEqual(caught.exception.errno, errno.EIO)
+        self.assertFalse(isinstance(caught.exception, self.bundle.BundleError))
+        self.assertTrue(target.is_file())
+        self.assertEqual(self._identity(sentinel), before)
+        self.assertEqual({path.name: self._identity(path) for path in source.iterdir()}, source_before)
+        names = {path.name for path in staging.iterdir()}
+        self.assertEqual(names, set(self.bundle.REQUIRED) | {'manifest.json'})
+        self.assertFalse((staging / 'approval.json').exists())
+        if seam == 'close':
+            raw = target.read_bytes()
+            self.assertGreater(len(raw), 0)
+            verified = self.bundle.verify(staging)
+            self.assertIs(verified['installable'], False)
+        else:
+            self.assertEqual(target.read_bytes(), b'')
+
+    def _umask(self):
+        current = os.umask(0o022)
+        os.umask(current)
+        return current
+
+    def _umask_once(self, mask):
+        previous = self._umask()
+        self.addCleanup(lambda: os.umask(previous))
+        root, source, payloads = self._fill('umask-' + oct(mask)[2:])
+        os.umask(mask)
+        first = root / 'staging-a'
+        second = root / 'staging-b'
+        chmod_calls = []
+        real_chmod = os.chmod
+
+        def os_chmod(path, mode, *args, **kwargs):
+            chmod_calls.append(os.fspath(path))
+            return real_chmod(path, mode, *args, **kwargs)
+
+        os.chmod = os_chmod
+        try:
+            built = self.bundle.build(source, first)
+            again = self.bundle.build(source, second)
+        finally:
+            os.chmod = real_chmod
+            os.umask(previous)
+        self.assertEqual(chmod_calls, [])
+        self.assertEqual(built['manifest_sha256'], again['manifest_sha256'])
+        raw = (first / 'manifest.json').read_bytes()
+        self.assertEqual((second / 'manifest.json').read_bytes(), raw)
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), built['manifest_sha256'])
+        self.assertEqual(stat.S_IMODE(first.lstat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE((first / 'manifest.json').lstat().st_mode), 0o666 & ~mask)
+        for name in self.bundle.REQUIRED:
+            staged = first / name
+            self.assertEqual(staged.read_bytes(), payloads[name])
+            self.assertEqual(stat.S_IMODE(staged.lstat().st_mode), 0o644)
+        verified = self.bundle.verify(first)
+        self.assertIs(verified['verified'], True)
+        self.assertIs(verified['installable'], False)
+        self.assertEqual(self._umask(), previous)
+
+    def _hide_destination_flag(self, flag):
+        root, source, _payloads = self._fill('hide-' + flag)
+        member = self.bundle.REQUIRED[0]
+        sentinel = root / 'sentinel'
+        sentinel.write_bytes(b'SENTINEL\n')
+        sentinel.chmod(0o600)
+        before = self._identity(sentinel)
+        staging = root / 'staging'
+        target = staging / member
+        state = {'hidden': False, 'opens': []}
+        real_mkdir, real_open, real_chmod = os.mkdir, os.open, os.chmod
+        saved = os.fchmod if flag == 'fchmod' else getattr(os, flag)
+
+        def mkdir(path, mode=0o777, *args, **kwargs):
+            real_mkdir(path, mode, *args, **kwargs)
+            if Path(path) == staging:
+                (staging / member).symlink_to(sentinel)
+
+        def os_open(path, flags, *args, **kwargs):
+            if not isinstance(path, int) and Path(path) == source / member and not state['hidden']:
+                state['hidden'] = True
+                if flag == 'fchmod':
+                    del os.fchmod
+                else:
+                    delattr(os, flag)
+            if not isinstance(path, int) and Path(path) in (target, sentinel):
+                state['opens'].append(os.path.normpath(os.fspath(path)))
+            return real_open(path, flags, *args, **kwargs)
+
+        def os_chmod(path, mode, *args, **kwargs):
+            if not isinstance(path, int) and Path(path) in (target, sentinel):
+                self.fail('path chmod used as a destination fallback')
+            return real_chmod(path, mode, *args, **kwargs)
+
+        os.mkdir, os.open, os.chmod = mkdir, os_open, os_chmod
+        fds = self._fds()
+        try:
+            with self.assertRaises(OSError) as caught:
+                self.bundle.build(source, staging)
+        finally:
+            os.mkdir, os.open, os.chmod = real_mkdir, real_open, real_chmod
+            if flag == 'fchmod':
+                os.fchmod = saved
+            else:
+                setattr(os, flag, saved)
+            self.assertEqual(self._fds(), fds)
+        self.assertTrue(state['hidden'])
+        self.assertEqual(caught.exception.errno, errno.ENOTSUP)
+        self.assertFalse(isinstance(caught.exception, self.bundle.BundleError))
+        self.assertEqual(state['opens'], [])
+        self.assertEqual(self._identity(sentinel), before)
+        self.assertTrue(target.is_symlink())
+        self.assertFalse((staging / 'manifest.json').exists())
+
+    def _raw_write(self, opener, path, data, mode):
+        fd = opener(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        try:
+            view = memoryview(data)
+            while view:
+                wrote = os.write(fd, view)
+                if wrote <= 0:
+                    self.fail('fixture write stalled')
+                view = view[wrote:]
+        finally:
+            os.close(fd)
+
+    def _outcome_name(self, outcome):
+        if isinstance(outcome, dict):
+            return 'success'
+        if isinstance(outcome, self.bundle.BundleError):
+            return outcome.code
+        if isinstance(outcome, OSError):
+            return '%s:%s' % (type(outcome).__name__, outcome.errno)
+        return type(outcome).__name__
+
+    def _identity(self, path):
+        info = path.lstat()
+        result = {'dev': info.st_dev, 'ino': info.st_ino, 'mode': info.st_mode, 'uid': info.st_uid,
+                  'size': info.st_size, 'mtime_ns': info.st_mtime_ns, 'ctime_ns': info.st_ctime_ns}
+        if stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            result['sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+        elif stat.S_ISLNK(info.st_mode):
+            result['link'] = os.readlink(path)
+        return result
+
+    def _fds(self):
+        base = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
+        return frozenset(os.listdir(base))
+
+
 if __name__ == '__main__':
     unittest.main()
