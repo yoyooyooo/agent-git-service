@@ -81,15 +81,18 @@ Before those staged copies exist, the builder checks each selected source file
 on one no-follow descriptor and uses the `release-source.json` fallback only
 when the primary path is actually missing. See
 [offline staging sources](upgrade-provisioning.md#offline-staging-sources).
-That input check is not the root-owned runtime bundle rule and does not make
-the staging directory a host trust root.
-The copies and `manifest.json` are new files created exclusively. The member
-mode is set on that same descriptor, and the builder refuses when the final
-path no longer names it. See
+That input check is separate from the output directory descriptor: it does not
+choose where staged bytes are created. It is not the root-owned runtime bundle
+rule and does not make the staging directory a host trust root.
+The copies and `manifest.json` are new files created exclusively through one
+output directory descriptor, by basename, not by joining the caller path
+again. Before success the caller path must still name that directory. The
+member mode is set on the file descriptor, and the builder refuses when that
+basename no longer names it. See
 [offline staging outputs](upgrade-provisioning.md#offline-staging-outputs).
-That output check does not `fsync`, does not publish the directory atomically,
-and does not turn the current-UID staging directory into a root-owned host
-trust root.
+That output directory bind is not the verifier's later directory read, does
+not `fsync`, does not publish the directory atomically, and does not turn the
+current-UID staging directory into a root-owned host trust root.
 Required files include the wrapper, host adapter, transaction engine, policy,
 installer, v2 consumer, verifier, shared archive contract, `upgrade_smoke.py`,
 `upgrade_backup_contract.py`, `upgrade_inventory.py`, `upgrade_backup.py`,

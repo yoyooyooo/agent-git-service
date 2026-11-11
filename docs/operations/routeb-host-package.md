@@ -32,7 +32,7 @@ unexpected programming errors remain errors rather than capability blockers.
 
 The package policy requires the same application revision and tree on
 both sides of the transaction. The tool bundle has a separate revision, tree
-and byte manifest. The offline staging check binds one directory descriptor, then checks the
+and byte manifest. The offline verifier binds one directory descriptor, then checks the
 manifest file, its closed content, and each ordinary member through that
 descriptor
 ([directory](upgrade-provisioning.md#offline-staging-directory),
@@ -42,9 +42,13 @@ source read is a separate input check: one descriptor supplies the copy and
 the digest, and the fallback file is used only when the primary path is
 missing
 ([sources](upgrade-provisioning.md#offline-staging-sources)). Its output
-check creates each member and the manifest exclusively and binds the member
-mode to that descriptor
-([outputs](upgrade-provisioning.md#offline-staging-outputs)). None of these
+check binds the new staging directory to its own descriptor, creates each
+member and the manifest by basename through that descriptor, and refuses
+success if the caller path no longer names it
+([outputs](upgrade-provisioning.md#offline-staging-outputs)). The builder's
+directory descriptor and the verifier's directory descriptor are separate
+binds. Neither is a long-term authorization, a tool revision, or a recovery
+binding. None of these
 checks admits production use. Tool revision and tree, the unchanged application
 revision, and recovery-asset binding remain separate facts. Production
 admission, Darwin entry, and `application_source_transition_not_admitted`
@@ -165,9 +169,10 @@ The output, directory, manifest, and member checks remain
 [manifest](upgrade-provisioning.md#offline-staging-manifest), and
 [members](upgrade-provisioning.md#offline-staging-members).
 That acceptance includes finishing each descriptor close; a close failure
-refuses the staging directory and is not an installable result. The directory
-descriptor only pins the directory used for lookup. It is not a
-tool, application, or recovery binding, and it does not remove the
+refuses the staging directory and is not an installable result. The builder
+output directory and the verifier read directory are pinned separately for
+that operation only. Neither pin is a long-term authorization, and neither
+is a tool, application, or recovery binding. This does not remove the
 production `native_full_closure_required` gate, the Darwin stage0 refusal, or
 `application_source_transition_not_admitted`.
 

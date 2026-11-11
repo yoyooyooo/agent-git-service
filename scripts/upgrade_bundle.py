@@ -12,8 +12,17 @@ other source access failure is source_unreadable. Those codes carry no path
 or body. The manifest is written only after every member copy has checked
 out. The destination file is created exclusively and is not truncated or
 followed. Member mode 0644 is fchmod on that same descriptor. A path that
-no longer names it is destination_changed. This does not prove a Git
-revision and does not make the bundle installable.
+no longer names it is destination_changed. After mkdir, the builder lstats
+the new directory and opens it once,
+O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK. Every member and the manifest is
+created by basename on that descriptor, and the final no-follow stat uses
+the same descriptor. The caller path must still name that directory before
+success. A replaced, removed, or non-directory root is destination_changed.
+A directory I/O error stays a destination OSError. Missing directory
+capability is ENOTSUP and does not fall back to path creates. The directory
+descriptor is closed once. The first lstat does not prove it observed the
+mkdir inode. This does not publish the directory atomically, does not prove
+a Git revision, and does not make the bundle installable.
 
 The manifest file itself must be a regular file owned by the current user.
 Verification does not follow a symlink at that final path component. The
@@ -106,15 +115,30 @@ def build(source, staging):
     if staging.exists():
         raise BundleError('staging_exists')
     staging.mkdir(mode=0o700)
-    files = {}
-    for name in REQUIRED:
-        path = _choose_source_path(source, name)
-        dest = staging / name
-        files[name] = _copy_source_member(path, dest)
-    manifest = {'schema': SCHEMA, 'entry': ENTRY, 'files': files}
-    raw = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()
-    _write_exclusive(staging / 'manifest.json', raw, 0o666, None)
-    return {'manifest_sha256': hashlib.sha256(raw).hexdigest(), 'members': len(files)}
+    directory, identity = _bind_output_directory(staging)
+    try:
+        files = {}
+        for name in REQUIRED:
+            _recheck_output_directory(directory, staging, identity)
+            path = _choose_source_path(source, name)
+            files[name] = _copy_source_member(path, name, directory)
+        _recheck_output_directory(directory, staging, identity)
+        manifest = {'schema': SCHEMA, 'entry': ENTRY, 'files': files}
+        raw = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()
+        _write_exclusive('manifest.json', raw, 0o666, None, directory)
+        _recheck_output_directory(directory, staging, identity)
+        result = {'manifest_sha256': hashlib.sha256(raw).hexdigest(), 'members': len(files)}
+    except BaseException:
+        # This build already failed. Close the directory once and keep that error.
+        _close_output_directory_keep(directory)
+        raise
+    # A caller's handled exception is not this build's failure.
+    # Close once, including after EINTR. Do not retry or close again.
+    try:
+        os.close(directory)
+    except OSError:
+        raise
+    return result
 
 
 def _manifest_owner_uid():
@@ -198,8 +222,17 @@ def _read_source(fd, size):
             raise BundleError('source_unreadable') from None
 
 
-def _open_destination(path, mode):
-    """Create the final component. Never truncate, follow, or reuse an existing object."""
+def _output_basename(name):
+    """One output basename. Do not join it back onto the caller path."""
+    if (type(name) is not str or not name or name in ('.', '..')
+            or '/' in name or '\\' in name or name != Path(name).name):
+        raise OSError(errno.EINVAL, 'destination name unavailable')
+    return name
+
+
+def _open_destination(name, mode, dir_fd):
+    """Create one basename in the held directory. Never truncate, follow, or reuse."""
+    _output_basename(name)
     nofollow = getattr(os, 'O_NOFOLLOW', None)
     nonblock = getattr(os, 'O_NONBLOCK', None)
     if nofollow is None or nonblock is None or not hasattr(os, 'fchmod'):
@@ -207,7 +240,9 @@ def _open_destination(path, mode):
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow | nonblock
     while True:
         try:
-            return os.open(path, flags, mode)
+            return os.open(name, flags, mode, dir_fd=dir_fd)
+        except NotImplementedError:
+            raise OSError(errno.ENOTSUP, 'destination creation unavailable') from None
         except OSError as exc:
             if exc.errno == errno.EINTR:
                 continue
@@ -253,15 +288,29 @@ def _require_new_regular(info):
         raise BundleError('destination_changed')
 
 
-def _bind_destination(fd, path, created, nbytes):
-    """The final path must still name this regular descriptor. Ignore atime."""
+def _stat_output_entry(name, dir_fd):
+    """No-follow stat of one basename through the held directory."""
+    _output_basename(name)
+    while True:
+        try:
+            return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except NotImplementedError:
+            raise OSError(errno.ENOTSUP, 'destination directory unavailable') from None
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise
+
+
+def _bind_destination(fd, name, created, nbytes, dir_fd):
+    """The basename in the held directory must still name this regular descriptor. Ignore atime."""
     _require_new_regular(created)
     finished = _destination_fstat(fd)
     _require_new_regular(finished)
     if _destination_owner(finished) != _destination_owner(created) or finished.st_size != nbytes:
         raise BundleError('destination_changed')
     try:
-        current = _lstat_source(path)
+        current = _stat_output_entry(name, dir_fd)
     except OSError as exc:
         if exc.errno in (errno.ENOENT, errno.ENOTDIR):
             raise BundleError('destination_changed') from None
@@ -282,16 +331,16 @@ def _close_output_keep(fd):
         pass
 
 
-def _write_exclusive(path, data, mode, chmod_mode):
+def _write_exclusive(name, data, mode, chmod_mode, dir_fd):
     """Create, write, and close one output. chmod_mode None keeps the creation mode."""
-    fd = _open_destination(path, mode)
+    fd = _open_destination(name, mode, dir_fd)
     try:
         created = _destination_fstat(fd)
         _require_new_regular(created)
         _write_dest(fd, data)
         if chmod_mode is not None:
             _destination_fchmod(fd, chmod_mode)
-        _bind_destination(fd, path, created, len(data))
+        _bind_destination(fd, name, created, len(data), dir_fd)
     except BaseException:
         _close_output_keep(fd)
         raise
@@ -316,11 +365,11 @@ def _write_dest(fd, data):
         view = view[wrote:]
 
 
-def _stream_source(fd, dest, size):
+def _stream_source(fd, name, size, dir_fd):
     """Copy and hash one descriptor. The extra probe byte is not written."""
     digest = hashlib.sha256()
     remaining = size
-    out = _open_destination(dest, 0o644)
+    out = _open_destination(name, 0o644, dir_fd)
     try:
         created = _destination_fstat(out)
         _require_new_regular(created)
@@ -337,7 +386,7 @@ def _stream_source(fd, dest, size):
             _write_dest(out, chunk)
             remaining -= len(chunk)
         _destination_fchmod(out, 0o644)
-        _bind_destination(out, dest, created, size)
+        _bind_destination(out, name, created, size, dir_fd)
     except BaseException:
         # This copy already failed. Close once and keep that error.
         # Do not close again: close leaves the descriptor state unspecified.
@@ -352,7 +401,7 @@ def _stream_source(fd, dest, size):
     return digest.hexdigest()
 
 
-def _copy_source_member(path, dest):
+def _copy_source_member(path, name, dir_fd):
     """Read, copy, and hash one selected source from a single no-follow descriptor."""
     try:
         info = _lstat_source(path)
@@ -367,7 +416,7 @@ def _copy_source_member(path, dest):
             raise BundleError('member_missing')
         if _manifest_identity(opened) != _manifest_identity(info):
             raise BundleError('source_changed')
-        digest = _stream_source(fd, dest, opened.st_size)
+        digest = _stream_source(fd, name, opened.st_size, dir_fd)
         after = _source_fstat(fd)
         if _manifest_identity(after) != _manifest_identity(opened):
             raise BundleError('source_changed')
@@ -703,6 +752,95 @@ def _verify_member(name, digest, *, executable, dir_fd):
 def _directory_object(info):
     """Directory identity. Size and timestamps are not part of this contract."""
     return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
+
+
+def _output_directory_flags():
+    """Flags for one no-follow output-directory open. None means unavailable.
+
+    Capability is the import-time os functions. A later test seam may replace
+    os.open without making a capable platform look incapable. The builder does
+    not list the directory, so a descriptor listing is not required.
+    """
+    nofollow = getattr(os, 'O_NOFOLLOW', None)
+    nonblock = getattr(os, 'O_NONBLOCK', None)
+    directory = getattr(os, 'O_DIRECTORY', None)
+    if nofollow is None or nonblock is None or directory is None:
+        return None
+    dir_fds = getattr(os, 'supports_dir_fd', ())
+    followers = getattr(os, 'supports_follow_symlinks', ())
+    if (_OS_STAT not in dir_fds or _OS_OPEN not in dir_fds or _OS_STAT not in followers):
+        return None
+    return os.O_RDONLY | directory | nofollow | nonblock
+
+
+def _close_output_directory_keep(fd):
+    """Close a directory descriptor once after this build already failed."""
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _fstat_output_directory(fd):
+    while True:
+        try:
+            return os.fstat(fd)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise
+
+
+def _require_output_directory(info, identity):
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise BundleError('destination_changed')
+    if _directory_object(info) != identity:
+        raise BundleError('destination_changed')
+
+
+def _recheck_output_directory(fd, staging, identity):
+    """The held descriptor and the caller path must still be the initial directory."""
+    _require_output_directory(_fstat_output_directory(fd), identity)
+    try:
+        current = _lstat_call(staging)
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.ENXIO):
+            raise BundleError('destination_changed') from None
+        raise
+    _require_output_directory(current, identity)
+
+
+def _bind_output_directory(staging):
+    """Bind the directory just created. Do not resolve a final symlink away."""
+    flags = _output_directory_flags()
+    if flags is None:
+        raise OSError(errno.ENOTSUP, 'destination directory unavailable')
+    try:
+        info = _lstat_call(staging)
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.ENXIO):
+            raise BundleError('destination_changed') from None
+        raise
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise BundleError('destination_changed')
+    while True:
+        try:
+            fd = os.open(os.fspath(staging), flags)
+            break
+        except NotImplementedError:
+            raise OSError(errno.ENOTSUP, 'destination directory unavailable') from None
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.ENXIO, errno.EISDIR):
+                raise BundleError('destination_changed') from None
+            raise
+    try:
+        _recheck_output_directory(fd, staging, _directory_object(info))
+    except BaseException:
+        _close_output_directory_keep(fd)
+        raise
+    return fd, _directory_object(info)
 
 
 def _lstat_call(path):
