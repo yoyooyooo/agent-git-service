@@ -11,7 +11,9 @@ reviewed member list, writes a manifest that does not include its own digest,
 and verifies that staging directory read-only. Verification success sets
 `installable` false. Source bytes are copied from the same no-follow
 descriptor that was checked; see
-[Offline staging sources](#offline-staging-sources). The manifest must match
+[Offline staging sources](#offline-staging-sources). Each output file is
+created exclusively and checked on that descriptor; see
+[Offline staging outputs](#offline-staging-outputs). The manifest must match
 the fixed shape in
 [Offline staging manifest](#offline-staging-manifest). It does not rename the
 staging directory onto `/usr/local/libexec/ags-autodeploy` and does not change
@@ -51,8 +53,10 @@ read. The descriptor must be a regular file whose device, inode, mode, uid,
 size, mtime, and ctime match the pre-open `lstat`. Atime is ignored. The
 builder does not require the current UID, mode 0600, a link count of one, or a
 clear executable bit. A stable hard link is accepted. Source modes 0600, 0644,
-0700, and 0755 remain compatible. The staged copy is still mode 0644, so a
-source executable bit is not a staging executable bit.
+0700, and 0755 remain compatible. The staged copy is still mode 0644, set on
+the destination descriptor; see
+[Offline staging outputs](#offline-staging-outputs). A source executable bit
+is not a staging executable bit.
 
 Bytes and the SHA256 are taken from that same descriptor. Each read is at most
 65536 bytes. The read stops at the size from the first `fstat`, plus one extra
@@ -68,13 +72,16 @@ not the verifier's `member_type_rejected`. An identity, length, mode, or
 final-path change observed around the read is `source_changed`, including the
 same bytes on a new inode. A source permission failure, or another source read
 or `fstat` failure, is `source_unreadable`. It is not raised as a normal
-permission exception. A destination write failure stays a destination failure:
-it is not `source_unreadable` and it does not select the fallback. The message
+permission exception. A destination write failure stays a destination
+`OSError`: it is not `source_unreadable` and it does not select the fallback.
+A destination path that no longer names the new file is `destination_changed`,
+as defined in [Offline staging outputs](#offline-staging-outputs). The message
 is only the fixed code. The exit code is 69.
 
 The descriptor is closed on success, on refusal, and when a programming error
-leaves the copy. The manifest is written only after every selected member has
-been copied and still matches its opening identity. A refusal may leave an
+leaves the copy. The manifest is created exclusively only after every selected
+member has been copied and still matches its opening identity. See
+[Offline staging outputs](#offline-staging-outputs). A refusal may leave an
 incomplete staging directory. That directory is not success, is not reused, and
 is not deleted by the builder. An existing staging directory is still
 `staging_exists`. Success is `verified=true` and `installable=false` only after
@@ -83,6 +90,82 @@ the checks in [Offline staging manifest](#offline-staging-manifest) and
 a Git revision or tree, does not admit production, and does not bind a host,
 tool revision, or recovery asset. It does not snapshot every ancestor or bound
 the whole bundle by total bytes or time.
+
+## Offline staging outputs
+
+`upgrade_bundle.build` creates every required member and `manifest.json` by
+an exclusive open of that final component: `O_WRONLY|O_CREAT|O_EXCL`, without
+following the component and without blocking. If the platform cannot open
+that way, or cannot `fchmod` a descriptor, the builder refuses and does not
+fall back to truncation or a following write. An existing final component is
+not unlinked, renamed over, or reused. That includes a regular file, a hard
+link, a symlink (dangling or chained), a directory, and a fifo. The open
+fails with the destination `OSError`. A member that already exists still
+surfaces as `FileExistsError` / `EEXIST`. The manifest uses that same
+destination failure. These errors are not rewritten into one bundle code.
+
+Member bytes and mode 0644 are applied to the descriptor just created. The
+mode is `os.fchmod` on that descriptor, including when the process umask is
+077. The builder does not `chmod`, `chown`, or truncate the destination path
+after the descriptor is opened. The manifest is created with mode `0666`
+masked by the current umask, the same creation rule as before. It is not
+forced to 0644 or 0600. The staging directory remains mode 0700 under its
+existing creation rule. The builder does not change the process umask.
+
+The builder `fstat`s the new descriptor and requires a regular file. Device,
+inode, type, and uid come from that first check. Size, mode, mtime, and ctime
+change when the builder writes and, for a member, changes the mode, so those
+fields are not compared with the creation snapshot. After the builder's own
+writes finish, the size must equal the number of bytes that were supposed to
+be written. Stable metadata from the descriptor is then compared with a
+non-following `lstat` of the final path, ignoring atime, and a further
+`fstat` must still agree. If the path is gone, is a link or another type,
+names a different inode, or disagrees in length or identity, the result is
+`destination_changed`, exit 69, and the message is only that code. The same
+bytes on a replacement inode are still a refusal. Digest equality is not
+enough.
+
+The manifest is serialized only after every member copy, source check, and
+destination check has succeeded. Its bytes use the same write loop as member
+bytes. A short write continues. `EINTR` from `write` is retried only for that
+call. A return of zero or a negative count is refused. The build returns
+success only after the manifest length, identity check, and its one close all
+succeed.
+
+Each output descriptor is closed once, on success and on failure. `EINTR`
+from `close` is not retried, and the descriptor is not closed again. Whether
+the caller is already handling an exception does not change that close. A
+`BundleError`, destination `OSError`, programming error, or cancellation that
+already happened is kept. A `close`, `fchmod`, `fstat`, or `write` `OSError`
+after the bytes were produced is not success, is not `source_unreadable`, and
+does not select the fallback. A destination I/O error stays a destination
+`OSError`. Only an observed identity or path mismatch is `destination_changed`.
+
+Failure is not an atomic rollback. The builder does not return success, does
+not reuse the staging directory, does not delete it, and does not write an
+approval, pin, or registration. A member refusal does not continue on to the
+manifest. A manifest collision does not modify the object already at that
+path. If the manifest was created and a later write, identity check, or close
+fails, a partial or even byte-complete `manifest.json` may remain. That
+residue is not a successful build. Verification still checks only the files it
+reads. Power-loss durability, `fsync`, and atomic publication are not part of
+this check.
+
+The check covers the life of that output descriptor. The builder does not
+write an object that already occupied the path, and it does not change that
+object's mode. If the path is replaced by another inode, later bytes and the
+mode change still apply only to the original descriptor, and the path mismatch
+is refused. The builder cannot stop the same user from linking that inode,
+writing the inode directly, replacing the path again after the last check, or
+moving an ancestor or the whole staging directory. It does not claim same-user
+isolation or a consistent snapshot of the directory.
+
+Success remains `verified=true` and `installable=false` only after
+[Offline staging manifest](#offline-staging-manifest) and
+[Offline staging members](#offline-staging-members). The source check is
+[Offline staging sources](#offline-staging-sources). This output check does
+not admit production and does not make the staging directory a host trust
+root.
 
 ## Offline staging manifest
 
@@ -204,7 +287,9 @@ not bound the bundle by total bytes or elapsed time. It does not change
 production admission, and success remains `verified=true` /
 `installable=false`. The source-file check that produced the staging directory
 is separate and is described in
-[Offline staging sources](#offline-staging-sources).
+[Offline staging sources](#offline-staging-sources). The creation of those
+files is described in
+[Offline staging outputs](#offline-staging-outputs).
 
 ## S6.12 release inputs
 
