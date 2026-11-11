@@ -7216,20 +7216,23 @@ class BuilderInputDirectoryTests(unittest.TestCase):
         self._drop_support_after_output('supports_follow_symlinks', os.stat)
 
     def test_directory_eintr_and_close_keep_the_first_error(self):
+        if os.environ.get('BUNDLE_INPUT_CLOSE_HIGH_FD') == '1':
+            self._high_fd_sentinel_case()
+            return
         for where in ('lstat', 'open', 'fstat', 'stat'):
             with self.subTest(where=where):
                 self._input_eintr(where)
         for number in (errno.EIO, errno.EINTR, errno.EBADF):
             for handled in (False, True):
-                with self.subTest(close=errno.errorcode.get(number, number), handled=handled):
-                    self._input_close(number, handled, which='source')
-                    self._input_close(number, handled, which='fallback')
-                    self._input_close(number, handled, which='output')
+                for which in ('source', 'fallback', 'output'):
+                    with self.subTest(close=errno.errorcode.get(number, number), handled=handled, which=which):
+                        self._input_close(number, handled, which=which)
         for kind in ('source_changed', 'source_unreadable', 'destination_oserror', 'runtime', 'cancel'):
             with self.subTest(kept=kind):
                 self._close_keeps_prior(kind)
         self._close_continues_after_first_input_error()
         self._source_close_may_leave_manifest()
+        self._assert_high_fd_sentinel_child()
 
     def test_legal_modes_links_and_manifest_bytes(self):
         for mode in (0o700, 0o755):
@@ -7767,7 +7770,43 @@ class BuilderInputDirectoryTests(unittest.TestCase):
         self.assertTrue(state['once'], where)
         self._assert_verified(case / 'staging', built)
 
-    def _input_close(self, number, handled, which):
+    def _high_fd_sentinel_case(self):
+        """Pre-occupy ordinary fds so this case's sentinels land at 128 or above."""
+        held = []
+        try:
+            floor = None
+            while True:
+                fd = os.open(os.devnull, os.O_RDONLY)
+                if fd >= 128:
+                    os.close(fd)
+                    floor = fd
+                    break
+                held.append(fd)
+            self.assertGreaterEqual(floor, 128)
+            self._input_close(errno.EIO, False, which='fallback', minimum_fd=128)
+        finally:
+            for fd in held:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def _assert_high_fd_sentinel_child(self):
+        env = os.environ.copy()
+        env['BUNDLE_INPUT_CLOSE_HIGH_FD'] = '1'
+        completed = subprocess.run(
+            [sys.executable, '-B', str(HERE / 'test_upgrade_bundle.py'),
+             'BuilderInputDirectoryTests.test_directory_eintr_and_close_keep_the_first_error'],
+            cwd=str(HERE.parent),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        detail = completed.stdout + completed.stderr
+        self.assertEqual(completed.returncode, 0, detail)
+        self.assertIn('OK', detail)
+
+    def _input_close(self, number, handled, which, minimum_fd=0):
         case = self.root / ('close-' + which + '-' + str(number) + '-' + str(handled))
         case.mkdir(mode=0o700)
         source = case / 'source'
@@ -7782,8 +7821,13 @@ class BuilderInputDirectoryTests(unittest.TestCase):
         sentinel = case / 'sentinel-fd'
         sentinel.write_bytes(b'SENTINEL')
         sentinel.chmod(0o600)
-        state = {'source': None, 'output': None, 'fallback': None, 'count': {}, 'occupied': None, 'double': 0}
-        real_open, real_close = os.open, os.close
+        sentinel_info = sentinel.lstat()
+        sentinel_key = (sentinel_info.st_dev, sentinel_info.st_ino)
+        state = {
+            'source': None, 'output': None, 'fallback': None, 'count': {},
+            'double': 0, 'sentinels': [],
+        }
+        real_open, real_close, real_fstat = os.open, os.close, os.fstat
 
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
@@ -7800,14 +7844,20 @@ class BuilderInputDirectoryTests(unittest.TestCase):
         target = {'source': 'source', 'fallback': 'fallback', 'output': 'output'}[which]
 
         def os_close(fd):
-            if state['occupied'] is not None and fd == state['occupied']:
+            if any(fd == entry['fd'] for entry in state['sentinels']):
                 state['double'] += 1
                 return real_close(fd)
             kind = next((name for name, held in (('fallback', state['fallback']), ('source', state['source']), ('output', state['output'])) if fd == held), None)
             if kind is not None and state['count'].get(kind, 0) == 0:
                 real_close(fd)
                 state['count'][kind] = 1
-                state['occupied'] = real_open(sentinel, os.O_RDONLY)
+                held = real_open(sentinel, os.O_RDONLY)
+                info = real_fstat(held)
+                state['sentinels'].append({
+                    'fd': held,
+                    'identity': (info.st_dev, info.st_ino, info.st_mode),
+                    'kind': kind,
+                })
                 if kind == target:
                     raise OSError(number, 'injected directory close')
                 return None
@@ -7822,20 +7872,22 @@ class BuilderInputDirectoryTests(unittest.TestCase):
             except ValueError:
                 self.bundle.build(source, case / 'staging')
 
+        before_fds = self._fds()
         os.open, os.close = os_open, os_close
         try:
             with self.assertRaises((self.bundle.BundleError, OSError)) as caught:
                 invoke()
         finally:
             os.open, os.close = real_open, real_close
-            if state['occupied'] is not None:
-                os.fstat(state['occupied'])
-                os.close(state['occupied'])
+            problems = self._close_owned_sentinels(state['sentinels'])
         self.assertEqual(state['double'], 0)
-        self.assertGreaterEqual(state['count'].get('source', 0), 1)
-        self.assertGreaterEqual(state['count'].get('output', 0), 1)
+        self.assertEqual(problems, [])
+        self.assertEqual(state['count'].get('source'), 1)
+        self.assertEqual(state['count'].get('output'), 1)
         if which == 'fallback':
-            self.assertGreaterEqual(state['count'].get('fallback', 0), 1)
+            self.assertEqual(state['count'].get('fallback'), 1)
+        else:
+            self.assertNotIn('fallback', state['count'])
         error = caught.exception
         if which == 'output':
             self.assertIsInstance(error, OSError)
@@ -7847,6 +7899,47 @@ class BuilderInputDirectoryTests(unittest.TestCase):
             self.assertEqual(error.exit_code, 69)
             self.assertIsNone(error.__cause__)
         self.assertNotIn('already-handled-caller-error', str(error))
+        expected = 3 if which == 'fallback' else 2
+        self.assertEqual(len(state['sentinels']), expected, which)
+        self.assertEqual([entry['kind'] for entry in state['sentinels']],
+                         (['fallback', 'source', 'output'] if which == 'fallback' else ['source', 'output']))
+        for entry in state['sentinels']:
+            self.assertEqual(entry['identity'][:2], sentinel_key, entry['fd'])
+            self.assertTrue(stat.S_ISREG(entry['identity'][2]), entry['fd'])
+            self.assertGreaterEqual(entry['fd'], minimum_fd)
+        self.assertEqual(self._fds(), before_fds, 'sentinel descriptors remained open')
+
+    def _close_owned_sentinels(self, sentinels):
+        """Close sentinels this fixture still owns. Do not stop on the first failure.
+
+        Close a number only when it is still the identity recorded at open.
+        An already-closed or reused number is reported and left untouched.
+        """
+        problems = []
+        for entry in sentinels:
+            fd = entry['fd']
+            try:
+                info = os.fstat(fd)
+            except OSError as exc:
+                problems.append('fd %s not alive before close errno %s' % (fd, exc.errno))
+                continue
+            identity = (info.st_dev, info.st_ino, info.st_mode)
+            if identity != entry['identity']:
+                problems.append('fd %s identity changed before close' % fd)
+                continue
+            try:
+                os.close(fd)
+            except OSError as exc:
+                problems.append('fd %s close errno %s' % (fd, exc.errno))
+                continue
+            try:
+                os.fstat(fd)
+            except OSError as exc:
+                if exc.errno != errno.EBADF:
+                    problems.append('fd %s after close errno %s' % (fd, exc.errno))
+            else:
+                problems.append('fd %s still open after close' % fd)
+        return problems
 
     def _close_keeps_prior(self, kind):
         case = self.root / ('keep-' + kind)
@@ -8104,14 +8197,22 @@ class BuilderInputDirectoryTests(unittest.TestCase):
         return rows
 
     def _fds(self):
+        directory = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
         found = []
-        for fd in range(3, 128):
+        for name in os.listdir(directory):
+            if not name.isdigit():
+                continue
+            fd = int(name)
+            if fd < 3:
+                continue
             try:
                 os.fstat(fd)
-            except OSError:
-                continue
+            except OSError as exc:
+                if exc.errno == errno.EBADF:
+                    continue
+                raise
             found.append(fd)
-        return found
+        return sorted(found)
 
     def _relax(self):
         if not self.root.exists():
