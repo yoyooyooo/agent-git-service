@@ -77,13 +77,16 @@ is not the runtime rule: a provisioned bundle and its ancestors must be
 root-owned and not group/world writable. The runtime bundle check remains a
 separate implementation. This page does not claim that the runtime parser
 rejects duplicate JSON keys.
-Before those staged copies exist, the builder checks each selected source file
-on one no-follow descriptor and uses the `release-source.json` fallback only
-when the primary path is actually missing. See
+Before those staged copies exist, the builder binds the source directory and
+checks each selected basename through that descriptor. The file bytes still
+come from a separate no-follow file descriptor. `release-source.json` uses
+`fork` only when that basename is missing inside the held source directory, and
+`fork` is bound on its own descriptor only then. See
 [offline staging sources](upgrade-provisioning.md#offline-staging-sources).
-That input check is separate from the output directory descriptor: it does not
-choose where staged bytes are created. It is not the root-owned runtime bundle
-rule and does not make the staging directory a host trust root.
+That input-directory bind is not the output-directory bind and not the
+verifier's later directory read. It does not choose where staged bytes are
+created. It is not the root-owned runtime bundle rule and does not make the
+staging directory a host trust root.
 The copies and `manifest.json` are new files created exclusively through one
 output directory descriptor, by basename, not by joining the caller path
 again. Before success the caller path must still name that directory. The

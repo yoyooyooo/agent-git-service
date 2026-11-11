@@ -38,17 +38,19 @@ descriptor
 ([directory](upgrade-provisioning.md#offline-staging-directory),
 [manifest](upgrade-provisioning.md#offline-staging-manifest),
 [members](upgrade-provisioning.md#offline-staging-members)). The builder's
-source read is a separate input check: one descriptor supplies the copy and
-the digest, and the fallback file is used only when the primary path is
-missing
-([sources](upgrade-provisioning.md#offline-staging-sources)). Its output
+source read is a separate input check: one file descriptor supplies the copy
+and the digest. The fallback directory is used only when `release-source.json`
+is missing inside the held source directory
+([sources](upgrade-provisioning.md#offline-staging-sources)). The source
+directory, and `fork` only when that fallback is actually selected, are each
+bound for lookup. Those input binds are not the output bind. Its output
 check binds the new staging directory to its own descriptor, creates each
 member and the manifest by basename through that descriptor, and refuses
 success if the caller path no longer names it
 ([outputs](upgrade-provisioning.md#offline-staging-outputs)). The builder's
-directory descriptor and the verifier's directory descriptor are separate
-binds. Neither is a long-term authorization, a tool revision, or a recovery
-binding. None of these
+input and output directory descriptors and the verifier's directory descriptor
+are separate binds. None of them is a long-term authorization, a tool
+revision, or a recovery binding, and none of them proves one Git tree. None of these
 checks admits production use. Tool revision and tree, the unchanged application
 revision, and recovery-asset binding remain separate facts. Production
 admission, Darwin entry, and `application_source_transition_not_admitted`
@@ -170,9 +172,10 @@ The output, directory, manifest, and member checks remain
 [members](upgrade-provisioning.md#offline-staging-members).
 That acceptance includes finishing each descriptor close; a close failure
 refuses the staging directory and is not an installable result. The builder
-output directory and the verifier read directory are pinned separately for
-that operation only. Neither pin is a long-term authorization, and neither
-is a tool, application, or recovery binding. This does not remove the
+input directory, the builder output directory, and the verifier read directory
+are pinned separately for that operation only. None of those pins is a
+long-term authorization, and none is a tool, application, or recovery binding.
+This does not remove the
 production `native_full_closure_required` gate, the Darwin stage0 refusal, or
 `application_source_transition_not_admitted`.
 

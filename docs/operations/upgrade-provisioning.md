@@ -12,8 +12,9 @@ and verifies that staging directory read-only. Verification holds one
 directory descriptor for the listing, the manifest, and the members, and
 checks that the caller path still names that directory before success. See
 [Offline staging directory](#offline-staging-directory). Verification success
-sets `installable` false. Source bytes are copied from the same no-follow
-descriptor that was checked; see
+sets `installable` false. The builder first binds the source directory, and
+binds `fork` only when `release-source.json` is absent inside that directory.
+Each selected file is then read from its own no-follow descriptor; see
 [Offline staging sources](#offline-staging-sources). After `mkdir`, the builder
 binds that new directory to one descriptor and creates every output by
 basename through it. That bind is not the verifier's later directory read.
@@ -43,20 +44,47 @@ separate approved operations. See
 
 ## Offline staging sources
 
-`upgrade_bundle.build` checks each closed member before copying it. It
-`lstat`s the source path and does not follow that final component. The only
-alternate path is `release-source.json`. When the first `lstat` of the primary
-path returns `ENOENT`, the builder reads `fork/release-source.json` beside the
-source directory. A symlink, including a dangling link or a chain, a directory,
-a fifo, or a permission error is not absence and does not select that fallback.
-If both files exist, the primary file is used. After a path is selected, a
-later absence does not switch to the other file.
+`upgrade_bundle.build` binds the final component of the source directory
+before it looks up a member. It `lstat`s that component and does not follow
+it, then opens it once, `O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK`. A
+missing path, a non-directory, or a final symlink is `member_missing`. After
+the directory has been observed, removal or a different device, inode, or type
+is `source_changed`, including another ordinary directory with the same bytes.
+Directory permission or other directory I/O is `source_unreadable`. If the
+platform cannot open a directory that way, cannot `stat` a basename through a
+directory descriptor, or cannot `stat` without following, the result is
+`source_unreadable` and the builder does not fall back to path reads. It does
+not `chmod` the directory and it does not use `O_PATH`.
 
-The selected path is opened once, `O_RDONLY`, without following the final
-component and without blocking. If the platform cannot open that way, the
-builder refuses with `member_missing` and does not fall back to a following
+Existence, the file pre-check, the no-follow open, and the final file identity
+use that descriptor and the member basename. The file descriptor, not the
+directory descriptor, supplies the bytes, the digest, the size-plus-one budget,
+and the file close. The builder rechecks the held directory and the caller path
+before each member, around fallback selection, after each file close, before
+the manifest, and before success. Directory size and timestamps are not
+identity. A check cannot cover the next syscall, but a lookup that already
+holds the descriptor still reads the original directory.
+
+The only alternate member is `release-source.json`. The builder selects it
+only when `stat` of that basename through the held source descriptor returns
+`ENOENT`. A disappeared source directory, a changed directory, an unreadable
+directory, a symlink or other non-regular primary, or a later failure does not
+select it. The fallback directory is `fork` beside the source directory, using
+the existing `Path` parent of the caller path, including `.` and `..`. It is
+bound on its own descriptor only at that selection, with the same no-follow
+open. The file checks then use that descriptor and the fixed basename. The
+builder does not return to the primary after that selection, and it does not
+open `fork` when the primary file exists. The two directories are not one
+parent snapshot, one Git tree, or one initial version. An ancestor symlink
+remains allowed when the final component is the ordinary directory that was
+bound. The builder does not walk every ancestor and does not resolve `..`
+through a symlink on its own.
+
+The selected basename is opened once, `O_RDONLY`, without following the final
+component and without blocking. If the platform cannot open a file that way,
+the builder refuses with `member_missing` and does not fall back to a following
 read. The descriptor must be a regular file whose device, inode, mode, uid,
-size, mtime, and ctime match the pre-open `lstat`. Atime is ignored. The
+size, mtime, and ctime match the pre-open no-follow `stat`. Atime is ignored. The
 builder does not require the current UID, mode 0600, a link count of one, or a
 clear executable bit. A stable hard link is accepted. Source modes 0600, 0644,
 0700, and 0755 remain compatible. The staged copy is still mode 0644, set on
@@ -84,8 +112,17 @@ A destination path that no longer names the new file is `destination_changed`,
 as defined in [Offline staging outputs](#offline-staging-outputs). The message
 is only the fixed code. The exit code is 69.
 
-The descriptor is closed on success, on refusal, and when a programming error
-leaves the copy. The manifest is created exclusively only after every selected
+The file descriptor is closed on success, on refusal, and when a programming
+error leaves the copy. Each input directory descriptor is closed once, after
+the last input check: the fallback directory if it was bound, then the source
+directory, then the output directory. `EINTR` from `close` is not retried and
+the descriptor is not closed again. A directory `close` failure after the body
+succeeded is not success. An input `close` failure is `source_unreadable`; an
+output `close` failure stays a destination `OSError`. The first of those is
+kept, and the remaining directory descriptors are still closed once. If the
+body already raised, that exception is kept. A source-directory `close`
+failure can leave a byte-complete manifest. That residue is not a successful
+build and is not deleted. The manifest is created exclusively only after every selected
 member has been copied and still matches its opening identity. See
 [Offline staging outputs](#offline-staging-outputs). A refusal may leave an
 incomplete staging directory. That directory is not success, is not reused, and

@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
 """Offline bundle builder and verifier. Staging only; no host provision.
 
-The builder lstats each closed source path and does not follow that final
-component. Only release-source.json may use another path, and only when that
-first lstat is ENOENT; the other path is fork/release-source.json beside the
-source directory. The selected file is opened once, without following and
-without blocking. Its bytes and SHA256 come from that same descriptor, capped
-at the first fstat size plus one probe byte. A symlink or other non-regular
-source is member_missing. A change around the read is source_changed. Any
-other source access failure is source_unreadable. Those codes carry no path
-or body. The manifest is written only after every member copy has checked
-out. The destination file is created exclusively and is not truncated or
+Before the first member lookup, the builder lstats the final component of the
+source directory and does not follow it. It opens that directory once,
+O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK, and keeps the descriptor until
+the last input check. Existence, the no-follow file open, and the final file
+identity use that descriptor and the member basename. Only release-source.json
+may use another directory, and only when stat of that basename through the
+held source descriptor returns ENOENT. The other directory is fork beside the
+source directory, bound on its own descriptor only at that selection. A
+missing, non-directory, or final symlink input is member_missing. After a
+directory has been observed, disappearance or an identity change is
+source_changed. Directory I/O, or a missing directory or no-follow capability,
+is source_unreadable. Those codes carry no path or body. The two binds are
+not one parent snapshot, and neither freezes the members.
+
+The selected file is opened once, without following and without blocking. Its
+bytes and SHA256 come from that same file descriptor, capped at the first
+fstat size plus one probe byte. A symlink or other non-regular source is
+member_missing. A change around the read is source_changed. Any other source
+file access failure is source_unreadable. The manifest is written only after
+every member copy has checked out. The destination file is created exclusively and is not truncated or
 followed. Member mode 0644 is fchmod on that same descriptor. A path that
 no longer names it is destination_changed. After mkdir, the builder lstats
 the new directory and opens it once,
@@ -116,28 +126,40 @@ def build(source, staging):
         raise BundleError('staging_exists')
     staging.mkdir(mode=0o700)
     directory, identity = _bind_output_directory(staging)
+    source_fd = None
+    fallback_fd = None
     try:
+        source_fd, source_identity = _bind_input_directory(source)
+        fallback_path = None
+        fallback_identity = None
         files = {}
         for name in REQUIRED:
             _recheck_output_directory(directory, staging, identity)
-            path = _choose_source_path(source, name)
-            files[name] = _copy_source_member(path, name, directory)
+            _recheck_bound_inputs(
+                source_fd, source, source_identity, fallback_fd, fallback_path, fallback_identity)
+            source_fd, fallback_fd, fallback_path, fallback_identity, input_fd = _select_input_directory(
+                source, source_fd, source_identity, name, fallback_fd, fallback_path, fallback_identity)
+            files[name] = _copy_source_member(name, input_fd, directory)
+            _recheck_output_directory(directory, staging, identity)
+            _recheck_bound_inputs(
+                source_fd, source, source_identity, fallback_fd, fallback_path, fallback_identity)
         _recheck_output_directory(directory, staging, identity)
+        _recheck_bound_inputs(
+            source_fd, source, source_identity, fallback_fd, fallback_path, fallback_identity)
         manifest = {'schema': SCHEMA, 'entry': ENTRY, 'files': files}
         raw = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()
         _write_exclusive('manifest.json', raw, 0o666, None, directory)
         _recheck_output_directory(directory, staging, identity)
+        _recheck_bound_inputs(
+            source_fd, source, source_identity, fallback_fd, fallback_path, fallback_identity)
         result = {'manifest_sha256': hashlib.sha256(raw).hexdigest(), 'members': len(files)}
     except BaseException:
-        # This build already failed. Close the directory once and keep that error.
-        _close_output_directory_keep(directory)
+        # This build already failed. Close every directory once and keep that error.
+        _release_directories(fallback_fd, source_fd, directory)
         raise
     # A caller's handled exception is not this build's failure.
-    # Close once, including after EINTR. Do not retry or close again.
-    try:
-        os.close(directory)
-    except OSError:
-        raise
+    # Close each directory once, including after EINTR. Do not retry or close again.
+    _finish_directories(fallback_fd, source_fd, directory)
     return result
 
 
@@ -164,7 +186,64 @@ def _source_io_error(exc, *, started):
     raise BundleError(code) from None
 
 
-def _lstat_source(path):
+def _input_directory_flags():
+    """Flags for one no-follow input-directory open. None means unavailable.
+
+    Capability is the import-time os functions. A later test seam may replace
+    os.open without making a capable platform look incapable. Listing is not
+    required. This is not the output-directory error path.
+    """
+    nofollow = getattr(os, 'O_NOFOLLOW', None)
+    nonblock = getattr(os, 'O_NONBLOCK', None)
+    directory = getattr(os, 'O_DIRECTORY', None)
+    if nofollow is None or nonblock is None or directory is None:
+        return None
+    dir_fds = getattr(os, 'supports_dir_fd', ())
+    followers = getattr(os, 'supports_follow_symlinks', ())
+    if (_OS_STAT not in dir_fds or _OS_OPEN not in dir_fds or _OS_STAT not in followers):
+        return None
+    return os.O_RDONLY | directory | nofollow | nonblock
+
+
+def _close_input_directory_keep(fd):
+    """Close one input directory once after this bind already failed."""
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _release_directories(fallback_fd, source_fd, output_fd):
+    """Close each held directory once. Keep the exception already in flight."""
+    for fd in (fallback_fd, source_fd, output_fd):
+        if fd is None:
+            continue
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _finish_directories(fallback_fd, source_fd, output_fd):
+    """Close fallback, then source, then output. Keep the first close error."""
+    first = None
+    for kind, fd in (('input', fallback_fd), ('input', source_fd), ('output', output_fd)):
+        if fd is None:
+            continue
+        try:
+            os.close(fd)
+        except OSError as exc:
+            if first is None:
+                first = (kind, exc)
+    if first is None:
+        return
+    kind, exc = first
+    if kind == 'input':
+        raise BundleError('source_unreadable') from None
+    raise exc
+
+
+def _lstat_input_directory(path):
     while True:
         try:
             return os.lstat(path)
@@ -174,28 +253,136 @@ def _lstat_source(path):
             raise
 
 
-def _choose_source_path(source, name):
-    """Fallback only when release-source.json itself is missing. Do not choose twice."""
-    primary = source / name
+def _fstat_input_directory(fd):
+    while True:
+        try:
+            return os.fstat(fd)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise BundleError('source_unreadable') from None
+
+
+def _map_unbound_input_directory(exc):
+    """The final component was not yet observed as a directory."""
+    if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR, errno.ENXIO):
+        raise BundleError('member_missing') from None
+    raise BundleError('source_unreadable') from None
+
+
+def _map_bound_input_directory(exc):
+    """The path no longer names the directory that was observed."""
+    if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.ENXIO):
+        raise BundleError('source_changed') from None
+    raise BundleError('source_unreadable') from None
+
+
+def _require_input_directory(info, identity):
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise BundleError('source_changed')
+    if _directory_object(info) != identity:
+        raise BundleError('source_changed')
+
+
+def _recheck_input_directory(fd, path, identity):
+    """The held descriptor and the caller path must still be the initial directory."""
+    _require_input_directory(_fstat_input_directory(fd), identity)
     try:
-        _lstat_source(primary)
+        current = _lstat_input_directory(path)
+    except OSError as exc:
+        _map_bound_input_directory(exc)
+    _require_input_directory(current, identity)
+
+
+def _recheck_bound_inputs(source_fd, source, source_identity, fallback_fd, fallback_path, fallback_identity):
+    _recheck_input_directory(source_fd, source, source_identity)
+    if fallback_fd is not None:
+        _recheck_input_directory(fallback_fd, fallback_path, fallback_identity)
+
+
+def _bind_input_directory(path):
+    """Bind one input directory. Do not resolve a final symlink away."""
+    flags = _input_directory_flags()
+    if flags is None:
+        raise BundleError('source_unreadable')
+    try:
+        info = _lstat_input_directory(path)
+    except OSError as exc:
+        _map_unbound_input_directory(exc)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise BundleError('member_missing')
+    identity = _directory_object(info)
+    while True:
+        try:
+            fd = os.open(os.fspath(path), flags)
+            break
+        except NotImplementedError:
+            raise BundleError('source_unreadable') from None
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            _map_bound_input_directory(exc)
+    try:
+        _recheck_input_directory(fd, path, identity)
+    except BaseException:
+        _close_input_directory_keep(fd)
+        raise
+    return fd, identity
+
+
+def _stat_input_name(name, dir_fd):
+    """No-follow stat of one basename through an input directory. No path fallback."""
+    dir_fds = getattr(os, 'supports_dir_fd', ())
+    followers = getattr(os, 'supports_follow_symlinks', ())
+    if _OS_STAT not in dir_fds or _OS_STAT not in followers:
+        raise BundleError('source_unreadable')
+    while True:
+        try:
+            return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except NotImplementedError:
+            raise BundleError('source_unreadable') from None
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise
+
+
+def _select_input_directory(source, source_fd, source_identity, name, fallback_fd, fallback_path, fallback_identity):
+    """Use the held source directory unless release-source.json is absent inside it."""
+    if name == 'release-source.json' and fallback_fd is not None:
+        return source_fd, fallback_fd, fallback_path, fallback_identity, fallback_fd
+    try:
+        _stat_input_name(name, source_fd)
     except OSError as exc:
         if name == 'release-source.json' and exc.errno == errno.ENOENT:
-            return source.parent / 'fork' / 'release-source.json'
+            _recheck_input_directory(source_fd, source, source_identity)
+            fallback_path = source.parent / 'fork'
+            fallback_fd, fallback_identity = _bind_input_directory(fallback_path)
+            try:
+                _recheck_input_directory(source_fd, source, source_identity)
+                _recheck_input_directory(fallback_fd, fallback_path, fallback_identity)
+            except BaseException:
+                _close_input_directory_keep(fallback_fd)
+                raise
+            return source_fd, fallback_fd, fallback_path, fallback_identity, fallback_fd
         _source_io_error(exc, started=False)
-    return primary
+    return source_fd, fallback_fd, fallback_path, fallback_identity, source_fd
 
 
-def _open_source(path):
-    """Open the final component without following it. Never fall back to a following open."""
+def _open_source(name, dir_fd):
+    """Open one basename without following it. Never fall back to a path open."""
     nofollow = getattr(os, 'O_NOFOLLOW', None)
     nonblock = getattr(os, 'O_NONBLOCK', None)
     if nofollow is None or nonblock is None:
         raise BundleError('member_missing')
+    if _OS_OPEN not in getattr(os, 'supports_dir_fd', ()):
+        raise BundleError('source_unreadable')
     flags = os.O_RDONLY | nofollow | nonblock
     while True:
         try:
-            return os.open(path, flags)
+            return os.open(name, flags, dir_fd=dir_fd)
+        except NotImplementedError:
+            raise BundleError('source_unreadable') from None
         except OSError as exc:
             if exc.errno == errno.EINTR:
                 continue
@@ -401,33 +588,31 @@ def _stream_source(fd, name, size, dir_fd):
     return digest.hexdigest()
 
 
-def _copy_source_member(path, name, dir_fd):
+def _copy_source_member(name, dir_fd, output_dir_fd):
     """Read, copy, and hash one selected source from a single no-follow descriptor."""
     try:
-        info = _lstat_source(path)
+        info = _stat_input_name(name, dir_fd)
     except OSError as exc:
         _source_io_error(exc, started=False)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise BundleError('member_missing')
-    fd = _open_source(path)
+    fd = _open_source(name, dir_fd)
     try:
         opened = _source_fstat(fd)
         if stat.S_ISLNK(opened.st_mode) or not stat.S_ISREG(opened.st_mode):
             raise BundleError('member_missing')
         if _manifest_identity(opened) != _manifest_identity(info):
             raise BundleError('source_changed')
-        digest = _stream_source(fd, name, opened.st_size, dir_fd)
+        digest = _stream_source(fd, name, opened.st_size, output_dir_fd)
         after = _source_fstat(fd)
         if _manifest_identity(after) != _manifest_identity(opened):
             raise BundleError('source_changed')
-        while True:
-            try:
-                current = os.lstat(path)
-                break
-            except OSError as exc:
-                if exc.errno == errno.EINTR:
-                    continue
-                raise BundleError('source_changed') from None
+        try:
+            current = _stat_input_name(name, dir_fd)
+        except BundleError:
+            raise
+        except OSError:
+            raise BundleError('source_changed') from None
         if _manifest_identity(current) != _manifest_identity(after):
             raise BundleError('source_changed')
         result = digest
