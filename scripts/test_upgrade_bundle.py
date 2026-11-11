@@ -15,6 +15,23 @@ from unittest.mock import Mock
 HERE = Path(__file__).resolve().parent
 
 
+def _entry_matches(path, target, kwargs=None):
+    """Historical full path, or one basename looked up through dir_fd."""
+    if isinstance(path, int):
+        return False
+    try:
+        text = os.fspath(path)
+    except TypeError:
+        return False
+    if os.path.normpath(text) == os.path.normpath(os.fspath(target)):
+        return True
+    if not kwargs or kwargs.get('dir_fd') is None:
+        return False
+    if text in ('.', '..') or text != Path(text).name:
+        return False
+    return text == Path(os.fspath(target)).name
+
+
 class BundleBaseline(unittest.TestCase):
     def test_old_three_file_set_is_not_complete(self):
         """Existing required-member contract. Three files are the behavior red."""
@@ -346,7 +363,7 @@ def _verify_fifo_manifest(mode, staging):
         real_open = os.open
 
         def wrapped(path, flags, *args, **kwargs):
-            if not state['done'] and os.fspath(path) == os.fspath(manifest):
+            if not state['done'] and _entry_matches(path, manifest, kwargs):
                 state['done'] = True
                 os.rename(manifest, staging.parent / 'fifo-held-race.json')
                 os.mkfifo(manifest, 0o600)
@@ -481,16 +498,26 @@ class ManifestFileTests(unittest.TestCase):
                     self._point_symlink(staging, self.root / (name + '.json'), relative=False)
                 saved = getattr(os, flag)
                 before = self._metadata(self.root)
+                real_open = os.open
+                opened = []
+
+                def wrapped(path, flags, *args, **kwargs):
+                    opened.append(path if isinstance(path, int) else os.fspath(path))
+                    return real_open(path, flags, *args, **kwargs)
+
+                os.open = wrapped
                 try:
                     delattr(os, flag)
                     with self.assertRaises(self.bundle.BundleError) as caught:
                         self.bundle.verify(staging)
                 finally:
+                    os.open = real_open
                     setattr(os, flag, saved)
                     self.assertEqual(self._metadata(self.root), before)
-                self.assertEqual(caught.exception.code, 'manifest_type_rejected')
+                self.assertEqual(opened, [])
+                self.assertEqual(caught.exception.code, 'staging_unreadable')
                 self.assertEqual(caught.exception.exit_code, 69)
-                self.assertEqual(str(caught.exception), 'manifest_type_rejected')
+                self.assertEqual(str(caught.exception), 'staging_unreadable')
 
     def _cases(self):
         def symlink(relative):
@@ -630,7 +657,7 @@ class ManifestFileTests(unittest.TestCase):
         real_open = os.open
 
         def wrapped(path, flags, *args, **kwargs):
-            if not state['done'] and os.fspath(path) == os.fspath(manifest):
+            if not state['done'] and _entry_matches(path, manifest, kwargs):
                 state['done'] = True
                 os.rename(manifest, held)
                 if kind == 'symlink':
@@ -660,7 +687,7 @@ class ManifestFileTests(unittest.TestCase):
 
         def wrapped(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if not state['done'] and os.fspath(path) == os.fspath(manifest):
+            if not state['done'] and _entry_matches(path, manifest, kwargs):
                 state['done'] = True
                 os.rename(manifest, held)
                 replacement = real_open(manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
@@ -688,7 +715,7 @@ class ManifestFileTests(unittest.TestCase):
 
         def wrapped_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if os.fspath(path) == os.fspath(manifest):
+            if _entry_matches(path, manifest, kwargs):
                 state['fds'].add(fd)
             return fd
 
@@ -740,7 +767,7 @@ class ManifestFileTests(unittest.TestCase):
 
         def wrapped_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if os.fspath(path) == os.fspath(manifest):
+            if _entry_matches(path, manifest, kwargs):
                 observed['opened'] = True
                 observed['flags'] = flags
                 fds.add(fd)
@@ -809,7 +836,7 @@ def _verify_fifo_member(mode, staging, member):
         real_open = os.open
 
         def wrapped(path, flags, *args, **kwargs):
-            if not state['done'] and os.fspath(path) == os.fspath(target):
+            if not state['done'] and _entry_matches(path, target, kwargs):
                 state['done'] = True
                 os.rename(target, staging.parent / 'member-fifo-held')
                 os.mkfifo(target, 0o600)
@@ -1112,8 +1139,8 @@ class MemberFileTests(unittest.TestCase):
     def _verify_hooked(self, staging, target, executable, state, mutate, *, before_open, after_open):
         real_path_open, real_os_open = Path.open, os.open
 
-        def intercept(path, real_call):
-            if Path(path) != target or state['hook']:
+        def intercept(path, real_call, open_kwargs):
+            if not _entry_matches(path, target, open_kwargs) or state['hook']:
                 return real_call()
             state['hook'] = True
             if before_open:
@@ -1124,10 +1151,10 @@ class MemberFileTests(unittest.TestCase):
             return opened
 
         def path_open(path, *args, **kwargs):
-            return intercept(path, lambda: real_path_open(path, *args, **kwargs))
+            return intercept(path, lambda: real_path_open(path, *args, **kwargs), kwargs)
 
         def os_open(path, *args, **kwargs):
-            return intercept(path, lambda: real_os_open(path, *args, **kwargs))
+            return intercept(path, lambda: real_os_open(path, *args, **kwargs), kwargs)
 
         Path.open = path_open
         os.open = os_open
@@ -1199,12 +1226,12 @@ class MemberFileTests(unittest.TestCase):
         opened = []
 
         def os_open(path, *args, **kwargs):
-            if Path(path) == target:
+            if _entry_matches(path, target, kwargs):
                 opened.append('os')
             return real_open(path, *args, **kwargs)
 
         def path_open(path, *args, **kwargs):
-            if Path(path) == target:
+            if _entry_matches(path, target, kwargs):
                 opened.append('path')
             return real_path_open(path, *args, **kwargs)
 
@@ -1323,6 +1350,11 @@ class MemberFileTests(unittest.TestCase):
         staging_path = os.path.normpath(os.fspath(staging))
 
         def matches(path):
+            if isinstance(path, int):
+                info = os.fstat(path)
+                held = os.lstat(staging)
+                return (stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+                        and (info.st_dev, info.st_ino) == (held.st_dev, held.st_ino))
             return os.path.normpath(os.fspath(path)) == staging_path
 
         def drop():
@@ -1388,7 +1420,7 @@ class MemberFileTests(unittest.TestCase):
 
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if Path(path) == target:
+            if _entry_matches(path, target, kwargs):
                 state['fds'].add(fd)
                 state['flags'] = flags
             return fd
@@ -1474,7 +1506,7 @@ class MemberFileTests(unittest.TestCase):
 
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if Path(path) == target:
+            if _entry_matches(path, target, kwargs):
                 state['fds'].add(fd)
                 state['flags'] = flags
             return fd
@@ -1524,7 +1556,7 @@ class MemberFileTests(unittest.TestCase):
 
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if Path(path) == target:
+            if _entry_matches(path, target, kwargs):
                 state['fds'].add(fd)
             return fd
 
@@ -1553,11 +1585,11 @@ class MemberFileTests(unittest.TestCase):
         real_open, real_read = os.open, os.read
 
         def os_open(path, flags, *args, **kwargs):
-            if where == 'open' and Path(path) == target and not state['once']:
+            if where == 'open' and _entry_matches(path, target, kwargs) and not state['once']:
                 state['once'] = True
                 raise OSError(errno.EINTR, 'interrupted')
             fd = real_open(path, flags, *args, **kwargs)
-            if Path(path) == target:
+            if _entry_matches(path, target, kwargs):
                 state['fds'].add(fd)
             return fd
 
@@ -1590,17 +1622,17 @@ class MemberFileTests(unittest.TestCase):
         opened = []
 
         def wrapped_stat(path, *args, **kwargs):
-            if os.fspath(path) == os.fspath(target) and hasattr(os, flag):
+            if _entry_matches(path, target, kwargs) and hasattr(os, flag):
                 delattr(os, flag)
             return real_stat(path, *args, **kwargs)
 
         def os_open(path, *args, **kwargs):
-            if Path(path) == target:
+            if _entry_matches(path, target, kwargs):
                 opened.append('os')
             return real_open(path, *args, **kwargs)
 
         def path_open(path, *args, **kwargs):
-            if Path(path) == target:
+            if _entry_matches(path, target, kwargs):
                 opened.append('path')
             return real_path_open(path, *args, **kwargs)
 
@@ -1627,7 +1659,7 @@ class MemberFileTests(unittest.TestCase):
         state = {'done': False}
 
         def os_open(path, flags, *args, **kwargs):
-            if Path(path) == target and not state['done']:
+            if _entry_matches(path, target, kwargs) and not state['done']:
                 state['done'] = True
                 raise OSError(number, 'injected seam')
             return real_open(path, flags, *args, **kwargs)
@@ -1647,7 +1679,7 @@ class MemberFileTests(unittest.TestCase):
 
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if Path(path) == target:
+            if _entry_matches(path, target, kwargs):
                 state['fds'].add(fd)
             return fd
 
@@ -1678,7 +1710,7 @@ class MemberFileTests(unittest.TestCase):
 
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if Path(path) == target:
+            if _entry_matches(path, target, kwargs):
                 state['fds'].add(fd)
             return fd
 
@@ -3483,7 +3515,7 @@ class VerifierCloseTests(unittest.TestCase):
                 name = Path(os.fspath(path)).name
                 if name == 'manifest.json' or name in self.bundle.REQUIRED:
                     state['opened_names'].append(name)
-                if self._same(path, target):
+                if self._same(path, target, kwargs):
                     live[fd] = True
                     state['target_opens'] += 1
             if closed['value']:
@@ -3559,12 +3591,21 @@ class VerifierCloseTests(unittest.TestCase):
             seen['iterdir'] += 1
             return real_iterdir(path)
 
+        real_listdir = os.listdir
+
+        def listdir(path, *args, **kwargs):
+            if isinstance(path, int):
+                seen['iterdir'] += 1
+            return real_listdir(path, *args, **kwargs)
+
         self.bundle._load_manifest = load
         Path.iterdir = iterdir
+        os.listdir = listdir
 
         def restore():
             self.bundle._load_manifest = real_load
             Path.iterdir = real_iterdir
+            os.listdir = real_listdir
 
         return restore
 
@@ -3668,8 +3709,8 @@ class VerifierCloseTests(unittest.TestCase):
         base = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
         return frozenset(os.listdir(base))
 
-    def _same(self, path, target):
-        return not isinstance(path, int) and os.path.normpath(os.fspath(path)) == str(target)
+    def _same(self, path, target, kwargs=None):
+        return _entry_matches(path, target, kwargs)
 
 def _occupy_destination(role, kind, source, staging, sentinel, outside):
     """Subprocess entry. An occupied fifo or dangling link must fail without waiting or following."""
@@ -4867,6 +4908,878 @@ class BuilderDestinationTests(unittest.TestCase):
         elif stat.S_ISLNK(info.st_mode):
             result['link'] = os.readlink(path)
         return result
+
+    def _fds(self):
+        base = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
+        return frozenset(os.listdir(base))
+
+
+def _verify_fifo_root(staging):
+    """Subprocess entry. A fifo root must be refused without waiting for a writer."""
+    import upgrade_bundle as bundle
+    staging = Path(staging)
+    real_open = os.open
+    opened = []
+
+    def wrapped(path, flags, *args, **kwargs):
+        opened.append(path if isinstance(path, int) else os.fspath(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    os.open = wrapped
+    code = None
+    try:
+        bundle.verify(staging)
+    except bundle.BundleError as error:
+        code = error.code if error.exit_code == 69 and str(error) == error.code else 'bad-error'
+    if opened:
+        sys.stdout.write('opened\n')
+        return 3
+    if code == 'staging_type_rejected':
+        return 0
+    sys.stdout.write((code or 'accepted') + '\n')
+    return 2
+
+
+class StagingDirectoryTests(unittest.TestCase):
+    """One staging directory descriptor for listing, manifest, and members.
+
+    Fixtures are synthetic inert bytes. Nothing is executed, imported, or provisioned.
+    """
+
+    def setUp(self):
+        import upgrade_bundle as bundle
+        self.bundle = bundle
+        self.module_path = Path(bundle.__file__).resolve()
+        self.assertEqual(self.module_path, HERE / 'upgrade_bundle.py')
+        self.tmp = tempfile.TemporaryDirectory(dir=Path.home(), prefix='bundle-staging-dir-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.source = self.root / 'source'
+        self.source.mkdir(mode=0o700)
+        for name in bundle.REQUIRED:
+            path = self.source / name
+            path.write_bytes(b'SYNTHETIC INERT\x00\xff ' + name.encode())
+            path.chmod(0o600)
+
+    def test_recorded_root_and_replacement_cases(self):
+        """Seven root-identity refusals and five controls from the directory probe."""
+        cases = (
+            ('plain', None, None, True, None),
+            ('mode0755', None, None, True, None),
+            ('ancestor-symlink', None, None, True, None),
+            ('member-symlink', None, None, True, 'member_type_rejected'),
+            ('digest-tamper', None, None, True, 'digest_rejected'),
+            ('root-absolute-link', None, None, True, 'staging_type_rejected'),
+            ('root-relative-link', None, None, True, 'staging_type_rejected'),
+            ('root-link-executable-false', None, None, False, 'staging_type_rejected'),
+            ('manifest-close-root-directory', 'manifest', 'directory', True, 'staging_changed'),
+            ('manifest-close-root-symlink', 'manifest', 'symlink', True, 'staging_changed'),
+            ('member-close-root-directory', 'member', 'directory', True, 'staging_changed'),
+            ('member-close-root-symlink', 'member', 'symlink', True, 'staging_changed'),
+        )
+        self.assertEqual(len(cases), 12)
+        for label, phase, replacement, executable, expected in cases:
+            with self.subTest(case=label):
+                self._recorded(label, phase, replacement, executable, expected)
+
+    def test_root_replacement_matrix_does_not_read_the_new_directory(self):
+        """Swap the root at each held-directory checkpoint. Replacement bytes stay unread."""
+        phases = (
+            'before-open', 'after-open', 'manifest-close', 'after-list',
+            'member-first', 'member-middle', 'member-last', 'before-final',
+        )
+        for phase in phases:
+            for kind in ('directory', 'absolute-symlink', 'relative-symlink'):
+                with self.subTest(phase=phase, kind=kind):
+                    self._swap_case(phase, kind, invalid=True)
+        for phase in ('manifest-close', 'member-last', 'before-final'):
+            with self.subTest(phase=phase, kind='same-bytes'):
+                self._swap_case(phase, 'directory', invalid=False)
+
+    def test_static_root_types_have_bounded_results(self):
+        root, _source, staging, _built = self._make('static-root')
+        dangling = root / 'dangling'
+        dangling.symlink_to('missing-staging-target')
+        self._assert_unopened(dangling, 'staging_type_rejected')
+        link = root / 'link'
+        link.symlink_to(staging, target_is_directory=True)
+        alias = root / 'alias'
+        alias.symlink_to('link')
+        self._assert_unopened(alias, 'staging_type_rejected')
+        regular = root / 'regular'
+        regular.write_bytes(b'SYNTHETIC NOT A DIRECTORY')
+        self._assert_unopened(regular, 'staging_type_rejected')
+        self._assert_code(root / 'missing', 'manifest_missing')
+        parent = root / 'file-parent'
+        parent.write_bytes(b'SYNTHETIC')
+        self._assert_code(parent / 'staging', 'manifest_missing')
+        blocked = root / 'fifo-root'
+        os.mkfifo(blocked)
+        self._fifo_root(blocked)
+        opaque = root / 'opaque'
+        opaque.mkdir(mode=0o700)
+        opaque.chmod(0)
+        try:
+            self._assert_code(opaque, 'staging_unreadable')
+        finally:
+            opaque.chmod(0o700)
+
+    def test_missing_directory_api_does_not_fall_back_to_path_reads(self):
+        _root, _source, staging, _built = self._make('api')
+        cases = (
+            ('flag-directory', 'O_DIRECTORY', None),
+            ('flag-nofollow', 'O_NOFOLLOW', None),
+            ('flag-nonblock', 'O_NONBLOCK', None),
+            ('dir-fd', None, 'supports_dir_fd'),
+            ('listing', None, 'supports_fd'),
+            ('nofollow-stat', None, 'supports_follow_symlinks'),
+        )
+        for name, flag, attr in cases:
+            with self.subTest(case=name):
+                self._hide_directory_api(staging, flag, attr)
+
+    def test_file_flag_loss_after_directory_open_does_not_follow(self):
+        for symlink in (False, True):
+            with self.subTest(symlink=symlink):
+                root, _source, staging, _built = self._make('file-flag-' + str(symlink).lower())
+                manifest = staging / 'manifest.json'
+                outside = root / 'outside.json'
+                outside.write_bytes(manifest.read_bytes())
+                outside.chmod(0o600)
+                if symlink:
+                    manifest.unlink()
+                    manifest.symlink_to(outside)
+                self._drop_flag_on_manifest_stat(staging, manifest)
+
+    def test_directory_eintr_retries_once_at_the_call(self):
+        for where in ('lstat', 'open', 'fstat', 'listdir'):
+            with self.subTest(where=where):
+                _root, _source, staging, built = self._make('eintr-' + where)
+                self._directory_eintr(staging, built, where)
+
+    def test_directory_close_is_one_attempt_and_keeps_the_earlier_error(self):
+        cases = (
+            ('success', errno.EIO, False, 'staging_unreadable'),
+            ('success', errno.EINTR, True, 'staging_unreadable'),
+            ('success', errno.EBADF, False, 'staging_unreadable'),
+            ('success', None, True, 'success'),
+            ('manifest-invalid', errno.EIO, True, 'manifest_invalid'),
+            ('digest', errno.EIO, False, 'digest_rejected'),
+            ('manifest-close', errno.EIO, True, 'manifest_unreadable'),
+            ('programming', errno.EIO, False, 'ProgrammingMarker'),
+            ('cancel', errno.EINTR, True, 'CancelMarker'),
+        )
+        for kind, number, handled, expected in cases:
+            with self.subTest(kind=kind, errno=None if number is None else errno.errorcode[number], handled=handled):
+                self._directory_close(kind, number, handled, expected)
+
+    def test_entries_are_relative_to_the_held_directory(self):
+        root, _source, staging, built = self._make('anchor')
+        self._assert_anchor(staging, built)
+        self.assertFalse(any(path.name in {'approval.json', 'host-profile.json', 'registration.json', 'pin.json'}
+                             for path in root.rglob('*')))
+
+    def test_compatible_directory_shapes_stay_uninstalled(self):
+        root, _source, staging, built = self._make('compat')
+        staging.chmod(0o755)
+        for executable in (True, False):
+            with self.subTest(executable=executable, shape='mode0755'):
+                outcome = self.bundle.verify(staging, executable=executable)
+                self.assertEqual(outcome, {
+                    'verified': True, 'installable': False,
+                    'manifest_sha256': built['manifest_sha256'],
+                })
+                self.assertEqual(stat.S_IMODE(staging.lstat().st_mode), 0o755)
+        previous = os.getcwd()
+        os.chdir(root)
+        real_chdir = os.chdir
+        calls = []
+
+        def wrapped(*args, **kwargs):
+            calls.append(args)
+            return real_chdir(*args, **kwargs)
+
+        os.chdir = wrapped
+        try:
+            relative = self.bundle.verify(Path('staging'))
+        finally:
+            os.chdir = real_chdir
+            os.chdir(previous)
+        self.assertEqual(calls, [])
+        self.assertIs(relative['installable'], False)
+        self.assertEqual(relative['manifest_sha256'], built['manifest_sha256'])
+        alias = root / 'alias'
+        alias.symlink_to('staging', target_is_directory=True)
+        os.chdir(root)
+        os.chdir = wrapped
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.verify(Path('alias'))
+        finally:
+            os.chdir = real_chdir
+            os.chdir(previous)
+        self.assertEqual(calls, [])
+        self.assertEqual(caught.exception.code, 'staging_type_rejected')
+        self.assertEqual(caught.exception.exit_code, 69)
+
+    def _recorded(self, label, phase, replacement, executable, expected):
+        staging = self.root / label / 'staging'
+        source = self.root / label / 'source'
+        source.parent.mkdir(mode=0o700)
+        source.mkdir(mode=0o700)
+        for name in self.bundle.REQUIRED:
+            path = source / name
+            path.write_bytes(b'SYNTHETIC INERT\x00\xff ' + name.encode())
+            path.chmod(0o600)
+        built = self.bundle.build(source, staging)
+        verify_path = staging
+        if label == 'mode0755':
+            staging.chmod(0o755)
+        if label == 'ancestor-symlink':
+            (source.parent / 'via').symlink_to(source.parent, target_is_directory=True)
+            verify_path = source.parent / 'via' / 'staging'
+        if label.startswith('root-'):
+            target = 'staging' if label == 'root-relative-link' else staging
+            (source.parent / 'alias').symlink_to(target, target_is_directory=True)
+            verify_path = source.parent / 'alias'
+        if label == 'member-symlink':
+            member = staging / self.bundle.REQUIRED[0]
+            member.rename(source.parent / 'member-held')
+            member.symlink_to(source.parent / 'member-held')
+        if label == 'digest-tamper':
+            (staging / self.bundle.REQUIRED[0]).write_bytes(b'TAMPERED SYNTHETIC')
+        alternate = source.parent / 'alternate'
+        if phase:
+            self.bundle.build(source, alternate)
+            manifest = json.loads((alternate / 'manifest.json').read_bytes())
+            manifest['schema'] = 'synthetic.invalid'
+            (alternate / 'manifest.json').write_bytes(json.dumps(manifest).encode())
+        origin_ids = self._file_ids(staging)
+        alternate_ids = self._file_ids(alternate) if phase else set()
+        initial = self._snapshot(source.parent)
+        target_name = 'manifest.json' if phase == 'manifest' else (sorted(self.bundle.REQUIRED)[0] if phase else None)
+        target_info = (staging / target_name).stat() if target_name else None
+        state = {
+            'hits': 0, 'target_reads': 0, 'target_closes': 0, 'fd': None,
+            'opens_original': 0, 'opens_alternate': 0, 'baseline': None,
+        }
+        real_open, real_read, real_close, real_fstat = os.open, os.read, os.close, os.fstat
+
+        def opened(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            info = real_fstat(fd)
+            key = (info.st_dev, info.st_ino)
+            if stat.S_ISREG(info.st_mode):
+                state['opens_original'] += int(key in origin_ids)
+                state['opens_alternate'] += int(key in alternate_ids)
+            if phase and state['hits'] == 0 and target_info is not None and key == (target_info.st_dev, target_info.st_ino):
+                state['fd'] = fd
+            return fd
+
+        def read(fd, size):
+            data = real_read(fd, size)
+            if phase and state['hits'] == 0 and fd == state['fd']:
+                state['target_reads'] += 1
+            return data
+
+        def close(fd):
+            is_target = phase and state['hits'] == 0 and fd == state['fd']
+            real_close(fd)
+            if not is_target:
+                return None
+            state['target_closes'] += 1
+            try:
+                real_fstat(fd)
+            except OSError as exc:
+                self.assertEqual(exc.errno, errno.EBADF)
+            else:
+                self.fail('target descriptor was still open after close')
+            staging.rename(source.parent / 'held-staging')
+            if replacement == 'directory':
+                alternate.rename(staging)
+            else:
+                staging.symlink_to(alternate, target_is_directory=True)
+            state['hits'] += 1
+            state['baseline'] = self._snapshot(source.parent)
+            return None
+
+        before_fds = self._fds()
+        os.open, os.read, os.close = opened, read, close
+        try:
+            try:
+                outcome = self.bundle.verify(verify_path, executable=executable)
+            except self.bundle.BundleError as error:
+                outcome = error
+        finally:
+            os.open, os.read, os.close = real_open, real_read, real_close
+        self.assertEqual(self._fds(), before_fds)
+        self.assertEqual(self._snapshot(source.parent), state['baseline'] or initial)
+        if phase:
+            self.assertEqual(state['hits'], 1)
+            self.assertGreater(state['target_reads'], 0)
+            self.assertEqual(state['target_closes'], 1)
+        code = outcome.code if isinstance(outcome, self.bundle.BundleError) else 'success'
+        detail = 'case=%s code=%s original=%s alternate=%s result=%s' % (
+            label, code, state['opens_original'], state['opens_alternate'],
+            outcome if not isinstance(outcome, self.bundle.BundleError) else outcome.code)
+        if expected is None:
+            self.assertEqual(code, 'success', detail)
+            self.assertEqual(outcome, {
+                'verified': True, 'installable': False,
+                'manifest_sha256': built['manifest_sha256'],
+            }, detail)
+            self.assertEqual(state['opens_alternate'], 0, detail)
+            return
+        self.assertIsInstance(outcome, self.bundle.BundleError, detail)
+        self.assertEqual(outcome.code, expected, detail)
+        self.assertEqual(outcome.exit_code, 69, detail)
+        self.assertEqual(str(outcome), expected, detail)
+        self.assertEqual(state['opens_alternate'], 0, detail)
+        if phase and replacement == 'directory':
+            fresh = self._fresh(verify_path, executable)
+            self.assertEqual(fresh, 'manifest_invalid', detail)
+        if phase and replacement == 'symlink':
+            fresh = self._fresh(verify_path, executable)
+            self.assertEqual(fresh, 'staging_type_rejected', detail)
+
+    def _make(self, label):
+        root = self.root / label
+        source = root / 'source'
+        source.mkdir(parents=True, mode=0o700)
+        for name in self.bundle.REQUIRED:
+            path = source / name
+            path.write_bytes(b'SYNTHETIC INERT\x00\xff ' + name.encode())
+            path.chmod(0o600)
+        staging = root / 'staging'
+        built = self.bundle.build(source, staging)
+        return root, source, staging, built
+
+    def _swap_case(self, phase, kind, *, invalid):
+        label = '%s-%s-%s' % (phase, kind, str(invalid).lower())
+        root, source, staging, built = self._make(label)
+        alternate = root / 'alternate'
+        self.bundle.build(source, alternate)
+        if invalid:
+            manifest = json.loads((alternate / 'manifest.json').read_bytes())
+            manifest['schema'] = 'synthetic.invalid'
+            (alternate / 'manifest.json').write_bytes(json.dumps(manifest).encode())
+        origin_ids = self._file_ids(staging)
+        alternate_ids = self._file_ids(alternate)
+        directory_id = (staging.lstat().st_dev, staging.lstat().st_ino)
+        order = sorted(self.bundle.REQUIRED)
+        member_name = {
+            'member-first': order[0],
+            'member-middle': order[len(order) // 2],
+            'member-last': order[-1],
+        }.get(phase)
+        target_name = 'manifest.json' if phase == 'manifest-close' else member_name
+        target_id = None
+        if target_name is not None:
+            info = (staging / target_name).stat()
+            target_id = (info.st_dev, info.st_ino)
+        state = {
+            'swapped': False, 'reads': 0, 'closes': 0, 'target_fd': None,
+            'original': 0, 'alternate': 0, 'baseline': None, 'closed_origin': set(),
+        }
+        real_open, real_read, real_close, real_fstat = os.open, os.read, os.close, os.fstat
+        real_lstat, real_list = os.lstat, os.listdir
+
+        def swap():
+            if state['swapped']:
+                return
+            state['swapped'] = True
+            staging.rename(root / 'held-staging')
+            if kind == 'directory':
+                alternate.rename(staging)
+            elif kind == 'absolute-symlink':
+                staging.symlink_to(alternate, target_is_directory=True)
+            else:
+                staging.symlink_to(Path(os.path.relpath(alternate, staging.parent)),
+                                   target_is_directory=True)
+            state['baseline'] = self._snapshot(root)
+
+        def opened(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            info = real_fstat(fd)
+            key = (info.st_dev, info.st_ino)
+            if stat.S_ISREG(info.st_mode):
+                state['original'] += int(key in origin_ids)
+                state['alternate'] += int(key in alternate_ids)
+            if target_id is not None and key == target_id and state['target_fd'] is None:
+                state['target_fd'] = fd
+            if (phase == 'after-open' and not state['swapped'] and not isinstance(path, int)
+                    and os.path.normpath(os.fspath(path)) == str(staging) and flags & os.O_DIRECTORY):
+                swap()
+            return fd
+
+        def read(fd, size):
+            data = real_read(fd, size)
+            if fd == state['target_fd']:
+                state['reads'] += 1
+            return data
+
+        def close(fd):
+            info = None
+            try:
+                info = real_fstat(fd)
+            except OSError:
+                info = None
+            is_target = target_id is not None and fd == state['target_fd'] and not state['swapped']
+            real_close(fd)
+            if info is not None and stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) in origin_ids:
+                state['closed_origin'].add((info.st_dev, info.st_ino))
+            if not is_target:
+                return None
+            state['closes'] += 1
+            try:
+                real_fstat(fd)
+            except OSError as exc:
+                self.assertEqual(exc.errno, errno.EBADF)
+            else:
+                self.fail('target descriptor was still open after close')
+            if phase in ('manifest-close', 'member-first', 'member-middle', 'member-last'):
+                swap()
+            return None
+
+        def lstat(path, *args, **kwargs):
+            staging_hit = (not isinstance(path, int)
+                           and os.path.normpath(os.fspath(path)) == str(staging))
+            if phase == 'before-open' and staging_hit and not state['swapped']:
+                info = real_lstat(path, *args, **kwargs)
+                swap()
+                return info
+            if (phase == 'before-final' and staging_hit and not state['swapped']
+                    and state['closed_origin'] == origin_ids):
+                swap()
+            return real_lstat(path, *args, **kwargs)
+
+        def listed(path, *args, **kwargs):
+            names = real_list(path, *args, **kwargs)
+            if phase == 'after-list' and isinstance(path, int) and not state['swapped']:
+                info = real_fstat(path)
+                if (info.st_dev, info.st_ino) == directory_id and stat.S_ISDIR(info.st_mode):
+                    swap()
+            return names
+
+        fds = self._fds()
+        os.open, os.read, os.close = opened, read, close
+        os.lstat, os.listdir = lstat, listed
+        try:
+            try:
+                outcome = self.bundle.verify(staging)
+            except self.bundle.BundleError as error:
+                outcome = error
+        finally:
+            os.open, os.read, os.close = real_open, real_read, real_close
+            os.lstat, os.listdir = real_lstat, real_list
+        detail = 'phase=%s kind=%s invalid=%s original=%s alternate=%s' % (
+            phase, kind, invalid, state['original'], state['alternate'])
+        self.assertEqual(self._fds(), fds, detail)
+        self.assertTrue(state['swapped'], detail)
+        self.assertEqual(self._snapshot(root), state['baseline'], detail)
+        self.assertEqual(state['alternate'], 0, detail)
+        self.assertIsInstance(outcome, self.bundle.BundleError, detail)
+        self.assertEqual(outcome.code, 'staging_changed', detail)
+        self.assertEqual(outcome.exit_code, 69, detail)
+        self.assertEqual(str(outcome), 'staging_changed', detail)
+        if phase in ('manifest-close', 'member-first', 'member-middle', 'member-last'):
+            self.assertEqual(state['closes'], 1, detail)
+            self.assertGreater(state['reads'], 0, detail)
+        if phase in ('before-open', 'after-open'):
+            self.assertEqual(state['original'], 0, detail)
+        if invalid and kind == 'directory':
+            self.assertEqual(self._fresh(staging, True), 'manifest_invalid', detail)
+        elif invalid:
+            self.assertEqual(self._fresh(staging, True), 'staging_type_rejected', detail)
+        else:
+            fresh = self.bundle.verify(staging)
+            self.assertEqual(fresh, {
+                'verified': True, 'installable': False,
+                'manifest_sha256': built['manifest_sha256'],
+            }, detail)
+
+    def _assert_unopened(self, path, expected):
+        real_open = os.open
+        opened = []
+
+        def wrapped(candidate, flags, *args, **kwargs):
+            opened.append(candidate if isinstance(candidate, int) else os.fspath(candidate))
+            return real_open(candidate, flags, *args, **kwargs)
+
+        before = self._snapshot(path.parent)
+        fds = self._fds()
+        os.open = wrapped
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.verify(path)
+        finally:
+            os.open = real_open
+        self.assertEqual(self._fds(), fds)
+        self.assertEqual(self._snapshot(path.parent), before)
+        self.assertEqual(opened, [])
+        self._assert_bundle(caught.exception, expected)
+
+    def _assert_code(self, path, expected):
+        before = self._snapshot(path.parent if path.parent.exists() else self.root)
+        fds = self._fds()
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.verify(path)
+        finally:
+            self.assertEqual(self._fds(), fds)
+        if path.parent.exists():
+            self.assertEqual(self._snapshot(path.parent), before)
+        self._assert_bundle(caught.exception, expected)
+
+    def _assert_bundle(self, error, expected):
+        self.assertEqual(error.code, expected)
+        self.assertEqual(error.exit_code, 69)
+        self.assertEqual(str(error), expected)
+        self.assertEqual(error.args, (expected,))
+
+    def _fifo_root(self, path):
+        before = self._snapshot(path.parent)
+        try:
+            completed = subprocess.run(
+                [sys.executable, '-B', '-c',
+                 'import sys; sys.path.insert(0, sys.argv[1]); '
+                 'import test_upgrade_bundle as tests; '
+                 'raise SystemExit(tests._verify_fifo_root(sys.argv[2]))',
+                 str(HERE), str(path)],
+                cwd=self.root, timeout=5, capture_output=True, text=True,
+                env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+        except subprocess.TimeoutExpired:
+            self.fail('fifo root verify was still blocked after 5s')
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertEqual(self._snapshot(path.parent), before)
+        self.assertTrue(stat.S_ISFIFO(path.lstat().st_mode))
+
+    def _hide_directory_api(self, staging, flag, attr):
+        real_open = os.open
+        opened = []
+
+        def wrapped(candidate, flags, *args, **kwargs):
+            opened.append(candidate if isinstance(candidate, int) else os.fspath(candidate))
+            return real_open(candidate, flags, *args, **kwargs)
+
+        before = self._snapshot(staging.parent)
+        fds = self._fds()
+        saved_flag = getattr(os, flag) if flag else None
+        saved_attr = getattr(os, attr) if attr else None
+        os.open = wrapped
+        try:
+            if flag:
+                delattr(os, flag)
+            else:
+                setattr(os, attr, frozenset())
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.verify(staging)
+        finally:
+            os.open = real_open
+            if flag:
+                setattr(os, flag, saved_flag)
+            else:
+                setattr(os, attr, saved_attr)
+            self.assertEqual(self._fds(), fds)
+            self.assertEqual(self._snapshot(staging.parent), before)
+        self.assertEqual(opened, [])
+        self._assert_bundle(caught.exception, 'staging_unreadable')
+
+    def _drop_flag_on_manifest_stat(self, staging, manifest):
+        real_open, real_stat = os.open, os.stat
+        opened = []
+        saved = os.O_NOFOLLOW
+        state = {'done': False}
+
+        def stated(path, *args, **kwargs):
+            if _entry_matches(path, manifest, kwargs) and not state['done']:
+                state['done'] = True
+                delattr(os, 'O_NOFOLLOW')
+            return real_stat(path, *args, **kwargs)
+
+        def opened_file(path, flags, *args, **kwargs):
+            if _entry_matches(path, manifest, kwargs):
+                opened.append(os.fspath(path))
+            return real_open(path, flags, *args, **kwargs)
+
+        before = self._snapshot(staging.parent)
+        fds = self._fds()
+        os.stat, os.open = stated, opened_file
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.verify(staging)
+        finally:
+            os.stat, os.open = real_stat, real_open
+            setattr(os, 'O_NOFOLLOW', saved)
+            self.assertEqual(self._fds(), fds)
+            self.assertEqual(self._snapshot(staging.parent), before)
+        self.assertTrue(state['done'])
+        self.assertEqual(opened, [])
+        self._assert_bundle(caught.exception, 'manifest_type_rejected')
+
+    def _directory_eintr(self, staging, built, where):
+        real_open, real_lstat, real_fstat, real_list = os.open, os.lstat, os.fstat, os.listdir
+        state = {'once': False, 'dir_fd': None}
+
+        def lstat(path, *args, **kwargs):
+            if (where == 'lstat' and not state['once'] and not isinstance(path, int)
+                    and os.path.normpath(os.fspath(path)) == str(staging)):
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted')
+            return real_lstat(path, *args, **kwargs)
+
+        def opened(path, flags, *args, **kwargs):
+            if (where == 'open' and not state['once'] and not isinstance(path, int)
+                    and os.path.normpath(os.fspath(path)) == str(staging)
+                    and flags & os.O_DIRECTORY):
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted')
+            fd = real_open(path, flags, *args, **kwargs)
+            if state['dir_fd'] is None and not isinstance(path, int) and flags & os.O_DIRECTORY:
+                state['dir_fd'] = fd
+            return fd
+
+        def fstat(fd):
+            if where == 'fstat' and fd == state['dir_fd'] and not state['once']:
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted')
+            return real_fstat(fd)
+
+        def listed(path, *args, **kwargs):
+            if where == 'listdir' and path == state['dir_fd'] and not state['once']:
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted')
+            return real_list(path, *args, **kwargs)
+
+        fds = self._fds()
+        os.lstat, os.open, os.fstat, os.listdir = lstat, opened, fstat, listed
+        try:
+            outcome = self.bundle.verify(staging)
+        finally:
+            os.lstat, os.open, os.fstat, os.listdir = real_lstat, real_open, real_fstat, real_list
+            self.assertEqual(self._fds(), fds)
+        self.assertTrue(state['once'])
+        self.assertIs(outcome['verified'], True)
+        self.assertIs(outcome['installable'], False)
+        self.assertEqual(outcome['manifest_sha256'], built['manifest_sha256'])
+
+    def _directory_close(self, kind, number, handled, expected):
+        root, _source, staging, built = self._make('dir-close-%s-%s-%s' % (kind, number, int(handled)))
+        if kind == 'manifest-invalid':
+            manifest = staging / 'manifest.json'
+            manifest.write_bytes(manifest.read_bytes() + b'x')
+        elif kind == 'digest':
+            (staging / sorted(self.bundle.REQUIRED)[0]).write_bytes(b'TAMPERED SYNTHETIC')
+        manifest_info = (staging / 'manifest.json').stat()
+        manifest_id = (manifest_info.st_dev, manifest_info.st_ino)
+        real_open, real_close, real_fstat, real_read = os.open, os.close, os.fstat, os.read
+        state = {
+            'dir_fd': None, 'dir_closes': 0, 'double': 0, 'sentinels': set(), 'manifest_fd': None,
+        }
+        marker = ProgrammingMarker('SYNTHETIC PROGRAMMING MARKER')
+        cancel = CancelMarker('SYNTHETIC CANCEL')
+
+        def opened(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            info = real_fstat(fd)
+            if state['dir_fd'] is None and not isinstance(path, int) and flags & os.O_DIRECTORY:
+                state['dir_fd'] = fd
+            if (info.st_dev, info.st_ino) == manifest_id and state['manifest_fd'] is None:
+                state['manifest_fd'] = fd
+            return fd
+
+        def read(fd, size):
+            if fd == state['manifest_fd'] and kind == 'programming':
+                raise marker
+            if fd == state['manifest_fd'] and kind == 'cancel':
+                raise cancel
+            return real_read(fd, size)
+
+        def close(fd):
+            if fd in state['sentinels']:
+                state['double'] += 1
+                return None
+            if fd == state['dir_fd']:
+                if state['dir_closes']:
+                    state['double'] += 1
+                    return None
+                state['dir_closes'] += 1
+                real_close(fd)
+                try:
+                    real_fstat(fd)
+                except OSError as exc:
+                    self.assertEqual(exc.errno, errno.EBADF)
+                else:
+                    self.fail('directory descriptor was still open after close')
+                holder = real_open(os.devnull, os.O_RDONLY)
+                if holder != fd:
+                    os.dup2(holder, fd)
+                    real_close(holder)
+                state['sentinels'].add(fd)
+                if number is not None:
+                    raise OSError(number, 'SYNTHETIC DIRECTORY CLOSE')
+                return None
+            if fd == state['manifest_fd'] and kind == 'manifest-close':
+                real_close(fd)
+                raise OSError(errno.EIO, 'SYNTHETIC FILE CLOSE')
+            return real_close(fd)
+
+        fds = self._fds()
+        before = self._snapshot(root)
+        os.open, os.close, os.read = opened, close, read
+        caller = LookupError('SYNTHETIC CALLER EXCEPTION')
+        outcome = None
+        error = None
+        preserved = False
+        try:
+            if not handled:
+                try:
+                    outcome = self.bundle.verify(staging)
+                except BaseException as exc:
+                    error = exc
+                preserved = True
+            else:
+                try:
+                    raise caller
+                except LookupError:
+                    try:
+                        outcome = self.bundle.verify(staging)
+                    except BaseException as exc:
+                        error = exc
+                    preserved = sys.exception() is caller
+        finally:
+            os.open, os.close, os.read = real_open, real_close, real_read
+            for fd in list(state['sentinels']):
+                real_close(fd)
+            state['sentinels'].clear()
+        self.assertEqual(self._fds(), fds)
+        self.assertEqual(self._snapshot(root), before)
+        self.assertTrue(preserved)
+        self.assertEqual(state['dir_closes'], 1)
+        self.assertEqual(state['double'], 0)
+        if error is None:
+            observed = 'success'
+        elif isinstance(error, self.bundle.BundleError):
+            observed = error.code
+        else:
+            observed = type(error).__name__
+        self.assertEqual(observed, expected)
+        if expected == 'success':
+            self.assertIs(outcome['verified'], True)
+            self.assertIs(outcome['installable'], False)
+            self.assertEqual(outcome['manifest_sha256'], built['manifest_sha256'])
+            return
+        if expected == 'ProgrammingMarker':
+            self.assertIs(error, marker)
+            return
+        if expected == 'CancelMarker':
+            self.assertIs(error, cancel)
+            return
+        self._assert_bundle(error, expected)
+        self.assertIsNone(error.__cause__)
+
+    def _assert_anchor(self, staging, built):
+        real_open, real_stat, real_list = os.open, os.stat, os.listdir
+        real_chdir, real_rename, real_unlink, real_chmod = os.chdir, os.rename, os.unlink, os.chmod
+        real_chown = os.chown
+        state = {'dir': None, 'opens': [], 'stats': [], 'lists': [], 'forbidden': []}
+
+        def forbid(name):
+            def wrapped(*args, **kwargs):
+                state['forbidden'].append(name)
+                raise AssertionError('verifier called ' + name)
+            return wrapped
+
+        def opened(path, flags, *args, **kwargs):
+            text = path if isinstance(path, int) else os.fspath(path)
+            if not isinstance(path, int) and ('/proc/self/fd' in text or text.startswith('/dev/fd/')):
+                state['forbidden'].append(text)
+            fd = real_open(path, flags, *args, **kwargs)
+            if (state['dir'] is None and not isinstance(path, int) and flags & os.O_DIRECTORY
+                    and os.path.normpath(text) == str(staging)):
+                state['dir'] = fd
+                self.assertTrue(flags & os.O_NOFOLLOW and flags & os.O_NONBLOCK)
+                self.assertFalse(flags & (os.O_WRONLY | os.O_RDWR))
+            else:
+                state['opens'].append((text, kwargs.get('dir_fd'), flags))
+            return fd
+
+        def stated(path, *args, **kwargs):
+            text = path if isinstance(path, int) else os.fspath(path)
+            state['stats'].append((text, kwargs.get('dir_fd'), kwargs.get('follow_symlinks', True)))
+            return real_stat(path, *args, **kwargs)
+
+        def listed(path, *args, **kwargs):
+            state['lists'].append(path if isinstance(path, int) else os.fspath(path))
+            return real_list(path, *args, **kwargs)
+
+        names = {'manifest.json'} | set(self.bundle.REQUIRED)
+        before = self._snapshot(staging.parent)
+        fds = self._fds()
+        os.open, os.stat, os.listdir = opened, stated, listed
+        os.chdir, os.rename, os.unlink, os.chmod = (
+            forbid('chdir'), forbid('rename'), forbid('unlink'), forbid('chmod'))
+        os.chown = forbid('chown')
+        try:
+            try:
+                outcome = self.bundle.verify(staging)
+            except self.bundle.BundleError as error:
+                outcome = error
+        finally:
+            os.open, os.stat, os.listdir = real_open, real_stat, real_list
+            os.chdir, os.rename, os.unlink, os.chmod = real_chdir, real_rename, real_unlink, real_chmod
+            os.chown = real_chown
+            self.assertEqual(self._fds(), fds)
+            self.assertEqual(self._snapshot(staging.parent), before)
+        self.assertEqual(state['forbidden'], [])
+        self.assertEqual(outcome, {
+            'verified': True, 'installable': False,
+            'manifest_sha256': built['manifest_sha256'],
+        })
+        self.assertEqual(state['lists'], [state['dir']])
+        self.assertEqual({item[0] for item in state['opens']}, names)
+        self.assertEqual(len(state['opens']), len(names))
+        for text, dir_fd, flags in state['opens']:
+            self.assertEqual(dir_fd, state['dir'])
+            self.assertNotIn('/', str(text))
+            self.assertTrue(flags & os.O_NOFOLLOW and flags & os.O_NONBLOCK)
+            self.assertFalse(flags & os.O_DIRECTORY)
+        self.assertGreaterEqual(len(state['stats']), len(names) * 2)
+        for text, dir_fd, follow in state['stats']:
+            self.assertEqual(dir_fd, state['dir'])
+            self.assertIs(follow, False)
+            self.assertIn(text, names)
+            self.assertNotIn('/', str(text))
+
+    def _fresh(self, path, executable):
+        try:
+            self.bundle.verify(path, executable=executable)
+        except self.bundle.BundleError as error:
+            return error.code if error.exit_code == 69 and str(error) == error.code else 'bad-error'
+        return 'success'
+
+    def _file_ids(self, root):
+        found = set()
+        if not root.exists():
+            return found
+        for path in root.iterdir():
+            info = path.lstat()
+            if stat.S_ISREG(info.st_mode):
+                found.add((info.st_dev, info.st_ino))
+        return found
+
+    def _snapshot(self, root):
+        rows = []
+        for path in sorted(root.rglob('*'), key=lambda item: item.as_posix()):
+            info = path.lstat()
+            row = [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
+                   info.st_mtime_ns, info.st_ctime_ns]
+            if stat.S_ISREG(info.st_mode):
+                row.append(hashlib.sha256(path.read_bytes()).hexdigest())
+            elif stat.S_ISLNK(info.st_mode):
+                row.append(os.readlink(path))
+            rows.append((str(path.relative_to(root)), tuple(row)))
+        return tuple(rows)
 
     def _fds(self):
         base = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'

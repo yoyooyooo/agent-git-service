@@ -8,8 +8,11 @@ does not install.
 
 `scripts/upgrade_bundle.py` builds a closed staging bundle. It copies only the
 reviewed member list, writes a manifest that does not include its own digest,
-and verifies that staging directory read-only. Verification success sets
-`installable` false. Source bytes are copied from the same no-follow
+and verifies that staging directory read-only. Verification holds one
+directory descriptor for the listing, the manifest, and the members, and
+checks that the caller path still names that directory before success. See
+[Offline staging directory](#offline-staging-directory). Verification success
+sets `installable` false. Source bytes are copied from the same no-follow
 descriptor that was checked; see
 [Offline staging sources](#offline-staging-sources). Each output file is
 created exclusively and checked on that descriptor; see
@@ -167,10 +170,66 @@ Success remains `verified=true` and `installable=false` only after
 not admit production and does not make the staging directory a host trust
 root.
 
+## Offline staging directory
+
+`upgrade_bundle.verify` binds the caller's staging path before it reads a
+manifest or member. It `lstat`s the final component and does not follow that
+component. A symlink, including a dangling link or a link chain, is
+`staging_type_rejected`. A regular file, fifo, or other non-directory uses
+the same code. The fifo check does not wait for a writer. A missing path,
+including a parent that is not a directory, stays `manifest_missing`.
+
+The directory is opened once, `O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK`.
+`fstat` must show that same directory object. Listing uses that descriptor.
+`manifest.json` and each required member are a single basename. Their
+no-follow `stat` and `open` use that basename and the same descriptor. They
+are not joined back onto the caller path. A slash, `..`, or another directory
+component is not looked up. If the platform cannot open a directory without
+following, cannot `stat` through a directory descriptor, or cannot list a
+descriptor, verification returns `staging_unreadable` and does not fall back
+to path reads.
+
+Before success, `fstat` of the held descriptor and a no-follow `lstat` of the
+original final component must still name that directory object: device,
+inode, and type. Size and timestamps are not compared. A root that was
+replaced, removed, or changed type is `staging_changed`, including when the
+replacement directory has the same bytes. Verification may notice that change
+before the last check. It does not read files from the replacement. A
+directory `fstat`, listing, or close failure is `staging_unreadable`.
+
+The directory descriptor is closed once. The close is not retried, including
+after EINTR, and it is not closed again. Success requires that close. A close
+OSError is `staging_unreadable`, exit 69, and the message is only that code.
+If verification had already raised, including a manifest or member refusal, a
+programming error, or cancellation, that earlier exception is kept. A
+directory close OSError does not replace it. An exception the caller is
+already handling is not this close's failure. One close attempt does not
+prove that every OS released the descriptor after an unknown close error.
+
+`executable=False` still skips only a file executable bit. It does not accept
+a symlink root. A directory search bit is not `unexpected_executable`. The
+check does not require mode `0700`, a directory owner rule, or an nlink rule.
+An ancestor symlink remains allowed when the final component is an ordinary
+directory. Mode `0755` remains acceptable.
+
+The descriptor pins the directory used for lookup. It does not freeze
+members, prove they were consistent at one instant, or catch every case where
+the root is replaced and restored before the last check. It does not cover a
+change after that check. It does not chmod, chown, rename, unlink, or execute
+a member, and it does not write a marker, pin, approval, or registration. It
+does not admit production. Success remains `verified=true` and
+`installable=false`. Creating the directory is a separate output check; see
+[Offline staging outputs](#offline-staging-outputs). The manifest and member
+checks below run only after this directory is held.
+
+These codes are `BundleError`, exit 69, and the message is only the code.
+
 ## Offline staging manifest
 
 `upgrade_bundle.verify` accepts a staging manifest only when the manifest file
-and every condition below hold. The final path component is not followed. A
+and every condition below hold. The file is the basename `manifest.json` in
+the [held staging directory](#offline-staging-directory), not a path joined
+back to the caller. The final path component is not followed. A
 missing path is `manifest_missing`. A symlink, including a dangling link, a
 link chain, or a link to a file inside or outside staging, is
 `manifest_type_rejected`, as is a directory, fifo, or other non-regular file.
@@ -179,9 +238,11 @@ be that regular file and be owned by the current UID (`owner_rejected`). Any
 executable bit is `unexpected_executable` unless the caller passes
 `executable=False`. That flag skips only the executable-bit check. It does not
 accept another file type, owner, or budget, and it does not make the bundle
-installable. If the platform cannot open without following a final symlink, or
-cannot open nonblocking, verification refuses with `manifest_type_rejected`
-instead of following the path. The reader then takes at most 65536 original
+installable. If the directory is already held and a manifest open would have to follow or
+block, verification refuses with `manifest_type_rejected` instead of
+following the path. A missing directory-open capability is
+`staging_unreadable` and is not turned into a path read. The reader then
+takes at most 65536 original
 bytes plus one extra byte from that descriptor only. A metadata or path
 identity change observed across the read is `manifest_changed`. None of these
 codes echoes the path or the file body.
@@ -237,17 +298,20 @@ parser is unchanged, including its handling of duplicate keys.
 ## Offline staging members
 
 After the manifest is accepted, each closed member is checked on one
-descriptor. Verification `lstat`s the path, rejects a symlink or other
+descriptor. The member name is a single basename in the
+[held staging directory](#offline-staging-directory). Verification `stat`s
+that name without following it, rejects a symlink or other
 non-regular file, then opens it `O_RDONLY` without following the final
 component and without blocking. It `fstat`s that descriptor and compares
-device, inode, mode, uid, size, mtime, and ctime with the pre-open `lstat`.
-Atime is ignored because a read may change it. The current UID is checked
+device, inode, mode, uid, size, mtime, and ctime with the pre-open
+no-follow stat. Atime is ignored because a read may change it. The current UID is checked
 next. Unless the caller passes `executable=False`, any executable bit is
 `unexpected_executable`. SHA256 is updated from that same descriptor in
 chunks of at most 65536 bytes. The read stops at the size from the first
 `fstat`, plus one extra byte so a growing file is noticed and is not followed
-to its new end. A later `fstat` and a final path `lstat` must still name that
-same file. The digest is compared only after those checks. The descriptor is
+to its new end. A later `fstat` and a final no-follow stat of that same
+basename must still name that file. The digest is compared only after those
+checks. The descriptor is
 then closed once. The close is not retried, including after EINTR, and it is
 not closed again. This member is accepted only if that close succeeds. A
 close OSError is `member_unreadable`, exit 69, and the message is only that
@@ -256,9 +320,9 @@ code; later members are not opened. Every close errno uses that code, not
 raised, that earlier exception is kept and a close OSError does not replace
 it. An exception the caller is already handling is not this member's failure.
 One close attempt does not prove that the descriptor was released after an
-unknown close error. If the platform cannot open without
-following, or cannot open nonblocking, verification refuses with
-`member_type_rejected` instead of following the path. No input, flag, or
+unknown close error. If the directory is already held and a member open would
+have to follow or block, verification refuses with `member_type_rejected`
+instead of following the path. No input, flag, or
 environment variable selects a larger chunk or removes the extra-byte stop.
 The chunk size is not the manifest's 65536-byte document budget. A member
 may be larger than that budget, and an empty member is valid when its
@@ -281,8 +345,12 @@ and before the first member `lstat` or open is `member_missing`. A listing
 that already lacks a required name stays `unexpected_member`. These member
 failures are `BundleError`, exit 69, and the message is only the fixed code.
 
-The check does not snapshot the whole staging directory, trust every
-ancestor, or freeze a member after that member's own check returns. It does
+The held directory descriptor fixes the directory object used for lookup.
+That is not a snapshot of the whole staging directory, and it does not prove
+every member was unchanged at the same instant. Replacing the root and
+restoring it before the last check, or changing the tree after that check, is
+outside this contract. The check does not trust every ancestor or freeze a
+member after that member's own check returns. It does
 not bound the bundle by total bytes or elapsed time. It does not change
 production admission, and success remains `verified=true` /
 `installable=false`. The source-file check that produced the staging directory
