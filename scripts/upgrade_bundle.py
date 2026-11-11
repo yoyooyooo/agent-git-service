@@ -186,30 +186,6 @@ def _write_dest(fd, data):
         view = view[wrote:]
 
 
-def _release_descriptor(fd):
-    """Close once. A delayed close error stays a destination error.
-
-    Do not close again: an error from close leaves the descriptor state unspecified.
-    An earlier failure is kept; the close error must not replace it.
-    """
-    pending = sys.exc_info()[0]
-    try:
-        os.close(fd)
-    except OSError:
-        if pending is None:
-            raise
-
-
-def _release_source_descriptor(fd):
-    """Close the source once. A new close error uses the source access code."""
-    pending = sys.exc_info()[0]
-    try:
-        os.close(fd)
-    except OSError as exc:
-        if pending is None:
-            _source_io_error(exc, started=True)
-
-
 def _stream_source(fd, dest, size):
     """Copy and hash one descriptor. The extra probe byte is not written."""
     digest = hashlib.sha256()
@@ -228,8 +204,19 @@ def _stream_source(fd, dest, size):
             digest.update(chunk)
             _write_dest(out, chunk)
             remaining -= len(chunk)
-    finally:
-        _release_descriptor(out)
+    except BaseException:
+        # This copy already failed. Close once and keep that error.
+        # Do not close again: close leaves the descriptor state unspecified.
+        try:
+            os.close(out)
+        except OSError:
+            pass
+        raise
+    # A caller's handled exception is not this copy's failure.
+    try:
+        os.close(out)
+    except OSError:
+        raise
     return digest.hexdigest()
 
 
@@ -262,9 +249,19 @@ def _copy_source_member(path, dest):
                 raise BundleError('source_changed') from None
         if _manifest_identity(current) != _manifest_identity(after):
             raise BundleError('source_changed')
-        return digest
-    finally:
-        _release_source_descriptor(fd)
+        result = digest
+    except BaseException:
+        # This copy already failed. Close the source once and keep that error.
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    try:
+        os.close(fd)
+    except OSError as exc:
+        _source_io_error(exc, started=True)
+    return result
 
 
 def _manifest_access_error(exc):

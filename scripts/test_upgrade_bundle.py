@@ -2153,10 +2153,15 @@ class BuilderSourceTests(unittest.TestCase):
         self.assertEqual(fallback.read_bytes(), fallback_bytes)
 
     def test_close_eio_after_real_write_is_not_published(self):
-        """Close EIO after the bytes exist is not success. The errno is an injected mapping, not a device fault."""
+        """Close EIO after the bytes exist is not success. The errno is an injected mapping, not a device fault.
+
+        A caller that is already handling another exception is not this copy's failure.
+        Close EIO in that context must still refuse publication.
+        """
         for role in ('destination', 'source'):
-            with self.subTest(role=role):
-                self._inject_delayed_close(role)
+            for handled in (False, True):
+                with self.subTest(role=role, handled=handled):
+                    self._inject_delayed_close(role, handled=handled)
 
     def test_close_error_keeps_the_earlier_refusal(self):
         """A later close error must not replace the refusal that already happened, and must not close twice."""
@@ -2653,8 +2658,9 @@ class BuilderSourceTests(unittest.TestCase):
         if fallback is not None:
             self.assertNotIn(str(fallback), state['opened'])
 
-    def _inject_delayed_close(self, role):
-        source = self._fill('close-' + role)
+    def _inject_delayed_close(self, role, handled=False):
+        label = 'close-' + role + ('-handled' if handled else '')
+        source = self._fill(label)
         primary = source / 'release-source.json'
         primary_bytes = b'PRIMARY CLOSE FAILURE\n'
         fallback_bytes = b'FALLBACK CLOSE FAILURE\n'
@@ -2664,7 +2670,7 @@ class BuilderSourceTests(unittest.TestCase):
         before = self._identity(primary)
         fallback_before = self._identity(fallback)
         member = self.bundle.REQUIRED[0]
-        watched = source / member if role == 'source' else self.root / ('close-' + role + '-staging') / member
+        watched = source / member if role == 'source' else self.root / (label + '-staging') / member
         original = (source / member).read_bytes()
         real_open, real_close, real_fstat = os.open, os.close, os.fstat
         state = {'fds': set(), 'hits': 0, 'real_closed': False, 'opened': [], 'closed': []}
@@ -2693,14 +2699,14 @@ class BuilderSourceTests(unittest.TestCase):
 
         os.open, os.close = os_open, os_close
         fds = self._fds()
-        staging = self.root / ('close-' + role + '-staging')
+        staging = self.root / (label + '-staging')
         try:
             if role == 'destination':
                 with self.assertRaises(OSError) as caught:
-                    self.bundle.build(source, staging)
+                    self._build_while_handling(source, staging, handled)
             else:
                 with self.assertRaises(self.bundle.BundleError) as caught:
-                    self.bundle.build(source, staging)
+                    self._build_while_handling(source, staging, handled)
         finally:
             os.open, os.close = real_open, real_close
             self.assertEqual(self._fds(), fds)
@@ -2724,8 +2730,18 @@ class BuilderSourceTests(unittest.TestCase):
             self.assertIsNone(caught.exception.__cause__)
         self.assertNotIn(str(self.root), str(caught.exception))
         self.assertNotIn('SYNTHETIC', str(caught.exception))
-        with self.assertRaises(self.bundle.BundleError):
+        with self.assertRaises(self.bundle.BundleError) as verified:
             self.bundle.verify(staging)
+        self.assertEqual(verified.exception.code, 'manifest_missing')
+
+    def _build_while_handling(self, source, staging, handled):
+        if not handled:
+            self.bundle.build(source, staging)
+            return
+        try:
+            raise ValueError('already-handled-caller-error')
+        except ValueError:
+            self.bundle.build(source, staging)
 
     def _close_after_destination_write_error(self):
         source = self._fill('close-after-write')
