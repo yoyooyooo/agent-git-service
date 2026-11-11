@@ -14,8 +14,11 @@ checks that the caller path still names that directory before success. See
 [Offline staging directory](#offline-staging-directory). Verification success
 sets `installable` false. Source bytes are copied from the same no-follow
 descriptor that was checked; see
-[Offline staging sources](#offline-staging-sources). Each output file is
-created exclusively and checked on that descriptor; see
+[Offline staging sources](#offline-staging-sources). After `mkdir`, the builder
+binds that new directory to one descriptor and creates every output by
+basename through it. That bind is not the verifier's later directory read.
+Each output file is still created exclusively and checked on its own file
+descriptor; see
 [Offline staging outputs](#offline-staging-outputs). The manifest must match
 the fixed shape in
 [Offline staging manifest](#offline-staging-manifest). It does not rename the
@@ -107,6 +110,47 @@ fails with the destination `OSError`. A member that already exists still
 surfaces as `FileExistsError` / `EEXIST`. The manifest uses that same
 destination failure. These errors are not rewritten into one bundle code.
 
+`mkdir` does not return a directory descriptor. The builder then `lstat`s the
+final component and does not follow it. A symlink, file, fifo, or missing
+path at that observation is `destination_changed`. The directory is opened
+once, `O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK`, and `fstat` must show the
+same device, inode, and type. Size and timestamps are not directory identity.
+If the platform cannot open a directory that way, cannot `stat` a basename
+through a directory descriptor, or cannot `stat` without following, the
+builder raises a destination `OSError` with `ENOTSUP` and does not create
+members by path. It does not need to list the directory. `EINTR` from that
+`lstat`, open, or `fstat` is retried only at that call. Another directory
+I/O error stays a destination `OSError`. It is not `source_unreadable`, does
+not select the fallback, and is not the verifier's `staging_unreadable` or
+`manifest_missing`.
+
+Every required member and `manifest.json` is then created by that basename
+and the same directory descriptor. The final no-follow `stat` uses the same
+basename and descriptor. The builder does not `chdir`, and it does not reopen
+the caller path or a `/proc` or `/dev/fd` path to find the directory again.
+Before each member, before the manifest, and before success, `fstat` of the
+held descriptor and a no-follow `lstat` of the caller path must still name
+the initial directory. A removed, replaced, linked, or non-directory root is
+`destination_changed`, exit 69, and the message is only that code, including
+when the replacement has the same bytes. A check cannot cover the next
+syscall. A create that already passed the check still writes only through
+the held descriptor, so it cannot land in the replacement. The builder does
+not open the replacement to follow the caller path.
+
+The interval after `mkdir` and before that first `lstat` is not atomic
+ownership of the new inode. A same-user replacement with another ordinary
+directory in that interval is not identified. The caller still has to control
+that window. This check does not claim an atomic directory publish, a parent
+transaction, or a hidden temporary name.
+
+The directory descriptor stays open until member and manifest descriptors
+have finished and the last root check has finished. It is closed once. `EINTR`
+from that `close` is not retried and the descriptor is not closed again. A
+`close` `OSError` after the build body succeeded is not success. If the body
+already raised a `BundleError`, a source or destination `OSError`, a
+programming error, or cancellation, that exception is kept. An exception the
+caller is already handling is not this directory close's failure.
+
 Member bytes and mode 0644 are applied to the descriptor just created. The
 mode is `os.fchmod` on that descriptor, including when the process umask is
 077. The builder does not `chmod`, `chown`, or truncate the destination path
@@ -121,8 +165,8 @@ change when the builder writes and, for a member, changes the mode, so those
 fields are not compared with the creation snapshot. After the builder's own
 writes finish, the size must equal the number of bytes that were supposed to
 be written. Stable metadata from the descriptor is then compared with a
-non-following `lstat` of the final path, ignoring atime, and a further
-`fstat` must still agree. If the path is gone, is a link or another type,
+non-following `stat` of the basename in the held directory, ignoring atime,
+and a further `fstat` must still agree. If the path is gone, is a link or another type,
 names a different inode, or disagrees in length or identity, the result is
 `destination_changed`, exit 69, and the message is only that code. The same
 bytes on a replacement inode are still a refusal. Digest equality is not
@@ -159,9 +203,15 @@ write an object that already occupied the path, and it does not change that
 object's mode. If the path is replaced by another inode, later bytes and the
 mode change still apply only to the original descriptor, and the path mismatch
 is refused. The builder cannot stop the same user from linking that inode,
-writing the inode directly, replacing the path again after the last check, or
-moving an ancestor or the whole staging directory. It does not claim same-user
-isolation or a consistent snapshot of the directory.
+writing the inode directly, or replacing the path again after the last check.
+Replacing the caller path after the directory is bound does not redirect
+later creates: those stay on the held descriptor, and success is refused when
+the caller path no longer names it. An ancestor symlink remains allowed when
+the final component is the ordinary directory that was bound. The builder
+does not claim same-user isolation, a freeze of every member, or a consistent
+snapshot of the whole directory. A failed build may leave partial or complete
+residue in the held directory, including a manifest created after the last
+passing check. That residue is not deleted, not marked, and not success.
 
 Success remains `verified=true` and `installable=false` only after
 [Offline staging manifest](#offline-staging-manifest) and
@@ -173,8 +223,12 @@ root.
 ## Offline staging directory
 
 `upgrade_bundle.verify` binds the caller's staging path before it reads a
-manifest or member. It `lstat`s the final component and does not follow that
-component. A symlink, including a dangling link or a link chain, is
+manifest or member. This read is a new bind of the path at verification time.
+It is not the descriptor the builder held while creating outputs, and a
+directory that verifies does not prove those creates stayed in the builder's
+directory. See
+[Offline staging outputs](#offline-staging-outputs). It `lstat`s the final
+component and does not follow that component. A symlink, including a dangling link or a link chain, is
 `staging_type_rejected`. A regular file, fifo, or other non-directory uses
 the same code. The fifo check does not wait for a writer. A missing path,
 including a parent that is not a directory, stays `manifest_missing`.
