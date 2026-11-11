@@ -32,6 +32,33 @@ def _entry_matches(path, target, kwargs=None):
     return text == Path(os.fspath(target)).name
 
 
+def _directory_fd_is(dir_fd, directory):
+    """True when dir_fd still names this directory object. A swapped path does not match."""
+    if dir_fd is None:
+        return False
+    try:
+        held = os.fstat(dir_fd)
+        current = os.lstat(directory)
+    except OSError:
+        return False
+    return (stat.S_ISDIR(held.st_mode) and stat.S_ISDIR(current.st_mode)
+            and (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino))
+
+
+def _basename_on_directory(path, target, dir_fd):
+    """Basename lookup through the directory that currently contains target."""
+    if isinstance(path, int) or dir_fd is None:
+        return False
+    try:
+        text = os.fspath(path)
+        target_text = os.fspath(target)
+    except TypeError:
+        return False
+    if text in ('.', '..') or text != Path(text).name or text != Path(target_text).name:
+        return False
+    return _directory_fd_is(dir_fd, Path(target_text).parent)
+
+
 class BundleBaseline(unittest.TestCase):
     def test_old_three_file_set_is_not_complete(self):
         """Existing required-member contract. Three files are the behavior red."""
@@ -1768,21 +1795,23 @@ def _build_source_fifo(mode, source, staging, name):
     elif mode == 'race':
         real_open, real_path_open = os.open, Path.open
 
-        def swap(path):
+        def swap(path, open_kwargs=None):
             if state['done'] or isinstance(path, int):
                 return
-            if os.path.normpath(os.fspath(path)) != str(target):
+            dir_fd = None if open_kwargs is None else open_kwargs.get('dir_fd')
+            full = os.path.normpath(os.fspath(path)) == str(target)
+            if not full and not _basename_on_directory(path, target, dir_fd):
                 return
             state['done'] = True
             os.rename(target, source.parent / 'fifo-race-held')
             os.mkfifo(target, 0o600)
 
         def os_open(path, flags, *args, **kwargs):
-            swap(path)
+            swap(path, kwargs)
             return real_open(path, flags, *args, **kwargs)
 
         def path_open(path, *args, **kwargs):
-            swap(path)
+            swap(path, kwargs)
             return real_path_open(path, *args, **kwargs)
 
         os.open, Path.open = os_open, path_open
@@ -2109,7 +2138,7 @@ class BuilderSourceTests(unittest.TestCase):
 
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if self._same(path, target):
+            if self._same(path, target, kwargs):
                 state['fds'].add(fd)
             return fd
 
@@ -2155,7 +2184,8 @@ class BuilderSourceTests(unittest.TestCase):
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
             if not isinstance(path, int):
-                state['opened'].append(os.path.normpath(os.fspath(path)))
+                noted = str(fallback) if self._same(path, fallback, kwargs) else os.path.normpath(os.fspath(path))
+                state['opened'].append(noted)
                 if self._same(path, dest, kwargs):
                     state['dest'].add(fd)
             return fd
@@ -2291,11 +2321,11 @@ class BuilderSourceTests(unittest.TestCase):
                 raise AssertionError(action)
             state['injected'] = self._identity(target)
 
-        def selected(path):
-            return not isinstance(path, int) and os.path.normpath(os.fspath(path)) == str(target)
+        def selected(path, open_kwargs):
+            return self._same(path, target, open_kwargs)
 
         def around(open_fn, path, *args, **kwargs):
-            hit = selected(path) and state['hook_count'] == 0 and raced
+            hit = selected(path, kwargs) and state['hook_count'] == 0 and raced
             if hit and action.endswith('-before'):
                 mutate()
             opened = open_fn(path, *args, **kwargs)
@@ -2367,13 +2397,16 @@ class BuilderSourceTests(unittest.TestCase):
             self._swap_nonregular(target, kind, outside, original)
 
         def os_open(path, flags, *args, **kwargs):
-            hit = not state['done'] and not isinstance(path, int) and self._same(path, target)
+            hit = not state['done'] and not isinstance(path, int) and self._same(path, target, kwargs)
             if hit and kind not in ('path-after', 'unlink-after'):
                 mutate()
             fd = real_open(path, flags, *args, **kwargs)
             if not isinstance(path, int):
-                state['opened'].append(os.path.normpath(os.fspath(path)))
-                if self._same(path, target):
+                noted = os.path.normpath(os.fspath(path))
+                if forbidden is not None and self._same(path, forbidden, kwargs):
+                    noted = str(forbidden)
+                state['opened'].append(noted)
+                if self._same(path, target, kwargs):
                     state['fds'].add(fd)
             if hit and kind in ('path-after', 'unlink-after'):
                 mutate()
@@ -2408,7 +2441,7 @@ class BuilderSourceTests(unittest.TestCase):
 
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if self._same(path, target):
+            if self._same(path, target, kwargs):
                 state['fds'].add(fd)
                 state['flags'] = flags
             return fd
@@ -2490,7 +2523,7 @@ class BuilderSourceTests(unittest.TestCase):
 
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if self._same(path, target):
+            if self._same(path, target, kwargs):
                 state['fds'].add(fd)
                 state['flags'] = flags
                 state['opens'] += 1
@@ -2516,7 +2549,7 @@ class BuilderSourceTests(unittest.TestCase):
             return real_fstat(fd)
 
         def path_open(path, *args, **kwargs):
-            if self._same(path, target):
+            if self._same(path, target, kwargs):
                 state['path_open'] = True
             return real_path_open(path, *args, **kwargs)
 
@@ -2540,7 +2573,7 @@ class BuilderSourceTests(unittest.TestCase):
 
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if self._same(path, target):
+            if self._same(path, target, kwargs):
                 state['fds'].add(fd)
             return fd
 
@@ -2575,11 +2608,11 @@ class BuilderSourceTests(unittest.TestCase):
         real_open, real_read, real_fstat, real_close = os.open, os.read, os.fstat, os.close
 
         def os_open(path, flags, *args, **kwargs):
-            if where == 'open' and self._same(path, target) and not state['once']:
+            if where == 'open' and self._same(path, target, kwargs) and not state['once']:
                 state['once'] = True
                 raise OSError(errno.EINTR, 'interrupted open seam')
             fd = real_open(path, flags, *args, **kwargs)
-            if self._same(path, target):
+            if self._same(path, target, kwargs):
                 state['fds'].add(fd)
             return fd
 
@@ -2612,30 +2645,37 @@ class BuilderSourceTests(unittest.TestCase):
 
     def _hide_flag(self, source, target, outside, flag):
         saved = getattr(os, flag)
-        real_lstat, real_open, real_path_open = os.lstat, os.open, Path.open
+        real_lstat, real_stat, real_open, real_path_open = os.lstat, os.stat, os.open, Path.open
         opened = []
 
-        def wrapped_lstat(path, *args, **kwargs):
-            if self._same(path, target) and hasattr(os, flag):
+        def hide(path, kwargs):
+            if self._same(path, target, kwargs) and hasattr(os, flag):
                 delattr(os, flag)
+
+        def wrapped_lstat(path, *args, **kwargs):
+            hide(path, kwargs)
             return real_lstat(path, *args, **kwargs)
 
+        def wrapped_stat(path, *args, **kwargs):
+            hide(path, kwargs)
+            return real_stat(path, *args, **kwargs)
+
         def os_open(path, *args, **kwargs):
-            if not isinstance(path, int) and (self._same(path, target) or self._same(path, outside)):
+            if not isinstance(path, int) and (self._same(path, target, kwargs) or self._same(path, outside)):
                 opened.append(os.path.normpath(os.fspath(path)))
             return real_open(path, *args, **kwargs)
 
         def path_open(path, *args, **kwargs):
-            if self._same(path, target) or self._same(path, outside):
+            if self._same(path, target, kwargs) or self._same(path, outside):
                 opened.append('path:' + os.path.normpath(os.fspath(path)))
             return real_path_open(path, *args, **kwargs)
 
         before = outside.read_bytes()
-        os.lstat, os.open, Path.open = wrapped_lstat, os_open, path_open
+        os.lstat, os.stat, os.open, Path.open = wrapped_lstat, wrapped_stat, os_open, path_open
         try:
             self._refuse(source, self.root / (source.name + '-staging'), 'member_missing')
         finally:
-            os.lstat, os.open, Path.open = real_lstat, real_open, real_path_open
+            os.lstat, os.stat, os.open, Path.open = real_lstat, real_stat, real_open, real_path_open
             setattr(os, flag, saved)
         self.assertEqual(opened, [])
         self.assertEqual(outside.read_bytes(), before)
@@ -2647,7 +2687,7 @@ class BuilderSourceTests(unittest.TestCase):
         state = {'done': False}
 
         def os_open(path, flags, *args, **kwargs):
-            if self._same(path, target) and not state['done']:
+            if self._same(path, target, kwargs) and not state['done']:
                 state['done'] = True
                 raise OSError(number, 'injected source open seam')
             return real_open(path, flags, *args, **kwargs)
@@ -2666,26 +2706,36 @@ class BuilderSourceTests(unittest.TestCase):
             fallback = self._write_fallback(source, b'FALLBACK MUST STAY UNREAD\n')
         else:
             fallback = None
-        real_lstat = os.lstat
+        real_lstat, real_stat = os.lstat, os.stat
         state = {'done': False, 'opened': []}
         real_open = os.open
 
-        def os_lstat(path, *args, **kwargs):
-            if self._same(path, target) and not state['done']:
+        def reject(path, kwargs):
+            if self._same(path, target, kwargs) and not state['done']:
                 state['done'] = True
                 raise OSError(number, 'injected source lstat seam')
+
+        def os_lstat(path, *args, **kwargs):
+            reject(path, kwargs)
             return real_lstat(path, *args, **kwargs)
+
+        def os_stat(path, *args, **kwargs):
+            reject(path, kwargs)
+            return real_stat(path, *args, **kwargs)
 
         def os_open(path, flags, *args, **kwargs):
             if not isinstance(path, int):
-                state['opened'].append(os.path.normpath(os.fspath(path)))
+                noted = os.path.normpath(os.fspath(path))
+                if fallback is not None and self._same(path, fallback, kwargs):
+                    noted = str(fallback)
+                state['opened'].append(noted)
             return real_open(path, flags, *args, **kwargs)
 
-        os.lstat, os.open = os_lstat, os_open
+        os.lstat, os.stat, os.open = os_lstat, os_stat, os_open
         try:
             self._refuse(source, self.root / ('lstat-staging-' + str(number) + '-' + str(release).lower()), expected)
         finally:
-            os.lstat, os.open = real_lstat, real_open
+            os.lstat, os.stat, os.open = real_lstat, real_stat, real_open
         self.assertTrue(state['done'])
         if fallback is not None:
             self.assertNotIn(str(fallback), state['opened'])
@@ -2710,9 +2760,9 @@ class BuilderSourceTests(unittest.TestCase):
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
             if not isinstance(path, int):
-                state['opened'].append(os.path.normpath(os.fspath(path)))
-                watched_kwargs = kwargs if role == 'destination' else None
-                if self._same(path, watched, watched_kwargs):
+                noted = str(fallback) if self._same(path, fallback, kwargs) else os.path.normpath(os.fspath(path))
+                state['opened'].append(noted)
+                if self._same(path, watched, kwargs):
                     state['fds'].add(fd)
             return fd
 
@@ -2834,7 +2884,7 @@ class BuilderSourceTests(unittest.TestCase):
 
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if self._same(path, target):
+            if self._same(path, target, kwargs):
                 state['fds'].add(fd)
             return fd
 
@@ -2880,7 +2930,7 @@ class BuilderSourceTests(unittest.TestCase):
 
         def os_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)
-            if self._same(path, target):
+            if self._same(path, target, kwargs):
                 state['fds'].add(fd)
             return fd
 
@@ -3060,9 +3110,16 @@ class BuilderSourceTests(unittest.TestCase):
         return tuple(rows)
 
     def _same(self, path, target, open_kwargs=None):
+        if isinstance(path, int):
+            return False
+        try:
+            if os.path.normpath(os.fspath(path)) == os.path.normpath(os.fspath(target)):
+                return True
+        except TypeError:
+            return False
         if open_kwargs is None:
-            return not isinstance(path, int) and os.path.normpath(os.fspath(path)) == str(target)
-        return _entry_matches(path, target, open_kwargs)
+            return False
+        return _basename_on_directory(path, target, open_kwargs.get('dir_fd'))
 
     def _fds(self):
         base = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
@@ -4100,7 +4157,7 @@ class BuilderDestinationTests(unittest.TestCase):
                 plant(staging / target_name)
 
         def os_open(path, flags, *args, **kwargs):
-            if _entry_matches(path, staging / target_name, kwargs):
+            if _entry_matches(path, staging / target_name, kwargs) and flags & os.O_CREAT:
                 state['opens'] += 1
                 state['flags'] = flags
                 state['mode'] = args[0] if args else kwargs.get('mode')
@@ -4308,7 +4365,8 @@ class BuilderDestinationTests(unittest.TestCase):
             fd = real_open(path, flags, *args, **kwargs)
             if isinstance(path, int):
                 return fd
-            if not isinstance(path, int) and Path(path) == target:
+            source_member = Path(path) == target or _basename_on_directory(path, target, kwargs.get('dir_fd'))
+            if source_member and not flags & (os.O_WRONLY | os.O_RDWR | getattr(os, 'O_DIRECTORY', 0)):
                 state['source'].add(fd)
             elif _entry_matches(path, dest, kwargs) and flags & (os.O_WRONLY | os.O_RDWR):
                 state['dest'] = fd
@@ -4639,10 +4697,14 @@ class BuilderDestinationTests(unittest.TestCase):
             fd = real_open(path, flags, *args, **kwargs)
             if isinstance(path, int):
                 return fd
-            if not isinstance(path, int) and Path(path) == source / member and not flags & (os.O_WRONLY | os.O_RDWR):
+            source_member = (
+                not isinstance(path, int)
+                and not flags & (os.O_WRONLY | os.O_RDWR | getattr(os, 'O_DIRECTORY', 0))
+                and (Path(path) == source / member or _basename_on_directory(path, source / member, kwargs.get('dir_fd'))))
+            if source_member:
                 source_fd['value'] = fd
                 if kind == 'source_changed' and append_fd is None:
-                    append_fd = real_open(path, os.O_WRONLY | os.O_APPEND)
+                    append_fd = real_open(source / member, os.O_WRONLY | os.O_APPEND)
             if _entry_matches(path, target, kwargs) and flags & (os.O_WRONLY | os.O_RDWR):
                 state['dest'] = fd
             return fd
@@ -4859,7 +4921,10 @@ class BuilderDestinationTests(unittest.TestCase):
                 (staging / member).symlink_to(sentinel)
 
         def os_open(path, flags, *args, **kwargs):
-            if not isinstance(path, int) and Path(path) == source / member and not state['hidden']:
+            source_member = (
+                not isinstance(path, int)
+                and (Path(path) == source / member or _basename_on_directory(path, source / member, kwargs.get('dir_fd'))))
+            if source_member and not state['hidden']:
                 state['hidden'] = True
                 if flag == 'fchmod':
                     del os.fchmod
@@ -5090,7 +5155,11 @@ class BuilderOutputDirectoryTests(unittest.TestCase):
             if phase == 'manifest' and is_output and name == 'manifest.json' and not state['injections']:
                 swap()
             fd = real_open(path, flags, mode, dir_fd=dir_fd)
-            source_open = (not is_output and not isinstance(path, int) and Path(path).parent == source)
+            member_name = '' if isinstance(path, int) else Path(os.fspath(path)).name
+            source_open = (
+                not is_output and not isinstance(path, int)
+                and not flags & getattr(os, 'O_DIRECTORY', 0)
+                and (Path(path).parent == source or _basename_on_directory(path, source / member_name, dir_fd)))
             if source_open:
                 state['source_opens'] += 1
                 if source_target and Path(path).name == source_target and not state['injections']:
@@ -5477,7 +5546,7 @@ class BuilderOutputDirectoryTests(unittest.TestCase):
         for text, dir_fd in state['opens']:
             self.assertEqual(dir_fd, state['dir'])
             self.assertEqual(text, Path(text).name)
-        member_stats = [row for row in state['stats'] if row[0] in names]
+        member_stats = [row for row in state['stats'] if row[0] in names and row[1] == state['dir']]
         self.assertEqual(sorted(row[0] for row in member_stats), sorted(names))
         for text, dir_fd, follow in member_stats:
             self.assertEqual(dir_fd, state['dir'])
@@ -5643,9 +5712,15 @@ class BuilderOutputDirectoryTests(unittest.TestCase):
         fallback = []
 
         def os_stat(path, *args, **kwargs):
-            if kwargs.get('dir_fd') is not None:
-                raise NotImplementedError('dir_fd stat seam')
-            if not isinstance(path, int) and Path(path).name in set(self.bundle.REQUIRED) | {'manifest.json'}:
+            dir_fd = kwargs.get('dir_fd')
+            if dir_fd is not None:
+                info = os.fstat(dir_fd)
+                current = os.lstat(staging)
+                if (stat.S_ISDIR(info.st_mode) and stat.S_ISDIR(current.st_mode)
+                        and (info.st_dev, info.st_ino) == (current.st_dev, current.st_ino)):
+                    raise NotImplementedError('dir_fd stat seam')
+            if (dir_fd is None and not isinstance(path, int)
+                    and Path(path).name in set(self.bundle.REQUIRED) | {'manifest.json'}):
                 fallback.append(os.fspath(path))
             return real_stat(path, *args, **kwargs)
 
@@ -5797,7 +5872,8 @@ class BuilderOutputDirectoryTests(unittest.TestCase):
                 state['once'] = True
                 raise OSError(errno.EINTR, 'interrupted directory open')
             fd = real_open(path, flags, *args, **kwargs)
-            if not isinstance(path, int) and flags & os.O_DIRECTORY and not flags & os.O_CREAT:
+            if (not isinstance(path, int) and flags & os.O_DIRECTORY and not flags & os.O_CREAT
+                    and Path(path) == staging):
                 state['dir_opens'] += 1
                 state['dir'] = fd
             return fd
@@ -5843,7 +5919,8 @@ class BuilderOutputDirectoryTests(unittest.TestCase):
                 state['dir'] = fd
             elif flags & os.O_CREAT and Path(path).name == member:
                 state['dest'] = fd
-            elif Path(path) == source / member:
+            elif (not flags & (os.O_WRONLY | os.O_RDWR | getattr(os, 'O_DIRECTORY', 0))
+                    and (Path(path) == source / member or _basename_on_directory(path, source / member, kwargs.get('dir_fd')))):
                 state['source'].add(fd)
             return fd
 
@@ -5986,7 +6063,8 @@ class BuilderOutputDirectoryTests(unittest.TestCase):
             fd = real_open(path, flags, *args, **kwargs)
             if not isinstance(path, int) and flags & os.O_DIRECTORY and state['dir'] is None:
                 state['dir'] = fd
-            if not isinstance(path, int) and Path(path) == fallback:
+            if (not isinstance(path, int) and not flags & os.O_CREAT and not flags & getattr(os, 'O_DIRECTORY', 0)
+                    and (Path(path) == fallback or _basename_on_directory(path, fallback, kwargs.get('dir_fd')))):
                 state['fallback_opened'] = True
             if flags & os.O_CREAT and Path(path).name == 'release-source.json':
                 self.assertEqual(kwargs.get('dir_fd'), state['dir'])
@@ -6903,6 +6981,1148 @@ class StagingDirectoryTests(unittest.TestCase):
     def _fds(self):
         base = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
         return frozenset(os.listdir(base))
+
+
+class BuilderInputDirectoryTests(unittest.TestCase):
+    """Builder input lookup stays on the directory descriptor held before members.
+
+    The seventeen recorded cases are red on the pre-fix builder: a static
+    directory symlink is followed, a replacement is mixed into later members,
+    or removing the source directory selects the fallback. The seven controls
+    keep the previous results. Fixtures are inert and are not executed.
+    """
+
+    def setUp(self):
+        import upgrade_bundle as bundle
+        self.bundle = bundle
+        actual = Path(bundle.__file__).resolve()
+        expected = (HERE / 'upgrade_bundle.py').resolve()
+        self.assertEqual(actual, expected, 'refusing to test an imported module outside this tree')
+        self.assertNotEqual(os.getuid(), 0)
+        self.module_path = str(actual)
+        self.module_sha256 = hashlib.sha256(actual.read_bytes()).hexdigest()
+        self.tmp = tempfile.TemporaryDirectory(dir=Path.home(), prefix='bundle-indir-')
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self._relax)
+        self.root = Path(self.tmp.name).resolve()
+        self.root.chmod(0o700)
+
+    def test_recorded_source_directory_contract(self):
+        """Seventeen source-directory failures plus seven controls. Hooks call the real open."""
+        cases = []
+        for which in ('source', 'fallback'):
+            for form in ('absolute_symlink', 'relative_symlink'):
+                cases.append(('static-' + which + '-' + form, 'static', which, form, None, 'member_missing'))
+        points = (0, len(self.bundle.REQUIRED) // 2, len(self.bundle.REQUIRED) - 1)
+        for point in points:
+            for form in ('directory', 'absolute_symlink', 'relative_symlink'):
+                name = self.bundle.REQUIRED[point]
+                cases.append(('source-after-close-' + str(point) + '-' + form, 'swap', 'source', form, name, 'source_changed'))
+        for form in ('directory', 'absolute_symlink', 'relative_symlink'):
+            cases.append(('fallback-after-close-' + form, 'swap', 'fallback', form, 'release-source.json', 'source_changed'))
+        cases.append(('source-removed-before-release', 'remove', 'source', None, self.bundle.REQUIRED[-2], 'source_changed'))
+        controls = (
+            'ordinary', 'source_exec', 'ancestor_symlink', 'fallback', 'hardlink',
+            'primary_wins_unused_fork_symlink', 'source_member_symlink',
+        )
+        for control in controls:
+            expected = 'member_missing' if control == 'source_member_symlink' else 'success'
+            cases.append((control, 'control', 'source', None, None, expected))
+        self.assertEqual(sum(1 for item in cases if item[1] != 'control'), 17)
+        self.assertEqual(sum(1 for item in cases if item[1] == 'control'), 7)
+        self.assertEqual(self.bundle.REQUIRED[-1], 'release-source.json')
+        for label, action, which, form, trigger, expected in cases:
+            with self.subTest(case=label):
+                self._recorded(label, action, which, form, trigger, expected)
+
+    def _recorded(self, label, action, which, form, trigger, expected):
+        bundle = self.bundle
+        case = self.root / label
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        alternate = case / 'alternate'
+        fork = case / 'fork'
+        uses_fallback = which == 'fallback' or label == 'fallback'
+        names = [name for name in bundle.REQUIRED if not uses_fallback or name != 'release-source.json']
+        old_ids = self._fill_ids(source, b'A', names)
+        replacement_names = bundle.REQUIRED if which == 'source' else ['release-source.json']
+        new_ids = self._fill_ids(alternate, b'B', replacement_names)
+        if uses_fallback:
+            old_ids |= self._fill_ids(fork, b'A-FALLBACK', ['release-source.json'])
+        if action == 'remove':
+            new_ids |= self._fill_ids(fork, b'UNEXPECTED-FALLBACK', ['release-source.json'])
+        call_source = source
+        if action == 'static':
+            actual = case / 'actual'
+            target = source if which == 'source' else fork
+            target.rename(actual)
+            link = actual if form == 'absolute_symlink' else Path(actual.name)
+            target.symlink_to(link, target_is_directory=True)
+        if label == 'source_exec':
+            (source / bundle.REQUIRED[0]).chmod(0o700)
+        if label == 'ancestor_symlink':
+            alias = case / 'alias'
+            alias.symlink_to(case, target_is_directory=True)
+            call_source = alias / 'source'
+        if label == 'hardlink':
+            os.link(source / bundle.REQUIRED[0], case / 'hardlink')
+        if label == 'primary_wins_unused_fork_symlink':
+            fork.symlink_to(alternate, target_is_directory=True)
+        if label == 'source_member_symlink':
+            member = source / bundle.REQUIRED[0]
+            member.rename(case / 'held-member')
+            member.symlink_to(case / 'held-member')
+        sentinel = case / 'sentinel'
+        sentinel.write_bytes(b'UNCHANGED')
+        sentinel.chmod(0o600)
+        before = self._file_snapshot(case)
+        before_fds = self._fds()
+        tracked = {}
+        injected = []
+        read_totals = {'old': 0, 'replacement': 0}
+        open_totals = {'old': 0, 'replacement': 0}
+        real_open, real_read, real_close, real_fstat = os.open, os.read, os.close, os.fstat
+
+        def ident(info):
+            return (info.st_dev, info.st_ino)
+
+        def wrapped_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            key = ident(real_fstat(fd))
+            if key in old_ids or key in new_ids:
+                origin = 'old' if key in old_ids else 'replacement'
+                tracked[fd] = (Path(os.fspath(path)).name, origin, key)
+                open_totals[origin] += 1
+            return fd
+
+        def wrapped_read(fd, count):
+            data = real_read(fd, count)
+            if fd in tracked:
+                read_totals[tracked[fd][1]] += len(data)
+            return data
+
+        def wrapped_close(fd):
+            entry = tracked.pop(fd, None)
+            real_close(fd)
+            if entry and action in ('swap', 'remove') and entry[0] == trigger and not injected:
+                try:
+                    real_fstat(fd)
+                except OSError as exc:
+                    self.assertEqual(exc.errno, errno.EBADF)
+                else:
+                    self.fail('real close did not release the file descriptor')
+                target = source if which == 'source' else fork
+                original = ident(target.stat())
+                target.rename(case / 'held')
+                if action == 'remove':
+                    current = None
+                elif form == 'directory':
+                    alternate.rename(target)
+                    current = ident(target.stat())
+                else:
+                    link = alternate if form == 'absolute_symlink' else Path(alternate.name)
+                    target.symlink_to(link, target_is_directory=True)
+                    current = ident(target.stat())
+                injected.append({'after_real_close': entry[0], 'old_directory': original, 'new_directory': current})
+
+        os.open, os.read, os.close = wrapped_open, wrapped_read, wrapped_close
+        built = None
+        try:
+            try:
+                built = bundle.build(call_source, case / 'staging')
+                observed = 'success'
+            except bundle.BundleError as exc:
+                observed = exc.code
+                self.assertEqual(exc.exit_code, 69)
+                self.assertEqual(str(exc), exc.code)
+                self.assertIsNone(exc.__cause__)
+                self.assertNotIn(str(case), str(exc))
+        finally:
+            os.open, os.read, os.close = real_open, real_read, real_close
+        detail = 'module=%s sha256=%s case=%s actual=%s opens=%s bytes=%s' % (
+            self.module_path, self.module_sha256, label, observed, open_totals, read_totals)
+        if built is not None:
+            verified = bundle.verify(case / 'staging')
+            self.assertIs(verified['verified'], True, detail)
+            self.assertIs(verified['installable'], False, detail)
+            self.assertEqual(verified['manifest_sha256'], built['manifest_sha256'], detail)
+        self.assertEqual(self._file_snapshot(case), before, detail)
+        self.assertEqual(self._fds(), before_fds, detail)
+        self.assertEqual(len(injected), 1 if action in ('swap', 'remove') else 0, detail)
+        self.assertEqual(observed, expected, detail)
+        if action in ('swap', 'remove'):
+            self.assertEqual(open_totals['replacement'], 0, detail)
+            self.assertEqual(read_totals['replacement'], 0, detail)
+        if label == 'primary_wins_unused_fork_symlink':
+            self.assertEqual(open_totals['replacement'], 0, detail)
+            staged = case / 'staging' / 'release-source.json'
+            self.assertEqual(staged.read_bytes(), (source / 'release-source.json').read_bytes(), detail)
+        if label == 'source_member_symlink':
+            self.assertEqual(open_totals['old'], 0, detail)
+            self.assertFalse((case / 'staging' / 'manifest.json').exists(), detail)
+        if label == 'source_exec':
+            staged = case / 'staging' / bundle.REQUIRED[0]
+            self.assertEqual(stat.S_IMODE(staged.lstat().st_mode), 0o644, detail)
+            self.assertEqual(stat.S_IMODE((source / bundle.REQUIRED[0]).lstat().st_mode), 0o700, detail)
+        if label == 'hardlink':
+            linked = case / 'hardlink'
+            self.assertGreaterEqual((source / bundle.REQUIRED[0]).lstat().st_nlink, 2, detail)
+            self.assertEqual((case / 'staging' / bundle.REQUIRED[0]).read_bytes(), linked.read_bytes(), detail)
+
+    def test_anchor_matrix_reads_only_the_bound_directory(self):
+        points = (
+            'after-lstat', 'after-open', 'before-file-open', 'after-first-close',
+            'after-middle-close', 'after-last-close', 'before-manifest',
+        )
+        kinds = ('directory', 'absolute_symlink', 'relative_symlink', 'same-bytes', 'unlink')
+        for point in points:
+            for kind in kinds:
+                with self.subTest(point=point, kind=kind):
+                    self._anchor(point, kind)
+
+    def test_static_input_roots_have_bounded_results(self):
+        for kind in ('file', 'missing', 'dangling', 'chain', 'unreadable'):
+            with self.subTest(kind=kind):
+                self._static_root(kind)
+        self._fifo_root()
+
+    def test_fallback_starts_only_for_member_enoent(self):
+        self._unused_fork('symlink')
+        self._unused_fork('missing')
+        self._unused_fork('unreadable')
+        self._no_fallback_for('dangling-primary')
+        self._no_fallback_for('directory-primary')
+        self._no_fallback_for('unreadable-primary')
+        self._no_fallback_for('missing-source-root')
+        self._no_fallback_for('destination-error')
+
+    def test_selected_fallback_stays_on_its_directory(self):
+        for point in ('after-lstat', 'before-file-open', 'after-close'):
+            for kind in ('directory', 'absolute_symlink', 'relative_symlink'):
+                with self.subTest(point=point, kind=kind):
+                    self._fallback_anchor(point, kind)
+
+    def test_path_semantics_keep_the_existing_parent(self):
+        self._absolute_and_relative()
+        self._dot_fallback_stays_lexical()
+        self._dotdot_fallback_is_not_resolved()
+
+    def test_missing_capability_does_not_read_members_by_path(self):
+        self._drop_after_output('O_DIRECTORY')
+        self._drop_after_output('O_NOFOLLOW')
+        self._drop_after_output('O_NONBLOCK')
+        self._drop_support_after_output('supports_dir_fd', os.open)
+        self._drop_support_after_output('supports_dir_fd', os.stat)
+        self._drop_support_after_output('supports_follow_symlinks', os.stat)
+
+    def test_directory_eintr_and_close_keep_the_first_error(self):
+        for where in ('lstat', 'open', 'fstat', 'stat'):
+            with self.subTest(where=where):
+                self._input_eintr(where)
+        for number in (errno.EIO, errno.EINTR, errno.EBADF):
+            for handled in (False, True):
+                with self.subTest(close=errno.errorcode.get(number, number), handled=handled):
+                    self._input_close(number, handled, which='source')
+                    self._input_close(number, handled, which='fallback')
+                    self._input_close(number, handled, which='output')
+        for kind in ('source_changed', 'source_unreadable', 'destination_oserror', 'runtime', 'cancel'):
+            with self.subTest(kept=kind):
+                self._close_keeps_prior(kind)
+        self._close_continues_after_first_input_error()
+        self._source_close_may_leave_manifest()
+
+    def test_legal_modes_links_and_manifest_bytes(self):
+        for mode in (0o700, 0o755):
+            with self.subTest(directory=oct(mode)):
+                self._directory_mode(mode)
+        for mode in (0o600, 0o644, 0o700, 0o755):
+            with self.subTest(member=oct(mode)):
+                self._member_mode(mode)
+        self._empty_and_large()
+        self._stable_hardlink()
+        self._umask_manifest(0o077)
+
+    def _anchor(self, point, kind):
+        bundle = self.bundle
+        case = self.root / ('anchor-' + point + '-' + kind)
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        alternate = case / 'alternate'
+        names = list(bundle.REQUIRED)
+        old_ids = self._fill_ids(source, b'A', names)
+        new_ids = self._fill_ids(alternate, b'B', names)
+        if kind == 'same-bytes':
+            for name in names:
+                (alternate / name).write_bytes((source / name).read_bytes())
+                (alternate / name).chmod(0o600)
+                new_ids.add((alternate / name).stat().st_dev)  # placeholder replaced below
+            new_ids = {(path.stat().st_dev, path.stat().st_ino) for path in alternate.iterdir()}
+        watched = {
+            'after-first-close': names[0],
+            'after-middle-close': names[len(names) // 2],
+            'after-last-close': names[-1],
+        }.get(point)
+        state = {'swapped': False, 'old': 0, 'new': 0, 'tracked': {}}
+        real_open, real_close, real_lstat, real_fstat = os.open, os.close, os.lstat, os.fstat
+
+        def swap():
+            self.assertFalse(state['swapped'])
+            state['swapped'] = True
+            source.rename(case / 'held')
+            if kind == 'unlink':
+                return
+            if kind in ('directory', 'same-bytes'):
+                alternate.rename(source)
+                return
+            link = alternate if kind == 'absolute_symlink' else Path(alternate.name)
+            source.symlink_to(link, target_is_directory=True)
+
+        def os_lstat(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            if point == 'after-lstat' and not state['swapped'] and not isinstance(path, int) and Path(path) == source:
+                swap()
+            return info
+
+        def os_open(path, flags, *args, **kwargs):
+            dir_fd = kwargs.get('dir_fd')
+            if (point == 'before-file-open' and not state['swapped']
+                    and _basename_on_directory(path, source / names[0], dir_fd)):
+                swap()
+            if point == 'before-manifest' and not state['swapped'] and flags & os.O_CREAT and Path(path).name == 'manifest.json':
+                swap()
+            fd = real_open(path, flags, *args, **kwargs)
+            if (point == 'after-open' and not state['swapped'] and not isinstance(path, int)
+                    and flags & os.O_DIRECTORY and not flags & os.O_CREAT and Path(path) == source):
+                swap()
+            key = (real_fstat(fd).st_dev, real_fstat(fd).st_ino)
+            if key in old_ids or key in new_ids:
+                state['tracked'][fd] = names[0] if key in old_ids else None
+                state['old' if key in old_ids else 'new'] += 1
+                if watched and key in old_ids:
+                    info = real_fstat(fd)
+                    for name in names:
+                        member = (case / 'held' / name) if state['swapped'] and kind == 'unlink' else None
+                        current = source / name
+                        try:
+                            if current.exists() and not current.is_symlink() and (current.stat().st_dev, current.stat().st_ino) == (info.st_dev, info.st_ino):
+                                state['tracked'][fd] = name
+                        except OSError:
+                            pass
+                    if not state['swapped']:
+                        for name in names:
+                            current = source / name
+                            if (current.stat().st_dev, current.stat().st_ino) == (info.st_dev, info.st_ino):
+                                state['tracked'][fd] = name
+            return fd
+
+        def os_close(fd):
+            name = state['tracked'].pop(fd, None)
+            real_close(fd)
+            if watched and name == watched and not state['swapped']:
+                swap()
+
+        before_fds = self._fds()
+        os.lstat, os.open, os.close = os_lstat, os_open, os_close
+        try:
+            with self.assertRaises(bundle.BundleError) as caught:
+                bundle.build(source, case / 'staging')
+        finally:
+            os.lstat, os.open, os.close = real_lstat, real_open, real_close
+        self.assertEqual(self._fds(), before_fds, point)
+        self.assertTrue(state['swapped'], point)
+        self.assertEqual(caught.exception.code, 'source_changed', point)
+        self.assertEqual(caught.exception.exit_code, 69, point)
+        self.assertEqual(str(caught.exception), 'source_changed', point)
+        self.assertEqual(state['new'], 0, point)
+        if point in ('after-lstat', 'after-open'):
+            self.assertEqual(state['old'], 0, point)
+            self.assertEqual(list((case / 'staging').iterdir()), [], point)
+        if point == 'before-file-open':
+            self.assertGreaterEqual(state['old'], 1, point)
+
+    def _static_root(self, kind):
+        case = self.root / ('root-' + kind)
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        sentinel = case / 'sentinel'
+        sentinel.write_bytes(b'UNTOUCHED\n')
+        sentinel.chmod(0o600)
+        if kind != 'missing':
+            source.mkdir(mode=0o700)
+        if kind == 'file':
+            if source.exists():
+                source.rmdir()
+            source.write_bytes(b'not a directory')
+            source.chmod(0o600)
+        elif kind == 'dangling':
+            source.rmdir()
+            source.symlink_to(case / 'absent-root')
+        elif kind == 'chain':
+            source.rmdir()
+            link = case / 'link'
+            link.symlink_to(case / 'absent-root')
+            source.symlink_to(link)
+        elif kind == 'unreadable':
+            source.chmod(0)
+        staging = case / 'staging'
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.build(source, staging)
+        finally:
+            if kind == 'unreadable' and source.exists() and not source.is_symlink():
+                source.chmod(0o700)
+        expected = 'source_unreadable' if kind == 'unreadable' else 'member_missing'
+        self.assertEqual(caught.exception.code, expected)
+        self.assertEqual(caught.exception.exit_code, 69)
+        self.assertEqual(str(caught.exception), expected)
+        self.assertEqual(sentinel.read_bytes(), b'UNTOUCHED\n')
+        self.assertFalse((staging / 'manifest.json').exists())
+        self.assertEqual(list(staging.iterdir()) if staging.is_dir() else [], [])
+
+    def _fifo_root(self):
+        case = self.root / 'root-fifo'
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        staging = case / 'staging'
+        completed = subprocess.run(
+            [sys.executable, '-B', '-c',
+             'import os, sys; from pathlib import Path; '
+             'sys.path.insert(0, sys.argv[1]); import upgrade_bundle as bundle; '
+             'source, staging = Path(sys.argv[2]), Path(sys.argv[3]); '
+             'os.mkfifo(source, 0o600); '
+             'code = None\n'
+             'try:\n'
+             '    bundle.build(source, staging)\n'
+             'except bundle.BundleError as exc:\n'
+             '    code = exc.code if exc.exit_code == 69 and str(exc) == exc.code else "bad"\n'
+             'raise SystemExit(0 if code == "member_missing" and not (staging / "manifest.json").exists() else 2)',
+             str(HERE), str(source), str(staging)],
+            cwd=case, timeout=5, capture_output=True, text=True,
+            env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertTrue(stat.S_ISFIFO(source.lstat().st_mode))
+
+    def _unused_fork(self, kind):
+        case = self.root / ('unused-' + kind)
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        self._fill_ids(source, b'A', self.bundle.REQUIRED)
+        fork = case / 'fork'
+        marker = b'FORK MUST STAY UNREAD\n'
+        if kind == 'symlink':
+            alternate = case / 'alternate'
+            self._fill_ids(alternate, b'B', ['release-source.json'])
+            (alternate / 'release-source.json').write_bytes(marker)
+            fork.symlink_to(alternate, target_is_directory=True)
+            watched = alternate / 'release-source.json'
+            fork_id = None
+        elif kind == 'missing':
+            watched = None
+            fork_id = None
+        else:
+            self._fill_ids(fork, b'B', ['release-source.json'])
+            watched = fork / 'release-source.json'
+            watched.write_bytes(marker)
+            info = fork.lstat()
+            fork_id = (info.st_dev, info.st_ino)
+            fork.chmod(0)
+        seen = []
+        real_open, real_lstat, real_stat, real_fstat = os.open, os.lstat, os.stat, os.fstat
+
+        def hit(path, kwargs):
+            if isinstance(path, int):
+                return False
+            text = os.path.normpath(os.fspath(path))
+            if text == str(fork) or (watched is not None and text == str(watched)):
+                return True
+            dir_fd = kwargs.get('dir_fd')
+            if dir_fd is None or watched is None or Path(os.fspath(path)).name != watched.name:
+                if dir_fd is None or fork_id is None:
+                    return False
+            if dir_fd is not None and fork_id is not None:
+                info = real_fstat(dir_fd)
+                if (info.st_dev, info.st_ino) == fork_id:
+                    return True
+            if dir_fd is not None and watched is not None and Path(os.fspath(path)).name == watched.name:
+                info = real_fstat(dir_fd)
+                parent = real_stat(watched.parent, follow_symlinks=False)
+                if (info.st_dev, info.st_ino) == (parent.st_dev, parent.st_ino):
+                    return True
+            return False
+
+        def os_open(path, flags, *args, **kwargs):
+            if hit(path, kwargs):
+                seen.append('open')
+            return real_open(path, flags, *args, **kwargs)
+
+        def os_lstat(path, *args, **kwargs):
+            if hit(path, kwargs):
+                seen.append('lstat')
+            return real_lstat(path, *args, **kwargs)
+
+        def os_stat(path, *args, **kwargs):
+            if hit(path, kwargs):
+                seen.append('stat')
+            return real_stat(path, *args, **kwargs)
+
+        os.open, os.lstat, os.stat = os_open, os_lstat, os_stat
+        try:
+            built = self.bundle.build(source, case / 'staging')
+        finally:
+            os.open, os.lstat, os.stat = real_open, real_lstat, real_stat
+            if kind == 'unreadable':
+                fork.chmod(0o700)
+        self.assertEqual(seen, [], kind)
+        self._assert_verified(case / 'staging', built)
+        self.assertEqual((case / 'staging' / 'release-source.json').read_bytes(), (source / 'release-source.json').read_bytes())
+        if watched is not None and kind != 'symlink':
+            self.assertEqual(watched.read_bytes(), marker)
+
+    def _no_fallback_for(self, kind):
+        case = self.root / ('nofallback-' + kind)
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        fork = case / 'fork'
+        self._fill_ids(source, b'A', self.bundle.REQUIRED)
+        self._fill_ids(fork, b'F', ['release-source.json'])
+        (fork / 'release-source.json').write_bytes(b'UNEXPECTED FALLBACK\n')
+        primary = source / 'release-source.json'
+        if kind == 'dangling-primary':
+            primary.unlink()
+            primary.symlink_to('absent-primary')
+        elif kind == 'directory-primary':
+            primary.unlink()
+            primary.mkdir(mode=0o700)
+        elif kind == 'unreadable-primary':
+            primary.chmod(0)
+        elif kind == 'missing-source-root':
+            replacement = case / 'held-source'
+            source.rename(replacement)
+            source = replacement
+            # The caller path is the missing final component, not this held directory.
+            call = case / 'source'
+        else:
+            call = source
+        if kind != 'missing-source-root':
+            call = source
+        seen = []
+        real_open, real_write = os.open, os.write
+        fork_file = fork / 'release-source.json'
+
+        def fail_write(fd, data):
+            raise OSError(errno.EIO, 'injected destination seam')
+
+        def os_open(path, flags, *args, **kwargs):
+            if not isinstance(path, int) and (
+                    Path(path) == fork or Path(path) == fork_file
+                    or _basename_on_directory(path, fork_file, kwargs.get('dir_fd'))
+                    or _directory_fd_is(kwargs.get('dir_fd'), fork)):
+                seen.append(os.fspath(path))
+            fd = real_open(path, flags, *args, **kwargs)
+            if kind == 'destination-error' and flags & os.O_CREAT and Path(path).name == self.bundle.REQUIRED[0]:
+                os.write = fail_write
+            return fd
+
+        os.open = os_open
+        try:
+            with self.assertRaises((self.bundle.BundleError, OSError)) as caught:
+                self.bundle.build(call, case / 'staging')
+        finally:
+            os.open, os.write = real_open, real_write
+            if kind == 'unreadable-primary':
+                primary.chmod(0o600)
+        self.assertEqual(seen, [], kind)
+        error = caught.exception
+        if kind == 'destination-error':
+            self.assertIsInstance(error, OSError)
+            self.assertNotIsInstance(error, self.bundle.BundleError)
+            self.assertEqual(error.errno, errno.EIO)
+        elif kind == 'unreadable-primary':
+            self.assertEqual(error.code, 'source_unreadable')
+        else:
+            self.assertEqual(error.code, 'member_missing')
+        self.assertFalse((case / 'staging' / 'manifest.json').exists())
+
+    def _fallback_anchor(self, point, kind):
+        case = self.root / ('fork-anchor-' + point + '-' + kind)
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        names = [name for name in self.bundle.REQUIRED if name != 'release-source.json']
+        self._fill_ids(source, b'A', names)
+        fork = case / 'fork'
+        alternate = case / 'fork-alternate'
+        old = self._fill_ids(fork, b'A', ['release-source.json'])
+        new = self._fill_ids(alternate, b'B', ['release-source.json'])
+        state = {'swapped': False, 'new': 0, 'dirs': []}
+        real_open, real_lstat, real_close, real_fstat = os.open, os.lstat, os.close, os.fstat
+
+        def swap():
+            self.assertFalse(state['swapped'])
+            state['swapped'] = True
+            fork.rename(case / 'held-fork')
+            if kind == 'directory':
+                alternate.rename(fork)
+            else:
+                link = alternate if kind == 'absolute_symlink' else Path(alternate.name)
+                fork.symlink_to(link, target_is_directory=True)
+
+        def os_lstat(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            if point == 'after-lstat' and not state['swapped'] and not isinstance(path, int) and Path(path) == fork:
+                swap()
+            return info
+
+        def os_open(path, flags, *args, **kwargs):
+            dir_fd = kwargs.get('dir_fd')
+            if (point == 'before-file-open' and not state['swapped']
+                    and _basename_on_directory(path, fork / 'release-source.json', dir_fd)):
+                swap()
+            fd = real_open(path, flags, *args, **kwargs)
+            if flags & os.O_DIRECTORY and not flags & os.O_CREAT and not isinstance(path, int):
+                info = real_fstat(fd)
+                state['dirs'].append((Path(path).name, (info.st_dev, info.st_ino)))
+            key = (real_fstat(fd).st_dev, real_fstat(fd).st_ino)
+            if key in new:
+                state['new'] += 1
+            if key in old and point == 'after-close':
+                state['release_fd'] = fd
+            return fd
+
+        def os_close(fd):
+            real_close(fd)
+            if point == 'after-close' and fd == state.get('release_fd') and not state['swapped']:
+                swap()
+
+        os.lstat, os.open, os.close = os_lstat, os_open, os_close
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.build(source, case / 'staging')
+        finally:
+            os.lstat, os.open, os.close = real_lstat, real_open, real_close
+        self.assertTrue(state['swapped'], point)
+        self.assertEqual(caught.exception.code, 'source_changed')
+        self.assertEqual(caught.exception.exit_code, 69)
+        self.assertEqual(state['new'], 0, point)
+        self.assertFalse((case / 'staging' / 'manifest.json').exists())
+
+    def _absolute_and_relative(self):
+        case = self.root / 'paths'
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        self._fill_ids(source, b'A', self.bundle.REQUIRED)
+        absolute = self.bundle.build(source.resolve(), case / 'absolute-staging')
+        self._assert_verified(case / 'absolute-staging', absolute)
+        previous = os.getcwd()
+        os.chdir(case)
+        try:
+            relative = self.bundle.build(Path('source'), Path('relative-staging'))
+        finally:
+            os.chdir(previous)
+        self._assert_verified(case / 'relative-staging', relative)
+        self.assertEqual(relative['manifest_sha256'], absolute['manifest_sha256'])
+        self.assertEqual(set(relative), {'manifest_sha256', 'members'})
+        self.assertEqual(relative['members'], len(self.bundle.REQUIRED))
+
+    def _dot_fallback_stays_lexical(self):
+        case = self.root / 'dot-source'
+        names = [name for name in self.bundle.REQUIRED if name != 'release-source.json']
+        self._fill_ids(case, b'A', names)
+        lexical = case / 'fork'
+        sibling = self.root / 'fork'
+        self._fill_ids(lexical, b'L', ['release-source.json'])
+        (lexical / 'release-source.json').write_bytes(b'LEXICAL FORK\n')
+        if sibling.exists():
+            pass
+        previous = os.getcwd()
+        os.chdir(case)
+        try:
+            built = self.bundle.build(Path('.'), Path('staging'))
+        finally:
+            os.chdir(previous)
+        self._assert_verified(case / 'staging', built)
+        self.assertEqual((case / 'staging' / 'release-source.json').read_bytes(), b'LEXICAL FORK\n')
+
+    def _dotdot_fallback_is_not_resolved(self):
+        case = self.root / 'dotdot'
+        case.mkdir(mode=0o700)
+        real = case / 'real'
+        real.mkdir(mode=0o700)
+        source = real / 'source'
+        names = [name for name in self.bundle.REQUIRED if name != 'release-source.json']
+        self._fill_ids(source, b'A', names)
+        (real / 'extra').mkdir(mode=0o700)
+        fork = real / 'fork'
+        self._fill_ids(fork, b'F', ['release-source.json'])
+        (fork / 'release-source.json').write_bytes(b'DOTDOT FORK\n')
+        (case / 'alias').symlink_to(real, target_is_directory=True)
+        other = case / 'other-fork'
+        self._fill_ids(other, b'O', ['release-source.json'])
+        (other / 'release-source.json').write_bytes(b'OTHER FORK\n')
+        call = case / 'alias' / 'extra' / '..' / 'source'
+        built = self.bundle.build(call, case / 'staging')
+        self._assert_verified(case / 'staging', built)
+        self.assertEqual((case / 'staging' / 'release-source.json').read_bytes(), b'DOTDOT FORK\n')
+
+    def _drop_after_output(self, flag):
+        case = self.root / ('drop-' + flag)
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        self._fill_ids(source, b'A', self.bundle.REQUIRED)
+        saved = getattr(os, flag)
+        state = {'hidden': False, 'members': 0}
+        real_open = os.open
+
+        def os_open(path, flags, *args, **kwargs):
+            if (not state['hidden'] and not isinstance(path, int) and flags & os.O_DIRECTORY
+                    and not flags & os.O_CREAT and Path(path).name == 'staging'):
+                state['hidden'] = True
+                delattr(os, flag)
+            if flags & os.O_CREAT:
+                state['members'] += 1
+            return real_open(path, flags, *args, **kwargs)
+
+        os.open = os_open
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.build(source, case / 'staging')
+        finally:
+            os.open = real_open
+            setattr(os, flag, saved)
+        self.assertTrue(state['hidden'])
+        self.assertEqual(caught.exception.code, 'source_unreadable')
+        self.assertEqual(state['members'], 0)
+        self.assertEqual(list((case / 'staging').iterdir()), [])
+
+    def _drop_support_after_output(self, attr, item):
+        case = self.root / ('support-' + attr + '-' + item.__name__)
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        self._fill_ids(source, b'A', self.bundle.REQUIRED)
+        saved = getattr(os, attr)
+        state = {'hidden': False, 'members': 0}
+        real_open = os.open
+
+        def os_open(path, flags, *args, **kwargs):
+            if (not state['hidden'] and not isinstance(path, int) and flags & getattr(os, 'O_DIRECTORY', 0)
+                    and not flags & os.O_CREAT and Path(path).name == 'staging'):
+                state['hidden'] = True
+                setattr(os, attr, set(saved) - {item})
+            if flags & os.O_CREAT:
+                state['members'] += 1
+            return real_open(path, flags, *args, **kwargs)
+
+        os.open = os_open
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.build(source, case / 'staging')
+        finally:
+            os.open = real_open
+            setattr(os, attr, saved)
+        self.assertTrue(state['hidden'])
+        self.assertEqual(caught.exception.code, 'source_unreadable')
+        self.assertEqual(state['members'], 0)
+
+    def _input_eintr(self, where):
+        case = self.root / ('eintr-' + where)
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        self._fill_ids(source, b'A', self.bundle.REQUIRED)
+        state = {'once': False, 'dir': None}
+        real_open, real_lstat, real_fstat, real_stat = os.open, os.lstat, os.fstat, os.stat
+
+        def os_lstat(path, *args, **kwargs):
+            if where == 'lstat' and not state['once'] and not isinstance(path, int) and Path(path) == source:
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted input lstat')
+            return real_lstat(path, *args, **kwargs)
+
+        def os_open(path, flags, *args, **kwargs):
+            if (where == 'open' and not state['once'] and not isinstance(path, int)
+                    and flags & os.O_DIRECTORY and Path(path) == source):
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted input open')
+            fd = real_open(path, flags, *args, **kwargs)
+            if not isinstance(path, int) and flags & os.O_DIRECTORY and Path(path) == source:
+                state['dir'] = fd
+            return fd
+
+        def os_fstat(fd):
+            if where == 'fstat' and fd == state['dir'] and not state['once']:
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted input fstat')
+            return real_fstat(fd)
+
+        def os_stat(path, *args, **kwargs):
+            if (where == 'stat' and not state['once'] and kwargs.get('dir_fd') is not None
+                    and Path(path).name == self.bundle.REQUIRED[0]):
+                state['once'] = True
+                raise OSError(errno.EINTR, 'interrupted input stat')
+            return real_stat(path, *args, **kwargs)
+
+        os.lstat, os.open, os.fstat, os.stat = os_lstat, os_open, os_fstat, os_stat
+        try:
+            built = self.bundle.build(source, case / 'staging')
+        finally:
+            os.lstat, os.open, os.fstat, os.stat = real_lstat, real_open, real_fstat, real_stat
+        self.assertTrue(state['once'], where)
+        self._assert_verified(case / 'staging', built)
+
+    def _input_close(self, number, handled, which):
+        case = self.root / ('close-' + which + '-' + str(number) + '-' + str(handled))
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        names = list(self.bundle.REQUIRED)
+        if which == 'fallback':
+            self._fill_ids(source, b'A', [name for name in names if name != 'release-source.json'])
+            fork = case / 'fork'
+            self._fill_ids(fork, b'F', ['release-source.json'])
+        else:
+            self._fill_ids(source, b'A', names)
+            fork = None
+        sentinel = case / 'sentinel-fd'
+        sentinel.write_bytes(b'SENTINEL')
+        sentinel.chmod(0o600)
+        state = {'source': None, 'output': None, 'fallback': None, 'count': {}, 'occupied': None, 'double': 0}
+        real_open, real_close = os.open, os.close
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if isinstance(path, int) or not flags & os.O_DIRECTORY or flags & os.O_CREAT:
+                return fd
+            if Path(path) == source and state['source'] is None:
+                state['source'] = fd
+            elif Path(path) == case / 'staging' and state['output'] is None:
+                state['output'] = fd
+            elif fork is not None and Path(path) == fork and state['fallback'] is None:
+                state['fallback'] = fd
+            return fd
+
+        target = {'source': 'source', 'fallback': 'fallback', 'output': 'output'}[which]
+
+        def os_close(fd):
+            if state['occupied'] is not None and fd == state['occupied']:
+                state['double'] += 1
+                return real_close(fd)
+            kind = next((name for name, held in (('fallback', state['fallback']), ('source', state['source']), ('output', state['output'])) if fd == held), None)
+            if kind is not None and state['count'].get(kind, 0) == 0:
+                real_close(fd)
+                state['count'][kind] = 1
+                state['occupied'] = real_open(sentinel, os.O_RDONLY)
+                if kind == target:
+                    raise OSError(number, 'injected directory close')
+                return None
+            return real_close(fd)
+
+        def invoke():
+            if not handled:
+                self.bundle.build(source, case / 'staging')
+                return
+            try:
+                raise ValueError('already-handled-caller-error')
+            except ValueError:
+                self.bundle.build(source, case / 'staging')
+
+        os.open, os.close = os_open, os_close
+        try:
+            with self.assertRaises((self.bundle.BundleError, OSError)) as caught:
+                invoke()
+        finally:
+            os.open, os.close = real_open, real_close
+            if state['occupied'] is not None:
+                os.fstat(state['occupied'])
+                os.close(state['occupied'])
+        self.assertEqual(state['double'], 0)
+        self.assertGreaterEqual(state['count'].get('source', 0), 1)
+        self.assertGreaterEqual(state['count'].get('output', 0), 1)
+        if which == 'fallback':
+            self.assertGreaterEqual(state['count'].get('fallback', 0), 1)
+        error = caught.exception
+        if which == 'output':
+            self.assertIsInstance(error, OSError)
+            self.assertNotIsInstance(error, self.bundle.BundleError)
+            self.assertEqual(error.errno, number)
+        else:
+            self.assertIsInstance(error, self.bundle.BundleError)
+            self.assertEqual(error.code, 'source_unreadable')
+            self.assertEqual(error.exit_code, 69)
+            self.assertIsNone(error.__cause__)
+        self.assertNotIn('already-handled-caller-error', str(error))
+
+    def _close_keeps_prior(self, kind):
+        case = self.root / ('keep-' + kind)
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        self._fill_ids(source, b'A', self.bundle.REQUIRED)
+        marker = RuntimeError('runtime-marker') if kind == 'runtime' else CancelMarker('cancel-marker')
+        state = {'source_fd': None, 'dir': None, 'done': False, 'closes': 0}
+        real_open, real_close, real_read, real_fstat = os.open, os.close, os.read, os.fstat
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if not isinstance(path, int) and flags & os.O_DIRECTORY and Path(path) == source and state['dir'] is None:
+                state['dir'] = fd
+            if _basename_on_directory(path, source / self.bundle.REQUIRED[0], kwargs.get('dir_fd')):
+                state['source_fd'] = fd
+            return fd
+
+        def os_read(fd, size):
+            if kind == 'source_unreadable' and fd == state['source_fd'] and not state['done']:
+                state['done'] = True
+                raise OSError(errno.EIO, 'injected source read')
+            if kind == 'source_changed' and fd == state['source_fd'] and size == 1 and not state['done']:
+                state['done'] = True
+                extra = real_open(source / self.bundle.REQUIRED[0], os.O_WRONLY | os.O_APPEND)
+                os.write(extra, b'X')
+                real_close(extra)
+            return real_read(fd, size)
+
+        def os_fstat(fd):
+            if kind in ('runtime', 'cancel') and fd == state['source_fd'] and not state['done']:
+                state['done'] = True
+                raise marker
+            return real_fstat(fd)
+
+        def os_close(fd):
+            if fd == state['dir']:
+                real_close(fd)
+                state['closes'] += 1
+                raise OSError(errno.EIO, 'injected directory close')
+            return real_close(fd)
+
+        os.open, os.read, os.fstat, os.close = os_open, os_read, os_fstat, os_close
+        if kind == 'destination_oserror':
+            real_write = os.write
+
+            def os_write(fd, data):
+                raise OSError(errno.EACCES, 'injected destination write')
+
+            os.write = os_write
+        try:
+            with self.assertRaises((self.bundle.BundleError, OSError, RuntimeError, CancelMarker)) as caught:
+                self.bundle.build(source, case / 'staging')
+        finally:
+            os.open, os.read, os.fstat, os.close = real_open, real_read, real_fstat, real_close
+            if kind == 'destination_oserror':
+                os.write = real_write
+        self.assertTrue(state['done'] or kind == 'destination_oserror')
+        self.assertGreaterEqual(state['closes'], 1)
+        error = caught.exception
+        self.assertNotIn('injected directory close', str(error))
+        if kind == 'source_unreadable':
+            self.assertEqual(error.code, 'source_unreadable')
+        elif kind == 'source_changed':
+            self.assertEqual(error.code, 'source_changed')
+        elif kind == 'destination_oserror':
+            self.assertIsInstance(error, OSError)
+            self.assertEqual(error.errno, errno.EACCES)
+        else:
+            self.assertIs(error, marker)
+
+    def _close_continues_after_first_input_error(self):
+        case = self.root / 'close-both'
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        self._fill_ids(source, b'A', self.bundle.REQUIRED)
+        sentinel = case / 'sentinel-fd'
+        sentinel.write_bytes(b'S')
+        sentinel.chmod(0o600)
+        state = {'source': None, 'output': None, 'count': {}, 'occupied': [], 'double': 0}
+        real_open, real_close = os.open, os.close
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if isinstance(path, int) or not flags & os.O_DIRECTORY or flags & os.O_CREAT:
+                return fd
+            if Path(path) == source and state['source'] is None:
+                state['source'] = fd
+            elif Path(path) == case / 'staging' and state['output'] is None:
+                state['output'] = fd
+            return fd
+
+        def os_close(fd):
+            if fd in state['occupied']:
+                state['double'] += 1
+                return real_close(fd)
+            kind = 'source' if fd == state['source'] else 'output' if fd == state['output'] else None
+            if kind is not None and state['count'].get(kind, 0) == 0:
+                real_close(fd)
+                state['count'][kind] = 1
+                state['occupied'].append(real_open(sentinel, os.O_RDONLY))
+                raise OSError(errno.EIO if kind == 'source' else errno.EBADF, 'injected later close')
+            return real_close(fd)
+
+        os.open, os.close = os_open, os_close
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.build(source, case / 'staging')
+        finally:
+            os.open, os.close = real_open, real_close
+            for fd in state['occupied']:
+                os.fstat(fd)
+                os.close(fd)
+        self.assertEqual(state['double'], 0)
+        self.assertEqual(state['count'].get('source'), 1)
+        self.assertEqual(state['count'].get('output'), 1)
+        self.assertEqual(caught.exception.code, 'source_unreadable')
+        self.assertNotIn('injected later close', str(caught.exception))
+
+    def _source_close_may_leave_manifest(self):
+        case = self.root / 'manifest-residue'
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        self._fill_ids(source, b'A', self.bundle.REQUIRED)
+        state = {'source': None}
+        real_open, real_close = os.open, os.close
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if not isinstance(path, int) and flags & os.O_DIRECTORY and Path(path) == source and state['source'] is None:
+                state['source'] = fd
+            return fd
+
+        def os_close(fd):
+            if fd == state['source']:
+                real_close(fd)
+                state['source'] = None
+                raise OSError(errno.EIO, 'injected source close')
+            return real_close(fd)
+
+        os.open, os.close = os_open, os_close
+        try:
+            with self.assertRaises(self.bundle.BundleError) as caught:
+                self.bundle.build(source, case / 'staging')
+        finally:
+            os.open, os.close = real_open, real_close
+        self.assertEqual(caught.exception.code, 'source_unreadable')
+        manifest = case / 'staging' / 'manifest.json'
+        self.assertTrue(manifest.is_file())
+        verified = self.bundle.verify(case / 'staging')
+        self.assertIs(verified['verified'], True)
+        self.assertIs(verified['installable'], False)
+        self.assertTrue(manifest.is_file())
+
+    def _directory_mode(self, mode):
+        case = self.root / ('dirmode-' + oct(mode)[2:])
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        self._fill_ids(source, b'A', self.bundle.REQUIRED)
+        source.chmod(mode)
+        built = self.bundle.build(source, case / 'staging')
+        self._assert_verified(case / 'staging', built)
+        self.assertEqual(stat.S_IMODE(source.lstat().st_mode), mode)
+        self.assertEqual(stat.S_IMODE((case / 'staging').lstat().st_mode), 0o700)
+
+    def _member_mode(self, mode):
+        case = self.root / ('mode-' + oct(mode)[2:])
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        self._fill_ids(source, b'A', self.bundle.REQUIRED)
+        target = source / self.bundle.REQUIRED[0]
+        target.chmod(mode)
+        built = self.bundle.build(source, case / 'staging')
+        staged = case / 'staging' / self.bundle.REQUIRED[0]
+        self.assertEqual(staged.read_bytes(), target.read_bytes())
+        self.assertEqual(stat.S_IMODE(staged.lstat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(target.lstat().st_mode), mode)
+        self._assert_verified(case / 'staging', built)
+
+    def _empty_and_large(self):
+        for size in (0, 65537):
+            case = self.root / ('size-' + str(size))
+            case.mkdir(mode=0o700)
+            source = case / 'source'
+            self._fill_ids(source, b'A', self.bundle.REQUIRED)
+            payload = b'' if size == 0 else (b'\x00\xffLARGE' * ((size // 8) + 1))[:size]
+            target = source / self.bundle.REQUIRED[0]
+            target.write_bytes(payload)
+            target.chmod(0o600)
+            built = self.bundle.build(source, case / 'staging')
+            staged = case / 'staging' / self.bundle.REQUIRED[0]
+            self.assertEqual(staged.read_bytes(), payload)
+            manifest = json.loads((case / 'staging' / 'manifest.json').read_bytes())
+            self.assertEqual(manifest['files'][self.bundle.REQUIRED[0]], hashlib.sha256(payload).hexdigest())
+            self._assert_verified(case / 'staging', built)
+
+    def _stable_hardlink(self):
+        case = self.root / 'hardlink-stable'
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        self._fill_ids(source, b'A', self.bundle.REQUIRED)
+        target = source / self.bundle.REQUIRED[0]
+        linked = case / 'linked'
+        os.link(target, linked)
+        before = linked.lstat().st_ino
+        built = self.bundle.build(source, case / 'staging')
+        self.assertEqual(linked.lstat().st_ino, before)
+        self.assertGreaterEqual(target.lstat().st_nlink, 2)
+        self.assertEqual((case / 'staging' / self.bundle.REQUIRED[0]).read_bytes(), linked.read_bytes())
+        self._assert_verified(case / 'staging', built)
+
+    def _umask_manifest(self, mask):
+        previous = os.umask(mask)
+        case = self.root / 'umask-input'
+        case.mkdir(mode=0o700)
+        source = case / 'source'
+        self._fill_ids(source, b'A', self.bundle.REQUIRED)
+        try:
+            built = self.bundle.build(source, case / 'staging')
+        finally:
+            os.umask(previous)
+        manifest = case / 'staging' / 'manifest.json'
+        self.assertEqual(stat.S_IMODE(manifest.lstat().st_mode), 0o666 & ~mask)
+        self.assertEqual(hashlib.sha256(manifest.read_bytes()).hexdigest(), built['manifest_sha256'])
+        self._assert_verified(case / 'staging', built)
+
+    def _assert_verified(self, staging, built):
+        verified = self.bundle.verify(staging)
+        self.assertIs(verified['verified'], True)
+        self.assertIs(verified['installable'], False)
+        self.assertEqual(verified['manifest_sha256'], built['manifest_sha256'])
+
+    def _fill_ids(self, path, tag, names):
+        path.mkdir(mode=0o700)
+        found = set()
+        for name in names:
+            member = path / name
+            member.write_bytes(b'\x00\xffSYNTHETIC ' + tag + b' ' + name.encode() + b'\n')
+            member.chmod(0o600)
+            info = member.stat()
+            found.add((info.st_dev, info.st_ino))
+        return found
+
+    def _file_snapshot(self, case):
+        rows = {}
+        for parent, dirs, files in os.walk(case, followlinks=False):
+            dirs[:] = [name for name in dirs if name != 'staging']
+            for name in files:
+                path = Path(parent) / name
+                info = path.lstat()
+                if stat.S_ISREG(info.st_mode):
+                    rows[(info.st_dev, info.st_ino)] = (
+                        info.st_mode, info.st_uid, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+                        hashlib.sha256(path.read_bytes()).hexdigest())
+        return rows
+
+    def _fds(self):
+        found = []
+        for fd in range(3, 128):
+            try:
+                os.fstat(fd)
+            except OSError:
+                continue
+            found.append(fd)
+        return found
+
+    def _relax(self):
+        if not self.root.exists():
+            return
+        for path in [self.root, *self.root.rglob('*')]:
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISLNK(info.st_mode):
+                os.chmod(path, 0o700 if stat.S_ISDIR(info.st_mode) else 0o600)
 
 
 if __name__ == '__main__':
