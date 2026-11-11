@@ -157,8 +157,10 @@ check in
 [upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-sources).
 The manifest and member checks remain
 [manifest](upgrade-provisioning.md#offline-staging-manifest) and
-[members](upgrade-provisioning.md#offline-staging-members). That acceptance
-is not a tool, application, or recovery binding, and it does not remove the
+[members](upgrade-provisioning.md#offline-staging-members).
+That acceptance includes finishing each descriptor close; a close failure
+refuses the staging directory and is not an installable result. It is not a
+tool, application, or recovery binding, and it does not remove the
 production `native_full_closure_required` gate, the Darwin stage0 refusal, or
 `application_source_transition_not_admitted`.
 

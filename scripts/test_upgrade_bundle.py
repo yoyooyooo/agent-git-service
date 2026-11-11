@@ -3054,5 +3054,622 @@ class BuilderSourceTests(unittest.TestCase):
             view = view[wrote:]
 
 
+
+class ProgrammingMarker(RuntimeError):
+    """Injected verifier fault. Not a bundle input error."""
+
+
+class CancelMarker(BaseException):
+    """Injected cancellation. Must not become BundleError."""
+
+
+class VerifierCloseTests(unittest.TestCase):
+    """Close failures after a real manifest or member read.
+
+    Errno values are injected after the real close. They are not hardware
+    faults. Hooks call the real open, read, fstat, and close. Fixtures are
+    inert and are not executed or imported.
+    """
+
+    def setUp(self):
+        import upgrade_bundle as bundle
+        self.bundle = bundle
+        self.module_path = Path(bundle.__file__).resolve()
+        self.assertEqual(self.module_path, HERE / 'upgrade_bundle.py')
+        self.tmp = tempfile.TemporaryDirectory(dir=Path.home(), prefix='bundle-verifier-close-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.source = self.root / 'source'
+        self.source.mkdir(mode=0o700)
+        self.payloads = {}
+        for name in bundle.REQUIRED:
+            path = self.source / name
+            payload = b'SYNTHETIC INERT CLOSE ' + name.encode() + b'\x00\xff\n'
+            path.write_bytes(payload)
+            path.chmod(0o600)
+            self.payloads[name] = payload
+        self.sentinel = self.root / 'sentinel'
+        self.sentinel.write_bytes(b'SYNTHETIC SENTINEL\n')
+        self.sentinel.chmod(0o600)
+
+    def test_recorded_probe_cases(self):
+        """Eight close failures must refuse. Twelve controls keep their result."""
+        cases = []
+        for role in ('manifest', 'member'):
+            for number in (errno.EIO, errno.EINTR):
+                for handled in (False, True):
+                    cases.append((role, 'valid', number, handled))
+            for mode in ('no_fault', 'prior_refusal', 'programming'):
+                for handled in (False, True):
+                    cases.append((role, mode, errno.EIO, handled))
+        self.assertEqual(len(cases), 20)
+        for role, mode, number, handled in cases:
+            with self.subTest(role=role, mode=mode, errno=errno.errorcode[number], handled=handled):
+                self._recorded(role, mode, number, handled)
+
+    def test_close_errno_is_fixed_and_does_not_reuse_the_fd(self):
+        """Any close OSError is the fixed code. A reused descriptor is not closed again."""
+        numbers = (errno.EIO, errno.EINTR, errno.EBADF, errno.ENOENT, errno.EACCES)
+        for role in ('manifest', 'member'):
+            expected = 'manifest_unreadable' if role == 'manifest' else 'member_unreadable'
+            for number in numbers:
+                with self.subTest(role=role, errno=errno.errorcode[number], occupy=True):
+                    self._close_case(role, number, expected, occupy=True)
+            with self.subTest(role=role, errno='none', occupy=True):
+                self._close_case(role, None, 'success', occupy=True)
+
+    def test_executable_false_still_rejects_close_failure(self):
+        """executable=False skips only the executable bit."""
+        for role in ('manifest', 'member'):
+            for injected in (False, True):
+                with self.subTest(role=role, injected=injected):
+                    staging, built, target = self._stage('exec-false-' + role + '-' + str(injected).lower(), role)
+                    target.chmod(0o700)
+                    number = errno.EIO if injected else None
+                    expected = self._close_code(role) if injected else 'success'
+                    self._close_case(role, number, expected, staging=staging, built=built, target=target,
+                                     executable=False, occupy=injected)
+
+    def test_earlier_failure_survives_close_failure(self):
+        """A later close OSError must not replace the exception this read already raised."""
+        kinds = ('read', 'fstat', 'identity', 'owner', 'executable', 'keyboard', 'cancel', 'programming')
+        for role in ('manifest', 'member'):
+            for kind in kinds:
+                for handled in (False, True):
+                    with self.subTest(role=role, kind=kind, handled=handled):
+                        self._earlier(role, kind, handled)
+
+    def test_manifest_close_stops_before_parser_and_members(self):
+        follow = {}
+        staging, built, target = self._stage('manifest-stop', 'manifest')
+        seen, restore_io = self._hooks(target, close_errno=errno.EIO)
+        restore_follow = self._watch_followups(follow)
+        before = self._snapshot()
+        fds = self._fds()
+        try:
+            _outcome, error, preserved = self._call(staging, handled=True)
+        finally:
+            restore_follow()
+            restore_io()
+        self.assertEqual(self._fds(), fds)
+        self.assertEqual(self._snapshot(), before)
+        self._assert_close_error(error, 'manifest_unreadable')
+        self.assertTrue(preserved)
+        self.assertEqual(follow, {'parser': 0, 'iterdir': 0})
+        self.assertEqual(seen['opens_after'], 0)
+        self.assertEqual(seen['target_opens'], 1)
+        self.assertGreaterEqual(seen['target_reads'], 2)
+        self.assertEqual(seen['read_bytes'], target.stat().st_size)
+        self.assertGreaterEqual(seen['fstats'], 2)
+        self.assertEqual(seen['target_close_calls'], 1)
+        self.assertEqual(seen['double_close'], 0)
+        self.assertEqual(seen['close_injections'], 1)
+        self.assertEqual([name for name in seen['opened_names'] if name != 'manifest.json'], [])
+        self.assertNotIn('installable', built)
+
+    def test_member_close_stops_at_early_middle_and_last(self):
+        staging, _built, _target = self._stage('member-order', 'member')
+        order = list(json.loads((staging / 'manifest.json').read_bytes())['files'])
+        self.assertEqual(order, sorted(self.bundle.REQUIRED))
+        positions = {
+            'early': 0,
+            'middle': len(order) // 2,
+            'last': len(order) - 1,
+        }
+        self.assertEqual(len(set(positions.values())), 3)
+        for name, index in positions.items():
+            with self.subTest(position=name):
+                self._member_stop(name, order, index)
+
+    def test_compatible_shapes_remain_readonly_and_uninstalled(self):
+        """Current UID, modes, hard links, and empty or large members stay uninstalled."""
+        for mode in (0o600, 0o644):
+            for role in ('manifest', 'member'):
+                with self.subTest(role=role, mode=oct(mode), injected=False):
+                    self._shape(role, mode=mode, injected=False)
+                with self.subTest(role=role, mode=oct(mode), injected=True):
+                    self._shape(role, mode=mode, injected=True)
+        for size in (0, self.bundle._MEMBER_CHUNK + 1):
+            for injected in (False, True):
+                with self.subTest(size=size, injected=injected):
+                    self._shape('member', size=size, injected=injected)
+        for injected in (False, True):
+            with self.subTest(hardlink=True, injected=injected):
+                self._shape('member', hardlink=True, injected=injected)
+
+    def _recorded(self, role, mode, number, handled):
+        label = 'recorded-%s-%s-%s-%s' % (role, mode, errno.errorcode[number], int(handled))
+        staging, built, target = self._stage(label, role)
+        if mode == 'prior_refusal':
+            if role == 'manifest':
+                raw = target.read_bytes()
+                target.write_bytes(raw + b' ' * (65537 - len(raw)))
+            else:
+                target.write_bytes(b'SYNTHETIC TAMPER\n')
+        marker = ProgrammingMarker('SYNTHETIC PROGRAMMING MARKER')
+
+        def on_read(_raw):
+            if mode == 'programming':
+                raise marker
+
+        close_errno = None if mode == 'no_fault' else number
+        seen, restore = self._hooks(target, close_errno=close_errno, on_read=on_read if mode == 'programming' else None)
+        before = self._snapshot()
+        fds = self._fds()
+        try:
+            outcome, error, preserved = self._call(staging, handled=handled)
+        finally:
+            restore()
+        expected = {
+            'valid': self._close_code(role),
+            'no_fault': 'success',
+            'prior_refusal': 'manifest_budget_exceeded' if role == 'manifest' else 'digest_rejected',
+            'programming': 'ProgrammingMarker',
+        }[mode]
+        detail = self._detail(expected, error, seen, preserved)
+        self.assertEqual(self._fds(), fds, detail)
+        self.assertEqual(self._snapshot(), before, detail)
+        self.assertTrue(preserved, detail)
+        self.assertEqual(seen['target_opens'], 1, detail)
+        self.assertGreaterEqual(seen['target_reads'], 1, detail)
+        self.assertGreater(seen['read_bytes'], 0, detail)
+        self.assertEqual(seen['target_close_calls'], 1, detail)
+        self.assertEqual(seen['double_close'], 0, detail)
+        self.assertEqual(seen['real_fd_closed'], [True], detail)
+        self.assertEqual(seen['close_injections'], 0 if mode == 'no_fault' else 1, detail)
+        self.assertEqual(self._observed(error), expected, detail)
+        if mode == 'programming':
+            self.assertIs(error, marker, detail)
+        elif mode == 'no_fault':
+            self._assert_success(staging, built, outcome)
+        else:
+            self._assert_bundle_error(error, expected, close_generated=(mode == 'valid'))
+        if mode != 'no_fault':
+            self.assertEqual(seen['opens_after'], 0, detail)
+        if mode in ('valid', 'no_fault'):
+            self.assertGreaterEqual(seen['target_reads'], 2, detail)
+            self.assertGreaterEqual(seen['fstats'], 2, detail)
+            self.assertEqual(seen['read_bytes'], target.stat().st_size, detail)
+
+    def _close_case(self, role, number, expected, *, occupy=False, staging=None, built=None,
+                    target=None, executable=True):
+        if staging is None:
+            label = 'close-' + role + '-' + (errno.errorcode[number] if number is not None else 'ok')
+            if not executable:
+                label += '-noexec'
+            staging, built, target = self._stage(label, role)
+        seen, restore = self._hooks(target, close_errno=number, occupy=occupy)
+        before = self._snapshot()
+        fds = self._fds()
+        try:
+            outcome, error, preserved = self._call(staging, executable=executable, handled=True)
+        finally:
+            restore()
+        detail = self._detail(expected, error, seen, preserved)
+        self.assertEqual(self._fds(), fds, detail)
+        self.assertEqual(self._snapshot(), before, detail)
+        self.assertTrue(preserved, detail)
+        self.assertEqual(seen['target_close_calls'], 1, detail)
+        self.assertEqual(seen['double_close'], 0, detail)
+        self.assertEqual(seen['real_fd_closed'], [True], detail)
+        self.assertGreaterEqual(seen['target_opens'], 1, detail)
+        self.assertGreaterEqual(seen['target_reads'], 1, detail)
+        self.assertEqual(seen['close_injections'], 0 if number is None else 1, detail)
+        if occupy:
+            self.assertTrue(seen['occupied'], detail)
+        if expected == 'success':
+            self._assert_success(staging, built, outcome)
+            self.assertIsNone(error, detail)
+        else:
+            self._assert_close_error(error, expected)
+            self.assertEqual(seen['opens_after'], 0, detail)
+
+    def _earlier(self, role, kind, handled):
+        staging, built, target = self._stage('earlier-' + role + '-' + kind + '-' + str(handled), role)
+        marker = ProgrammingMarker('SYNTHETIC PROGRAMMING MARKER')
+        cancel = CancelMarker('SYNTHETIC CANCEL')
+        keyboard = KeyboardInterrupt('SYNTHETIC INTERRUPT')
+        once = {'done': False}
+
+        def on_read(_raw):
+            if once['done']:
+                return
+            once['done'] = True
+            if kind == 'read':
+                raise OSError(errno.EIO, 'SYNTHETIC READ ERROR', str(target))
+            if kind == 'identity':
+                current = stat.S_IMODE(target.stat().st_mode)
+                updated = 0o640 if current != 0o640 else 0o604
+                if updated & 0o111 or updated == current:
+                    raise AssertionError('identity seam could not choose a non-executable mode')
+                os.chmod(target, updated)
+            elif kind == 'programming':
+                raise marker
+            elif kind == 'keyboard':
+                raise keyboard
+            elif kind == 'cancel':
+                raise cancel
+
+        def on_fstat(_info):
+            if kind == 'fstat' and not once['done']:
+                once['done'] = True
+                raise OSError(errno.EIO, 'SYNTHETIC FSTAT ERROR', str(target))
+
+        if kind == 'executable':
+            target.chmod(0o700)
+        created = []
+        owner = self._patch_owner(role, os.getuid() + 1) if kind == 'owner' else None
+        seen, restore = self._hooks(
+            target, close_errno=errno.EIO,
+            on_read=on_read if kind in ('read', 'identity', 'programming', 'keyboard', 'cancel') else None,
+            on_fstat=on_fstat if kind == 'fstat' else None)
+        self._mark_errors(created)
+        before = self._snapshot()
+        fds = self._fds()
+        try:
+            _outcome, error, preserved = self._call(staging, handled=handled)
+        finally:
+            restore()
+            self._unmark_errors()
+            if owner is not None:
+                owner()
+        if kind == 'identity':
+            self._assert_chmod_only(before, target)
+        else:
+            self.assertEqual(self._snapshot(), before)
+        self.assertEqual(self._fds(), fds)
+        self.assertTrue(preserved)
+        self.assertEqual(seen['target_close_calls'], 1)
+        self.assertEqual(seen['close_injections'], 1)
+        self.assertEqual(seen['double_close'], 0)
+        self.assertEqual(seen['real_fd_closed'], [True])
+        self.assertEqual(seen['opens_after'], 0)
+        expected = {
+            'read': self._close_code(role),
+            'fstat': self._close_code(role),
+            'identity': 'manifest_changed' if role == 'manifest' else 'member_changed',
+            'owner': 'owner_rejected',
+            'executable': 'unexpected_executable',
+            'keyboard': 'KeyboardInterrupt',
+            'cancel': 'CancelMarker',
+            'programming': 'ProgrammingMarker',
+        }[kind]
+        self.assertEqual(self._observed(error), expected)
+        if kind == 'programming':
+            self.assertIs(error, marker)
+        elif kind == 'keyboard':
+            self.assertIs(error, keyboard)
+        elif kind == 'cancel':
+            self.assertIs(error, cancel)
+        else:
+            self._assert_bundle_error(error, expected, close_generated=False)
+            self.assertEqual(created, [error])
+        if kind in ('read', 'fstat', 'owner', 'executable'):
+            self.assertGreaterEqual(seen['fstats'], 1)
+        if kind in ('read', 'identity', 'programming', 'keyboard', 'cancel'):
+            self.assertGreaterEqual(seen['target_reads'], 1)
+        self.assertIsNone(built.get('installable'))
+
+    def _member_stop(self, name, order, index):
+        staging, _built, _target = self._stage('stop-' + name, 'member')
+        target = staging / order[index]
+        follow = {}
+        seen, restore_io = self._hooks(target, close_errno=errno.EINTR, occupy=True)
+        restore_follow = self._watch_followups(follow)
+        before = self._snapshot()
+        fds = self._fds()
+        try:
+            outcome, error, preserved = self._call(staging, handled=False)
+        finally:
+            restore_follow()
+            restore_io()
+        self.assertEqual(self._fds(), fds)
+        self.assertEqual(self._snapshot(), before)
+        self.assertTrue(preserved)
+        self.assertIsNone(outcome)
+        self._assert_close_error(error, 'member_unreadable')
+        self.assertEqual(follow['parser'], 1)
+        self.assertEqual(follow['iterdir'], 1)
+        opened = [item for item in seen['opened_names'] if item in self.bundle.REQUIRED]
+        self.assertEqual(opened, order[:index + 1])
+        self.assertEqual(seen['opens_after'], 0)
+        self.assertEqual(seen['target_close_calls'], 1)
+        self.assertEqual(seen['double_close'], 0)
+        self.assertTrue(seen['occupied'])
+        self.assertGreaterEqual(seen['target_reads'], 2)
+        self.assertEqual(seen['read_bytes'], target.stat().st_size)
+        self.assertGreaterEqual(seen['fstats'], 2)
+
+    def _shape(self, role, *, mode=None, size=None, hardlink=False, injected=False):
+        member = 'upgrade.py'
+        if size is not None:
+            self._write_source(member, b'Z' * size)
+        label = 'shape-' + role + '-' + str(mode) + '-' + str(size) + '-' + str(hardlink) + '-' + str(injected)
+        staging, built, target = self._stage(label, role if size is None and not hardlink else 'member')
+        if size is not None or hardlink:
+            target = staging / member
+        if mode is not None:
+            target.chmod(mode)
+        link = None
+        if hardlink:
+            link = self.root / (label + '-link')
+            os.link(target, link)
+        if role == 'manifest' and size is None and not hardlink:
+            checked = 'manifest'
+        else:
+            checked = 'member'
+        number = errno.EIO if injected else None
+        expected = self._close_code(checked) if injected else 'success'
+        try:
+            self._close_case(checked, number, expected, staging=staging, built=built, target=target,
+                             occupy=injected)
+            if link is not None:
+                self.assertEqual(link.lstat().st_ino, target.lstat().st_ino)
+                self.assertGreaterEqual(target.lstat().st_nlink, 2)
+        finally:
+            if size is not None:
+                self._write_source(member, self.payloads[member])
+
+    def _stage(self, label, role):
+        staging = self.root / label
+        built = self.bundle.build(self.source, staging)
+        target = staging / ('manifest.json' if role == 'manifest' else sorted(self.bundle.REQUIRED)[0])
+        return staging, built, target
+
+    def _write_source(self, name, payload):
+        path = self.source / name
+        path.write_bytes(payload)
+        path.chmod(0o600)
+
+    def _call(self, staging, *, executable=True, handled=False):
+        preserved = True
+        outcome = None
+        error = None
+        if not handled:
+            try:
+                outcome = self.bundle.verify(staging, executable=executable)
+            except BaseException as exc:
+                error = exc
+            return outcome, error, preserved
+        caller = LookupError('SYNTHETIC CALLER EXCEPTION')
+        try:
+            raise caller
+        except LookupError:
+            try:
+                outcome = self.bundle.verify(staging, executable=executable)
+            except BaseException as exc:
+                error = exc
+            preserved = sys.exception() is caller
+        return outcome, error, preserved
+
+    def _hooks(self, target, *, close_errno=None, on_read=None, on_fstat=None, occupy=False):
+        real_open, real_read, real_close, real_fstat = os.open, os.read, os.close, os.fstat
+        state = {
+            'target_opens': 0, 'target_reads': 0, 'read_bytes': 0, 'target_close_calls': 0,
+            'close_injections': 0, 'real_fd_closed': [], 'opens_after': 0, 'fstats': 0,
+            'double_close': 0, 'opened_names': [], 'occupied': False,
+        }
+        live = {}
+        finished = set()
+        sentinels = set()
+        closed = {'value': False}
+
+        def os_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            # A later open may reuse the number. That is not a second close.
+            if fd in finished and fd not in sentinels:
+                finished.discard(fd)
+            if not isinstance(path, int):
+                name = Path(os.fspath(path)).name
+                if name == 'manifest.json' or name in self.bundle.REQUIRED:
+                    state['opened_names'].append(name)
+                if self._same(path, target):
+                    live[fd] = True
+                    state['target_opens'] += 1
+            if closed['value']:
+                state['opens_after'] += 1
+            return fd
+
+        def os_read(fd, amount):
+            raw = real_read(fd, amount)
+            if live.get(fd):
+                state['target_reads'] += 1
+                state['read_bytes'] += len(raw)
+                if on_read is not None:
+                    on_read(raw)
+            return raw
+
+        def os_fstat(fd):
+            info = real_fstat(fd)
+            if live.get(fd):
+                state['fstats'] += 1
+                if on_fstat is not None:
+                    on_fstat(info)
+            return info
+
+        def os_close(fd):
+            if fd in sentinels or fd in finished:
+                state['double_close'] += 1
+                return None
+            if not live.pop(fd, False):
+                return real_close(fd)
+            state['target_close_calls'] += 1
+            real_close(fd)
+            finished.add(fd)
+            closed['value'] = True
+            try:
+                real_fstat(fd)
+            except OSError as exc:
+                state['real_fd_closed'].append(exc.errno == errno.EBADF)
+            else:
+                state['real_fd_closed'].append(False)
+            if occupy:
+                holder = real_open(os.devnull, os.O_RDONLY)
+                if holder != fd:
+                    os.dup2(holder, fd)
+                    real_close(holder)
+                sentinels.add(fd)
+                state['occupied'] = True
+            if close_errno is not None:
+                state['close_injections'] += 1
+                raise OSError(close_errno, 'SYNTHETIC CLOSE ERROR', str(target))
+            return None
+
+        os.open, os.read, os.close, os.fstat = os_open, os_read, os_close, os_fstat
+
+        def restore():
+            os.open, os.read, os.close, os.fstat = real_open, real_read, real_close, real_fstat
+            for fd in list(sentinels):
+                real_close(fd)
+            sentinels.clear()
+
+        return state, restore
+
+    def _watch_followups(self, seen):
+        seen['parser'] = 0
+        seen['iterdir'] = 0
+        real_load = self.bundle._load_manifest
+        real_iterdir = Path.iterdir
+
+        def load(raw):
+            seen['parser'] += 1
+            return real_load(raw)
+
+        def iterdir(path):
+            seen['iterdir'] += 1
+            return real_iterdir(path)
+
+        self.bundle._load_manifest = load
+        Path.iterdir = iterdir
+
+        def restore():
+            self.bundle._load_manifest = real_load
+            Path.iterdir = real_iterdir
+
+        return restore
+
+    def _mark_errors(self, created):
+        real = self.bundle.BundleError
+
+        class Marked(real):
+            def __init__(self, reason, exit_code=69):
+                super().__init__(reason, exit_code)
+                created.append(self)
+
+        self._marked = (real, Marked)
+        self.bundle.BundleError = Marked
+
+    def _unmark_errors(self):
+        if getattr(self, '_marked', None) is not None:
+            self.bundle.BundleError = self._marked[0]
+            self._marked = None
+
+    def _patch_owner(self, role, uid):
+        """Expected-UID seam only. This is not a foreign-owner or sudo proof."""
+        self.assertNotEqual(os.getuid(), 0)
+        name = '_manifest_owner_uid' if role == 'manifest' else '_member_owner_uid'
+        original = getattr(self.bundle, name)
+        setattr(self.bundle, name, lambda: uid)
+
+        def restore():
+            setattr(self.bundle, name, original)
+
+        return restore
+
+    def _assert_success(self, staging, built, outcome):
+        raw = (staging / 'manifest.json').read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        self.assertEqual(outcome, {
+            'verified': True, 'installable': False, 'manifest_sha256': digest,
+        })
+        self.assertIs(outcome['verified'], True)
+        self.assertIs(outcome['installable'], False)
+        self.assertEqual(outcome['manifest_sha256'], built['manifest_sha256'])
+        self.assertEqual(digest, built['manifest_sha256'])
+
+    def _assert_close_error(self, error, expected):
+        self._assert_bundle_error(error, expected, close_generated=True)
+
+    def _assert_bundle_error(self, error, expected, *, close_generated):
+        self.assertIsInstance(error, self.bundle.BundleError)
+        self.assertEqual(error.code, expected)
+        self.assertEqual(error.exit_code, 69)
+        self.assertEqual(str(error), expected)
+        self.assertEqual(error.args, (expected,))
+        self.assertIsNone(error.__cause__)
+        self.assertNotIn(str(self.root), str(error))
+        self.assertNotIn('SYNTHETIC', str(error))
+        self.assertNotIn(str(self.root), repr(error.args))
+        if close_generated:
+            self.assertTrue(error.__suppress_context__)
+
+    def _assert_chmod_only(self, before, target):
+        after = self._snapshot()
+        rel = str(target.relative_to(self.root))
+        self.assertEqual(set(before), set(after))
+        for key, old in before.items():
+            new = after[key]
+            if key == rel:
+                self.assertEqual(old[7], new[7], key)
+                self.assertEqual(old[:2], new[:2], key)
+                self.assertEqual(old[3:6], new[3:6], key)
+                self.assertNotEqual(old[2], new[2], key)
+                continue
+            self.assertEqual(old, new, key)
+
+    def _observed(self, error):
+        if error is None:
+            return 'success'
+        if isinstance(error, self.bundle.BundleError):
+            return error.code
+        return type(error).__name__
+
+    def _close_code(self, role):
+        return 'manifest_unreadable' if role == 'manifest' else 'member_unreadable'
+
+    def _detail(self, expected, error, seen, preserved):
+        return 'module=%s expected=%s observed=%s preserved=%s opens_after=%s closes=%s double=%s reads=%s bytes=%s' % (
+            self.module_path, expected, self._observed(error), preserved, seen['opens_after'],
+            seen['target_close_calls'], seen['double_close'], seen['target_reads'], seen['read_bytes'])
+
+    def _snapshot(self):
+        rows = {}
+        for path in self.root.rglob('*'):
+            info = path.lstat()
+            digest = None
+            if path.is_file() and not path.is_symlink():
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            rel = str(path.relative_to(self.root))
+            rows[rel] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
+                         info.st_mtime_ns, info.st_ctime_ns, digest)
+        return rows
+
+    def _fds(self):
+        base = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
+        return frozenset(os.listdir(base))
+
+    def _same(self, path, target):
+        return not isinstance(path, int) and os.path.normpath(os.fspath(path)) == str(target)
+
 if __name__ == '__main__':
     unittest.main()

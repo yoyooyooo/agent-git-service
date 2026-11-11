@@ -56,6 +56,10 @@ The metadata and the member SHA256 come from that same descriptor, with a
 separate read chunk that does not reuse the manifest budget as a member-size
 cap; see
 [offline staging members](upgrade-provisioning.md#offline-staging-members).
+A manifest or member read is finished only when its one descriptor close
+succeeds. A close failure is refused and does not make the staging directory
+installable; the fixed codes and the one-close rule are in the manifest and
+member contracts linked above.
 `executable=False` there skips only the staging executable-bit check. The user
 who builds a staging directory owns those files. That current-UID staging rule
 is not the runtime rule: a provisioned bundle and its ancestors must be
