@@ -46,13 +46,22 @@ original `manifest.json` bytes, not a normalized re-encoding, through
 `verification_policy.tool_bundle_manifest_sha256`.
 The manifest schema is `ags.upgrade-tool-bundle.v2`, its entry is
 `upgrade_host.py`, and its only top-level fields are `schema`, `entry` and
-`files`. Offline staging verification checks that `manifest.json` is a
+`files`. Offline staging verification `lstat`s the final component of the staging
+path and does not follow it. One directory descriptor then supplies the
+listing, `manifest.json`, and every member basename. Before success, that
+descriptor and the caller path must still name the same directory. A symlink
+at that final component is refused. An ancestor symlink is not forbidden
+here when the final component is an ordinary directory; the root-owned
+ancestor rule below stays a separate runtime check. See
+[offline staging directory](upgrade-provisioning.md#offline-staging-directory).
+It then checks that `manifest.json` is a
 regular file owned by the current user, does not follow that final component
 if it is a symlink, and applies the fixed identity plus a 65536-byte
 original-byte budget before it checks members; see
 [upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-manifest).
-Each ordinary member is then opened without following its final component.
-The metadata and the member SHA256 come from that same descriptor, with a
+Each ordinary member is then opened by basename, without following its final
+component, through the same directory descriptor.
+The metadata and the member SHA256 come from that member file descriptor, with a
 separate read chunk that does not reuse the manifest budget as a member-size
 cap; see
 [offline staging members](upgrade-provisioning.md#offline-staging-members).
@@ -60,7 +69,9 @@ A manifest or member read is finished only when its one descriptor close
 succeeds. A close failure is refused and does not make the staging directory
 installable; the fixed codes and the one-close rule are in the manifest and
 member contracts linked above.
-`executable=False` there skips only the staging executable-bit check. The user
+`executable=False` there skips only the staging file executable-bit check.
+It does not apply to a directory search bit and it does not accept a symlink
+root. The user
 who builds a staging directory owns those files. That current-UID staging rule
 is not the runtime rule: a provisioned bundle and its ancestors must be
 root-owned and not group/world writable. The runtime bundle check remains a

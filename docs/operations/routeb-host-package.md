@@ -32,11 +32,12 @@ unexpected programming errors remain errors rather than capability blockers.
 
 The package policy requires the same application revision and tree on
 both sides of the transaction. The tool bundle has a separate revision, tree
-and byte manifest. The offline staging check,
-[upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-manifest),
-checks the manifest file, its closed content, and each ordinary member
-through one no-follow descriptor
-([members](upgrade-provisioning.md#offline-staging-members)). The builder's
+and byte manifest. The offline staging check binds one directory descriptor, then checks the
+manifest file, its closed content, and each ordinary member through that
+descriptor
+([directory](upgrade-provisioning.md#offline-staging-directory),
+[manifest](upgrade-provisioning.md#offline-staging-manifest),
+[members](upgrade-provisioning.md#offline-staging-members)). The builder's
 source read is a separate input check: one descriptor supplies the copy and
 the digest, and the fallback file is used only when the primary path is
 missing
@@ -155,15 +156,17 @@ Ordinary source CI does not run the launchd experiment. Set
 `AGS_ROUTEB_NATIVE=1` only for an explicitly authorized disposable label.
 That run is not a source-CI pass and does not authorize deployment.
 
-Staging acceptance is the offline source, output, manifest, and
+Staging acceptance is the offline source, output, directory, manifest, and
 member-descriptor check in
 [upgrade bundle provisioning](upgrade-provisioning.md#offline-staging-sources).
-The output, manifest, and member checks remain
+The output, directory, manifest, and member checks remain
 [outputs](upgrade-provisioning.md#offline-staging-outputs),
+[directory](upgrade-provisioning.md#offline-staging-directory),
 [manifest](upgrade-provisioning.md#offline-staging-manifest), and
 [members](upgrade-provisioning.md#offline-staging-members).
 That acceptance includes finishing each descriptor close; a close failure
-refuses the staging directory and is not an installable result. It is not a
+refuses the staging directory and is not an installable result. The directory
+descriptor only pins the directory used for lookup. It is not a
 tool, application, or recovery binding, and it does not remove the
 production `native_full_closure_required` gate, the Darwin stage0 refusal, or
 `application_source_transition_not_admitted`.
