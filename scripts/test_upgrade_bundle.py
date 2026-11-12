@@ -6379,18 +6379,24 @@ class StagingDirectoryTests(unittest.TestCase):
         }
         extra_name = 'unexpected-probe-entry'
         removed = root / 'removed-member'
+        real_scandir, real_lstat_entry = os.scandir, os.lstat
 
         def tree(path):
+            # Do not call os.listdir. A hooked listing must be the verifier's.
+            with real_scandir(path) as scan:
+                names = sorted(entry.name for entry in scan)
             rows = []
-            for child in sorted(path.iterdir(), key=lambda item: item.name):
-                info = child.lstat()
+            for name in names:
+                child = path / name
+                info = real_lstat_entry(child)
                 row = [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
                        info.st_mtime_ns, info.st_ctime_ns]
                 if stat.S_ISREG(info.st_mode):
-                    row.append(hashlib.sha256(child.read_bytes()).hexdigest())
+                    with open(child, 'rb') as handle:
+                        row.append(hashlib.sha256(handle.read()).hexdigest())
                 elif stat.S_ISLNK(info.st_mode):
                     row.append(os.readlink(child))
-                rows.append((child.name, tuple(row)))
+                rows.append((name, tuple(row)))
             return tuple(rows)
 
         def inject():
@@ -6450,10 +6456,15 @@ class StagingDirectoryTests(unittest.TestCase):
             return None
 
         def listed(path, *args, **kwargs):
+            if not isinstance(path, int):
+                text = os.fspath(path)
+                if text.rstrip('/') in ('/proc/self/fd', '/dev/fd') or text.startswith('/proc/self/fd/') or text.startswith('/dev/fd/'):
+                    return real_list(path, *args, **kwargs)
             result = real_list(path, *args, **kwargs)
             info = real_fstat(path) if isinstance(path, int) else os.stat(path)
             state['lists'].append({
                 'is_fd': isinstance(path, int), 'fd': path if isinstance(path, int) else None,
+                'path': None if isinstance(path, int) else os.fspath(path),
                 'identity': (info.st_dev, info.st_ino),
                 'count': len(result), 'names': set(result),
             })
@@ -6491,7 +6502,7 @@ class StagingDirectoryTests(unittest.TestCase):
         self.assertEqual(state['closes'], 1, detail)
         self.assertNotIn(extra_name, state['opened'], detail)
         self.assertTrue(state['lists'], detail)
-        self.assertTrue(all(item['is_fd'] for item in state['lists']), detail)
+        self.assertEqual([item['path'] for item in state['lists'] if not item['is_fd']], [], detail)
         self.assertTrue(all(
             item['identity'] == state['directory_identity'] and item['fd'] == state['directory']
             for item in state['lists']), detail)
