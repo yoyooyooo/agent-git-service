@@ -47,8 +47,10 @@ original `manifest.json` bytes, not a normalized re-encoding, through
 The manifest schema is `ags.upgrade-tool-bundle.v2`, its entry is
 `upgrade_host.py`, and its only top-level fields are `schema`, `entry` and
 `files`. Offline staging verification `lstat`s the final component of the staging
-path and does not follow it. One directory descriptor then supplies the
-listing, `manifest.json`, and every member basename. Before success, that
+path and does not follow it. One directory descriptor then supplies
+`manifest.json` and every member basename. That descriptor is listed before
+the members and again after those reads have closed; both listings must match
+the closed set. Before success, including after the final listing, that
 descriptor and the caller path must still name the same directory. A symlink
 at that final component is refused. An ancestor symlink is not forbidden
 here when the final component is an ordinary directory; the root-owned

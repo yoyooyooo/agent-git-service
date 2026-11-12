@@ -6319,6 +6319,582 @@ class StagingDirectoryTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'staging_type_rejected')
         self.assertEqual(caught.exception.exit_code, 69)
 
+    def test_closed_member_set_is_checked_again_after_reads(self):
+        """Seventeen post-read set changes refuse. Seven controls keep their result."""
+        cases = []
+        for phase in ('first', 'middle', 'last'):
+            for kind in ('regular', 'executable', 'directory', 'symlink', 'fifo'):
+                cases.append((kind, phase, True))
+        cases.append(('regular', 'last', False))
+        cases.append(('missing', 'last', True))
+        controls = [('regular', 'initial', True), ('executable', 'initial', True),
+                    ('directory', 'initial', True), ('symlink', 'initial', True),
+                    ('fifo', 'initial', True), ('regular', 'stable', True),
+                    ('regular', 'stable', False)]
+        self.assertEqual(len(cases), 17)
+        self.assertEqual(len(controls), 7)
+        for kind, phase, executable in cases + controls:
+            with self.subTest(kind=kind, phase=phase, executable=executable):
+                expected = 'success' if phase == 'stable' else 'unexpected_member'
+                self._closed_set_after_read(kind, phase, executable, expected)
+
+    def test_final_listing_compares_names_not_count_or_order(self):
+        """The final listing is set equality, not a count, order, or history monitor."""
+        for case in ('drop-manifest', 'rename-and-add', 'transient', 'reverse-order', 'early-missing'):
+            with self.subTest(case=case):
+                self._final_listing_case(case)
+
+    def test_final_listing_anchors_keep_the_held_directory(self):
+        """Injections around both listings, and a root swap, stay on the original fd."""
+        for case in (
+            'after-first-list', 'before-second-list', 'after-second-list',
+            'swap-before-second', 'swap-after-second',
+        ):
+            with self.subTest(case=case):
+                self._final_listing_case(case)
+
+    def test_final_listing_errors_close_the_directory_once(self):
+        """Second-listing faults and directory-close faults keep one close and the first error."""
+        for case in (
+            'eintr', 'eio', 'eacces', 'type',
+            'extra-close-eio', 'extra-close-eintr',
+            'eio-close-eio', 'eio-close-eintr',
+            'success-close-eio', 'success-close-eintr',
+        ):
+            with self.subTest(case=case):
+                self._final_listing_case(case)
+
+    def _closed_set_after_read(self, kind, phase, executable, expected):
+        label = 'inventory-%s-%s-%s' % (kind, phase, int(executable))
+        root, source, staging, built = self._make(label)
+        sentinel = root / 'sentinel'
+        sentinel.write_bytes(b'SYNTHETIC OUTSIDE')
+        sentinel.chmod(0o600)
+        order = list(json.loads((staging / 'manifest.json').read_bytes())['files'])
+        self.assertEqual(order[0] != order[-1], True)
+        target = {'first': order[0], 'middle': order[len(order) // 2], 'last': order[-1]}.get(phase)
+        state = {
+            'injected': 0, 'lists': [], 'opened': [], 'directory': None,
+            'directory_identity': None, 'closes': 0, 'closed_target': False, 'live': {},
+        }
+        extra_name = 'unexpected-probe-entry'
+        removed = root / 'removed-member'
+
+        def tree(path):
+            rows = []
+            for child in sorted(path.iterdir(), key=lambda item: item.name):
+                info = child.lstat()
+                row = [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
+                       info.st_mtime_ns, info.st_ctime_ns]
+                if stat.S_ISREG(info.st_mode):
+                    row.append(hashlib.sha256(child.read_bytes()).hexdigest())
+                elif stat.S_ISLNK(info.st_mode):
+                    row.append(os.readlink(child))
+                rows.append((child.name, tuple(row)))
+            return tuple(rows)
+
+        def inject():
+            self.assertEqual(state['injected'], 0)
+            if kind in ('regular', 'executable'):
+                path = staging / extra_name
+                path.write_bytes(b'SYNTHETIC EXTRA')
+                path.chmod(0o700 if kind == 'executable' else 0o600)
+            elif kind == 'directory':
+                (staging / extra_name).mkdir(mode=0o700)
+            elif kind == 'symlink':
+                (staging / extra_name).symlink_to(sentinel)
+            elif kind == 'fifo':
+                os.mkfifo(staging / extra_name, 0o600)
+            elif kind == 'missing':
+                self.assertIn(order[0], state['opened'])
+                self.assertNotEqual(order[0], target)
+                (staging / order[0]).rename(removed)
+            else:
+                self.fail(kind)
+            state['injected'] += 1
+            state['after_injection'] = tree(staging)
+
+        if phase == 'initial':
+            inject()
+        source_before = tree(source)
+        baseline = tree(staging)
+        real_open, real_close, real_list, real_fstat = os.open, os.close, os.listdir, os.fstat
+
+        def opened(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if flags & os.O_DIRECTORY:
+                self.assertIsNone(state['directory'])
+                state['directory'] = fd
+                info = real_fstat(fd)
+                state['directory_identity'] = (info.st_dev, info.st_ino)
+            else:
+                state['opened'].append(os.fspath(path))
+                state['live'][fd] = os.fspath(path)
+            return fd
+
+        def closed(fd):
+            name = state['live'].pop(fd, None)
+            real_close(fd)
+            if fd == state['directory']:
+                state['closes'] += 1
+            if name is None or name != target or state['injected']:
+                return None
+            try:
+                real_fstat(fd)
+            except OSError as exc:
+                self.assertEqual(exc.errno, errno.EBADF)
+            else:
+                self.fail('member descriptor was still open after close')
+            state['closed_target'] = True
+            inject()
+            return None
+
+        def listed(path, *args, **kwargs):
+            result = real_list(path, *args, **kwargs)
+            info = real_fstat(path) if isinstance(path, int) else os.stat(path)
+            state['lists'].append({
+                'is_fd': isinstance(path, int), 'fd': path if isinstance(path, int) else None,
+                'identity': (info.st_dev, info.st_ino),
+                'count': len(result), 'names': set(result),
+            })
+            return result
+
+        def identities():
+            base = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
+            found = {}
+            for text in real_list(base):
+                try:
+                    fd = int(text)
+                    info = os.fstat(fd)
+                except (OSError, ValueError):
+                    continue
+                found[fd] = (info.st_dev, info.st_ino, info.st_mode)
+            return found
+
+        before_fds = identities()
+        os.open, os.close, os.listdir = opened, closed, listed
+        outcome = None
+        caught = None
+        try:
+            try:
+                outcome = self.bundle.verify(staging, executable=executable)
+            except self.bundle.BundleError as exc:
+                caught = exc
+        finally:
+            os.open, os.close, os.listdir = real_open, real_close, real_list
+        detail = 'kind=%s phase=%s executable=%s injected=%s lists=%s opened=%s closes=%s' % (
+            kind, phase, executable, state['injected'], len(state['lists']),
+            len(state['opened']), state['closes'])
+        self.assertEqual(identities(), before_fds, detail)
+        self.assertEqual(tree(source), source_before, detail)
+        self.assertEqual(sentinel.read_bytes(), b'SYNTHETIC OUTSIDE', detail)
+        self.assertEqual(state['closes'], 1, detail)
+        self.assertNotIn(extra_name, state['opened'], detail)
+        self.assertTrue(state['lists'], detail)
+        self.assertTrue(all(item['is_fd'] for item in state['lists']), detail)
+        self.assertTrue(all(
+            item['identity'] == state['directory_identity'] and item['fd'] == state['directory']
+            for item in state['lists']), detail)
+        self.assertEqual(tree(staging), state.get('after_injection', baseline), detail)
+        closed_names = set(self.bundle.REQUIRED) | {'manifest.json'}
+        if phase == 'initial':
+            self.assertEqual(state['injected'], 1, detail)
+            self.assertFalse(state['closed_target'], detail)
+            self.assertEqual(state['opened'], ['manifest.json'], detail)
+            self.assertEqual(len(state['lists']), 1, detail)
+            self.assertEqual(state['lists'][0]['names'], closed_names | {extra_name}, detail)
+        elif phase == 'stable':
+            self.assertEqual(state['injected'], 0, detail)
+            self.assertEqual(sorted(state['opened']), sorted(closed_names), detail)
+            self.assertEqual(len(state['lists']), 2, detail)
+            self.assertEqual(state['lists'][0]['names'], closed_names, detail)
+            self.assertEqual(state['lists'][1]['names'], closed_names, detail)
+        else:
+            self.assertEqual(state['injected'], 1, detail)
+            self.assertTrue(state['closed_target'], detail)
+            self.assertEqual(sorted(state['opened']), sorted(closed_names), detail)
+            self.assertEqual(len(state['lists']), 2, detail)
+            self.assertEqual(state['lists'][0]['names'], closed_names, detail)
+            if kind == 'missing':
+                self.assertEqual(state['lists'][1]['names'], closed_names - {order[0]}, detail)
+                self.assertTrue(removed.is_file(), detail)
+                self.assertEqual(removed.read_bytes(), (source / order[0]).read_bytes(), detail)
+            else:
+                self.assertEqual(state['lists'][1]['names'], closed_names | {extra_name}, detail)
+        if caught is None:
+            self.assertEqual(outcome, {
+                'verified': True, 'installable': False,
+                'manifest_sha256': built['manifest_sha256'],
+            }, detail)
+            actual = 'success'
+        else:
+            self._assert_bundle(caught, caught.code)
+            actual = caught.code
+        try:
+            self.bundle.verify(staging, executable=executable)
+            fresh = 'success'
+        except self.bundle.BundleError as exc:
+            fresh = exc.code if exc.exit_code == 69 and str(exc) == exc.code else 'bad-error'
+        self.assertEqual(fresh, 'success' if phase == 'stable' else 'unexpected_member', detail)
+        self.assertEqual(actual, expected, detail)
+
+    def _final_listing_case(self, case):
+        import traceback
+        root, source, staging, built = self._make('final-' + case)
+        sentinel = root / 'sentinel'
+        sentinel.write_bytes(b'SYNTHETIC OUTSIDE')
+        sentinel.chmod(0o600)
+        order = list(json.loads((staging / 'manifest.json').read_bytes())['files'])
+        closed_names = set(self.bundle.REQUIRED) | {'manifest.json'}
+        self.assertEqual(set(order), set(self.bundle.REQUIRED))
+        self.assertNotEqual(order[0], order[-1])
+        manifest_bytes = (staging / 'manifest.json').read_bytes()
+        alternate = None
+        alternate_ids = set()
+        if case.startswith('swap-'):
+            alternate = root / 'alternate'
+            self.bundle.build(source, alternate)
+            payload = json.loads((alternate / 'manifest.json').read_bytes())
+            payload['schema'] = 'synthetic.invalid'
+            (alternate / 'manifest.json').write_bytes(json.dumps(payload).encode())
+            for child in alternate.iterdir():
+                info = child.lstat()
+                if stat.S_ISREG(info.st_mode):
+                    alternate_ids.add((info.st_dev, info.st_ino))
+        directory_id = (staging.lstat().st_dev, staging.lstat().st_ino)
+        extra_name = 'unexpected-probe-entry'
+        close_errno = None
+        if case.endswith('close-eio'):
+            close_errno = errno.EIO
+        elif case.endswith('close-eintr'):
+            close_errno = errno.EINTR
+        listing_errno = {
+            'eio': errno.EIO, 'eacces': errno.EACCES,
+            'eio-close-eio': errno.EIO, 'eio-close-eintr': errno.EIO,
+        }.get(case)
+        state = {
+            'directory': None, 'opened': [], 'lists': [], 'attempts': 0, 'eintr': 0,
+            'faults': 0, 'closes': 0, 'double': 0, 'sentinels': set(), 'path_lists': [],
+            'alternate_opens': 0, 'lstat_after_final': 0, 'live': {},
+            'opened_at_mutation': None,
+        }
+
+        def children(directory):
+            rows = {}
+            for child in directory.iterdir():
+                info = child.lstat()
+                row = [info.st_mode, info.st_uid, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+                if stat.S_ISREG(info.st_mode):
+                    row.append(hashlib.sha256(child.read_bytes()).hexdigest())
+                elif stat.S_ISLNK(info.st_mode):
+                    row.append(os.readlink(child))
+                rows[child.name] = tuple(row)
+            return rows
+
+        def identities():
+            base = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
+            found = {}
+            for text in os.listdir(base):
+                try:
+                    fd = int(text)
+                    info = os.fstat(fd)
+                except (OSError, ValueError):
+                    continue
+                found[fd] = (info.st_dev, info.st_ino, info.st_mode)
+            return found
+
+        baseline = children(staging)
+        source_before = children(source)
+        real_open, real_close, real_list = os.open, os.close, os.listdir
+        real_fstat, real_lstat = os.fstat, os.lstat
+
+        def add_extra():
+            path = staging / extra_name
+            self.assertFalse(path.exists())
+            path.write_bytes(b'SYNTHETIC EXTRA')
+            path.chmod(0o600)
+            state['extra'] = True
+
+        def swap():
+            self.assertIsNotNone(alternate)
+            staging.rename(root / 'held-staging')
+            alternate.rename(staging)
+            state['swapped'] = True
+
+        def opened(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            info = real_fstat(fd)
+            if stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) in alternate_ids:
+                state['alternate_opens'] += 1
+            if flags & os.O_DIRECTORY:
+                self.assertIsNone(state['directory'])
+                self.assertEqual((info.st_dev, info.st_ino), directory_id)
+                state['directory'] = fd
+            else:
+                state['opened'].append(os.fspath(path))
+                state['live'][fd] = os.fspath(path)
+            return fd
+
+        def closed(fd):
+            if fd in state['sentinels']:
+                state['double'] += 1
+                return None
+            name = state['live'].pop(fd, None)
+            if fd == state['directory']:
+                state['closes'] += 1
+                real_close(fd)
+                try:
+                    real_fstat(fd)
+                except OSError as exc:
+                    self.assertEqual(exc.errno, errno.EBADF)
+                else:
+                    self.fail('directory descriptor was still open after close')
+                holder = real_open(os.devnull, os.O_RDONLY)
+                if holder != fd:
+                    os.dup2(holder, fd)
+                    real_close(holder)
+                state['sentinels'].add(fd)
+                if close_errno is not None:
+                    state['close_raises'] = state.get('close_raises', 0) + 1
+                    raise OSError(close_errno, 'SYNTHETIC DIRECTORY CLOSE')
+                return None
+            real_close(fd)
+            if case == 'transient' and name == order[-1] and not state.get('transient'):
+                try:
+                    real_fstat(fd)
+                except OSError as exc:
+                    self.assertEqual(exc.errno, errno.EBADF)
+                else:
+                    self.fail('member descriptor was still open after close')
+                state['opened_at_mutation'] = list(state['opened'])
+                add_extra()
+                (staging / extra_name).unlink()
+                state['extra'] = False
+                state['transient'] = True
+            return None
+
+        def listed(path, *args, **kwargs):
+            if not isinstance(path, int):
+                state['path_lists'].append(os.fspath(path))
+                return real_list(path, *args, **kwargs)
+            info = real_fstat(path)
+            identity = (info.st_dev, info.st_ino)
+            if identity != directory_id:
+                state['path_lists'].append('foreign:%s' % (identity,))
+                return real_list(path, *args, **kwargs)
+            state['attempts'] += 1
+            if state['attempts'] == 2 and case == 'eintr' and not state['eintr']:
+                state['eintr'] += 1
+                raise OSError(errno.EINTR, 'interrupted')
+            if state['attempts'] == 2 and case == 'type':
+                state['faults'] += 1
+                raise TypeError('synthetic listing type')
+            if state['attempts'] == 2 and listing_errno is not None:
+                state['faults'] += 1
+                raise OSError(listing_errno, 'synthetic listing')
+            if state['attempts'] == 2 and case in (
+                    'before-second-list', 'extra-close-eio', 'extra-close-eintr',
+                    'drop-manifest', 'rename-and-add', 'swap-before-second'):
+                state['opened_at_mutation'] = list(state['opened'])
+                if case in ('before-second-list', 'extra-close-eio', 'extra-close-eintr'):
+                    add_extra()
+                elif case == 'drop-manifest':
+                    (staging / 'manifest.json').rename(root / 'held-manifest')
+                elif case == 'rename-and-add':
+                    (staging / order[0]).rename(root / 'removed-member')
+                    add_extra()
+                else:
+                    swap()
+            names = list(real_list(path, *args, **kwargs))
+            if case == 'reverse-order' and state['attempts'] >= 2:
+                state['second_real'] = list(names)
+                names = list(reversed(names))
+            state['lists'].append({
+                'fd': path, 'identity': identity, 'names': set(names), 'order': list(names),
+            })
+            if case == 'after-first-list' and len(state['lists']) == 1 and not state.get('extra'):
+                state['opened_at_mutation'] = list(state['opened'])
+                add_extra()
+            if case == 'early-missing' and len(state['lists']) == 1 and not state.get('dropped'):
+                state['opened_at_mutation'] = list(state['opened'])
+                (staging / order[-1]).rename(root / 'not-yet-read')
+                state['dropped'] = True
+            if case == 'after-second-list' and len(state['lists']) == 2 and not state.get('extra'):
+                state['opened_at_mutation'] = list(state['opened'])
+                add_extra()
+            if case == 'swap-after-second' and len(state['lists']) == 2 and not state.get('swapped'):
+                state['opened_at_mutation'] = list(state['opened'])
+                swap()
+            return names
+
+        def lstat(path, *args, **kwargs):
+            if (not isinstance(path, int)
+                    and os.path.normpath(os.fspath(path)) == str(staging)
+                    and len(state['lists']) >= 2):
+                state['lstat_after_final'] += 1
+            return real_lstat(path, *args, **kwargs)
+
+        before_fds = identities()
+        os.open, os.close, os.listdir, os.lstat = opened, closed, listed, lstat
+        outcome = None
+        caught = None
+        try:
+            try:
+                outcome = self.bundle.verify(staging)
+            except self.bundle.BundleError as exc:
+                caught = exc
+        finally:
+            os.open, os.close, os.listdir, os.lstat = real_open, real_close, real_list, real_lstat
+            for fd in list(state['sentinels']):
+                real_close(fd)
+            state['sentinels'].clear()
+        detail = 'case=%s attempts=%s lists=%s closes=%s opened=%s' % (
+            case, state['attempts'], len(state['lists']), state['closes'], len(state['opened']))
+        self.assertIs(os.open, real_open, detail)
+        self.assertIs(os.close, real_close, detail)
+        self.assertIs(os.listdir, real_list, detail)
+        self.assertIs(os.lstat, real_lstat, detail)
+        self.assertEqual(identities(), before_fds, detail)
+        self.assertEqual(children(source), source_before, detail)
+        self.assertEqual(sentinel.read_bytes(), b'SYNTHETIC OUTSIDE', detail)
+        self.assertEqual(state['closes'], 1, detail)
+        self.assertEqual(state['double'], 0, detail)
+        self.assertEqual(state['alternate_opens'], 0, detail)
+        self.assertEqual(state['path_lists'], [], detail)
+        self.assertNotIn(extra_name, state['opened'], detail)
+        self.assertEqual(len(state['opened']), len(set(state['opened'])), detail)
+        self.assertTrue(all('/' not in name and name == Path(name).name for name in state['opened']), detail)
+        for item in state['lists']:
+            self.assertEqual(item['fd'], state['directory'], detail)
+            self.assertEqual(item['identity'], directory_id, detail)
+        self.assertEqual(state['lists'][0]['names'], closed_names, detail)
+        expected = {
+            'drop-manifest': 'unexpected_member', 'rename-and-add': 'unexpected_member',
+            'transient': 'success', 'reverse-order': 'success', 'early-missing': 'member_missing',
+            'after-first-list': 'unexpected_member', 'before-second-list': 'unexpected_member',
+            'after-second-list': 'success', 'swap-before-second': 'staging_changed',
+            'swap-after-second': 'staging_changed', 'eintr': 'success',
+            'eio': 'staging_unreadable', 'eacces': 'staging_unreadable', 'type': 'staging_unreadable',
+            'extra-close-eio': 'unexpected_member', 'extra-close-eintr': 'unexpected_member',
+            'eio-close-eio': 'staging_unreadable', 'eio-close-eintr': 'staging_unreadable',
+            'success-close-eio': 'staging_unreadable', 'success-close-eintr': 'staging_unreadable',
+        }[case]
+        fresh_expected = {
+            'drop-manifest': 'manifest_missing', 'early-missing': 'unexpected_member',
+            'swap-before-second': 'manifest_invalid', 'swap-after-second': 'manifest_invalid',
+            'transient': 'success', 'reverse-order': 'success', 'eintr': 'success',
+            'eio': 'success', 'eacces': 'success', 'type': 'success',
+            'eio-close-eio': 'success', 'eio-close-eintr': 'success',
+            'success-close-eio': 'success', 'success-close-eintr': 'success',
+        }.get(case, 'unexpected_member')
+        if case == 'early-missing':
+            self.assertEqual(set(state['opened']), closed_names - {order[-1]}, detail)
+            self.assertEqual(state['opened_at_mutation'], ['manifest.json'], detail)
+            self.assertTrue((root / 'not-yet-read').is_file(), detail)
+        else:
+            self.assertEqual(set(state['opened']), closed_names, detail)
+        one_list = case in (
+            'early-missing', 'eio', 'eacces', 'type', 'eio-close-eio', 'eio-close-eintr')
+        self.assertEqual(len(state['lists']), 1 if one_list else 2, detail)
+        if case == 'eintr':
+            self.assertEqual(state['eintr'], 1, detail)
+            self.assertEqual(state['attempts'], 3, detail)
+        elif listing_errno is not None or case == 'type':
+            self.assertEqual(state['faults'], 1, detail)
+            self.assertEqual(state['attempts'], 2, detail)
+        else:
+            self.assertEqual(state['attempts'], len(state['lists']), detail)
+        if not one_list:
+            second = state['lists'][1]['names']
+            if case in ('after-first-list', 'before-second-list', 'extra-close-eio', 'extra-close-eintr'):
+                self.assertEqual(second, closed_names | {extra_name}, detail)
+            elif case == 'drop-manifest':
+                self.assertEqual(second, closed_names - {'manifest.json'}, detail)
+            elif case == 'rename-and-add':
+                self.assertEqual(len(second), len(closed_names), detail)
+                self.assertEqual(second, (closed_names - {order[0]}) | {extra_name}, detail)
+                self.assertNotEqual(second, closed_names, detail)
+            else:
+                self.assertEqual(second, closed_names, detail)
+        if case == 'reverse-order':
+            self.assertEqual(set(state['second_real']), closed_names, detail)
+            self.assertEqual(state['lists'][1]['order'], list(reversed(state['second_real'])), detail)
+            self.assertNotEqual(state['lists'][1]['order'], state['second_real'], detail)
+        if case == 'after-first-list':
+            self.assertEqual(state['opened_at_mutation'], ['manifest.json'], detail)
+        if case in ('before-second-list', 'swap-before-second', 'after-second-list', 'swap-after-second'):
+            self.assertEqual(set(state['opened_at_mutation']), closed_names, detail)
+        if case == 'transient':
+            self.assertTrue(state['transient'], detail)
+            self.assertEqual(set(state['opened_at_mutation']), closed_names, detail)
+        rechecked = case in (
+            'transient', 'reverse-order', 'after-second-list', 'eintr',
+            'swap-before-second', 'swap-after-second', 'success-close-eio', 'success-close-eintr')
+        self.assertEqual(state['lstat_after_final'] >= 1, rechecked, detail)
+        if close_errno is not None:
+            self.assertEqual(state.get('close_raises'), 1, detail)
+        if case.startswith('swap-'):
+            held = root / 'held-staging'
+            self.assertTrue(state['swapped'], detail)
+            self.assertEqual(children(held), baseline, detail)
+            self.assertEqual((held.lstat().st_dev, held.lstat().st_ino), directory_id, detail)
+            self.assertNotEqual((staging.lstat().st_dev, staging.lstat().st_ino), directory_id, detail)
+            self.assertFalse(alternate.exists(), detail)
+        elif case == 'drop-manifest':
+            after = children(staging)
+            self.assertNotIn('manifest.json', after, detail)
+            self.assertEqual(
+                {key: value for key, value in after.items()}, {key: value for key, value in baseline.items() if key != 'manifest.json'},
+                detail)
+            self.assertEqual((root / 'held-manifest').read_bytes(), manifest_bytes, detail)
+        elif case == 'rename-and-add':
+            after = children(staging)
+            self.assertNotIn(order[0], after, detail)
+            self.assertIn(extra_name, after, detail)
+            self.assertEqual(len(after), len(closed_names), detail)
+            self.assertEqual((root / 'removed-member').read_bytes(), (source / order[0]).read_bytes(), detail)
+        elif case == 'early-missing':
+            after = children(staging)
+            self.assertNotIn(order[-1], after, detail)
+            self.assertEqual((root / 'not-yet-read').read_bytes(), (source / order[-1]).read_bytes(), detail)
+        elif state.get('extra'):
+            after = children(staging)
+            self.assertIn(extra_name, after, detail)
+            rest = {key: value for key, value in after.items() if key != extra_name}
+            self.assertEqual(rest, baseline, detail)
+        else:
+            self.assertEqual(children(staging), baseline, detail)
+        if caught is None:
+            self.assertEqual(outcome, {
+                'verified': True, 'installable': False,
+                'manifest_sha256': built['manifest_sha256'],
+            }, detail)
+            actual = 'success'
+        else:
+            self._assert_bundle(caught, expected)
+            self.assertIsNone(caught.__cause__, detail)
+            frames = ''.join(traceback.format_tb(caught.__traceback__))
+            if expected == 'staging_changed':
+                self.assertIn('_require_held_directory', frames, detail)
+                self.assertNotIn('_list_staging', frames, detail)
+            elif case.startswith('success-close-'):
+                self.assertIn('_close_directory_success', frames, detail)
+                self.assertNotIn('_list_staging', frames, detail)
+            elif expected == 'member_missing':
+                self.assertIn('_verify_member', frames, detail)
+                self.assertNotIn('_list_staging', frames, detail)
+            else:
+                self.assertIn('_list_staging', frames, detail)
+                self.assertNotIn('_close_directory_success', frames, detail)
+            actual = caught.code
+        self.assertEqual(actual, expected, detail)
+        try:
+            self.bundle.verify(staging)
+            fresh = 'success'
+        except self.bundle.BundleError as exc:
+            fresh = exc.code if exc.exit_code == 69 and str(exc) == exc.code else 'bad-error'
+        self.assertEqual(fresh, fresh_expected, detail)
+
     def _recorded(self, label, phase, replacement, executable, expected):
         staging = self.root / label / 'staging'
         source = self.root / label / 'source'
@@ -6933,7 +7509,7 @@ class StagingDirectoryTests(unittest.TestCase):
             'verified': True, 'installable': False,
             'manifest_sha256': built['manifest_sha256'],
         })
-        self.assertEqual(state['lists'], [state['dir']])
+        self.assertEqual(state['lists'], [state['dir'], state['dir']])
         self.assertEqual({item[0] for item in state['opens']}, names)
         self.assertEqual(len(state['opens']), len(names))
         for text, dir_fd, flags in state['opens']:
