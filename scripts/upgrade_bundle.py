@@ -50,14 +50,17 @@ Verification first lstats the final component of the caller path and does not
 follow that component. A symlink or other non-directory is
 staging_type_rejected. A missing path stays manifest_missing. It then holds
 one directory descriptor opened O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK.
-Listing, the manifest, and every required member use that descriptor and a
-single basename; they do not reopen the caller path. Before success, the
+The manifest and every required member use that descriptor and a single
+basename; they do not reopen the caller path. The same descriptor is listed
+before the members and again after every member read has closed. Both
+listings must equal the fixed closed set. An extra or missing name is
+unexpected_member. Before success, and again after that final listing, the
 descriptor and the caller path must still name that same directory object.
 A replaced or removed root is staging_changed. Directory I/O or a missing
 directory, no-follow, or listing capability is staging_unreadable. The
 directory descriptor is closed once. This pins the directory used for lookup.
-It does not freeze members, reject an ancestor symlink, or make the bundle
-installable.
+It does not freeze members between or after those observations, reject an
+ancestor symlink, or make the bundle installable.
 
 Each manifest or member descriptor is closed once. That close is not retried,
 including after EINTR, and it is not attempted a second time. The read is
@@ -1163,6 +1166,8 @@ def verify(staging, *, executable=True):
         for name, digest in files.items():
             _recheck_staging(fd, staging, identity)
             _verify_member(name, digest, executable=executable, dir_fd=fd)
+        _recheck_staging(fd, staging, identity)
+        _list_staging(fd)
         _recheck_staging(fd, staging, identity)
         result = {
             'verified': True, 'installable': False,

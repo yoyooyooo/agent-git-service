@@ -32,12 +32,16 @@ unexpected programming errors remain errors rather than capability blockers.
 
 The package policy requires the same application revision and tree on
 both sides of the transaction. The tool bundle has a separate revision, tree
-and byte manifest. The offline verifier binds one directory descriptor, then checks the
+and byte manifest. The offline verifier binds one directory descriptor and
+lists it against the closed member set before the members and again after
+they close, then checks the
 manifest file, its closed content, and each ordinary member through that
 descriptor
 ([directory](upgrade-provisioning.md#offline-staging-directory),
 [manifest](upgrade-provisioning.md#offline-staging-manifest),
-[members](upgrade-provisioning.md#offline-staging-members)). The builder's
+[members](upgrade-provisioning.md#offline-staging-members)).
+Those two listings are not a tool revision, Git tree, or recovery binding
+and do not admit production. The builder's
 source read is a separate input check: one file descriptor supplies the copy
 and the digest. The fallback directory is used only when `release-source.json`
 is missing inside the held source directory

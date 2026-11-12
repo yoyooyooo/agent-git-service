@@ -9,8 +9,10 @@ does not install.
 `scripts/upgrade_bundle.py` builds a closed staging bundle. It copies only the
 reviewed member list, writes a manifest that does not include its own digest,
 and verifies that staging directory read-only. Verification holds one
-directory descriptor for the listing, the manifest, and the members, and
-checks that the caller path still names that directory before success. See
+directory descriptor for the manifest and the members. It lists that
+descriptor before the members and again after they are closed; both listings
+must match the closed member set. It checks that the caller path still names
+that directory before success, including after the final listing. See
 [Offline staging directory](#offline-staging-directory). Verification success
 sets `installable` false. The builder first binds the source directory, and
 binds `fork` only when `release-source.json` is absent inside that directory.
@@ -271,7 +273,7 @@ the same code. The fifo check does not wait for a writer. A missing path,
 including a parent that is not a directory, stays `manifest_missing`.
 
 The directory is opened once, `O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK`.
-`fstat` must show that same directory object. Listing uses that descriptor.
+`fstat` must show that same directory object. Each listing uses that descriptor.
 `manifest.json` and each required member are a single basename. Their
 no-follow `stat` and `open` use that basename and the same descriptor. They
 are not joined back onto the caller path. A slash, `..`, or another directory
@@ -280,33 +282,53 @@ following, cannot `stat` through a directory descriptor, or cannot list a
 descriptor, verification returns `staging_unreadable` and does not fall back
 to path reads.
 
+The held descriptor is listed twice. The first listing is after the manifest
+is accepted and before the first member. The second is after every manifest
+and member read has closed, and after the directory identity check that
+follows those reads. Both use that same still-open descriptor. Neither
+reopens the caller path or calls verify again. Each result is compared as a
+set with the fixed closed member list plus `manifest.json`. Order does not
+matter, and a matching count is not enough. An extra or missing name is
+`unexpected_member`. A listing `OSError` is `staging_unreadable`; `EINTR`
+retries only that listing call. An earlier manifest or member error keeps its
+code. A name that disappears before its own read is not rewritten into
+`unexpected_member`.
+
 Before success, `fstat` of the held descriptor and a no-follow `lstat` of the
 original final component must still name that directory object: device,
-inode, and type. Size and timestamps are not compared. A root that was
-replaced, removed, or changed type is `staging_changed`, including when the
-replacement directory has the same bytes. Verification may notice that change
-before the last check. It does not read files from the replacement. A
-directory `fstat`, listing, or close failure is `staging_unreadable`.
+inode, and type. That identity check also runs again after the final listing
+and before the result is assembled. Size and timestamps are not compared.
+A root that was replaced, removed, or changed type is `staging_changed`,
+including when the replacement directory has the same bytes. The final
+listing still enumerates the held descriptor and does not read the
+replacement. Verification may notice a root change before the last check.
+A directory `fstat`, listing, or close failure is `staging_unreadable`.
 
 The directory descriptor is closed once. The close is not retried, including
 after EINTR, and it is not closed again. Success requires that close. A close
 OSError is `staging_unreadable`, exit 69, and the message is only that code.
-If verification had already raised, including a manifest or member refusal, a
-programming error, or cancellation, that earlier exception is kept. A
-directory close OSError does not replace it. An exception the caller is
-already handling is not this close's failure. One close attempt does not
+The final listing is inside this same lifetime. If it fails, the directory is
+still closed once, and a close OSError does not replace the set or listing
+error. If verification had already raised, including a manifest or member
+refusal, a programming error, or cancellation, that earlier exception is
+kept. A directory close OSError does not replace it. An exception the caller
+is already handling is not this close's failure. One close attempt does not
 prove that every OS released the descriptor after an unknown close error.
 
-`executable=False` still skips only a file executable bit. It does not accept
+`executable=False` still skips only a file executable bit. It does not skip
+either closed-set listing, and it does not accept
 a symlink root. A directory search bit is not `unexpected_executable`. The
 check does not require mode `0700`, a directory owner rule, or an nlink rule.
 An ancestor symlink remains allowed when the final component is an ordinary
 directory. Mode `0755` remains acceptable.
 
-The descriptor pins the directory used for lookup. It does not freeze
-members, prove they were consistent at one instant, or catch every case where
-the root is replaced and restored before the last check. It does not cover a
-change after that check. It does not chmod, chown, rename, unlink, or execute
+The descriptor pins the directory used for lookup. The two listings are two
+observations of the closed set, one before the member reads and one after
+those reads have closed. They do not freeze members, prove the bytes were
+consistent at one instant, or catch a name that is added and removed between
+them. Directory mtime or ctime is not a member snapshot. They do not catch
+every case where the root is replaced and restored before the last check.
+They do not cover a change after the final listing or after that check. The check does not chmod, chown, rename, unlink, or execute
 a member, and it does not write a marker, pin, approval, or registration. It
 does not admit production. Success remains `verified=true` and
 `installable=false`. Creating the directory is a separate output check; see
@@ -431,9 +453,11 @@ the open uses the same code. An identity, length, or final-path change
 observed around the read is `member_changed`. That includes a different
 inode with the same bytes, a rewrite, truncation, or growth of the open
 file, and a permission change after the open. A permission or other member
-IO failure is `member_unreadable`. Disappearance after the directory listing
-and before the first member `lstat` or open is `member_missing`. A listing
-that already lacks a required name stays `unexpected_member`. These member
+IO failure is `member_unreadable`. Disappearance after the first directory
+listing and before that member's first `lstat` or open is `member_missing`.
+A listing that already lacks a required name stays `unexpected_member`.
+Removal after the member was read is left to the final closed-set listing.
+These member
 failures are `BundleError`, exit 69, and the message is only the fixed code.
 
 The held directory descriptor fixes the directory object used for lookup.
