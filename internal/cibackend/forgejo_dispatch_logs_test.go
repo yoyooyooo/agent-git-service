@@ -141,7 +141,7 @@ func detachedDispatchLogFixture(t *testing.T, run map[string]any) (Backend, *gor
 	for _, statement := range []string{
 		`CREATE TABLE repository (id integer primary key, owner_name text, lower_name text)`,
 		`CREATE TABLE action_run (id integer primary key, repo_id integer, "index" integer, ref text, commit_sha text, event text)`,
-		`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text, status integer DEFAULT 0, started integer DEFAULT 0, stopped integer DEFAULT 0)`,
+		`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text, status integer DEFAULT 0, started integer DEFAULT 0, stopped integer DEFAULT 0, attempt integer DEFAULT 0)`,
 		`CREATE TABLE action_task (id integer primary key, repo_id integer, commit_sha text, log_filename text, log_in_storage boolean, log_expired boolean)`,
 		`INSERT INTO repository VALUES (1,'ci','project')`,
 		`INSERT INTO action_run VALUES (17,1,9,'` + head + `','` + head + `','workflow_dispatch')`,
