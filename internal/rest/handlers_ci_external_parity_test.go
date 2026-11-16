@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -142,19 +141,9 @@ func TestExternalCheckRunsAndEmptyArtifacts(t *testing.T) {
 		t.Fatal("check's parent run lost its head SHA")
 	}
 	artifacts := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/runs/%d/artifacts", repo.FullName, runID), nil)
-	assertStatusCode(t, artifacts, 200)
-	artifactBody := testharness.DecodeJSON(t, artifacts)
-	if int(artifactBody["total_count"].(float64)) != 0 || artifactBody["artifacts"] == nil {
-		t.Fatalf("artifacts=%s", artifacts.Body.String())
-	}
-	if _, ok := artifactBody["artifacts"].([]any); !ok {
-		t.Fatalf("artifacts is not a list: %s", artifacts.Body.String())
-	}
+	assertStatusCode(t, artifacts, http.StatusNotImplemented)
 	repoArtifacts := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/artifacts", repo.FullName), nil)
-	assertStatusCode(t, repoArtifacts, 200)
-	if !strings.Contains(repoArtifacts.Body.String(), `"artifacts":[]`) && !strings.Contains(repoArtifacts.Body.String(), `"artifacts": []`) {
-		t.Fatalf("repo artifacts=%s", repoArtifacts.Body.String())
-	}
+	assertStatusCode(t, repoArtifacts, http.StatusNotImplemented)
 	download := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/artifacts/1/zip", repo.FullName), nil)
 	if download.Code != http.StatusNotImplemented {
 		t.Fatalf("download status=%d body=%s", download.Code, download.Body.String())

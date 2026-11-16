@@ -26,10 +26,11 @@ type CIRun struct {
 	Backend    string
 }
 type CIJob struct {
-	ID      uint64
-	RunID   uint64
-	Job     cibackend.Job
-	Backend string
+	ID          uint64
+	RunID       uint64
+	Job         cibackend.Job
+	Backend     string
+	StepsStatus string
 }
 type CIRuns struct {
 	Runs     []CIRun
@@ -131,7 +132,7 @@ func (s *Service) CIRuns(ctx context.Context, repository string, query cibackend
 	out := CIRuns{Runs: []CIRun{}, Total: found.Total, Complete: found.Complete, Backend: sel.Name}
 	for _, run := range found.Items {
 		// Do not rely on a provider actually honoring its query parameters.
-		if !cibackend.MatchesRunQuery(run, query) {
+		if query.HeadSHA != "" && run.HeadSHA != query.HeadSHA || query.Branch != "" && run.Branch != query.Branch || query.Event != "" && run.Event != query.Event || query.Status != "" && run.Status != query.Status {
 			continue
 		}
 		r, e := s.ciRun(ctx, repo, sel, run)
@@ -142,32 +143,6 @@ func (s *Service) CIRuns(ctx context.Context, repository string, query cibackend
 	}
 	return out, nil
 }
-
-// CIReadRun accepts typed read selectors without changing numeric ID semantics
-// or widening mutation routes. Repository access is checked before any selector
-// is resolved by the configured backend.
-func (s *Service) CIReadRun(ctx context.Context, repository, selector string) (CIRun, error) {
-	repo, sel, err := s.ciScope(ctx, repository)
-	if err != nil {
-		return CIRun{}, err
-	}
-	if id, err := strconv.ParseUint(selector, 10, 64); err == nil && id > 0 {
-		return s.CIRun(ctx, repository, id)
-	}
-	backend, ok := sel.Backend.(cibackend.RunSelectorBackend)
-	if !ok || sel.Kind != "forgejo" {
-		return CIRun{}, ErrValidation
-	}
-	run, err := backend.RunBySelector(ctx, sel.Binding.Repository, selector)
-	if err != nil {
-		if errors.Is(err, cibackend.ErrInvalidRunSelector) {
-			return CIRun{}, ErrValidation
-		}
-		return CIRun{}, ciError(err)
-	}
-	return s.ciRun(ctx, repo, sel, run)
-}
-
 func (s *Service) CIRun(ctx context.Context, repository string, id uint64) (CIRun, error) {
 	repo, sel, e := s.ciScope(ctx, repository)
 	if e != nil {
@@ -213,12 +188,13 @@ func (s *Service) CIJobs(ctx context.Context, repository string, id uint64) ([]C
 		}
 		seen[j.Key] = true
 		j.HeadSHA = run.Run.HeadSHA
-		j.Steps = ciJobSteps(ctx, sel.Backend, sel.Binding.Repository, run.Run, j)
+		steps, status := ciJobSteps(ctx, sel.Backend, sel.Binding.Repository, run.Run, j)
+		j.Steps = steps
 		id, e := s.mapCI(ctx, repo, sel, "job", j.Key, j.Run)
 		if e != nil {
 			return nil, e
 		}
-		out = append(out, CIJob{ID: id, RunID: run.ID, Job: j, Backend: sel.Name})
+		out = append(out, CIJob{ID: id, RunID: run.ID, Job: j, Backend: sel.Name, StepsStatus: status})
 	}
 	return out, nil
 }
@@ -253,21 +229,28 @@ func (s *Service) CIJob(ctx context.Context, repository string, id uint64) (CIJo
 		return CIJob{}, e
 	}
 	job.HeadSHA = run.HeadSHA
-	job.Steps = ciJobSteps(ctx, sel.Backend, sel.Binding.Repository, run, job)
-	return CIJob{ID: id, RunID: mapped.ID, Job: job, Backend: sel.Name}, nil
+	steps, status := ciJobSteps(ctx, sel.Backend, sel.Binding.Repository, run, job)
+	job.Steps = steps
+	return CIJob{ID: id, RunID: mapped.ID, Job: job, Backend: sel.Name, StepsStatus: status}, nil
 }
 
-func ciJobSteps(ctx context.Context, backend cibackend.Backend, repo string, run cibackend.Run, job cibackend.Job) []cibackend.Step {
+func ciJobSteps(ctx context.Context, backend cibackend.Backend, repo string, run cibackend.Run, job cibackend.Job) ([]cibackend.Step, string) {
 	if steps, ok := backend.(cibackend.StepBackend); ok {
 		result, err := steps.JobSteps(ctx, repo, run, job)
 		if err != nil {
 			// Steps are optional metadata. Keep all access/binding checks in the
 			// adapter and discard even partial data on failure, not the job itself.
-			return nil
+			return nil, cibackend.DiagnosticStatus(err)
 		}
-		return result
+		if len(result) == 0 && job.Status == "completed" {
+			return result, "missing"
+		}
+		return result, "available"
 	}
-	return job.Steps
+	if job.Steps == nil {
+		return nil, "not-projected"
+	}
+	return job.Steps, "available"
 }
 func (s *Service) CILogs(ctx context.Context, repository string, id uint64, job bool) ([]byte, error) {
 	_, sel, e := s.ciScope(ctx, repository)
@@ -503,28 +486,17 @@ func ciCheckSatisfiesRequired(check CICheck) bool {
 	return check.Status == "completed" && (check.Conclusion == "success" || check.Conclusion == "neutral" || check.Conclusion == "skipped")
 }
 
-// preferObservedCIRun keeps one run per workflow. A pull_request run is the
-// evidence a protected pull request check uses. A later workflow_dispatch of the
-// same workflow and job name must not replace that evidence.
+// preferObservedCIRun keeps the newest eligible run per workflow, regardless of
+// event or conclusion. The caller already binds the head SHA and branch/PR.
+// Run numbers break timestamp ties before attempts, which belong to one run.
 func preferObservedCIRun(candidate, current cibackend.Run) bool {
-	candidatePR := ciRunIsPullRequestEvent(candidate.Event)
-	currentPR := ciRunIsPullRequestEvent(current.Event)
-	if candidatePR != currentPR {
-		return candidatePR
+	if !candidate.CreatedAt.Equal(current.CreatedAt) {
+		return candidate.CreatedAt.After(current.CreatedAt)
 	}
-	if candidate.CreatedAt.After(current.CreatedAt) {
-		return true
+	if candidate.Number != current.Number {
+		return candidate.Number > current.Number
 	}
-	return candidate.CreatedAt.Equal(current.CreatedAt) && candidate.Attempt > current.Attempt
-}
-
-func ciRunIsPullRequestEvent(event string) bool {
-	switch strings.TrimSpace(event) {
-	case "pull_request", "pull_request_sync", "pull_request_target":
-		return true
-	default:
-		return false
-	}
+	return candidate.Attempt > current.Attempt
 }
 
 // Safe status errors deliberately omit provider response bodies and credentials.

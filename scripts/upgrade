@@ -1,0 +1,6 @@
+#!/bin/sh
+# Guaranteed checkout entry for the internal local upgrade implementation.
+# Direct "python3 scripts/upgrade.py" is not covered by the read-only guarantee.
+set -eu
+here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+exec "$here/ags-python.sh" "$here/upgrade.py" "$@"

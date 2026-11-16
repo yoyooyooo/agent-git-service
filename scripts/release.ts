@@ -2,9 +2,8 @@
 /**
  * Maintainer release entry for the downstream AGS fork.
  *
- * The local script decides and pushes one exact immutable tag. That tag is the
- * only publication trigger; GitHub Actions verifies, builds, attests and
- * publishes the Release.
+ * Tag mutation stays disabled. A future tag may name only a control commit whose
+ * release-control.yml supplies reviewed v2 wiring. Status and version helpers remain.
  *
  * Usage:
  *   bun scripts/release.ts status
@@ -16,7 +15,7 @@ import { spawnSync } from "node:child_process";
 const REPOSITORY = "yoyooyooo/agent-git-service";
 const REPOSITORY_ID = 1384519373;
 const UPSTREAM = "ngaut/agent-git-service";
-const RELEASE_WORKFLOW = ".github/workflows/release.yml";
+const RELEASE_WORKFLOW = ".github/workflows/release-control.yml";
 const CI_WORKFLOW = ".github/workflows/ci.yml";
 const SECRET_WORKFLOW = ".github/workflows/secret-scan.yml";
 const BRANCH = /^fork\/main\.(\d{8})$/;
@@ -38,6 +37,7 @@ if (import.meta.main) {
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
+  requireReadOnlyCommand(options.command);
   const context = preflight();
   const tags = readReleaseTags();
   const lines = releaseLines(tags, context.date);
@@ -47,6 +47,8 @@ async function main(): Promise<void> {
     const promotionBlocked = rcCandidate === null ? null : promotionSourceConflict(lines, rcCandidate);
     console.log(JSON.stringify({
       repository: REPOSITORY,
+      tagMutationEnabled: false,
+      publicationSwitch: "AGS_RELEASE_PUBLICATION_ENABLED",
       branch: context.branch,
       head: context.head,
       generation: context.date,
@@ -64,7 +66,7 @@ async function main(): Promise<void> {
 
   console.log(formatPlan(plan, options));
   verifyExactCI(plan.sha);
-  ensureTagDrivenWorkflow(plan.sha);
+  ensureControlTagTarget(plan.sha);
   ensureTagAvailable(plan.tag);
   if (plan.fromRc !== null) verifyPromotableRc(plan.fromRc, plan.sha);
 
@@ -88,6 +90,12 @@ async function main(): Promise<void> {
     run("gh", ["run", "watch", String(runId), "--repo", REPOSITORY, "--exit-status"]);
     verifyPublishedRelease(plan.tag, plan.sha, plan.kind === "rc");
     console.log(`Released ${plan.tag}`);
+  }
+}
+
+function requireReadOnlyCommand(command: Command): void {
+  if (command !== "status") {
+    fail("release_source_binding_unverified: tag publication disabled pending v2 tag policy and real evidence");
   }
 }
 
@@ -130,9 +138,10 @@ stable:
   Promote the latest RC (or --from RC) by creating the same-source tag without
   -rcN. The RC remains immutable.
 
-Pushing the exact tag triggers .github/workflows/release.yml. The script refuses
-dirty/out-of-date branches, wrong fork identity, missing exact-source CI, tag
-collisions, mutable/unfinished RCs, and sources predating the tag-driven flow.`;
+rc and stable currently refuse before repository/network access or tag mutation.
+A future tag must name the reviewed default-branch control tip and its v2 source
+manifest. Tag publication is gated by AGS_RELEASE_PUBLICATION_ENABLED=true.
+Status is read-only. Candidate dispatch never publishes. CLI tag mutation stays disabled.`;
 }
 
 function preflight(): Context {
@@ -286,11 +295,47 @@ function verifyExactCI(sha: string): void {
   }
 }
 
-function ensureTagDrivenWorkflow(sha: string): void {
-  const text = run("git", ["show", `${sha}:${RELEASE_WORKFLOW}`], { quiet: true });
-  if (!text.includes("tags:") || !text.includes("fork-*") || text.includes("workflow_dispatch:")) {
-    fail(`Source ${sha} does not contain the accepted tag-driven Release workflow.`);
+export function legacyTagWorkflowRejection(workflowText: string): string | null {
+  const trigger = workflowText.match(/^on:\n(?:(?:[ \t]+.*|\s*)\n)*/m)?.[0] ?? "";
+  const jobs = workflowText.split(/^jobs:\n/m)[1] ?? "";
+  const jobNames = [...jobs.matchAll(/^  ([a-z_]+):/gm)].map((match) => match[1]);
+  const retired = workflowText.includes("ubuntu-24.04")
+    || workflowText.includes("contents: write")
+    || workflowText.includes("attestations: write")
+    || workflowText.includes("release.py publish")
+    || workflowText.includes("release.py build");
+  const rejectOnly = /^on:\n  workflow_dispatch:\n/.test(trigger)
+    && !/^  push:/m.test(trigger)
+    && jobNames.length === 1 && jobNames[0] === "reject"
+    && jobs.includes("exit 65")
+    && !retired;
+  if (!rejectOnly) {
+    return "release_legacy_tag_refused: tag target does not retire the legacy publisher as a manual reject-only workflow";
   }
+  return null;
+}
+
+export function controlWorkflowRejection(workflowText: string): string | null {
+  // Advisory source check only; Python tag-gate owns authority and live evidence.
+  const jobs = workflowText.split(/^jobs:\n/m)[1] ?? "";
+  const names = [...jobs.matchAll(/^  ([a-z_]+):/gm)].map((match) => match[1]);
+  if (!workflowText.includes("      - 'fork-*'")
+      || !workflowText.includes("  workflow_dispatch:")
+      || names.join(",") !== "gate,build,publish"
+      || !workflowText.includes("AGS_RELEASE_PUBLICATION_ENABLED")
+      || !workflowText.includes("release.py tag-gate")
+      || !workflowText.includes("release.py tag-publish")
+      || workflowText.includes("self-hosted") || workflowText.includes("ubuntu-24.04")) {
+    return "release_control_contract_required";
+  }
+  return null;
+}
+
+function ensureControlTagTarget(sha: string): void {
+  const retired = run("git", ["show", `${sha}:.github/workflows/release.yml`], { quiet: true });
+  const control = run("git", ["show", `${sha}:${RELEASE_WORKFLOW}`], { quiet: true });
+  const rejection = legacyTagWorkflowRejection(retired) ?? controlWorkflowRejection(control);
+  if (rejection !== null) fail(rejection);
 }
 
 function ensureTagAvailable(tag: string): void {
@@ -328,7 +373,7 @@ function pushExactTag(tag: string, sha: string): void {
 }
 
 function latestReleaseRunId(): number {
-  const rows = ghJson(["run", "list", "--repo", REPOSITORY, "--workflow", "release.yml", "--limit", "20",
+  const rows = ghJson(["run", "list", "--repo", REPOSITORY, "--workflow", "release-control.yml", "--limit", "20",
     "--json", "databaseId"]) as Array<{ databaseId: number }>;
   return rows.reduce((max, row) => Math.max(max, row.databaseId), 0);
 }
@@ -336,7 +381,7 @@ function latestReleaseRunId(): number {
 async function waitForReleaseRun(sha: string, previousRun: number): Promise<number> {
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
-    const rows = ghJson(["run", "list", "--repo", REPOSITORY, "--workflow", "release.yml", "--limit", "20",
+    const rows = ghJson(["run", "list", "--repo", REPOSITORY, "--workflow", "release-control.yml", "--limit", "20",
       "--json", "databaseId,headSha,event,status,conclusion"]) as Array<{
         databaseId: number; headSha: string; event: string; status: string; conclusion: string;
       }>;

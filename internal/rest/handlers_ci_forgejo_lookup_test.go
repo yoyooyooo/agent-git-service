@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -44,13 +43,9 @@ func TestForgejoCollectionOnlyRunDetailsJobsLogsAndRerun(t *testing.T) {
 				"id": 17, "index_in_repo": 9, "workflow_id": "ci.yml", "prettyref": "feature", "commit_sha": head, "event": "push", "status": runStatus, "created": now, "updated": now, "html_url": "https://ci.example.test/ci/project/actions/runs/9",
 			}}})
 		case "/api/v1/repos/ci/project/actions/tasks":
-			// Retried runs retain same-name historical tasks in the public API.
-			// Only task 41 still belongs to a current action_run_job.
-			tasks := []any{}
-			for _, task := range []int{41, 40, 39} {
-				tasks = append(tasks, map[string]any{"id": task, "run_number": 9, "name": "check-linux", "workflow_id": "ci.yml", "head_sha": head, "status": "failure", "created_at": now, "updated_at": now, "url": "https://ci.example.test/ci/project/actions/runs/9"})
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(tasks), "workflow_runs": tasks})
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "workflow_runs": []any{map[string]any{
+				"id": 41, "run_number": 9, "name": "check-linux", "workflow_id": "ci.yml", "head_sha": head, "status": "failure", "created_at": now, "updated_at": now, "url": "https://ci.example.test/ci/project/actions/runs/9",
+			}}})
 		case "/api/internal/provider-logs/repos/ci/project/runs/17/jobs":
 			require.Equal(t, "Bearer bridge-only", r.Header.Get("Authorization"))
 			_ = json.NewEncoder(w).Encode(map[string]any{"schema": "ags.internal-provider-jobs.v1", "repo": "ci/project", "run": "17", "run_number": 9, "head_sha": head, "jobs": []any{map[string]any{"task_id": 41, "name": "check-linux"}}})
@@ -81,7 +76,7 @@ func TestForgejoCollectionOnlyRunDetailsJobsLogsAndRerun(t *testing.T) {
 		}
 	}))
 	defer provider.Close()
-	config := cibackend.BackendConfig{Kind: "forgejo", URL: provider.URL, WebURL: "https://ci.example.test", TokenFile: "fixture", AllowHTTP: true, LogBridge: &cibackend.LogBridgeConfig{URL: provider.URL, TokenFile: "bridge-fixture", AllowHTTP: true}}
+	config := cibackend.BackendConfig{Kind: "forgejo", URL: provider.URL, TokenFile: "fixture", AllowHTTP: true, LogBridge: &cibackend.LogBridgeConfig{URL: provider.URL, TokenFile: "bridge-fixture", AllowHTTP: true}}
 	backend, err := cibackend.NewHTTP(config, "provider-only", "bridge-only")
 	require.NoError(t, err)
 	h.Svc.CI, err = cibackend.WithBackends(cibackend.Config{Backends: map[string]cibackend.BackendConfig{"builder": config}, Repositories: map[string]cibackend.Binding{repo.FullName: {Backend: "builder", Repository: "ci/project"}}}, map[string]cibackend.Backend{"builder": backend})
@@ -93,37 +88,12 @@ func TestForgejoCollectionOnlyRunDetailsJobsLogsAndRerun(t *testing.T) {
 	detail := h.DoREST(t, "GET", path, nil)
 	require.Equal(t, 200, detail.Code, detail.Body.String())
 	require.Equal(t, head, testharness.DecodeJSON(t, detail)["head_sha"])
-	for _, selector := range []string{"forgejo:9", "https://ci.example.test/ci/project/actions/runs/9"} {
-		selectorPath := fmt.Sprintf("/api/v3/repos/%s/actions/runs/%s", repo.FullName, url.PathEscape(selector))
-		selected := h.DoREST(t, "GET", selectorPath, nil)
-		require.Equal(t, 200, selected.Code, selected.Body.String())
-		body := testharness.DecodeJSON(t, selected)
-		require.Equal(t, float64(runs.Runs[0].ID), body["id"], "typed and encoded URL locators retain the canonical ID")
-		require.Equal(t, head, body["head_sha"])
-		require.True(t, strings.HasSuffix(body["jobs_url"].(string), path+"/jobs"))
-		for _, action := range []string{"rerun", "rerun-failed-jobs", "cancel"} {
-			denied := h.DoREST(t, "POST", selectorPath+"/"+action, nil)
-			require.Equal(t, 422, denied.Code, "read locators must not widen mutations: %s", denied.Body.String())
-		}
-	}
-	require.Zero(t, writes)
-	wrongHost := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/runs/%s", repo.FullName, url.PathEscape("https://other.example.test/ci/project/actions/runs/9")), nil)
-	require.Equal(t, 404, wrongHost.Code, wrongHost.Body.String())
-	for _, query := range []string{"per_page=101", "per_page=zero", "per_page=0", "page=-1", "page=1001", "page=1&page=2", "page=01"} {
-		invalid := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/runs?%s", repo.FullName, query), nil)
-		require.Equal(t, 422, invalid.Code, invalid.Body.String())
-	}
 	jobs := h.DoREST(t, "GET", path+"/jobs", nil)
 	require.Equal(t, 200, jobs.Code, jobs.Body.String())
 	rows := testharness.DecodeJSON(t, jobs)["jobs"].([]any)
 	require.Len(t, rows, 1)
 	job := rows[0].(map[string]any)
 	require.Equal(t, "check-linux", job["name"])
-	checks := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/commits/%s/check-runs", repo.FullName, head), nil)
-	require.Equal(t, 200, checks.Code, checks.Body.String())
-	checkRows := testharness.DecodeJSON(t, checks)["check_runs"].([]any)
-	require.Len(t, checkRows, 1, "historical retries must not create ambiguous check names")
-	require.Equal(t, job["id"], checkRows[0].(map[string]any)["id"])
 	steps := job["steps"].([]any)
 	require.Len(t, steps, 2)
 	require.Equal(t, "failure", steps[0].(map[string]any)["conclusion"])

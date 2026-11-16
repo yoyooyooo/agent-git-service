@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
@@ -37,7 +36,7 @@ func Run(ctx context.Context, remoteURL, token string, args ...string) ([]byte, 
 
 func run(ctx context.Context, remoteURL, token string, sshConfig *SSHConfig, args ...string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, SafeError(err)
 	}
 	clean, username, password, err := credentialParts(remoteURL, token)
 	if err != nil {
@@ -109,16 +108,21 @@ func run(ctx context.Context, remoteURL, token string, sshConfig *SSHConfig, arg
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err = cmd.Run()
 	if cause := ctx.Err(); cause != nil {
-		return nil, cause
+		f := SafeError(cause)
+		f.failure.StderrTruncated = stderr.overflow
+		return nil, f
 	}
 	if err != nil {
-		// ExitError.Error contains the exit status, not stderr or argv. Avoid
-		// wrapping PathError/start errors, which may contain operator paths.
+		f := stderr.scan.Failure()
+		f.StderrTruncated = stderr.overflow
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
-			return nil, fmt.Errorf("provider Git %s: %w", failureClass(string(stderr.data)), exit)
+			code := exit.ExitCode()
+			f.ExitCode = &code
+		} else {
+			f = failure("unknown", "process_start_or_drain_failed", "process")
 		}
-		return nil, errors.New("provider Git process failed to start or drain")
+		return nil, &TransportError{failure: f}
 	}
 	if stdout.overflow {
 		return nil, ErrOutputLimit
@@ -201,10 +205,12 @@ func processEnvironment() []string {
 type limitedOutput struct {
 	data     []byte
 	overflow bool
+	scan     failureScan
 }
 
 func (w *limitedOutput) Write(p []byte) (int, error) {
 	n := len(p)
+	w.scan.Write(p)
 	remaining := outputLimit - len(w.data)
 	if n > remaining {
 		w.overflow = true
@@ -212,21 +218,4 @@ func (w *limitedOutput) Write(p []byte) (int, error) {
 	}
 	w.data = append(w.data, p...)
 	return n, nil
-}
-
-func failureClass(stderr string) string {
-	text := strings.ToLower(stderr)
-	// Preserve only fixed classes, never the provider-controlled response.
-	switch {
-	case strings.Contains(text, "protected branch"), strings.Contains(text, "protected_branch"), strings.Contains(text, "pre-receive hook declined"):
-		return "protected branch rejected"
-	case strings.Contains(text, "403"), strings.Contains(text, "forbidden"):
-		return "403 forbidden"
-	}
-	for _, known := range []string{"stale info", "non-fast-forward", "fetch first", "authentication failed", "repository not found", "could not resolve host", "connection refused", "certificate problem", "redirect"} {
-		if strings.Contains(text, known) {
-			return known
-		}
-	}
-	return "operation failed (response withheld)"
 }

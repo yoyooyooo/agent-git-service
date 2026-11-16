@@ -1,14 +1,67 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import {
+  controlWorkflowRejection,
   chooseNextRc,
   choosePromotableRc,
   latestPublishedTag,
+  legacyTagWorkflowRejection,
   parseReleaseTag,
   previousStableTag,
   releaseLines,
 } from "./release";
 
 describe("downstream release version decisions", () => {
+  test("rc and stable refuse before preflight or any tag mutation", () => {
+    for (const command of ["rc", "stable"]) {
+      const result = spawnSync(process.execPath, [new URL("release.ts", import.meta.url).pathname, command], {
+        cwd: "/", encoding: "utf8",
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("release_source_binding_unverified: tag publication disabled");
+      expect(result.stderr).not.toContain("not a git repository");
+    }
+  });
+  test("refuses a tag whose target still has the old release workflow", () => {
+    const current = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+    expect(legacyTagWorkflowRejection(current)).toBeNull();
+    const runtime = [
+      "name: Release",
+      "on:",
+      "  push:",
+      "    tags:",
+      "      - 'fork-*'",
+      "jobs:",
+      "  build:",
+      "    runs-on: ubuntu-24.04",
+      "    permissions:",
+      "      contents: read",
+      "      id-token: write",
+      "      attestations: write",
+      "    steps:",
+      "      - run: python3 fork/scripts/release.py build --version v --output out",
+      "  publish:",
+      "    permissions:",
+      "      contents: write",
+      "    steps:",
+      "      - run: python3 fork/scripts/release.py publish --version v --sha s --output out",
+      "",
+    ].join("\n");
+    expect(legacyTagWorkflowRejection(runtime)).toContain("release_legacy_tag_refused");
+    expect(legacyTagWorkflowRejection(current.replace("exit 65", "exit 0"))).toContain("release_legacy_tag_refused");
+    expect(legacyTagWorkflowRejection(current.replace("jobs:", "jobs:\n  build:\n"))).toContain("release_legacy_tag_refused");
+  });
+
+  test("control wiring is distinct from the retired legacy publisher", () => {
+    const control = readFileSync(new URL("../.github/workflows/release-control.yml", import.meta.url), "utf8");
+    expect(controlWorkflowRejection(control)).toBeNull();
+    for (const part of ["release.py tag-gate", "release.py tag-publish", "AGS_RELEASE_PUBLICATION_ENABLED"]) {
+      expect(controlWorkflowRejection(control.replaceAll(part, "missing"))).toBe("release_control_contract_required");
+    }
+    expect(controlWorkflowRejection(control.replace("ubuntu-22.04", "ubuntu-24.04"))).not.toBeNull();
+  });
+
   test("parses RC and stable tags only", () => {
     expect(parseReleaseTag("fork-20260924.1-rc6")).toEqual({
       raw: "fork-20260924.1-rc6",

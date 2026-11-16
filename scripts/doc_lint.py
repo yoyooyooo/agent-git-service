@@ -31,6 +31,18 @@ REQUIRED_FILES = [
 ]
 
 LINK_CHECK_DOCS = [
+    Path("docs/operations/local-upgrade.md"),
+    Path("docs/operations/backup-recovery.md"),
+    Path("docs/operations/user-runtime.md"),
+    Path("docs/operations/releases.md"),
+    Path("docs/operations/upgrade-provisioning.md"),
+    Path("docs/operations/routeb-baseline.md"),
+    Path("docs/operations/routeb-runbook.md"),
+    Path("docs/operations/routeb-runbook-mini.md"),
+    Path("docs/operations/routeb-runbook-imile-win.md"),
+    Path("docs/operations/routeb-build.md"),
+    Path("docs/operations/routeb-external-dependencies.md"),
+    Path("fork/README.md"),
     Path("docs/ci.md"),
     Path("docs/README.md"),
     Path("docs/test-strategy.md"),

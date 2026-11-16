@@ -90,6 +90,7 @@ document the relevant contract below in the same change.
 | `replicationadmin` | database-free remote native-admin registration client and offline, unapplied certificate/peer/binding plans |
 | `githttp` | primary Git Smart HTTP authorization/storage/effect adapter using gitbackend |
 | `integrations` | file-backed integration config loading and translation for Forgejo, GitLab, GitHub, Multica, notifications, and projection watch |
+| `interpreterauthority` | bounded verification and rechecks of interpreter archives, prefix contents, native dependencies and recovery assets from a fixed root registry, plus fixed Linux loader arguments; file evidence does not grant process or execution admission |
 | `gitstore` | on-disk bare repository operations |
 | `graphql` | GitHub GraphQL API surface |
 | `httputil` | bounded outbound HTTP helpers |
@@ -110,6 +111,7 @@ document the relevant contract below in the same change.
 | `randutil` | shared random helper functions |
 | `ratelimit` | GitHub-compatible rate-limit snapshot helpers |
 | `rest` | GitHub REST API surface |
+| `routebstage0` | Linux root supervisor and broker bound to kernel peer credentials for registered Route B invocations, fixed manager lifecycle, writer observation and recovery; no caller-selected scripts, runtime roots or manager targets |
 | `router` | route registration and host rewrite |
 | `service` | business logic and cross-store orchestration |
 | `sessionauthority` | team-authority-v4 registered-source/workspace/team/class bindings, exact policy-class operations, target/service resource defaults, exact repo exception overrides, and non-executable legacy compatibility inventory |
@@ -1290,9 +1292,28 @@ Release linker values identify the full source/tree and fork release version.
 Development defaults remain explicitly unknown, not inferred from a machine path.
 
 `fork/scripts/release.py` owns exact-source archive builds, platform smoke checks,
-complete-CI admission, manifest/archive validation and complete draft publication.
+manifest/archive validation and fail-closed legacy publication entry points.
+`release-control.yml` separates dispatch candidates from switch-gated tag
+publication. The read-only gate binds C/R/T/V to merged default-branch PRs and
+exact CI. Only the runtime PR no longer requires a GitHub human approval; the
+control PR still requires one, and publication does not read runtime PR reviews.
+Independent review before merge and CI carry that runtime-PR risk. Control code builds native archives
+and signs runtime binding under C. The publisher validates
+nine assets and retains failed drafts without repeating unknown writes.
+`scripts/release_contract.py` owns the shared side-effect-free ABI/archive checks;
+it never imports the installer. The standalone v1 installer keeps its historical
+contract. `release_install_v2.py` owns the full-checkout v2 consumer and never
+routes failed v2 evidence through v1.
+`scripts/release_verify.py` owns binding-policy checks; its production
+`separated-control-v1` entry stays disabled pending real evidence and tag policy.
+`scripts/install-release` and `scripts/upgrade` are the supported shell entries;
+they disable bytecode before starting Python. The adjacent `.py` files are
+internal implementations; bare Python invocation has no startup-cache guarantee.
 `scripts/install-release.py` owns verification and replacement of one installed
-program set under `~/.ags/bin`, not service lifetime or schema changes. There are
+program set under `~/.ags/bin`, not service lifetime or schema changes.
+`upgrade.py` validates identity and the fixed root-owned bundle; `upgrade_host.py`
+is the local adapter and `upgrade_engine.py` owns claim/journal/receipt writes.
+The checked-in upgrade policy is empty. Apply also refuses unimplemented backup, handoff and observation contracts before effects; see [local upgrades](operations/local-upgrade.md). There are
 no retained version slots. Installed and running identities remain separate facts.
 `scripts/ags-runtime.py` owns the optional single-root process launcher, startup
 dependency observations and bounded stdout/stderr; the service manager owns

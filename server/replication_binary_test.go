@@ -40,6 +40,12 @@ func TestPrimaryExecutableWithConfiguredPeerAndRealEdgeClone(t *testing.T) {
 		go func() { done <- cmd.Wait() }()
 		return cmd, done, &output
 	}
+	if err := f.publicReservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.peerReservation.Close(); err != nil {
+		t.Fatal(err)
+	}
 	cmd, done, output := start()
 	stopped := false
 	t.Cleanup(func() {
@@ -151,7 +157,7 @@ func TestPrimaryExecutableWithConfiguredPeerAndRealEdgeClone(t *testing.T) {
 		<-badDone
 		t.Fatalf("partial startup remained alive\n%s", badOutput.String())
 	}
-	public, err := net.Listen("tcp", strings.TrimPrefix(f.cfg.BaseURL, "http://"))
+	public, err := net.Listen("tcp", ":"+f.cfg.Port)
 	if err != nil {
 		t.Fatal("failed process retained public port", err)
 	}

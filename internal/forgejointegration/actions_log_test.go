@@ -103,11 +103,11 @@ func TestWorkflowRunLogsRoundTripsNearMaximumControlTextThroughRealBridge(t *tes
 	for _, statement := range []string{
 		`CREATE TABLE repository (id integer primary key, owner_name text, lower_name text)`,
 		`CREATE TABLE action_run (id integer primary key, repo_id integer, "index" integer, ref text, commit_sha text, event text)`,
-		`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text)`,
+		`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text, status integer DEFAULT 0, started integer DEFAULT 0, stopped integer DEFAULT 0)`,
 		`CREATE TABLE action_task (id integer primary key, repo_id integer, commit_sha text, log_filename text, log_in_storage boolean, log_expired boolean)`,
 		`INSERT INTO repository VALUES (24, 'forgejo', 'demo-ci')`,
 		`INSERT INTO action_run VALUES (4001, 24, 1194, 'refs/pull/16/head', '` + head + `', 'pull_request')`,
-		`INSERT INTO action_run_job VALUES (6763, 4001, 24, 6949, 'Backend Smoke', '` + head + `')`,
+		`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha) VALUES (6763, 4001, 24, 6949, 'Backend Smoke', '` + head + `')`,
 		`INSERT INTO action_task VALUES (6949, 24, '` + head + `', 'forgejo/demo-ci/25/6949.log', true, false)`,
 	} {
 		if err := db.Exec(statement).Error; err != nil {

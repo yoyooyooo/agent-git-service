@@ -3,6 +3,7 @@ package snapshotstore
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -78,11 +79,19 @@ func (s *Store) saveRetentionAge() error {
 	if err != nil {
 		return err
 	}
-	if len(items) > 100000 {
+	views := items[:0]
+	for _, item := range items {
+		if publishedOSMetadata(item) {
+			slog.Warn("skipping published snapshot OS metadata", "entry", item.Name())
+			continue
+		}
+		views = append(views, item)
+	}
+	if len(views) > 100000 {
 		return errors.New("snapshot retention checkpoint exceeds view limit")
 	}
-	saved := retentionClose{Version: 1, ClosedAt: s.now(), LastUse: make(map[string]time.Time, len(items))}
-	for _, item := range items {
+	saved := retentionClose{Version: 1, ClosedAt: s.now(), LastUse: make(map[string]time.Time, len(views))}
+	for _, item := range views {
 		if !snapshotKeyString(item.Name()) || !item.IsDir() {
 			return errors.New("unexpected published snapshot entry")
 		}

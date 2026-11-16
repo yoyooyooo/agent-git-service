@@ -147,3 +147,11 @@ func TestParseDeletedBranchWebhook(t *testing.T) {
 		t.Fatalf("unexpected event=%#v", event)
 	}
 }
+
+func TestClosedWebhookRetainsSignedProviderRevision(t *testing.T) {
+	body := []byte(`{"action":"closed","repository":{"full_name":"fixture/project"},"pull_request":{"number":42,"updated_at":"2001-01-01T02:00:03.123456789+02:00"}}`)
+	event, ok, err := ParseClosedPullRequestWebhook(body)
+	if err != nil || !ok || event.UpdatedAt != "2001-01-01T02:00:03.123456789+02:00" {
+		t.Fatalf("lost lifecycle revision: %#v %v", event, err)
+	}
+}

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Guaranteed checkout entry for the internal installer.
+# plan is the default. install and verify-only select the internal mode.
+# This launcher, not install-release.py, owns the read-only bytecode guarantee.
+set -eu
+here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+action=plan
+if [ $# -gt 0 ]; then
+  case "$1" in
+    plan|install|verify-only)
+      action=$1
+      shift
+      ;;
+  esac
+fi
+case "$action" in
+  plan) exec "$here/ags-python.sh" "$here/install-release.py" "$@" ;;
+  install) exec "$here/ags-python.sh" "$here/install-release.py" --install "$@" ;;
+  verify-only) exec "$here/ags-python.sh" "$here/install-release.py" --verify-only "$@" ;;
+esac

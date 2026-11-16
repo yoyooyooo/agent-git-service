@@ -53,12 +53,16 @@ fi
 need gh
 need python3
 
-python3 - <<'PY' || die "Python 3.9+ is required"
+# The entry itself refuses bytecode caches. Callers, CI and tests do not supply this.
+export PYTHONDONTWRITEBYTECODE=1
+unset PYTHONPYCACHEPREFIX
+
+python3 -B - <<'PY' || die "Python 3.9+ is required"
 import sys
 raise SystemExit(0 if sys.version_info >= (3, 9) else 1)
 PY
 
-prefix=$(python3 - "$prefix" <<'PY'
+prefix=$(python3 -B - "$prefix" <<'PY'
 from pathlib import Path
 import sys
 p=Path(sys.argv[1]).expanduser().absolute()
@@ -67,7 +71,7 @@ if p.is_symlink() or p.resolve()!=p:
 print(p)
 PY
 )
-bin_dir=$(python3 - "$bin_dir" <<'PY'
+bin_dir=$(python3 -B - "$bin_dir" <<'PY'
 from pathlib import Path
 import sys
 p=Path(sys.argv[1]).expanduser().absolute()
@@ -79,7 +83,7 @@ PY
 
 if [[ -z "$version" ]]; then
   release_json=$(gh api "repos/$REPOSITORY/releases/latest") || die "cannot resolve Latest stable release"
-  version=$(python3 - "$release_json" <<'PY'
+  version=$(python3 -B - "$release_json" <<'PY'
 import json,re,sys
 release=json.loads(sys.argv[1])
 tag=str(release.get("tag_name",""))
@@ -96,7 +100,7 @@ else
   release_json=$(gh api "repos/$REPOSITORY/releases/tags/$version") || die "release not found: $version"
 fi
 
-source=$(python3 - "$release_json" "$version" "$allow_prerelease" <<'PY'
+source=$(python3 -B - "$release_json" "$version" "$allow_prerelease" <<'PY'
 import json,re,sys
 release=json.loads(sys.argv[1]); version=sys.argv[2]; allow=sys.argv[3]=="1"
 if release.get("tag_name")!=version or release.get("draft") or not release.get("immutable"):
@@ -111,7 +115,7 @@ PY
 ) || die "release identity rejected"
 
 ref_json=$(gh api "repos/$REPOSITORY/git/ref/tags/$version") || die "release tag cannot be read"
-tag_source=$(python3 - "$ref_json" <<'PY'
+tag_source=$(python3 -B - "$ref_json" <<'PY'
 import json,re,sys
 obj=json.loads(sys.argv[1]).get("object",{})
 if obj.get("type")!="commit" or not re.fullmatch(r"[0-9a-f]{40}",obj.get("sha","")):
@@ -121,11 +125,88 @@ PY
 ) || die "release tag rejected"
 [[ "$source" == "$tag_source" ]] || die "release source and tag differ"
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/ags-installer.XXXXXXXX")
+# Select a parent using the embedded selector only, before mktemp or bootstrap downloads.
+# The adjacent installer is a trusted release source, but its bytes are not read here.
+companion=""
+if [[ -n ${BASH_SOURCE[0]:-} ]]; then
+  companion="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install-release.py"
+fi
+scratch_parent=$(python3 -B - "$prefix" <<'PY_SCRATCH'
+import os
+from pathlib import Path
+import sys
+
+def same_directory(path, other):
+    try: return os.path.samestat(path.lstat(), other.lstat())
+    except OSError: return False
+
+def contains_directory(parent, child):
+    """Filesystem identity, independent of path spelling or case."""
+    current=child
+    while True:
+        if same_directory(parent,current): return True
+        parent_of=current.parent
+        try:
+            if same_directory(parent_of,current): return False
+        except OSError:
+            return False
+        current=parent_of
+
+def outside_installation(candidate, root, state):
+    """True only for a real directory outside both protected directories.
+
+    A protected path that does not exist yet has no filesystem identity, so a
+    real candidate elsewhere cannot be inside it. The lexical prefix check
+    still rejects a candidate spelled inside that future path.
+    """
+    if not candidate.is_dir() or candidate.is_symlink(): return False
+    for protected in (root, state):
+        if not protected.exists() and not protected.is_symlink():
+            try: candidate.relative_to(protected)
+            except ValueError: continue
+            return False
+        if contains_directory(protected,candidate): return False
+    return True
+
+def installation_scratch_parent(prefix):
+    """Choose one scratch parent before tempfile probes or downloads.
+
+    tempfile's default selection creates and deletes a probe file in each
+    candidate, including TMPDIR. That probe is already an installation-root
+    write, so an unsafe candidate is never passed to tempfile. TMPDIR, TEMP
+    and TMP are tried in that order. A relative value resolves from the
+    current directory, and symlinks resolve before the location check.
+    Identification and full v2 verification share this parent.
+    """
+    root=prefix.resolve(strict=False)
+    state=(prefix/'state').resolve(strict=False)
+    for envname in ('TMPDIR','TEMP','TMP'):
+        configured=os.environ.get(envname)
+        if not configured: continue
+        candidate=Path(configured).expanduser()
+        if not candidate.is_absolute(): candidate=Path.cwd()/candidate
+        try: resolved=candidate.resolve(strict=True)
+        except OSError: continue
+        if outside_installation(resolved,root,state): return resolved
+    for fallback in (Path('/tmp'), Path('/var/tmp'), Path('/usr/tmp')):
+        try: resolved=fallback.resolve(strict=True)
+        except OSError: continue
+        if outside_installation(resolved,root,state): return resolved
+    return None
+
+
+parent=installation_scratch_parent(Path(sys.argv[1]))
+if parent is None:
+    raise SystemExit('release_artifact_unverified: no scratch parent outside installation')
+print(parent)
+PY_SCRATCH
+) || exit 1
+
+tmp=$(mktemp -d "$scratch_parent/ags-installer.XXXXXXXX")
 chmod 700 "$tmp"
 # The trap only removes this invocation's owner-only, freshly-created directory.
 cleanup() {
-  python3 - "$tmp" <<'PY'
+  python3 -B - "$tmp" <<'PY'
 import pathlib,shutil,sys
 p=pathlib.Path(sys.argv[1])
 if p.name.startswith('ags-installer.') and p.is_dir() and not p.is_symlink():
@@ -135,16 +216,12 @@ PY
 trap cleanup EXIT
 metadata="$tmp/install-release.json"
 installer="$tmp/install-release.py"
-companion=""
-if [[ -n ${BASH_SOURCE[0]:-} ]]; then
-  companion="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install-release.py"
-fi
 if [[ -n "$companion" && -f "$companion" && ! -L "$companion" ]]; then
   installer="$companion"
 else
   # Old binary releases must not reintroduce their old multi-version installer.
   installer_release=$(gh api "repos/$REPOSITORY/releases/latest") || die "cannot resolve installer release"
-  installer_source=$(python3 - "$installer_release" <<'PY'
+  installer_source=$(python3 -B - "$installer_release" <<'PY'
 import json,re,sys
 r=json.loads(sys.argv[1]); source=r.get('target_commitish','')
 if r.get('draft') or r.get('prerelease') or not r.get('immutable') or not re.fullmatch('[0-9a-f]{40}',source):
@@ -153,7 +230,7 @@ print(source)
 PY
   ) || die "installer source rejected"
   gh api "repos/$REPOSITORY/contents/scripts/install-release.py?ref=$installer_source" >"$metadata" || die "cannot fetch exact installer source"
-python3 - "$metadata" "$installer" <<'PY' || die "installer source identity rejected"
+python3 -B - "$metadata" "$installer" <<'PY' || die "installer source identity rejected"
 import base64,hashlib,json,os,sys
 meta=json.load(open(sys.argv[1]))
 if meta.get("type")!="file" or meta.get("path")!="scripts/install-release.py" or meta.get("encoding")!="base64":
@@ -169,7 +246,7 @@ fd=os.open(sys.argv[2],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 with os.fdopen(fd,"wb") as out: out.write(data)
 PY
 fi
-python3 - "$installer" <<'PY' || die "installer predates the single-root contract; use a current trusted checkout"
+python3 -B - "$installer" <<'PY' || die "installer predates the single-root contract; use a current trusted checkout"
 import pathlib,sys
 if 'ags.installation.v2' not in pathlib.Path(sys.argv[1]).read_text():
     raise SystemExit('single-root installer is required')
@@ -201,7 +278,7 @@ case "$action" in
     ;;
 esac
 
-python3 "$installer" "${args[@]}"
+python3 -B "$installer" "${args[@]}"
 
 if [[ "$action" == install || "$action" == upgrade ]]; then
   [[ -f "$prefix/state/installation.json" ]] || die "installation succeeded without its current receipt"

@@ -162,7 +162,12 @@ type PullRequest struct {
 	CreatedAt                time.Time
 	UpdatedAt                time.Time
 	ClosedAt                 *time.Time
-	MergedAt                 *time.Time
+	// LifecycleGeneration fences provider readback across native reopen intent.
+	LifecycleGeneration  uint64 `gorm:"not null;default:0"`
+	ForgejoReopenPending bool   `gorm:"not null;default:false"`
+	// ForgejoLifecycleAt is exclusively in the provider clock domain.
+	ForgejoLifecycleAt *time.Time `gorm:"precision:6"`
+	MergedAt           *time.Time
 	// CommitMessages stores concatenated commit messages for search (indexed).
 	CommitMessages string `gorm:"type:text"`
 	// Filenames stores comma-separated list of changed filenames for search.

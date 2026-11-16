@@ -65,7 +65,7 @@ class BootstrapTests(unittest.TestCase):
                 raise SystemExit("unexpected fake gh path: "+path)
         """)
         fake=self.bin/"gh"; fake.write_text(gh); fake.chmod(0o755)
-        self.env={k:v for k,v in os.environ.items() if k not in ("MULTICA_TOKEN","GH_TOKEN","GITHUB_TOKEN")}
+        self.env={k:v for k,v in os.environ.items() if k not in ("MULTICA_TOKEN","GH_TOKEN","GITHUB_TOKEN","BASH_ENV","ENV")}
         self.env.update(PATH=str(self.bin)+":"+os.environ["PATH"],HOME=str(self.root/"home"),
                         AGS_TEST_ARGS=str(self.args_file),AGS_TEST_VERSION=VERSION,
                         AGS_TEST_STABLE=STABLE,AGS_TEST_SOURCE=SOURCE)

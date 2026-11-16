@@ -50,7 +50,7 @@ Does not own:
 
 ```
 Init(fullName, seed)
-  → go-git: create bare repo at GIT_REPO_DIR/{storage-key}.git
+  → go-git: create bare repo at GIT_REPO_DIR/{fullName}.git
   → if seed: create initial commit with empty README.md via go-git object APIs
 
 Fork(src, dst)
@@ -59,6 +59,22 @@ Fork(src, dst)
 Delete(fullName)
   → os.RemoveAll(repoPath)
 ```
+
+The path helper uses the repository's full name, such as
+`sample/project.git`; `GitStorageID` is a replication identity and does not
+select a disk path. Existing Wiki repositories are siblings such as
+`sample/project.wiki.git`. The same Git root can also hold `.wikiblobs` CAS and
+persistent delivery/retirement auxiliary state. Complete recovery must preserve
+those as well as every bare Git object and DB-held root. A soft-deleted Wiki
+page is a tombstone: `applyDelete` keeps the previous body on `wiki_pages` and
+points `head_revision_id` at an `op=delete` revision. Inventory checks that
+retained blob, size and inline body against an earlier content revision of the
+same `page_id`, with `op` in `create`, `update`, `rename`, `restore` or `compact`.
+The candidate's `revision_id` must be strictly less than the current delete
+head's `revision_id`, and its changeset must belong to the page's `repository_id`.
+A restore followed by another delete uses the new delete head as that bound.
+Inventory does not expect the delete revision's empty blob to equal the page; see
+[backup and recovery](../operations/backup-recovery.md).
 
 ### Merge (Regular)
 

@@ -34,7 +34,9 @@ to accommodate invalid fixtures.
 For concurrent idempotent operations, require one durable record, exact payload
 agreement and no repeated provider effects under both SQLite and TiDB isolation.
 A targeted pass after a failing full run is not a replacement for the final full
-regression. Pin the complete run to one clean commit and retain its exit status;
+regression. The isolated [startup dependency recovery](operations/startup-dependency-recovery.md)
+suite proves selected synthetic faults and restart behavior; it does not replace
+window evidence for a real migration or provider. Pin the complete run to one clean commit and retain its exit status;
 source promotion is separate from deployment or shared protected-ref rewriting.
 Upstream's retired interfaces require scoped consumer/migration checks before
 upgrading affected consumers or changing a running server.

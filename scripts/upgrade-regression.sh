@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# One test entry for local regression and hosted CI; only synthetic data.
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+sandbox="$(mktemp -d "$HOME/ags-upgrade-regression-XXXXXXXX")"
+chmod 700 "$sandbox"
+# Deliberately retained for diagnosis, never removed by this runner.
+printf 'Upgrade regression sandbox: %s\n' "$sandbox"
+entries=(
+  'scripts/test_upgrade_identity.py' 'scripts/test_routeb_candidate.py' 'scripts/test_routeb_host_admission.py' 'scripts/test_routeb_backup_binding.py' 'scripts/test_routeb_launchd_stop.py' 'scripts/test_routeb_oneshot.py'
+  'scripts/test_routeb_metadata_darwin.py' 'scripts/test_routeb_restore_verify.py' 'scripts/test_routeb_storage.py'
+  'scripts/test_routeb_full_restore.py' 'scripts/test_routeb_restore_switch.py' 'scripts/test_routeb_old_start.py'
+  'scripts/test_routeb_cold_window.py' 'scripts/test_routeb_host_transaction.py' 'scripts/test_routeb_host_execution.py'
+  'scripts/test_routeb_runtime_health.py' 'scripts/test_routeb_observation.py'
+  'scripts/test_routeb_host_identity.py' 'scripts/test_routeb_host_native.py'
+  'scripts/test_routeb_host_package.py' 'scripts/test_routeb_immutable_authority.py'
+  'scripts/test_routeb_native_bootstrap.py'
+  'scripts/test_routeb_stage0_lifecycle.py' 'scripts/test_routeb_native_delegation.py'
+  'scripts/test_routeb_native_recovery.py'
+  'scripts/test_routeb_bundle_closure.py' 'scripts/test_routeb_native_evidence.py' 'scripts/test_routeb_native_capture.py'
+  'scripts/test_upgrade_host_evidence.py' 'scripts/test_upgrade_bootstrap.py'
+  'scripts/test_upgrade_adapter_launchd.py' 'scripts/test_upgrade_adapter_systemd.py'
+  'scripts/test_upgrade_metadata.py' 'scripts/test_upgrade_bundle.py'
+  'scripts/test_upgrade_state.py' 'scripts/test_upgrade_journal.py'
+  'scripts/test_upgrade_journal_chain.py'
+  'scripts/test_upgrade_durable_wiring.py' 'scripts/test_upgrade_activation.py'
+  'scripts/test_upgrade_resume.py' 'scripts/test_upgrade_restore_intent.py'
+  'scripts/test_upgrade_restore_containment.py' 'scripts/test_upgrade_host_binding.py'
+  'scripts/test_upgrade_production_wire.py' 'scripts/test_upgrade_two_chain.py'
+  'scripts/test_upgrade_epoch2_writer.py'
+  'scripts/test_native_probe_sequence.py' 'scripts/test_native_manager_parse.py'
+  'scripts/test_systemd_show_readback.py'
+  'scripts/test_native_factories.py' 'scripts/test_native_systemd_contract.py'
+  'scripts/test_upgrade_helpers.py' 'scripts/test_upgrade_epoch_chain.py'
+  'scripts/test_buildinfo_binding.py' 'scripts/test_upgrade_pin_emitter.py'
+  'scripts/test_upgrade_pin_evidence.py'
+  'scripts/test_upgrade_pin_bundle_bytes.py'
+  'scripts/test_s6b_ci_inventory.py'
+  'scripts/test_upgrade_ci_inventory.py'
+  'scripts/test_upgrade_lifecycle.py' 'scripts/test_upgrade_recovery_cli.py'
+  'scripts/test_upgrade_forward_recovery.py'
+  'scripts/test_upgrade_full_restore.py FullRestoreTests'
+  'scripts/test_upgrade_handoff.py HandoffTests'
+  'scripts/test_upgrade_pin.py PinTests'
+  'scripts/test_upgrade_integration.py'
+  'scripts/test_upgrade.py' 'scripts/test_upgrade_safety.py'
+  'scripts/test_upgrade_inventory.py' 'scripts/test_upgrade_backup.py BackupTests'
+  'scripts/test_upgrade_restore.py RestoreTests' 'scripts/test_upgrade_backup_regressions.py'
+  'scripts/test_upgrade_quiescence.py' 'scripts/test_upgrade_recovery.py'
+  'scripts/test_upgrade_manual_approval.py' 'scripts/test_upgrade_wireup.py'
+  'scripts/test_install_v2.py' 'scripts/test_single_root.py' 'scripts/test_release_consumer.py'
+  'fork/scripts/test_release.py' 'fork/scripts/test_release_binding.py'
+  'fork/scripts/test_install_sh.py'
+)
+failed=0
+for index in "${!entries[@]}"; do
+  work="$sandbox/$index"
+  mkdir -m 700 "$work" "$work/home" "$work/tmp" "$work/cwd"
+  read -r -a args <<< "${entries[$index]}"
+  args[0]="$root/${args[0]}"
+  printf '\n==> %s\n' "${entries[$index]}"
+  start=$(date +%s)
+  set +e
+  (cd "$work/cwd" && env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX -u PYTHONPATH -u BASH_ENV \
+    HOME="$work/home" TMPDIR="$work/tmp" "$root/scripts/ags-python.sh" "${args[@]}" -v)
+  status=$?
+  set -e
+  printf 'ENTRY %s exit=%s seconds=%s\n' "${entries[$index]}" "$status" "$(( $(date +%s) - start ))"
+  if [[ "$status" -ne 0 ]]; then
+    failed=1
+    break
+  fi
+done
+if [[ "$failed" -ne 0 ]]; then
+  printf '\nUpgrade regression failed. Sandbox retained: %s\n' "$sandbox"
+  exit 1
+fi
+# Native launchd evidence is not a source-CI entry. A skipped unittest is not a pass.
+# Set AGS_ROUTEB_NATIVE=1 to run scripts/test_routeb_launchd_native.py outside this list.
+if [[ "${AGS_ROUTEB_NATIVE:-}" == "1" ]]; then
+  printf 'AGS_ROUTEB_NATIVE=1 does not make scripts/test_routeb_launchd_native.py a source-CI pass.\n'
+fi
+printf '\nUpgrade regression passed (%s entries). Sandbox retained: %s\n' "${#entries[@]}" "$sandbox"
+exit 0

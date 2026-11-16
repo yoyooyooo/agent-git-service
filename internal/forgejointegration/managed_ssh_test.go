@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ngaut/agent-git-service/internal/attribution"
@@ -212,5 +213,124 @@ func TestManagedSSHDenialCannotBecomeExactRefSuccess(t *testing.T) {
 	err := i.pushAndVerify(ctx, PushRequest{Repo: TargetRepo{Owner: "team", Repo: "repo"}}, "refs/heads/topic", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	if !errors.Is(err, denied) || !errors.Is(err, ErrMappedPushNotAttempted) || reads != 0 || pushes != 0 {
 		t.Fatalf("err=%v reads=%d pushes=%d", err, reads, pushes)
+	}
+}
+
+func TestManagedSSHInventoryHTTPStatusAndProvisioningCompatibility(t *testing.T) {
+	for _, failurePage := range []int{1, 2} {
+		for _, status := range []int{200, 401, 403, 404, 503} {
+			for _, evidence := range []bool{true, false} {
+				t.Run(fmt.Sprintf("page%d/status%d/evidence%t", failurePage, status, evidence), func(t *testing.T) {
+					var reads atomic.Int32
+					firstPage := make([]providerKey, 50)
+					for n := range firstPage {
+						firstPage[n] = providerKey{ID: int64(n + 1), Key: "ssh-ed25519 fixture-public", Title: "fixture"}
+					}
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						page := reads.Add(1)
+						if r.Method != http.MethodGet || r.URL.Path != "/sentinel-private-url/api/v1/users/selected-owner/keys" || r.URL.Query().Get("limit") != "50" || r.URL.Query().Get("page") != fmt.Sprint(page) || r.Header.Get("Sudo") != "" {
+							t.Error("unexpected inventory request")
+						}
+						if int(page) < failurePage {
+							json.NewEncoder(w).Encode(firstPage)
+							return
+						}
+						w.WriteHeader(status)
+						if status == 200 {
+							fmt.Fprint(w, "[]")
+						} else {
+							fmt.Fprint(w, "sentinel-body sentinel-token")
+						}
+					}))
+					defer server.Close()
+					c := NewHTTPClient(server.URL+"/sentinel-private-url", "sentinel-token")
+					list := listManagedKeys
+					if evidence {
+						list = listManagedKeysEvidence
+					}
+					keys, err := list(context.Background(), c, "selected-owner")
+					if reads.Load() != int32(failurePage) {
+						t.Fatalf("inventory requests=%d, want %d", reads.Load(), failurePage)
+					}
+					if status == 200 {
+						if err != nil || len(keys) != (failurePage-1)*50 {
+							t.Fatal("successful inventory lost keys")
+						}
+						return
+					}
+					if !evidence && status == 404 {
+						// Even a later-page 404 historically discards earlier pages.
+						if keys != nil || err != nil {
+							t.Fatal("provisioning changed its 404 empty-list contract")
+						}
+						return
+					}
+					if keys != nil || err == nil {
+						t.Fatal("failed inventory accepted as complete")
+					}
+					var typed *ProviderHTTPError
+					if evidence {
+						if !errors.As(err, &typed) || typed.Status != status || typed.Method != http.MethodGet || typed.RouteKind != "user_keys" {
+							t.Fatal("inventory lost typed HTTP evidence")
+						}
+					} else if errors.As(err, &typed) || err.Error() != "managed SSH public key readback failed" {
+						t.Fatal("provisioning changed its failure contract")
+					}
+					for _, secret := range []string{"sentinel-body", "sentinel-private-url", "sentinel-token", server.URL} {
+						if strings.Contains(err.Error(), secret) {
+							t.Fatal("inventory error disclosed private provider data")
+						}
+					}
+					if evidence {
+						reads.Store(0)
+						p := selectedSSHPrincipal(context.Background(), c, managedKey{Login: "selected-owner"})
+						reason := "http_status"
+						if status != 503 {
+							reason = fmt.Sprintf("http_%d", status)
+						}
+						assertPrincipalProbeFailure(t, p, reason, "http_status", status)
+						if reads.Load() != int32(failurePage) {
+							t.Fatal("diagnostic retried failed inventory")
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestManagedSSHProvisioningRegistersAfterInventory404(t *testing.T) {
+	k := managedKey{Instance: "fixture", Identity: "actor", Login: "selected-owner", Public: "ssh-ed25519 fixture-public"}
+	var reads, writes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Sudo") != "" {
+			t.Error("key registration impersonated a user")
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/users/selected-owner/keys":
+			if reads.Add(1) == 1 {
+				w.WriteHeader(404)
+				fmt.Fprint(w, "sentinel-body")
+				return
+			}
+			json.NewEncoder(w).Encode([]providerKey{{ID: 1, Key: k.Public, Title: managedTitle(k)}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/admin/users/selected-owner/keys":
+			writes.Add(1)
+			var key providerKey
+			if json.NewDecoder(r.Body).Decode(&key) != nil || key.Key != k.Public || key.Title != managedTitle(k) {
+				t.Error("registration payload changed")
+			}
+			w.WriteHeader(201)
+		default:
+			t.Error("unexpected provisioning request")
+			w.WriteHeader(500)
+		}
+	}))
+	defer server.Close()
+	if err := ensureManagedKey(context.Background(), NewHTTPClient(server.URL, "synthetic"), k); err != nil {
+		t.Fatal(err)
+	}
+	if reads.Load() != 2 || writes.Load() != 1 {
+		t.Fatalf("reads=%d writes=%d, want 2/1", reads.Load(), writes.Load())
 	}
 }

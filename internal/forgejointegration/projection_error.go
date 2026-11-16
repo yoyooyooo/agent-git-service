@@ -5,9 +5,15 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/ngaut/agent-git-service/internal/gittransport"
 )
 
 const (
+	ProjectionFailureRefLock                      = "ref_lock_contention"
+	ProjectionFailureHookRejected                 = "hook_rejected"
+	ProjectionFailureNetwork                      = "transport_error"
 	ProjectionFailureUnknown                      = "unknown_projection_error"
 	ProjectionFailureNonFastForward               = "non_fast_forward_blocked"
 	ProjectionFailureProtectedBranch              = "protected_branch_blocked"
@@ -33,7 +39,10 @@ type ProjectionError struct {
 	ExpectedSHA  string
 	ActualSHA    string
 	ErrorSummary string
-	Cause        error
+	Cause        error `json:"-"`
+	// Diagnostic is additive; existing API/DB fields retain their shapes. It
+	// is immediate evidence, not a diagnostics table or an execution permit.
+	Diagnostic *gittransport.Failure `json:"diagnostic,omitempty"`
 }
 
 func (e *ProjectionError) Error() string {
@@ -79,28 +88,42 @@ func ClassifyProjectionError(ref, expectedSHA string, err error) ProjectionError
 		}
 		return pe
 	}
-	pe := ProjectionError{
-		Type:         ProjectionFailureUnknown,
-		Ref:          strings.TrimSpace(ref),
-		ExpectedSHA:  strings.TrimSpace(expectedSHA),
-		ErrorSummary: redactProjectionError(err),
-		Cause:        err,
-	}
-	msg := strings.ToLower(pe.ErrorSummary)
-	switch {
-	case strings.Contains(msg, "non-fast-forward") || strings.Contains(msg, "fetch first") || strings.Contains(msg, "updates were rejected") || strings.Contains(msg, "更新被拒绝") || (strings.Contains(msg, "cannot lock ref") && strings.Contains(msg, "reference already exists")):
-		pe.Type = ProjectionFailureNonFastForward
-	case strings.Contains(msg, "not allowed to push to protected branch") || strings.Contains(msg, "protected branch") || strings.Contains(msg, "pre-receive hook declined"):
+	f := projectionFailure(err)
+	pe := ProjectionError{Type: ProjectionFailureUnknown, Ref: strings.TrimSpace(ref), ExpectedSHA: strings.TrimSpace(expectedSHA), Cause: err, Diagnostic: &f}
+	switch f.Category {
+	case "cas_conflict", "non_fast_forward":
+		pe.Type = ProjectionFailureNonFastForward // legacy public type
+	case "protection_policy":
 		pe.Type = ProjectionFailureProtectedBranch
-	case strings.Contains(msg, "403 forbidden"):
+	case "http_forbidden":
 		pe.Type = ProjectionFailurePermissionDenied
-	case strings.Contains(msg, "authentication failed") || strings.Contains(msg, "凭据不正确") || strings.Contains(msg, "requires authentication") || strings.Contains(msg, "401"):
+	case "auth_failed":
 		pe.Type = ProjectionFailureAuthFailed
-	case strings.Contains(msg, "repository not found") || strings.Contains(msg, "not found") || strings.Contains(msg, "404"):
+	case "target_missing_or_inaccessible":
 		pe.Type = ProjectionFailureRepoMissing
-	case strings.Contains(msg, "head sha mismatch") || strings.Contains(msg, "did not reach expected head"):
-		pe.Type = ProjectionFailureSHADrift
+	case "ref_lock_contention":
+		pe.Type = ProjectionFailureRefLock
+	case "hook_rejected":
+		pe.Type = ProjectionFailureHookRejected
+	case "network":
+		pe.Type = ProjectionFailureNetwork
 	}
+	// Legacy errors have no typed evidence. Keep the known SHA/translation
+	// compatibility cases, but never return their arbitrary response text.
+	var transport *gittransport.TransportError
+	var provider *ProviderHTTPError
+	if !errors.As(err, &transport) && !errors.As(err, &provider) && err != nil && f.Category == "unknown" {
+		msg := strings.ToLower(err.Error())
+		switch {
+		case strings.Contains(msg, "head sha mismatch"), strings.Contains(msg, "did not reach expected head"):
+			pe.Type = ProjectionFailureSHADrift
+		case strings.Contains(msg, "更新被拒绝"):
+			pe.Type = ProjectionFailureNonFastForward
+		case strings.Contains(msg, "凭据不正确"), strings.Contains(msg, "requires authentication"):
+			pe.Type = ProjectionFailureAuthFailed
+		}
+	}
+	pe.ErrorSummary = fmt.Sprintf("projection failure: %s (%s; %s)", pe.Type, f.ReasonCode, f.EvidenceSource)
 	return pe
 }
 
@@ -115,6 +138,12 @@ func SanitizeProjectionErrorSummary(summary string) string {
 func redactProjectionError(err error) string {
 	if err == nil {
 		return ""
+	}
+	var transport *gittransport.TransportError
+	var provider *ProviderHTTPError
+	if errors.As(err, &transport) || errors.As(err, &provider) {
+		f := projectionFailure(err)
+		return fmt.Sprintf("projection transport failure: %s (%s; %s)", f.Category, f.ReasonCode, f.EvidenceSource)
 	}
 	msg := strings.TrimSpace(err.Error())
 	msg = credentialURLPattern.ReplaceAllStringFunc(msg, func(raw string) string {
@@ -131,11 +160,22 @@ func redactURLCredential(raw string) string {
 }
 
 func truncateProjectionError(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	// Summaries are display text: replace each run of invalid UTF-8 bytes
+	// before measuring the byte budget, since U+FFFD can expand the input.
+	s = strings.ToValidUTF8(s, "\ufffd")
 	if len(s) <= max {
 		return s
 	}
-	if max <= 3 {
-		return s[:max]
+	end, suffix := max, ""
+	if max > 3 {
+		end, suffix = max-3, "..."
 	}
-	return fmt.Sprintf("%s...", s[:max-3])
+	// s is valid UTF-8 and end < len(s); back up to a complete rune boundary.
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + suffix
 }

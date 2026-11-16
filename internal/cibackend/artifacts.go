@@ -32,7 +32,7 @@ type StepBackend interface {
 
 func (f *Forgejo) JobSteps(ctx context.Context, repo string, run Run, job Job) ([]Step, error) {
 	if f.config.LogBridge == nil {
-		return []Step{}, nil
+		return nil, ErrUnsupported
 	}
 	body, err := f.boundJobResource(ctx, repo, run, job, true)
 	if err != nil {
@@ -62,6 +62,9 @@ func (f *Forgejo) JobSteps(ctx context.Context, repo string, run Run, job Job) (
 	return steps, nil
 }
 func (f *Forgejo) artifactRequest(ctx context.Context, repo string, run Run, download string) ([]byte, error) {
+	return f.runBridgeRequest(ctx, repo, run, "artifacts", download)
+}
+func (f *Forgejo) runBridgeRequest(ctx context.Context, repo string, run Run, resource, download string) ([]byte, error) {
 	if f.config.LogBridge == nil {
 		return nil, ErrUnsupported
 	}
@@ -73,6 +76,9 @@ func (f *Forgejo) artifactRequest(ctx context.Context, repo string, run Run, dow
 		return nil, ErrInvalid
 	}
 	query := url.Values{"head_sha": {run.HeadSHA}}
+	if resource == "jobs" {
+		query.Set("run_number", strconv.FormatInt(run.Number, 10))
+	}
 	if download != "" {
 		n, err := strconv.ParseInt(download, 10, 64)
 		if err != nil || n <= 0 {
@@ -80,7 +86,7 @@ func (f *Forgejo) artifactRequest(ctx context.Context, repo string, run Run, dow
 		}
 		query.Set("download", download)
 	}
-	endpoint := strings.TrimRight(f.config.LogBridge.URL, "/") + "/api/internal/provider-logs/repos/" + repo + "/runs/" + run.Key + "/artifacts?" + query.Encode()
+	endpoint := strings.TrimRight(f.config.LogBridge.URL, "/") + "/api/internal/provider-logs/repos/" + repo + "/runs/" + run.Key + "/" + resource + "?" + query.Encode()
 	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, ErrInvalid
@@ -91,16 +97,8 @@ func (f *Forgejo) artifactRequest(ctx context.Context, repo string, run Run, dow
 		return nil, ErrUnavailable
 	}
 	defer response.Body.Close()
-	switch response.StatusCode {
-	case 200:
-	case 404:
-		return nil, ErrNotFound
-	case 501:
-		return nil, ErrUnsupported
-	case 403:
-		return nil, ErrForbidden
-	default:
-		return nil, ErrUnavailable
+	if response.StatusCode != http.StatusOK {
+		return nil, bridgeStatusError(response.StatusCode)
 	}
 	return bounded(response.Body)
 }

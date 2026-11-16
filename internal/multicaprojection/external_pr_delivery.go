@@ -39,8 +39,9 @@ type ExternalPRTerminalDeliveryTarget struct {
 // ExternalPRTerminalDeliverySource identifies the AGS source fact in the
 // durable row. It contains no credential or raw provider response.
 type ExternalPRTerminalDeliverySource struct {
-	AGSPrID    string `json:"ags_pr_id"`
-	ObservedAt string `json:"observed_at"`
+	LifecycleGeneration uint64 `json:"lifecycle_generation,omitempty"`
+	AGSPrID             string `json:"ags_pr_id"`
+	ObservedAt          string `json:"observed_at"`
 }
 
 // ExternalPRTerminalDelivery is an AGS-private typed wrapper. Request is the
@@ -57,10 +58,11 @@ type ExternalPRTerminalDelivery struct {
 // ExternalPRTerminalDeliveryInput is the secret-free input used by AGS to
 // construct one deterministic terminal delivery.
 type ExternalPRTerminalDeliveryInput struct {
-	TargetInstance string
-	Request        ExternalPRLinkRequest
-	AGSPrID        string
-	ObservedAt     time.Time
+	LifecycleGeneration uint64
+	TargetInstance      string
+	Request             ExternalPRLinkRequest
+	AGSPrID             string
+	ObservedAt          time.Time
 }
 
 // NewExternalPRTerminalDelivery validates and constructs a deterministic
@@ -84,7 +86,11 @@ func NewExternalPRTerminalDelivery(input ExternalPRTerminalDeliveryInput) (Exter
 		input.ObservedAt = time.Now().UTC()
 	}
 
-	digest, err := externalPRTerminalIdentityDigest(instance, request)
+	generation := input.LifecycleGeneration
+	if request.State == "merged" {
+		generation = 0
+	}
+	digest, err := externalPRTerminalIdentityDigest(instance, request, generation)
 	if err != nil {
 		return ExternalPRTerminalDelivery{}, err
 	}
@@ -106,8 +112,9 @@ func NewExternalPRTerminalDelivery(input ExternalPRTerminalDeliveryInput) (Exter
 		},
 		Request: request,
 		Source: ExternalPRTerminalDeliverySource{
-			AGSPrID:    strings.TrimSpace(input.AGSPrID),
-			ObservedAt: input.ObservedAt.UTC().Format(time.RFC3339),
+			LifecycleGeneration: generation,
+			AGSPrID:             strings.TrimSpace(input.AGSPrID),
+			ObservedAt:          input.ObservedAt.UTC().Format(time.RFC3339),
 		},
 	}, nil
 }
@@ -150,7 +157,7 @@ func DecodeExternalPRTerminalDelivery(data []byte) (ExternalPRTerminalDelivery, 
 	if delivery.Target.Workspace != delivery.Request.WorkspaceID || delivery.Target.Issue != delivery.Request.IssueID || delivery.IdempotencyKey != delivery.Request.IdempotencyKey {
 		return ExternalPRTerminalDelivery{}, fmt.Errorf("external PR terminal delivery target or idempotency binding conflicts")
 	}
-	digest, err := externalPRTerminalIdentityDigest(delivery.Target.InstanceID, delivery.Request)
+	digest, err := externalPRTerminalIdentityDigest(delivery.Target.InstanceID, delivery.Request, delivery.Source.LifecycleGeneration)
 	if err != nil {
 		return ExternalPRTerminalDelivery{}, err
 	}
@@ -191,17 +198,22 @@ func ExternalPRTerminalPath(state string) (string, error) {
 	}
 }
 
-func externalPRTerminalIdentityDigest(targetInstance string, request ExternalPRLinkRequest) ([32]byte, error) {
+func externalPRTerminalIdentityDigest(targetInstance string, request ExternalPRLinkRequest, generations ...uint64) ([32]byte, error) {
+	var generation uint64
+	if request.State == "closed" && len(generations) > 0 {
+		generation = generations[0]
+	}
 	identityJSON, err := json.Marshal(struct {
-		TargetInstance string `json:"target_instance"`
-		WorkspaceID    string `json:"workspace_id"`
-		IssueID        string `json:"issue_id"`
-		Provider       string `json:"provider"`
-		ExternalRepo   string `json:"external_repo"`
-		ExternalNumber int    `json:"external_number"`
-		State          string `json:"state"`
-		MergedSHA      string `json:"merged_sha"`
-	}{strings.TrimSpace(targetInstance), request.WorkspaceID, request.IssueID, request.Provider, request.ExternalRepo, request.ExternalNumber, request.State, request.MergedSHA})
+		TargetInstance      string `json:"target_instance"`
+		WorkspaceID         string `json:"workspace_id"`
+		IssueID             string `json:"issue_id"`
+		Provider            string `json:"provider"`
+		ExternalRepo        string `json:"external_repo"`
+		ExternalNumber      int    `json:"external_number"`
+		State               string `json:"state"`
+		MergedSHA           string `json:"merged_sha"`
+		LifecycleGeneration uint64 `json:"lifecycle_generation,omitempty"`
+	}{strings.TrimSpace(targetInstance), request.WorkspaceID, request.IssueID, request.Provider, request.ExternalRepo, request.ExternalNumber, request.State, request.MergedSHA, generation})
 	if err != nil {
 		return [32]byte{}, fmt.Errorf("marshal external PR terminal identity: %w", err)
 	}

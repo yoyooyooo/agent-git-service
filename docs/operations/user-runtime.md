@@ -30,6 +30,20 @@ rehearsal workspace from live configuration. Relative replication paths resolve
 from the replication JSON's directory, not the service working directory. Use
 explicit durable paths and check all referenced files before switching roots.
 
+The Git root uses `<GitRepoDir>/<full_name>.git` with optional sibling
+`<full_name>.wiki.git`, plus historical Wiki CAS under `.wikiblobs` and durable
+auxiliary state. `GitStorageID` does not name its directory. Current installation
+state is not a recovery archive. [Backup and recovery](backup-recovery.md) defines
+the S1 complete recovery group and per-machine five-verified-backup retention
+contract. S2 can copy a synthetic cold snapshot and check an offline restore
+copy. It does not enable upgrade apply. A caller must inject a verified system
+Trash function; there is no default implementation. Only successful restore
+copies and sealed, restore-verified backups beyond the latest five per host are
+moved to Trash. Failed partial backups and failed restore copies remain in place
+for manual review, do not count toward five and are not automatically removed.
+Seal time, host identity and validated seal/report binding determine eligibility,
+not directory modification time. Insufficient space refuses before copying.
+
 ## Program installation
 
 The verified Python installer places the current three native commands directly
@@ -70,13 +84,74 @@ python3 ~/.ags/bin/ags-runtime.py --root ~/.ags doctor
 python3 ~/.ags/bin/ags-runtime.py --root ~/.ags serve
 ```
 
+## Cold-window startup fence
+
+The launchd adapter no longer treats `launchctl` exit 0 as closure. Stop evidence requires a disabled readback and an absent job with no live pid. Truncated manager output is a refusal. This is not a production activation.
+
+The S3 [local upgrade component](local-upgrade.md#s3-private-cold-window-protocol)
+adds `state/upgrade-cold.json`, independently of `installing.json`. Before spawn,
+the launcher refuses pending upgrades with missing marker/claim/journal, unknown
+phase, changed binary/receipt or mismatched generation. A fixed-manager handoff
+is permitted only after durable `start_attempted` and manager-request intent.
+The launcher consumes that token under runtime EX and install SH, fsyncs it
+before spawn, and never refunds it. Repeated manager starts therefore refuse;
+uncertain startup needs read-only diagnosis, not another start. The marker has
+no TTL and S3 never removes it or automatically restores restart policy.
+Direct installers also refuse a pending upgrade even after OS locks were lost.
+
+S6.01 cold-window admission also uses the
+[fixed host identity](local-upgrade.md#s601-fixed-host-identity). A missing or
+changed profile blocks token consumption and spawn before the recovery check.
+Startup dependency refusal remains exit 78. This does not provision a profile
+or grant a normal restart.
+
+Ordinary installations without pending upgrades retain the standalone launcher
+path. A launcher provisioned for the new cold-window protocol needs adjacent
+`upgrade_recovery.py` and its complete pinned dependency set; missing imports
+with a pending upgrade fail closed. Provisioning those files or changing a
+manager on a host is not part of this source slice. Runtime receipts now include
+a unique generation, requested-stop/forced-kill flags, child exit status and
+process-group-empty evidence. A fixed manager must separately prove supervisor
+exit and restart suppression; a stop command returning zero does not prove it.
+See [pre-start recovery](backup-recovery.md#s3-pre-start-recovery).
+
+S6.02 adds shared stop and writer evidence in `upgrade_host_evidence.py`.
+A manager command that exits zero while a writer pid is still alive is
+`normal_stop_unproven`. Forced kill, a surviving descendant, boot or process
+identity mismatch, and missing observation permission stay open. The S3 field
+check is unchanged. `upgrade_bootstrap.py` refuses a legacy pid/time receipt;
+a same-binary launcher transition can admit a real generation receipt and does
+not upgrade the business binary. A crash at any bootstrap phase stays fenced.
+The launchd adapter is documented with the
+[local upgrade stop contract](local-upgrade.md#s3-private-cold-window-protocol).
+
+## Runtime lifecycle
+
 The launcher reads `config/runtime.env`, preserves ordinary authentication, starts
 one owning primary with `<root>` as its working directory, forwards termination
 to its process group, and waits for the child. It never starts a second primary
 against a live Git directory. The service manager owns restart policy. The program
-identity query completes before spawning the primary; failures after spawn always
-reap the child. Requested shutdown permits an 80-second drain before terminating
-the remaining process group, so the service manager needs a longer exit time.
+identity query completes before spawning the primary; the launcher keeps
+ownership until the child is reaped. Ordinary requested shutdown permits an
+80-second drain before terminating the remaining process group, so the service
+manager needs a longer exit time.
+
+The isolated native entry has a stricter stop contract. Only its live registered
+root-parent context selects this behavior; a CLI or environment flag cannot.
+After 80 seconds it records `native_stop_timeout` and continues supervising,
+holding the runtime lock and draining the output pipe until the owned child and
+process group exit naturally. An exception after spawn follows the same ownership
+rule and records `native_supervision_failed`. A broken log becomes a discard sink;
+it cannot close the read end and deliver SIGPIPE to the primary. Failure facts
+also go to stderr if the state or log write fails. No forced stop is attempted.
+
+Even if that child subsequently exits zero, the supervisor returns 78. Its
+runtime record preserves the actual child exit and adds `supervision_failed`,
+`stop_timed_out`, and `supervisor_exit_code`; these failure fields cannot satisfy
+the native normal-stop check. Both native manager verifiers require the protected
+unit and effective `SendSIGKILL=no`, so systemd cannot supply a hidden escalation.
+The timeout and unresolved live processes require operator reconciliation;
+neither another transaction nor an automatic restart is admitted.
 
 Before launch, and once per minute while running, it checks the installed primary
 hash, interrupted-install marker, environment, durable Git/database paths and
@@ -124,7 +199,8 @@ stream checks remain authoritative.
 Malformed, unsafe or out-of-range retention configuration fails startup rather
 than silently falling back to normal operation. A bounded diagnostic still records
 the failed check. Program-identity and process-lifecycle failures update the fixed
-`state/runtime-failure.json` with stage and error type only, never exception text,
+`state/runtime-failure.json` with stage, error type and, for the native path, a
+fixed failure reason, never exception text,
 subprocess output, credentials or user request content. A failed state write after
 spawn cannot leave an unowned primary running.
 
@@ -172,3 +248,43 @@ change global deletion policy.
 Regression: `python3 scripts/test_single_root.py` and
 `python3 fork/scripts/test_install_sh.py` use isolated files and processes.
 Private migration receipts are not evidence that all deployments were migrated.
+
+## Release wiring boundary
+
+The tag publication wiring described in [release operations](releases.md) does
+not install or start these programs. V2 installation now has a complete-checkout consumer with a distinct verification-only
+mode; the legacy production-pin gate remains disabled. The [local upgrade entry](local-upgrade.md)
+is source preparation. Empty policy and explicit unimplemented-contract refusals block apply before effects. Each machine upgrade requires separate operator
+approval, compatible verified installation, and its normal stop/start checks.
+Do not use successful publication as a signal to restart a managed runtime.
+
+### S5 admitted upgrade lifecycle
+
+S5 [private-package admission](local-upgrade.md#s5-two-layer-admission) connects
+S3's existing one-shot handoff, not a second runtime or installer. Root-owned
+adapter provisioning must route its fixed manager through this launcher. The
+writer probe and runtime stop evidence remain mandatory. Completed confirmation
+does not clear the cold marker or authorize a manager restart; missing/consumed
+handoff continues to refuse spawn. Restoring normal restarts and starting old
+AGS after pre-start recovery remain separately scoped. Source and synthetic
+manager tests are not a native launchd/systemd acceptance or deployment approval.
+The disposable harness is evidence only when bootstrap created the job, print
+showed that label and plist, and bootout plus a later exit 113 absence proved
+cleanup. A failed command is not a successful native run. The skipped default
+is not a pass.
+
+### S6b source-only lifecycle limit
+
+The S6b durable journal, activation and start-observation seams are documented in the [S6b design](../design/s6b-upgrade-recovery.md). S6b-fix6 B2 makes `startup_permitted` refuse a present journal whose authority is missing, not active, or still has a spawn intent. A missing authority is itself a fence. `commit_phase` requires an explicit epoch. The engine operation key is the transaction plus the phase. `launcher_spawn` calls the injected runner only after that fence. `launcher_spawn_authorized` on a deployment root is that same durable path: intent is fsynced before spawn, a pending or already observed spawn is not retried, and an inactive authority does not spawn. `upgrade_bootstrap.execute` uses it for the same-binary launcher transition. `supervise` records durable spawn and exit when a journal already exists. This is not a live host start. It does not grant default startup. Native manager behavior remains UNVERIFIED; this machine did not run launchctl or systemctl.
+
+## S6 source-only lifecycle limit
+
+`upgrade_lifecycle.py`, `upgrade_recovery_cli.py` and
+`upgrade_forward_recovery.py` currently validate in-memory planning contracts.
+They are not connected to this launcher's durable admission or spawn protocol.
+A returned `started=true` from the old-start helper is not a process observation.
+No new public lifecycle/recover command is available. Accepted upgrades still
+retain the one-shot cold fence. Normal restart, reboot and a second upgrade
+through new epoch authority are **not verified or enabled** by these modules.
+See [integration limits](local-upgrade.md#s613-source-integration-boundary) and
+[recovery matrix](backup-recovery.md#s613-fault-matrix).

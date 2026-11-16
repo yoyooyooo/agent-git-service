@@ -42,11 +42,24 @@ accepted direction, or incremental work that has not fully landed yet.
 - [Authorization Layer](design/authz-layer.md)
 - [Wiki Storage Re-Architecture](design/wiki-storage-rearchitecture.md)
 - [Forgejo Rebase Execution Lifetime](design/forgejo-rebase-execution-lifetime.md) - proposed handoff to the existing worker; not implemented or approved.
+- [Ref Projection Convergence](design/ref-projection-convergence.md) - S0 contracts and S1 immediate safe diagnostics; no execute/retire enablement.
+- [Ref Projection Writer Inventory](design/ref-projection-writers.md) - source/provider coverage and negative strict-adapter assessment.
 
 ## Testing And Operations
 
 - [Fork Governance](../fork/README.md) - GitHub source workflow, upstream generations, capability review and publication gates.
 - [Production Deployment](production-deployment.md)
+- [S6b Upgrade Recovery Design](design/s6b-upgrade-recovery.md) - durable journal, recovery boundaries, native adapter evidence and non-installable pin/build identity work.
+- [Reviewed Maintenance Windows](operations/maintenance-window.md) - opt-in executor admission, exact candidate import, complete startup recovery review and default forward repair.
+- [Startup Dependency Recovery](operations/startup-dependency-recovery.md) - isolated fault-injection evidence, restart idempotence and boundaries that still require a maintenance window.
+- [Local v2 Upgrade](operations/local-upgrade.md) - fixed entry, per-machine manual authorization, durable claim, S1–S6 source contracts, identity and private-package admission; public policy stays closed. See its source integration limits.
+- [Upgrade bundle provisioning](operations/upgrade-provisioning.md) - dependency-complete staging and non-installable release preparation; no host provision.
+- [Local Backup and Recovery](operations/backup-recovery.md) - inventory, offline backup verification, cold-window recovery, manual acceptance, full-group plans and the S6 fault matrix; default apply remains closed.
+- [Route B baseline](operations/routeb-baseline.md) - frozen 0013aa74 to f63aa88e impact matrix; not a deployment approval.
+- [Route B runbook](operations/routeb-runbook.md) - preparation manuals for mini and imile-win; rollback is a full cold restore.
+- [Route B build](operations/routeb-build.md) - exact-source candidate identity; Linux native build is separate.
+- [Route B external dependencies](operations/routeb-external-dependencies.md) - owner contracts; no live backup in this tree.
+- [Route B host package](operations/routeb-host-package.md) - host-mode entry, observation and native-evidence contract; not a deployment approval.
 - [Single-root User Runtime](operations/user-runtime.md) - one installation under `~/.ags`, durable startup inputs, bounded logs and explicit migration.
 - [Automatic Git Maintenance](operations/git-maintenance.md) - primary-owned storage housekeeping, application object protection and explicit history-retirement boundaries.
 - [Official gh and Task Runs](operations/official-gh.md) - origin-based official clients, native run identity and association without command shims.
@@ -55,6 +68,7 @@ accepted direction, or incremental work that has not fully landed yet.
 - [Edge Client Routing](operations/ags-edge-client-routing.md) - exact per-user configuration ownership, drift checks and rollback.
 - [AGS Edge Primary Listener](operations/ags-edge-primary-listener.md) - explicit mTLS startup, filesystem preflight, shutdown and remaining rollout gates.
 - [AGS Edge Enrollment](operations/ags-edge-enrollment.md) - native-admin registration CLI, exact repository receipts and unapplied certificate-based peer plans.
+- [Ref Projection Diagnostics](operations/ref-projection-operations.md) - typed evidence, actual transport identity, test and future enablement boundaries.
 - [CI](ci.md)
 - [Hosted-runner Network Probe](operations/ags-network-probe.md) - optional default-branch-only, read-only deployment connectivity check, independent from CI and production handoff.
 - [Wiki Storage V2 Cutover Checklist](operations/wiki-storage-v2-cutover.md)

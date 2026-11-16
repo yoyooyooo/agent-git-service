@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Build and publish exact-source release bundles. No deployment or live data access.
-All construction uses a verified archive outside the checkout. Publication is a
-separate, explicitly invoked operation after exact-source CI and artifact checks.
+"""Build runtime candidates and gated v2 tag releases.
+Legacy publication and recovery entries remain closed.
 """
 from __future__ import annotations
 import argparse
 import hashlib
 import io
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -28,9 +28,43 @@ VERSION = re.compile(r'fork-[0-9]{8}\.[1-9][0-9]*(?:-rc[1-9][0-9]*)?')
 SHA = re.compile(r'[0-9a-f]{40}')
 COMMANDS = ('gh-server', 'ags-edge', 'ags-replication')
 TARGETS = ('darwin_arm64', 'linux_amd64')
+_spec=importlib.util.spec_from_file_location('ags_bundle_contract',ROOT/'scripts/release_contract.py')
+bundle_contract=importlib.util.module_from_spec(_spec);_spec.loader.exec_module(bundle_contract)
+
+
+def refuse_tag_publication():
+    # Tag destination and real separated-control evidence are not approved.
+    raise ValueError('release_source_binding_unverified: tag publication disabled; 24.04 contract retired')
+
+
+def linux_builder(os_release):
+    values=dict(line.split('=',1) for line in os_release.splitlines() if '=' in line)
+    if values.get('ID','').strip('"')!='ubuntu' or values.get('VERSION_ID','').strip('"')!='22.04':
+        raise ValueError('release_abi_incompatible: native Ubuntu 22.04 required')
+
+
+def linux_dependencies(versions, headers, libraries):
+    needs=re.findall(r'GLIBC_([0-9]+(?:\.[0-9]+)+)',versions)
+    if not needs or any(tuple(map(int,v.split('.')))>(2,35) for v in needs):
+        raise ValueError('release_abi_incompatible: GLIBC version needs exceed 2.35 or missing')
+    loaders=re.findall(r'Requesting program interpreter: ([^\]]+)',headers)
+    if loaders!=['/lib64/ld-linux-x86-64.so.2'] or not Path(loaders[0]).is_file():
+        raise ValueError('release_abi_incompatible: unresolved or unexpected loader')
+    if 'not found' in libraries or 'libc.so.6 =>' not in libraries:
+        raise ValueError('release_abi_incompatible: unresolved NEEDED libraries')
+
+
+def darwin_minimum(load_commands):
+    versions=re.findall(r'^\s*minos\s+(\S+)',load_commands,re.M)
+    if versions!=['15.0']:
+        raise ValueError('release_abi_incompatible: Mach-O minimum must be 15.0')
+
 
 def run(args, *, cwd=ROOT, env=None, timeout=600):
-    result = subprocess.run(args, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    try:
+        result = subprocess.run(args, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        raise RuntimeError('command outcome unknown: ' + str(args[0])) from None
     if result.returncode:
         raise RuntimeError('command failed: ' + str(args[0]) + ': ' + result.stderr.decode(errors='replace')[-2500:])
     return result.stdout
@@ -71,42 +105,17 @@ def api(path, *, method='GET', fields=(), missing=False):
             args += ['-F',key+'='+json.dumps(value)]
         else:
             args += ['-f',key+'='+value]
-    result=subprocess.run(args,cwd=ROOT,capture_output=True,timeout=90)
+    try:
+        result=subprocess.run(args,cwd=ROOT,capture_output=True,timeout=90)
+    except (subprocess.TimeoutExpired, OSError):
+        raise RuntimeError('GitHub operation outcome unknown: '+method+' '+path) from None
     if result.returncode:
         if missing and b'(HTTP 404)' in result.stderr: return None
         raise RuntimeError('GitHub operation failed: '+method+' '+path)
     return json.loads(result.stdout) if result.stdout else None
 
 def gate(version, sha, *, recovery_id=None):
-    validated_version(version)
-    if not isinstance(sha,str) or not SHA.fullmatch(sha): raise ValueError('invalid source identity')
-    if recovery_id is None and git('rev-parse','HEAD')!=sha: raise ValueError('source mismatch')
-    if recovery_id is not None and (type(recovery_id) is not int or recovery_id<=0 or git('rev-parse',sha+'^{commit}')!=sha): raise ValueError('invalid exact recovery identity')
-    meta=api('repos/'+REPOSITORY)
-    if meta['id']!=REPOSITORY_ID or meta['private'] or not meta.get('fork') or meta.get('parent',{}).get('full_name')!='ngaut/agent-git-service':
-        raise ValueError('wrong, nonpublic or detached repository')
-    if tag_source(version)!=sha: raise ValueError('release tag is missing or differs from source')
-    if os.environ.get('GITHUB_ACTIONS')=='true':
-        if os.environ.get('GITHUB_REF_TYPE')!='tag' or os.environ.get('GITHUB_REF_NAME')!=version or os.environ.get('GITHUB_REF')!='refs/tags/'+version:
-            raise ValueError('release workflow must run from the exact release tag')
-    runs=api('repos/'+REPOSITORY+'/actions/runs?head_sha='+sha+'&per_page=100')['workflow_runs']
-    receipts={}
-    for path in ('.github/workflows/ci.yml','.github/workflows/secret-scan.yml'):
-        eligible=[r for r in runs if r['head_sha']==sha and r['path']==path and r['status']=='completed' and r['conclusion']=='success' and r['repository']['id']==REPOSITORY_ID]
-        if not eligible: raise ValueError('exact source lacks successful '+path)
-        chosen=max(eligible,key=lambda r:r['id'])
-        jobs=api('repos/'+REPOSITORY+'/actions/runs/'+str(chosen['id'])+'/jobs?per_page=100')
-        expected_min=10 if path.endswith('/ci.yml') else 1
-        if jobs['total_count']>100 or len(jobs['jobs'])!=jobs['total_count'] or len(jobs['jobs'])<expected_min or any(j['conclusion']!='success' for j in jobs['jobs']):
-            raise ValueError('CI jobs are incomplete, skipped or failed')
-        receipts[path]=chosen['id']
-    if recovery_id is None:
-        if lookup_release(version) is not None: raise ValueError('release exists; never overwrite or silently resume it')
-    else:
-        require_draft(api('repos/'+REPOSITORY+'/releases/'+str(recovery_id)),version,sha,recovery_id)
-    # Repository immutability is configured by an administrator, never by a
-    # build token. The publisher requires the resulting Release to be locked.
-    return {'source':sha,'tree':git('rev-parse',sha+'^{tree}'),'version':version,'ci':receipts,'repository_id':REPOSITORY_ID}
+    refuse_tag_publication()
 
 def lookup_release(version):
     # Published lookup deliberately does not cover a draft with no Git tag.
@@ -173,23 +182,38 @@ def smoke(binary, env, cwd, endpoint, expected_revision=None, *, diagnostics_end
                 proc.kill(); proc.wait(); raise RuntimeError(binary.name+' did not drain during smoke')
         if result!=0: raise RuntimeError(binary.name+' did not exit cleanly')
 
-def build(version, output):
-    validated_version(version)
-    sha=git('rev-parse','HEAD'); tree=git('rev-parse','HEAD^{tree}')
+def build(version, output, *, runtime_revision=None, runtime_tree=None, tag_binding=None):
+    if runtime_revision is None:
+        refuse_tag_publication()
+    control=git('rev-parse','HEAD')
+    sha=runtime_revision;tree=runtime_tree
+    if not isinstance(sha,str) or not SHA.fullmatch(sha) or not isinstance(tree,str) or not SHA.fullmatch(tree):
+        raise ValueError('invalid full runtime revision/tree')
+    if sha==control or git('rev-parse',sha+'^{commit}')!=sha or git('rev-parse',sha+'^{tree}')!=tree:
+        raise ValueError('runtime/control identity mismatch')
+    if tag_binding is None:
+        if version!='source-'+sha: raise ValueError('candidate version must not allocate a release tag')
+    elif (tag_binding['version'],tag_binding['control'],tag_binding['source']['runtime']) != (version,control,{'revision':sha,'tree':tree}):
+        raise ValueError('tag build identity mismatch')
     native_os={'Darwin':'darwin','Linux':'linux'}.get(platform.system())
     arch={'arm64':'arm64','aarch64':'arm64','x86_64':'amd64','AMD64':'amd64'}.get(platform.machine())
     target=str(native_os)+'_'+str(arch)
     if target not in TARGETS: raise ValueError('unsupported native build platform')
-    # Check before creating staging or accepting a different local compiler.
+    if native_os=='linux': linux_builder(Path('/etc/os-release').read_text())
+    if native_os=='darwin' and platform.mac_ver()[0].split('.')[0]!='15': raise ValueError('native macOS 15 required')
+    # Check both pins and actual compiler before staging.
+    if pinned_toolchain(control)!='go1.26.8' or pinned_toolchain(sha)!='go1.26.8': raise ValueError('runtime/control toolchain mismatch')
     toolchain=verify_toolchain(sha)['go_version']
     output=Path(output).absolute()
     if output.resolve().is_relative_to(ROOT) or output.exists(): raise ValueError('output must be a new external directory')
-    verify_env=dict(os.environ,GIT_SHA=sha)
+    verify_env=dict(os.environ,GIT_SHA=control)
     run(['bash','scripts/build-exact-source.sh','verify'],env=verify_env,timeout=180)
+    run(['git','--no-replace-objects','fsck','--strict','--no-dangling',sha],timeout=180)
     os.umask(0o077); output.mkdir(mode=0o700,parents=False)
     stage=Path(tempfile.mkdtemp(prefix='ags-release-build-',dir=str(output.parent)))
-    source=stage/'source'; unpack_source(run(['git','archive','--format=tar',sha]),source)
+    source=stage/'source'; unpack_source(run(['git','--no-replace-objects','archive','--format=tar',sha]),source)
     home=stage/'home'; home.mkdir(); env=environment(home)
+    scratch=stage/'tmp';scratch.mkdir();env['TMPDIR']=str(scratch)
     if native_os=='darwin': env['MACOSX_DEPLOYMENT_TARGET']='15.0'
     package=stage/'package'; (package/'bin').mkdir(parents=True)
     flags=' '.join('-X github.com/ngaut/agent-git-service/'+key+'='+value for key,value in (
@@ -205,8 +229,13 @@ def build(version, output):
             raise ValueError('binary identity mismatch')
         if reported.get('go_version')!=toolchain: raise ValueError('binary toolchain differs from pinned build compiler')
         if native_os=='darwin':
+            if command=='gh-server': darwin_minimum(run(['otool','-l',str(binary)],env=env).decode())
             deps=run(['otool','-L',str(binary)],env=env).decode().splitlines()[1:]
             if any(not line.strip().startswith(('/usr/lib/','/System/Library/')) for line in deps): raise ValueError('non-system dynamic dependency')
+        if native_os=='linux' and command=='gh-server':
+            linux_dependencies(run(['readelf','--version-info',str(binary)],env=env).decode(),
+                               run(['readelf','-l',str(binary)],env=env).decode(),
+                               run(['ldd',str(binary)],env=env).decode())
         infos[command]={'sha256':digest(binary),'size':binary.stat().st_size,'identity':reported,'cgo_enabled':command=='gh-server'}
     primary=stage/'primary-smoke'; primary.mkdir(); port=free_port()
     smoke_env=dict(env,DB_DSN='file:'+str(primary/'smoke.sqlite'),GIT_REPO_DIR=str(primary/'repos'),PORT=str(port),BASE_URL='http://127.0.0.1:'+str(port),LISTEN_MODE='production',ENVIRONMENT='production',ENABLE_WORKFLOW_EXEC='0')
@@ -224,8 +253,8 @@ def build(version, output):
     smoke(package/'bin/ags-edge',edge_env,edge,'http://127.0.0.1:'+str(port)+'/livez',diagnostics_endpoint='http://127.0.0.1:'+str(diagnostics_port)+'/status',expected_build=infos['ags-edge']['identity'])
     for name in ('LICENSE','NOTICE'):
         if (source/name).is_file(): (package/name).write_bytes((source/name).read_bytes())
-    info={'schema':'ags.release.v1','version':version,'repository':REPOSITORY,'repository_id':REPOSITORY_ID,'revision':sha,'tree':tree,'target':target,
-          'minimum_platform':'macOS 15 (Apple Silicon)' if native_os=='darwin' else 'Ubuntu 24.04 / glibc 2.39 for gh-server; Edge and replication client are static',
+    info={'schema':bundle_contract.MANIFEST_SCHEMA,'abi':bundle_contract.abi_for(target),'toolchain':{'go_version':toolchain,'pin_path':'.go-version'},'version':version,'repository':REPOSITORY,'repository_id':REPOSITORY_ID,'revision':sha,'tree':tree,'target':target,
+          'minimum_platform':'macOS 15 (Apple Silicon)' if native_os=='darwin' else 'Ubuntu 22.04 / glibc 2.35 for gh-server; Edge and replication client are static',
           'binaries':infos,'smoke':{'primary_readiness':True,'sqlite':True,'edge_liveness':True,'edge_build_identity':True,'clean_shutdown':True},'apple_notarized':False}
     (package/'build-info.json').write_text(json.dumps(info,indent=2)+'\n')
     archive=output/('ags-'+version+'-'+target+'.tar.gz')
@@ -234,9 +263,11 @@ def build(version, output):
             if path.is_file():
                 entry=tf.gettarinfo(str(path),arcname=str(path.relative_to(package)));entry.uid=entry.gid=0;entry.uname=entry.gname='';entry.mode=0o755 if path.parent.name=='bin' else 0o644
                 with path.open('rb') as content: tf.addfile(entry,content)
+    if bundle_contract.inspect_bundle(archive,version,sha,target)!=info: raise ValueError('candidate archive mismatch')
     (output/(archive.name+'.sha256')).write_text(digest(archive)+'  '+archive.name+'\n')
     (output/('build-info-'+target+'.json')).write_text(json.dumps(info,indent=2)+'\n')
-    if git('rev-parse','HEAD')!=sha or git('status','--porcelain=v1','--untracked-files=all'): raise ValueError('source changed during build')
+    if git('rev-parse','HEAD')!=control or git('status','--porcelain=v1','--untracked-files=all'): raise ValueError('source changed during build')
+    (output/'runtime-predicate.json').write_text(json.dumps({'schema':'ags.runtime-binding.v1','runtime_revision':sha,'runtime_tree':tree})+'\n')
     return {'archive':archive.name,'sha256':digest(archive),'source':sha,'target':target,'smoke':info['smoke']}
 
 def check_assets(directory,version,sha):
@@ -247,97 +278,475 @@ def check_assets(directory,version,sha):
     for target in TARGETS:
         name='ags-'+version+'-'+target+'.tar.gz'; bundle=directory/name; manifest=directory/('build-info-'+target+'.json')
         info=json.loads(manifest.read_text())
+        bundle_contract.validate_manifest_contract(info,target)
         if info['repository_id']!=REPOSITORY_ID or info['revision']!=sha or info['version']!=version or info['target']!=target or info['tree']!=git('rev-parse',sha+'^{tree}') or set(info['binaries'])!=set(COMMANDS): raise ValueError('asset source/platform mismatch')
         if any(info['binaries'][command].get('identity',{}).get('go_version')!=toolchain for command in COMMANDS):
             raise ValueError('asset toolchain differs from the exact source pin')
         if info.get('smoke')!={'primary_readiness':True,'sqlite':True,'edge_liveness':True,'edge_build_identity':True,'clean_shutdown':True}: raise ValueError('asset smoke verification is incomplete')
         expected=digest(bundle)
         if (directory/(name+'.sha256')).read_text()!=expected+'  '+name+'\n': raise ValueError('asset checksum mismatch')
-        with tarfile.open(bundle) as tf:
-            members=tf.getmembers(); seen=set()
-            for member in members:
-                if member.name in seen or not member.isfile() or member.name not in {'build-info.json','LICENSE','NOTICE',*('bin/'+c for c in COMMANDS)}: raise ValueError('unsafe/unexpected archive member')
-                seen.add(member.name)
-            for cmd in COMMANDS:
-                raw=tf.extractfile('bin/'+cmd).read()
-                if hashlib.sha256(raw).hexdigest()!=info['binaries'][cmd]['sha256']: raise ValueError('binary checksum mismatch')
-            if json.load(tf.extractfile('build-info.json'))!=info: raise ValueError('embedded manifest mismatch')
+        if bundle_contract.inspect_bundle(bundle,version,sha,target)!=info: raise ValueError('embedded manifest mismatch')
         assets.extend([bundle,manifest]);lines.append(expected+'  '+name)
     return assets,lines
 
 def verified_assets(directory,version,sha):
-    assets,lines=check_assets(directory,version,sha)
-    bootstrap=Path(directory)/'install.sh'
-    expected_bootstrap=run(['git','--no-replace-objects','show',sha+':scripts/install.sh'])
-    mode=git('ls-tree',sha,'--','scripts/install.sh').split()[0]
-    if mode!='100755': raise ValueError('installer bootstrap must be executable in the exact source')
-    if bootstrap.exists():
-        if bootstrap.is_symlink() or bootstrap.read_bytes()!=expected_bootstrap: raise ValueError('existing installer bootstrap differs from exact source')
-    else:
-        with bootstrap.open('xb') as out: out.write(expected_bootstrap)
-        bootstrap.chmod(0o755)
-    assets.append(bootstrap); lines.append(digest(bootstrap)+'  '+bootstrap.name)
-    for bundle in (p for p in assets if p.name.endswith('.tar.gz')):
-        run(['gh','attestation','verify',str(bundle),'--repo',REPOSITORY,'--source-digest',sha,
-             '--signer-workflow',REPOSITORY+'/.github/workflows/release.yml','--deny-self-hosted-runners'],timeout=120)
-    checks=Path(directory)/'SHA256SUMS'; expected='\n'.join(lines)+'\n'
-    if checks.exists():
-        if checks.is_symlink() or checks.read_text()!=expected: raise ValueError('existing checksum manifest differs; refusing overwrite')
-    else:
-        with checks.open('x') as out: out.write(expected)
-    return [*assets,checks]
-
-def validate_uploaded(release,assets):
-    listed=release.get('assets',[])
-    if len(listed)!=len(assets) or {a['name'] for a in listed}!={p.name for p in assets}: raise ValueError('draft upload incomplete or ambiguous')
-    local={p.name:p for p in assets}
-    for asset in listed:
-        path=local[asset['name']]
-        if asset.get('state')!='uploaded' or asset.get('digest')!='sha256:'+digest(path) or asset['size']!=path.stat().st_size:
-            raise ValueError('GitHub upload state/digest/size mismatch')
+    refuse_tag_publication()
 
 def finish_draft(version,sha,release_id,assets):
-    endpoint='repos/'+REPOSITORY+'/releases/'+str(release_id)
-    release=require_draft(api(endpoint),version,sha,release_id)
-    validate_uploaded(release,assets)
-    if tag_source(version)!=sha: raise ValueError('release tag differs from accepted source')
-    # Re-read after ref creation; publishing uses the numeric draft identity.
-    release=require_draft(api(endpoint),version,sha,release_id); validate_uploaded(release,assets)
-    api(endpoint,method='PATCH',fields=(('draft',False),('make_latest','false' if '-rc' in version else 'true')))
-    release=api(endpoint)
-    if release.get('draft') or not release.get('immutable') or release.get('tag_name')!=version or release.get('id')!=release_id: raise ValueError('release was not locked after publication')
-    validate_uploaded(release,assets)
-    if tag_source(version)!=sha: raise ValueError('published tag identity mismatch')
-    return {'tag':version,'source':sha,'release_id':release_id,'immutable':True,'assets':len(assets),'release_url':release['html_url']}
+    refuse_tag_publication()
 
 def publish(version,sha,directory):
-    gate(version,sha)
-    assets=verified_assets(directory,version,sha)
-    # Draft is retained on failure. An ordinary rerun will refuse this version.
-    if '-rc' in version:
-        install='VERSION='+version+'; curl -fsSL "https://github.com/'+REPOSITORY+'/releases/download/$VERSION/install.sh" | bash -s -- install --version "$VERSION" --allow-prerelease'
-        upgrade='VERSION='+version+'; curl -fsSL "https://github.com/'+REPOSITORY+'/releases/download/$VERSION/install.sh" | bash -s -- upgrade --version "$VERSION" --allow-prerelease'
-    else:
-        install='curl -fsSL "https://github.com/'+REPOSITORY+'/releases/latest/download/install.sh" | bash -s -- install'
-        upgrade='curl -fsSL "https://github.com/'+REPOSITORY+'/releases/latest/download/install.sh" | bash -s -- upgrade'
-    notes='Exact-source release for controlled installation.\n\nSource: `'+sha+'`\n\nNative macOS ARM64 and Linux amd64 bundles contain gh-server, ags-edge, ags-replication, build metadata and license. No service configuration or data is included.\n\nInstall:\n\n```bash\n'+install+'\n```\n\nUpgrade an existing installer-owned version:\n\n```bash\n'+upgrade+'\n```\n\nThe tagged Bash bootstrap is only a thin version selector. The executable archive is still verified using the immutable Release asset digest and GitHub build provenance before activation. Installation does not restart a service or migrate live data. See docs/operations/releases.md for platform limits, staging and rollback.\n'
-    args=['gh','release','create',version,'--repo',REPOSITORY,'--target',sha,'--verify-tag','--draft','--title',version,'--notes',notes]
-    if '-rc' in version: args.append('--prerelease')
-    args.extend(str(p) for p in assets);run(args,timeout=180)
-    release=require_draft(lookup_release(version),version,sha)
-    return finish_draft(version,sha,release['id'],assets)
+    refuse_tag_publication()
 
 def recover_draft(version,sha,directory,release_id):
-    # Explicit operator recovery only. No new upload, source rebuild, version
-    # change or deletion; every existing artifact must match its provenance.
-    gate(version,sha,recovery_id=release_id)
-    assets=verified_assets(directory,version,sha)
-    return finish_draft(version,sha,release_id,assets)
+    refuse_tag_publication()
+
+
+# These are complete job names, including every matrix expansion in ci.yml.
+# A workflow change must update this reviewed inventory and its contract test.
+DEFAULT_BRANCH = 'fork/main.20260924'
+CI_JOBS = {
+    '.github/workflows/ci.yml': {
+        'Source and governance', 'Root tests (service)', 'Root tests (rest)',
+        'Root tests (server-graphql)', 'Root tests (db-router-git)',
+        'Root tests (edge)', 'Root tests (fork-integrations)', 'Root tests (misc)',
+        'Edge and authority race checks', 'Vendored client compatibility',
+        'Official gh and CI backend acceptance', 'Real Forgejo protected-branch projection',
+    },
+    '.github/workflows/secret-scan.yml': {'secrets'},
+}
+
+
+def pages(path, key=None):
+    rows = []
+    for page in range(1, 11):
+        response = api(path + ('&' if '?' in path else '?') + 'per_page=100&page=' + str(page))
+        batch = response[key] if key else response
+        if not isinstance(batch, list):
+            raise ValueError('incomplete API inventory')
+        rows.extend(batch)
+        if len(batch) < 100:
+            if key and response.get('total_count') != len(rows):
+                raise ValueError('incomplete API inventory')
+            return rows
+    raise ValueError('API inventory exceeds bound')
+
+
+def tag_event(context):
+    if (context.get('event_name') != 'push' or context.get('repository_id') != REPOSITORY_ID
+            or context.get('deleted') is not False or context.get('forced') is not False
+            or context.get('created') is not True or context.get('before') != '0' * 40):
+        raise ValueError('tag_creation_required')
+    ref = context.get('ref', '')
+    if not isinstance(ref, str) or not ref.startswith('refs/tags/'):
+        raise ValueError('tag_ref_required')
+    version = validated_version(ref.removeprefix('refs/tags/'))
+    control = context.get('sha', '')
+    if (not isinstance(control, str) or not SHA.fullmatch(control)
+            or context.get('workflow_sha') != control):
+        raise ValueError('control_identity_mismatch')
+    # Annotated tag pushes can report the tag object as `after`; tag_gate peels it.
+    if not isinstance(context.get('after'), str) or not SHA.fullmatch(context['after']):
+        raise ValueError('tag_event_object_invalid')
+    return version
+
+
+def invocation():
+    event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+    return {key: event.get(key) for key in ('created', 'deleted', 'forced', 'before', 'after')} | {
+        'event_name': os.environ.get('GITHUB_EVENT_NAME'), 'ref': os.environ.get('GITHUB_REF'),
+        'sha': os.environ.get('GITHUB_SHA'), 'workflow_sha': os.environ.get('GITHUB_WORKFLOW_SHA'),
+        'repository_id': event.get('repository', {}).get('id'),
+        'run_id': os.environ.get('GITHUB_RUN_ID'), 'run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT'),
+    }
+
+
+def source_contract(source, version, control):
+    validated_version(version)
+    runtime = source.get('runtime', {})
+    acceptance = source.get('acceptance', {})
+    if (set(source) != {'schema', 'version', 'runtime', 'acceptance'}
+            or source.get('schema') != 'ags.release-source.v1' or source.get('version') != version
+            or set(runtime) != {'revision', 'tree'}
+            or any(not isinstance(v, str) or not SHA.fullmatch(v) for v in runtime.values())
+            or runtime['revision'] == control
+            or set(acceptance) != {'runtime_pull_request', 'disclosure'}
+            or type(acceptance.get('runtime_pull_request')) is not int
+            or acceptance['runtime_pull_request'] <= 0
+            or acceptance.get('disclosure') != 'fork/PUBLICATION.md'):
+        raise ValueError('release_source_invalid')
+    return source
+
+
+def review_evidence(pr, reviews):
+    latest = {}
+    for review in sorted(reviews, key=lambda row: row['id']):
+        # COMMENTED reviews do not dismiss or replace an effective decision.
+        if review.get('state') in ('APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'):
+            latest[review.get('user', {}).get('id')] = review
+    if any(row.get('state') == 'CHANGES_REQUESTED' for row in latest.values()):
+        raise ValueError('human_review_required')
+    approvals = [row['id'] for row in latest.values()
+                 if row.get('state') == 'APPROVED' and row.get('commit_id') == pr['head']['sha']
+                 and row.get('user', {}).get('type') == 'User'
+                 and row.get('author_association') in ('OWNER', 'MEMBER', 'COLLABORATOR')
+                 and type(row['user'].get('id')) is int
+                 and row['user']['id'] != pr['user']['id']]
+    if not approvals:
+        raise ValueError('human_review_required')
+    return sorted(approvals)
+
+
+def reviewed_commit(sha, number=None, *, require_human_review=True):
+    prs = pages('repos/' + REPOSITORY + '/commits/' + sha + '/pulls')
+    accepted = []
+    for row in prs:
+        if number is not None and row.get('number') != number:
+            continue
+        pr = api('repos/' + REPOSITORY + '/pulls/' + str(row['number']))
+        if (not pr.get('merged') or pr.get('base', {}).get('ref') != DEFAULT_BRANCH
+                or pr.get('base', {}).get('repo', {}).get('id') != REPOSITORY_ID
+                or pr.get('head', {}).get('repo', {}).get('id') != REPOSITORY_ID
+                or pr.get('merge_commit_sha') != sha):
+            continue
+        # A rebase/merge may change commit IDs. The approved head's final tree
+        # must still equal the accepted commit, rather than trusting `merged`.
+        head = pr['head']['sha']
+        if not SHA.fullmatch(str(head)):
+            continue
+        if api('repos/' + REPOSITORY + '/git/commits/' + head)['tree']['sha'] != git('rev-parse', sha + '^{tree}'):
+            continue
+        evidence = {'pull_request': pr['number'], 'head': head}
+        if require_human_review:
+            reviews = pages('repos/' + REPOSITORY + '/pulls/' + str(pr['number']) + '/reviews')
+            evidence['reviews'] = review_evidence(pr, reviews)
+        accepted.append(evidence)
+    if len(accepted) != 1:
+        raise ValueError('reviewed_commit_required')
+    return accepted[0]
+
+
+def validate_jobs(rows, expected, attempt):
+    """Required jobs must be an exact success set.
+
+    A completed skipped job outside that set is not evidence and does not
+    fail the inventory. A skipped required job still fails.
+    """
+    required = []
+    for row in rows:
+        name = row.get('name')
+        if name not in expected and row.get('conclusion') == 'skipped' and row.get('status') == 'completed':
+            continue
+        required.append(row)
+    if (len(required) != len(expected) or {row.get('name') for row in required} != expected
+            or any(row.get('status') != 'completed' or row.get('conclusion') != 'success'
+                   or row.get('run_attempt') != attempt for row in required)):
+        raise ValueError('exact_ci_jobs_required')
+
+
+def exact_ci(sha):
+    rows = pages('repos/' + REPOSITORY + '/actions/runs?head_sha=' + sha, 'workflow_runs')
+    evidence = []
+    for path, expected in CI_JOBS.items():
+        eligible = [row for row in rows if row.get('path') == path and row.get('head_sha') == sha
+                    and row.get('repository', {}).get('id') == REPOSITORY_ID
+                    and row.get('head_repository', {}).get('id') == REPOSITORY_ID
+                    and row.get('event') in ('push', 'pull_request', 'workflow_dispatch')]
+        if not eligible:
+            raise ValueError('exact_ci_missing')
+        # Choose the newest applicable run before looking at its conclusion.
+        chosen = max(eligible, key=lambda row: row['id'])
+        current = api('repos/' + REPOSITORY + '/actions/runs/' + str(chosen['id']))
+        if (current.get('head_sha') != sha or current.get('path') != path
+                or current.get('repository', {}).get('id') != REPOSITORY_ID
+                or current.get('head_repository', {}).get('id') != REPOSITORY_ID
+                or current.get('event') != chosen['event']
+                or current.get('status') != 'completed' or current.get('conclusion') != 'success'
+                or type(current.get('run_attempt')) is not int):
+            raise ValueError('exact_ci_incomplete')
+        attempt = current['run_attempt']
+        jobs = pages('repos/' + REPOSITORY + '/actions/runs/' + str(chosen['id'])
+                     + '/attempts/' + str(attempt) + '/jobs', 'jobs')
+        validate_jobs(jobs, expected, attempt)
+        evidence.append({'path': path, 'run_id': chosen['id'], 'attempt': attempt})
+    return evidence
+
+
+def tag_gate(context, *, prior=None, release_id=None):
+    # Missing variables deny even candidate artifact allocation in tag mode.
+    if os.environ.get('AGS_RELEASE_PUBLICATION_ENABLED') != 'true':
+        raise ValueError('publication_disabled')
+    version = tag_event(context)
+    control = context['sha']
+    repo = api('repos/' + REPOSITORY)
+    if (repo.get('id') != REPOSITORY_ID or repo.get('full_name') != REPOSITORY
+            or repo.get('private') is not False or repo.get('fork') is not True
+            or repo.get('parent', {}).get('full_name') != 'ngaut/agent-git-service'
+            or repo.get('default_branch') != DEFAULT_BRANCH):
+        raise ValueError('repository_identity_mismatch')
+    enabled = api('repos/' + REPOSITORY + '/actions/variables/AGS_RELEASE_PUBLICATION_ENABLED', missing=True)
+    if not enabled or enabled.get('value') != 'true':
+        raise ValueError('publication_disabled')
+    ref = api('repos/' + REPOSITORY + '/git/ref/tags/' + version)['object']
+    if context['after'] != ref.get('sha') or tag_source(version) != control:
+        raise ValueError('tag_control_mismatch')
+    if git('rev-parse', 'HEAD') != control:
+        raise ValueError('checkout_control_mismatch')
+    tip = api('repos/' + REPOSITORY + '/commits/' + DEFAULT_BRANCH)['sha']
+    if prior is None:
+        if tip != control:
+            raise ValueError('default_tip_mismatch')
+    else:
+        if prior.get('control') != control or prior.get('version') != version:
+            raise ValueError('frozen_binding_mismatch')
+        comparison = api('repos/' + REPOSITORY + '/compare/' + control + '...' + tip)
+        if comparison.get('status') not in ('identical', 'ahead') or comparison.get('merge_base_commit', {}).get('sha') != control:
+            raise ValueError('default_branch_rewritten')
+    # Freeze and compare the exact reviewed workflow and source bytes at C.
+    for path in ('.github/workflows/release-control.yml', '.github/workflows/release.yml',
+                 'fork/release-source.json'):
+        if run(['git', '--no-replace-objects', 'show', control + ':' + path]) != (ROOT / path).read_bytes():
+            raise ValueError('control_contract_mismatch')
+    control_review = reviewed_commit(control)
+    source = source_contract(json.loads(git('show', control + ':fork/release-source.json')), version, control)
+    runtime = source['runtime']
+    revision = runtime['revision']
+    if git('rev-parse', revision + '^{tree}') != runtime['tree']:
+        raise ValueError('runtime_tree_mismatch')
+    try:
+        git('merge-base', '--is-ancestor', revision, control)
+    except RuntimeError:
+        raise ValueError('runtime_not_ancestor') from None
+    # Runtime publication does not require a GitHub human approval.
+    runtime_review = reviewed_commit(revision, source['acceptance']['runtime_pull_request'],
+                                     require_human_review=False)
+    ci = {'control': exact_ci(control), 'runtime': exact_ci(revision)}
+    # Public source/disclosure checks only. Never load an operator's private policy.
+    run(['python3', 'fork/scripts/audit.py', 'verify'])
+    run(['python3', 'fork/scripts/audit.py', 'publication'])
+    found = lookup_release(version)
+    if found is not None:
+        if release_id is None:
+            raise ValueError('release_name_occupied')
+        require_draft(found, version, control, release_id)
+    elif release_id is not None:
+        raise ValueError('draft_missing')
+    if not re.fullmatch(r'[1-9][0-9]*', str(context.get('run_id', ''))) or not re.fullmatch(r'[1-9][0-9]*', str(context.get('run_attempt', ''))):
+        raise ValueError('build_invocation_invalid')
+    binding = {'schema': 'ags.release-gate.v2', 'version': version, 'control': control,
+               'source': source, 'tag_object': ref['sha'], 'run_id': str(context['run_id']), 'run_attempt': str(context['run_attempt']),
+               'control_review': control_review, 'runtime_review': runtime_review, 'ci': ci}
+    if prior is not None and any(binding[key] != prior.get(key) for key in
+                                 ('source', 'tag_object', 'run_id', 'run_attempt', 'control_review', 'runtime_review')):
+        raise ValueError('frozen_binding_mismatch')
+    return binding
+
+
+def load_binding(path):
+    binding = json.loads(Path(path).read_text())
+    if binding.get('schema') != 'ags.release-gate.v2':
+        raise ValueError('invalid gate receipt')
+    return binding
+
+
+def tag_build(binding, output):
+    fresh = tag_gate(invocation(), prior=binding)
+    runtime = fresh['source']['runtime']
+    result = build(fresh['version'], output, runtime_revision=runtime['revision'],
+                   runtime_tree=runtime['tree'], tag_binding=fresh)
+    (Path(output) / 'build-binding.json').write_text(json.dumps({
+        key: fresh[key] for key in ('version', 'control', 'source', 'run_id', 'run_attempt')}, sort_keys=True) + '\n')
+    return result
+
+
+def binding_verifier():
+    spec = importlib.util.spec_from_file_location('ags_release_binding', ROOT / 'scripts/release_verify.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def tag_assets(directory, binding):
+    """Assemble exactly nine assets from disjoint current-run target directories."""
+    directory = Path(directory)
+    version, control, source = binding['version'], binding['control'], binding['source']
+    revision = source['runtime']['revision']
+    verifier = binding_verifier()
+    pin = {'schema': bundle_contract.PIN_SCHEMA, 'repository': REPOSITORY,
+           'repository_id': REPOSITORY_ID, 'runtime': source['runtime'],
+           'targets': {target: {'manifest_schema': bundle_contract.MANIFEST_SCHEMA,
+                       'abi': bundle_contract.abi_for(target), 'provenance': {
+                           'control_revision': control, 'signer_digest': control,
+                           'signer_workflow': verifier.WORKFLOW}} for target in TARGETS}}
+    assembled = directory / 'publication'
+    assembled.mkdir(mode=0o700)
+    for target in TARGETS:
+        part = directory / ('release-control-' + target)
+        archive_name = 'ags-' + version + '-' + target + '.tar.gz'
+        allowed = {archive_name, archive_name + '.sha256', 'build-info-' + target + '.json',
+                   'attestation.sigstore.json', 'runtime-predicate.json', 'build-binding.json'}
+        if {p.name for p in part.iterdir()} != allowed or any(p.is_symlink() or not p.is_file() for p in part.iterdir()):
+            raise ValueError('target_asset_inventory_mismatch')
+        expected = {key: binding[key] for key in ('version', 'control', 'source', 'run_id', 'run_attempt')}
+        if json.loads((part / 'build-binding.json').read_text()) != expected:
+            raise ValueError('target_binding_mismatch')
+        for name in (archive_name, archive_name + '.sha256', 'build-info-' + target + '.json'):
+            (assembled / name).write_bytes((part / name).read_bytes())
+        bundle = assembled / ('attestation-' + target + '.sigstore.json')
+        bundle.write_bytes((part / 'attestation.sigstore.json').read_bytes())
+        statement = verifier.verify_evidence(assembled / archive_name, pin, target, bundle=bundle, source=source,
+            invocation_uri='https://github.com/' + REPOSITORY + '/actions/runs/' + binding['run_id'] + '/attempts/' + binding['run_attempt'],
+            source_ref='refs/tags/' + version)
+        verifier.check_verified_statement([{'verificationResult': {'statement': statement}}],
+                                          digest(assembled / archive_name), source=source, subject_name=archive_name)
+    assets, _ = check_assets(assembled, version, revision)
+    # check_assets validates the exact R tree; also compare the gate's pinned T.
+    for target in TARGETS:
+        info = json.loads((assembled / ('build-info-' + target + '.json')).read_text())
+        if info['tree'] != source['runtime']['tree']:
+            raise ValueError('target_tree_mismatch')
+    for target in TARGETS:
+        assets.append(assembled / ('attestation-' + target + '.sigstore.json'))
+    for name, content in (
+            ('release-source.json', run(['git', '--no-replace-objects', 'show', control + ':fork/release-source.json'])),
+            ('install.sh', run(['git', '--no-replace-objects', 'show', control + ':scripts/install.sh']))):
+        (assembled / name).write_bytes(content)
+        assets.append(assembled / name)
+    sums = assembled / 'SHA256SUMS'
+    sums.write_text(''.join(digest(path) + '  ' + path.name + '\n' for path in sorted(assets, key=lambda p: p.name)))
+    assets.append(sums)
+    if len(assets) != 9 or len({p.name for p in assets}) != 9:
+        raise ValueError('nine_release_assets_required')
+    return sorted(assets, key=lambda p: p.name)
+
+
+def release_body(binding):
+    runtime = binding['source']['runtime']
+    return ('Release ' + binding['version'] + '\n\nControl: ' + binding['control']
+            + '\nRuntime: ' + runtime['revision'] + '\nTree: ' + runtime['tree']
+            + '\nBuild run/attempt: ' + binding['run_id'] + '/' + binding['run_attempt']
+            + '\n\nNative Ubuntu 22.04 amd64 (glibc <= 2.35) and macOS 15 arm64; Go 1.26.8.'
+            + '\nVerify both archives with gh attestation verify using --source-digest and'
+            + ' --signer-digest set to Control, --signer-workflow ' + REPOSITORY
+            + '/.github/workflows/release-control.yml --deny-self-hosted-runners'
+            + ' --predicate-type https://github.com/' + REPOSITORY
+            + '/attestations/runtime-binding/v1 --bundle attestation-<target>.sigstore.json.'
+            + '\nSee docs/operations/releases.md at Control for the full verification policy.'
+            + '\n\nPublication does not deploy. Operators upgrade manually.'
+            + '\nV2 installation and production verification remain disabled in slice 1.'
+            + '\nStable Latest promotion requires separate approval.\n')
+
+
+def create_draft(version, control, body):
+    if lookup_release(version) is not None:
+        raise ValueError('release_name_occupied')
+    with tempfile.TemporaryDirectory(prefix='ags-release-notes-') as directory:
+        notes = Path(directory) / 'notes.md'
+        notes.write_text(body)
+        args = ['gh', 'release', 'create', version, '--repo', REPOSITORY,
+                '--verify-tag', '--target', control, '--title', version,
+                '--notes-file', str(notes), '--draft', '--latest=false']
+        if '-rc' in version:
+            args.append('--prerelease')
+        try:
+            run(args, timeout=180)
+        except RuntimeError:
+            pass
+    # Read by exact tag after both successful and uncertain writes. Never POST twice.
+    created = lookup_release(version)
+    if created is None:
+        raise ValueError('create_outcome_unknown; retain run evidence, do not retry')
+    require_draft(created, version, control)
+    if created.get('body') != body:
+        raise ValueError('draft_body_mismatch')
+    return created
+
+
+def asset_matches(row, asset):
+    return (row.get('name') == asset.name and row.get('size') == asset.stat().st_size
+            and row.get('digest') == 'sha256:' + digest(asset))
+
+
+def upload_asset(release_id, version, asset):
+    # gh release upload never uses --clobber. Each POST has one readback even on timeout.
+    try:
+        run(['gh', 'release', 'upload', version, str(asset), '--repo', REPOSITORY])
+    except RuntimeError:
+        pass
+    remote = api('repos/' + REPOSITORY + '/releases/' + str(release_id))
+    if remote.get('id') != release_id or remote.get('draft') is not True:
+        raise ValueError('upload_draft_changed; retained without further writes')
+    matches = [row for row in remote.get('assets', []) if row.get('name') == asset.name]
+    if len(matches) != 1 or not asset_matches(matches[0], asset):
+        raise ValueError('upload_outcome_unknown; failed draft retained')
+
+
+def validate_remote_assets(remote, assets):
+    rows = remote.get('assets', [])
+    if len(rows) != 9 or len({row.get('name') for row in rows}) != 9:
+        raise ValueError('nine_remote_assets_required; failed draft retained')
+    for asset in assets:
+        matches = [row for row in rows if row.get('name') == asset.name]
+        if len(matches) != 1 or not asset_matches(matches[0], asset):
+            raise ValueError('remote_asset_mismatch; failed draft retained')
+
+
+def tag_publish(binding, directory):
+    context = invocation()
+    tag_gate(context, prior=binding)
+    assets = tag_assets(directory, binding)
+    tag_gate(context, prior=binding)
+    version, control = binding['version'], binding['control']
+    body = release_body(binding)
+    # The CLI refuses to allocate a missing tag via --verify-tag.
+    if tag_source(version) != control:
+        raise ValueError('tag_control_mismatch')
+    draft = create_draft(version, control, body)
+    release_id = draft['id']
+    for asset in assets:
+        upload_asset(release_id, version, asset)
+    fresh = api('repos/' + REPOSITORY + '/releases/' + str(release_id))
+    require_draft(fresh, version, control, release_id)
+    if fresh.get('body') != body:
+        raise ValueError('draft_body_mismatch')
+    validate_remote_assets(fresh, assets)
+    tag_gate(context, prior=binding, release_id=release_id)
+    try:
+        api('repos/' + REPOSITORY + '/releases/' + str(release_id), method='PATCH',
+            fields=(('draft', False), ('prerelease', '-rc' in version), ('make_latest', 'false')))
+    except RuntimeError:
+        pass
+    published = api('repos/' + REPOSITORY + '/releases/' + str(release_id))
+    if (published.get('id') != release_id or published.get('draft') is not False
+            or published.get('immutable') is not True or published.get('tag_name') != version
+            or published.get('target_commitish') != control or published.get('body') != body
+            or published.get('prerelease') is not ('-rc' in version)):
+        raise ValueError('publication_outcome_unknown; retain draft/release and read back, do not retry')
+    validate_remote_assets(published, assets)
+    for asset in assets:
+        run(['gh', 'release', 'verify-asset', version, str(asset), '--repo', REPOSITORY], timeout=180)
+    return {'release_id': release_id, 'control': control, 'version': version, 'immutable': True}
+
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('mode',choices=['toolchain','gate','build','publish','recover-draft']);p.add_argument('--version');p.add_argument('--sha');p.add_argument('--output');p.add_argument('--draft-id',type=int);a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('mode',choices=['toolchain','gate','build','build-runtime','publish','recover-draft','tag-gate','tag-build','tag-publish']);p.add_argument('--version');p.add_argument('--sha');p.add_argument('--output');p.add_argument('--draft-id',type=int);p.add_argument('--runtime-revision');p.add_argument('--runtime-tree');p.add_argument('--binding');a=p.parse_args()
+    if a.mode=='tag-gate':
+        result=tag_gate(invocation())
+        Path(a.output).write_text(json.dumps(result,sort_keys=True)+'\n')
+        with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+            out.write('binding='+json.dumps(result,separators=(',',':'))+'\n')
+        print(json.dumps(result,indent=2));return
+    if a.mode in ('tag-build','tag-publish'):
+        if not a.binding or not a.output: p.error('tag operation requires --binding and --output')
+        binding=load_binding(a.binding)
+        result=tag_build(binding,a.output) if a.mode=='tag-build' else tag_publish(binding,a.output)
+        print(json.dumps(result,indent=2));return
     if a.mode=='toolchain':
         print(json.dumps(verify_toolchain(a.sha or git('rev-parse','HEAD')),indent=2)); return
+    if a.mode=='build-runtime':
+        if os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch': p.error('runtime builds require workflow_dispatch')
+        result=build('source-'+str(a.runtime_revision),a.output,runtime_revision=a.runtime_revision,runtime_tree=a.runtime_tree)
+        print(json.dumps(result,indent=2));return
     if a.version is None: p.error('this operation requires --version')
     if a.mode=='build': result=build(a.version,a.output)
     elif a.mode=='gate': result=gate(a.version,a.sha)

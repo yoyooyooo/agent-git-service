@@ -40,9 +40,11 @@ func TestCIOptionalStepErrorsDiscardDataWithoutHidingJobErrors(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, jobs, 1)
 			require.Empty(t, jobs[0].Job.Steps)
+			require.Equal(t, cibackend.DiagnosticStatus(stepErr), jobs[0].StepsStatus)
 			job, err := s.CIJob(ctx, repo.FullName, jobs[0].ID)
 			require.NoError(t, err)
 			require.Empty(t, job.Job.Steps)
+			require.Equal(t, cibackend.DiagnosticStatus(stepErr), job.StepsStatus)
 			fixture.jobs[0].HeadSHA = "foreign"
 			_, err = s.CIJobs(ctx, repo.FullName, runs.Runs[0].ID)
 			require.ErrorIs(t, err, cibackend.ErrInvalid, "job binding is mandatory even when steps are optional")
@@ -52,9 +54,9 @@ func TestCIOptionalStepErrorsDiscardDataWithoutHidingJobErrors(t *testing.T) {
 	}
 }
 
-func TestCIArtifactsOnlyUnsupportedFallsBackToEmpty(t *testing.T) {
+func TestCIArtifactsNeverHideUnsupportedAsEmpty(t *testing.T) {
 	for _, tc := range []struct{ err, want error }{
-		{fmt.Errorf("optional: %w", cibackend.ErrUnsupported), nil},
+		{fmt.Errorf("optional: %w", cibackend.ErrUnsupported), cibackend.ErrUnsupported},
 		{cibackend.ErrUnavailable, cibackend.ErrUnavailable},
 		{cibackend.ErrForbidden, ErrForbidden},
 		{cibackend.ErrNotFound, ErrNotFound},
@@ -76,4 +78,27 @@ func TestCIArtifactsOnlyUnsupportedFallsBackToEmpty(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCIStepsDistinguishMissingUnsupportedAndObservedEmpty(t *testing.T) {
+	fixture := &ciFixtureBackend{}
+	job := cibackend.Job{Status: "completed"}
+	steps, status := ciJobSteps(t.Context(), fixture, "ci/project", cibackend.Run{}, job)
+	require.Empty(t, steps)
+	require.Equal(t, "not-projected", status)
+	job.Steps = []cibackend.Step{}
+	_, status = ciJobSteps(t.Context(), fixture, "ci/project", cibackend.Run{}, job)
+	require.Equal(t, "available", status)
+	backend := &emptyStepsBackend{ciFixtureBackend: fixture}
+	_, status = ciJobSteps(t.Context(), backend, "ci/project", cibackend.Run{}, job)
+	require.Equal(t, "missing", status)
+	job.Status = "queued"
+	_, status = ciJobSteps(t.Context(), backend, "ci/project", cibackend.Run{}, job)
+	require.Equal(t, "available", status)
+}
+
+type emptyStepsBackend struct{ *ciFixtureBackend }
+
+func (*emptyStepsBackend) JobSteps(context.Context, string, cibackend.Run, cibackend.Job) ([]cibackend.Step, error) {
+	return []cibackend.Step{}, nil
 }

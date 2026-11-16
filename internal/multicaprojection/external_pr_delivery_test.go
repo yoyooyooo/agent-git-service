@@ -323,3 +323,47 @@ func TestDecodeExternalPRTerminalDeliveryRejectsUnknownFields(t *testing.T) {
 		t.Fatal("expected closed wrapper decoder to reject unknown field")
 	}
 }
+
+func TestExternalPRTerminalDeliveryReopenGenerationIdentity(t *testing.T) {
+	input := ExternalPRTerminalDeliveryInput{TargetInstance: "fixture", Request: terminalRequest("closed", ""), AGSPrID: "owner/repo#7", ObservedAt: time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)}
+	old, err := NewExternalPRTerminalDelivery(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.LifecycleGeneration = 1
+	next, err := NewExternalPRTerminalDelivery(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.IdempotencyKey == next.IdempotencyKey {
+		t.Fatal("distinct closes collided")
+	}
+	data, err := MarshalExternalPRTerminalDelivery(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeExternalPRTerminalDelivery([]byte(data)); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := MarshalExternalPRLinkRequest(next.Request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), "lifecycle_generation") {
+		t.Fatal("private generation leaked into wire schema")
+	}
+	input.Request = terminalRequest("merged", strings.Repeat("a", 40))
+	input.LifecycleGeneration = 0
+	first, err := NewExternalPRTerminalDelivery(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.LifecycleGeneration = 2
+	second, err := NewExternalPRTerminalDelivery(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.IdempotencyKey != second.IdempotencyKey {
+		t.Fatal("merged identity was weakened by reopen generation")
+	}
+}

@@ -18,7 +18,10 @@ The repository uses a layered CI gate:
 - `license-check.yml` verifies root Go module dependency license metadata.
 
 Publishing, deployment, and benchmark-history workflows are intentionally not
-part of the default public CI set.
+part of the default public CI set. `scripts/upgrade-regression.sh` does not
+list `scripts/test_routeb_launchd_native.py`. A skipped native run is not a
+source-CI pass and does not authorize deployment. See
+[Route B host package](operations/routeb-host-package.md).
 
 ## Workflow Files
 
@@ -32,6 +35,36 @@ part of the default public CI set.
   scan full git history
 - `license-check.yml` - verifies dependency licenses and reviewed third-party
   NOTICE files
+
+## Release candidate workflows
+
+`release-control.yml` retains non-publishing dispatch candidates and adds
+`fork-*` tag publication wiring, disabled unless `AGS_RELEASE_PUBLICATION_ENABLED`
+is exactly `true`. Its read-only gate refuses closed tag mode before builds.
+Native builders remain Ubuntu 22.04/macOS 15 and Go 1.26.8. Only the tag publish
+job can write Release contents, after rechecking reviewed C/R/T/V, complete
+exact-head CI and real signed evidence. Both control and runtime PRs must be
+merged. Only the runtime PR no longer requires a GitHub human approval;
+the control PR still requires one. Independent review before merge and CI carry
+the runtime-PR risk. `release.yml` is a manual
+retired reject entry. Neither workflow deploys. Historical tags still select historical workflows;
+platform fencing requires separate approval.
+
+Fork CI runs `fork/scripts/test_release.py`, `fork/scripts/test_release_binding.py`
+and `bun test scripts/release.test.ts` for event, identity, merged-PR and CI
+refusals, admission when the runtime PR has no human approval but the control PR does, ABI/archive checks, nine-asset publication, and uncertain-write readback.
+Synthetic fixtures do not replace real cryptographic platform acceptance.
+The legacy production-pin verifier stays disabled. The complete-checkout v2
+consumer and S1–S6 source contracts run through `bash scripts/upgrade-regression.sh`,
+shared by Fork CI and `scripts/regression_gate.list`. Each test gets independent
+HOME/TMPDIR/cwd, removes inherited Python injection variables and uses
+`scripts/ags-python.sh`. Public host/migration policy stays empty and default
+apply/backup/transaction and direct install retain exit 83. Synthetic complete
+apply tests do not mock the total gate or backup/manual validators; they do not
+prove native host manager, VM or production-copy startup behavior. Real evidence
+acceptance runs separately with `scripts/test_release_crypto.py` and local archives.
+A real two-platform candidate already ran on 2026-10-29; no new candidate or tag
+run is authorized by wiring. See [release operations](operations/releases.md).
 
 ## Main CI Workflow
 
@@ -179,3 +212,20 @@ The following capabilities are intentionally outside the default public CI set:
 As additional suites become reliable, promote the smallest stable regressions
 into `scripts/regression_gate.list` first, then consider widening the required
 smoke or compatibility lanes.
+
+
+## S6 source verification
+
+`bash scripts/upgrade-regression.sh` is the shared sequential Python gate for
+all `test_upgrade_*` entries, including the S6b.01 boundary reproduction, install-v2, single-root, release-consumer and fork
+release/binding/installer-shell tests. New full-restore, handoff, pin and integration suites are
+included through `scripts/regression_gate.list` and the existing Fork CI step.
+The Source and governance job has a 30-minute bound for the expanded sequential
+source suites and owning Go checks. Each entry has isolated HOME/TMPDIR/cwd
+under the runner's home. The runner
+unsets PYTHONDONTWRITEBYTECODE, PYTHONPYCACHEPREFIX, PYTHONPATH and BASH_ENV before
+`scripts/ags-python.sh` establishes bytecode-free execution.
+
+S6 tests cover source contracts and real synthetic S1/S2/S4 integration. S6b-fix3 B2 covers the real local-v2 root, transaction conflicts, the startup fence, launcher and supervise durable spawn/exit, and old-start readback. Those tests do not prove a live host recovery or a two-upgrade chain. S6b portable inventory checks, pin evidence checks, and the injected native sequence run through the same sequential runner.
+
+Native adapter isolation lives in [`.github/workflows/native-adapter.yml`](../.github/workflows/native-adapter.yml), not in Fork CI. It is not release-required evidence: `fork/scripts/release.py` and `scripts/upgrade_host.py` still require the reviewed 12 Fork CI jobs to succeed. A skipped job outside that inventory does not count as success and does not fail the inventory. The separate workflow stays off unless the run is `workflow_dispatch` with `native_probe=true`. It uses a one-shot label and the injected sequence only. It does not use a private runner or a secret, and it does not call `launchctl` or `systemctl`. Real launchd and systemd chains, privileged metadata helper, native Trash, isolated VM, production-copy startup, imile behavior and tag-push crypto remain UNVERIFIED. A skip is not a pass. No candidate or publication workflow is dispatched by this gate. See [source limits](operations/local-upgrade.md#s613-source-integration-boundary).

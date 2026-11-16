@@ -196,6 +196,7 @@ type PullRequestResult struct {
 
 // PullRequestSnapshot is the live provider state used by integrity scans.
 type PullRequestSnapshot struct {
+	UpdatedAt      string   `json:"updated_at"`
 	Number         int      `json:"number"`
 	URL            string   `json:"url"`
 	State          string   `json:"state"`

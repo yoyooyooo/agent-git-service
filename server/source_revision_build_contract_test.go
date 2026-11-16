@@ -22,7 +22,12 @@ func TestSupportedBuildsInjectVerifiedExactSourceRevision(t *testing.T) {
 		}
 	}
 	dockerfile := readBuildContractFile(t, filepath.Join(root, "Dockerfile"))
-	for _, required := range []string{"ARG GIT_SHA", "ARG GIT_TREE", ".ags-source-revision", ".ags-source-tree", "server.gitSHA=${GIT_SHA}"} {
+	for _, required := range []string{
+		"ARG GIT_SHA", "ARG GIT_TREE", ".ags-source-revision", ".ags-source-tree", "server.gitSHA=${GIT_SHA}",
+		"internal/buildinfo.Version=source-${GIT_SHA}",
+		"internal/buildinfo.Revision=${GIT_SHA}",
+		"internal/buildinfo.Tree=${GIT_TREE}",
+	} {
 		if !strings.Contains(dockerfile, required) {
 			t.Fatalf("Dockerfile source-revision contract missing %q", required)
 		}
@@ -65,6 +70,23 @@ func TestHostedCIUsesJobOwnedDatabaseWithoutSourceBindMount(t *testing.T) {
 	for _, forbidden := range []string{"--mount", "--volume", "${PWD}", "GITHUB_WORKSPACE"} {
 		if strings.Contains(database, forbidden) {
 			t.Fatalf("database may bind or write the checkout: %q", forbidden)
+		}
+	}
+}
+
+func TestExactSourceBinaryLdflagsIncludeBuildinfoIdentity(t *testing.T) {
+	script := readBuildContractFile(t, filepath.Join("..", "scripts", "build-exact-source.sh"))
+	for _, required := range []string{
+		"internal/buildinfo.Version=${version_stamp}",
+		"internal/buildinfo.Revision=${source_sha}",
+		"internal/buildinfo.Tree=${source_tree}",
+		"server.gitSHA=${source_sha}",
+		"version_stamp=\"source-${source_sha}\"",
+		"-mod=readonly",
+		"-buildvcs=false",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("exact-source binary ldflags missing %q", required)
 		}
 	}
 }

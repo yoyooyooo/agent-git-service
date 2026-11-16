@@ -19,3 +19,20 @@
 
 [shell]
 scripts/wiki_regression_gate.sh
+# Includes every test_upgrade_* suite and S6 source integration via isolated sequential runner.
+# Route B host package PR1 candidate identity runs inside scripts/upgrade-regression.sh.
+# Route B host package PR2 backup, restore and old-start tests run inside scripts/upgrade-regression.sh.
+# Route B host package PR3 transaction, observation and bundle closure run inside scripts/upgrade-regression.sh.
+scripts/upgrade-regression.sh
+# S6.10 offline full-group contracts run inside scripts/upgrade-regression.sh.
+# S6.11 handoff v2 contracts run inside scripts/upgrade-regression.sh.
+# S6.12 non-installable pin preparation runs inside scripts/upgrade-regression.sh.
+# S6b.01–S6b.13 boundary, journal, wiring, activation, resume, restore, native adapter, helper, epoch-chain, buildinfo, pin-emitter, pin-evidence and CI-inventory tests run inside scripts/upgrade-regression.sh.
+# S6b-fix B1 containment, B4 host binding, B2 production shim and B3 injected native sequence also run inside scripts/upgrade-regression.sh.
+# S6b-fix3 B6 CI inventory regression runs inside scripts/upgrade-regression.sh.
+# S6b-fix3 B5 journal chain and append race run inside scripts/upgrade-regression.sh.
+# S6b-fix6 B2 two-upgrade chain and cross-process phase replay run inside scripts/upgrade-regression.sh.
+# S6b-fix8 B2 epoch=2 runtime/engine writers run inside scripts/upgrade-regression.sh.
+# S6b-fix8 B3 systemd show readback runs inside scripts/upgrade-regression.sh.
+# S6b-fix8 B7 bundle-byte pin emission runs inside scripts/upgrade-regression.sh.
+# S6b-fix9 B7 internal verifier TypeError refusal runs inside scripts/upgrade-regression.sh.

@@ -49,7 +49,7 @@ func TestForgejoOptionalStepsKeepJobsAndChecksAvailable(t *testing.T) {
 				`CREATE TABLE action_run (id integer primary key, repo_id integer, "index" integer, ref text, commit_sha text, event text)`,
 				`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text, status integer DEFAULT 0, started integer DEFAULT 0, stopped integer DEFAULT 0)`,
 				`CREATE TABLE action_task (id integer primary key, repo_id integer, commit_sha text, log_filename text, log_in_storage boolean, log_expired boolean)`,
-				`CREATE TABLE action_task_step (id integer primary key, task_id integer, repo_id integer, name text, "index" integer, status integer, started integer, stopped integer, log_index integer, log_length integer)`,
+				`CREATE TABLE action_task_step (id integer primary key, task_id integer, repo_id integer, name text, "index" integer, status integer, started integer, stopped integer)`,
 				`INSERT INTO repository VALUES (1, 'ci', 'project')`,
 			} {
 				require.NoError(t, database.Exec(sql).Error)
@@ -59,7 +59,7 @@ func TestForgejoOptionalStepsKeepJobsAndChecksAvailable(t *testing.T) {
 			require.NoError(t, database.Exec(`INSERT INTO action_task VALUES (41, 1, ?, 'missing.log', false, true)`, head).Error)
 			require.NoError(t, database.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha) VALUES (32, 17, 1, 40, 'lint', ?)`, head).Error)
 			require.NoError(t, database.Exec(`INSERT INTO action_task VALUES (40, 1, ?, 'missing.log', false, true)`, head).Error)
-			require.NoError(t, database.Exec(`INSERT INTO action_task_step VALUES (1,41,1,'private step',0,1,1767225600,1767225601,0,0)`).Error)
+			require.NoError(t, database.Exec(`INSERT INTO action_task_step VALUES (1,41,1,'private step',0,1,1767225600,1767225601)`).Error)
 			switch tc.name {
 			case "wrong_commit":
 				require.NoError(t, database.Exec(`UPDATE action_task SET commit_sha=?`, strings.Repeat("b", 40)).Error)
@@ -120,6 +120,9 @@ func TestForgejoOptionalStepsKeepJobsAndChecksAvailable(t *testing.T) {
 					expected = 1
 				}
 				require.Len(t, job["steps"], expected)
+				if expected == 0 {
+					require.NotEmpty(t, job["ags_steps_status"], "missing metadata needs an explicit diagnosis")
+				}
 				detail := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/jobs/%.0f", repo.FullName, job["id"]), nil)
 				require.Equal(t, 200, detail.Code, detail.Body.String())
 				require.Len(t, testharness.DecodeJSON(t, detail)["steps"], expected)
@@ -133,7 +136,7 @@ func TestForgejoOptionalStepsKeepJobsAndChecksAvailable(t *testing.T) {
 	}
 }
 
-func TestForgejoArtifactsWithoutLogBridgeRemainEmpty(t *testing.T) {
+func TestForgejoArtifactsWithoutLogBridgeFailExplicitly(t *testing.T) {
 	h := testharness.New(t)
 	repo, head := seedCheckRunsRepo(t, h, "optional-artifacts")
 	bindOptionalForgejo(t, h, repo.FullName, head, "schedule", cibackend.BackendConfig{Kind: "forgejo", TokenFile: "fixture", AllowHTTP: true}, "")
@@ -142,10 +145,10 @@ func TestForgejoArtifactsWithoutLogBridgeRemainEmpty(t *testing.T) {
 	require.Len(t, runs.Runs, 1)
 	path := fmt.Sprintf("/api/v3/repos/%s/actions/runs/%d/artifacts", repo.FullName, runs.Runs[0].ID)
 	response := h.DoREST(t, "GET", path, nil)
-	require.Equal(t, 200, response.Code, response.Body.String())
-	body := testharness.DecodeJSON(t, response)
-	require.Equal(t, float64(0), body["total_count"])
-	require.Equal(t, []any{}, body["artifacts"])
+	require.Equal(t, 501, response.Code, response.Body.String())
+	require.Contains(t, response.Body.String(), "does not support")
+	repoResponse := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/artifacts", repo.FullName), nil)
+	require.Equal(t, 501, repoResponse.Code, repoResponse.Body.String())
 	unknown := h.DoREST(t, "GET", fmt.Sprintf("/api/v3/repos/%s/actions/runs/17/artifacts", repo.FullName), nil)
 	require.Equal(t, 404, unknown.Code, "unsupported metadata must not bypass run identity")
 }

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -137,8 +136,15 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 			return
 		case "runs":
 			q := r.URL.Query()
-			page, size, valid := ciRunPagination(q)
-			if !valid {
+			page, _ := strconv.Atoi(q.Get("page"))
+			size, _ := strconv.Atoi(q.Get("per_page"))
+			if page == 0 {
+				page = 1
+			}
+			if size == 0 {
+				size = 30
+			}
+			if page < 1 || page > 1000 || size < 1 || size > 100 {
 				respond.Error(w, 422, "invalid CI pagination")
 				return
 			}
@@ -160,27 +166,15 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 			respond.JSON(w, 200, map[string]any{"total_count": result.Total, "workflow_runs": rows})
 			return
 		case "run", "run-jobs", "run-logs", "cancel", "rerun", "rerun-failed-jobs":
-			var run service.CIRun
-			var e error
-			if r.Method == http.MethodGet {
-				selector, err := url.PathUnescape(chi.URLParam(r, "run_id"))
-				if err != nil {
-					respond.Error(w, 422, "invalid CI run selector")
-					return
-				}
-				run, e = d.Svc.CIReadRun(r.Context(), repo.FullName, selector)
-			} else {
-				id, ok := readID("run_id")
-				if !ok {
-					return
-				}
-				run, e = d.Svc.CIRun(r.Context(), repo.FullName, id)
+			id, ok := readID("run_id")
+			if !ok {
+				return
 			}
+			run, e := d.Svc.CIRun(r.Context(), repo.FullName, id)
 			if e != nil {
 				ciHTTPError(w, e)
 				return
 			}
-			id := run.ID
 			if attempt := chi.URLParam(r, "attempt_number"); attempt != "" && attempt != strconv.Itoa(run.Run.Attempt) {
 				respond.Error(w, 404, "Only the selected run attempt is available")
 				return
@@ -296,9 +290,7 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 				respond.JSON(w, 200, map[string]any{"total_count": len(rows), "artifacts": rows})
 				return
 			}
-			// Repository-wide inventory is not projected by these adapters;
-			// run-scoped artifacts above are observed independently.
-			respond.JSON(w, 200, map[string]any{"total_count": 0, "artifacts": []any{}})
+			ciHTTPError(w, cibackend.ErrUnsupported)
 			return
 		default:
 			respond.Error(w, 501, "Selected CI backend does not expose this Actions operation")
@@ -306,26 +298,6 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 		}
 	}
 }
-
-func ciRunPagination(query url.Values) (int, int, bool) {
-	values := []int{1, 30}
-	for i, field := range []string{"page", "per_page"} {
-		raw, exists := query[field]
-		if !exists {
-			continue
-		}
-		if len(raw) != 1 {
-			return 0, 0, false
-		}
-		n, err := strconv.Atoi(raw[0])
-		if err != nil || n < 1 || strconv.Itoa(n) != raw[0] {
-			return 0, 0, false
-		}
-		values[i] = n
-	}
-	return values[0], values[1], values[0] <= 1000 && values[1] <= 100
-}
-
 func ciHTTPError(w http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
 	switch {
@@ -357,7 +329,7 @@ func ciJobJSON(v service.CIJob, base string) map[string]any {
 	for _, step := range j.Steps {
 		steps = append(steps, map[string]any{"name": step.Name, "number": step.Number, "status": nilIfEmpty(step.Status), "conclusion": nilIfEmpty(step.Conclusion), "started_at": step.StartedAt, "completed_at": step.CompletedAt})
 	}
-	return map[string]any{"id": v.ID, "run_id": v.RunID, "name": j.Name, "head_sha": j.HeadSHA, "status": j.Status, "conclusion": nilIfEmpty(j.Conclusion), "html_url": j.URL, "url": fmt.Sprintf("%s/actions/jobs/%d", base, v.ID), "run_url": fmt.Sprintf("%s/actions/runs/%d", base, v.RunID), "started_at": j.StartedAt, "completed_at": j.CompletedAt, "steps": steps, "labels": []string{}, "ags_ci_backend": v.Backend}
+	return map[string]any{"id": v.ID, "run_id": v.RunID, "name": j.Name, "head_sha": j.HeadSHA, "status": j.Status, "conclusion": nilIfEmpty(j.Conclusion), "html_url": j.URL, "url": fmt.Sprintf("%s/actions/jobs/%d", base, v.ID), "run_url": fmt.Sprintf("%s/actions/runs/%d", base, v.RunID), "started_at": j.StartedAt, "completed_at": j.CompletedAt, "steps": steps, "ags_steps_status": v.StepsStatus, "labels": []string{}, "ags_ci_backend": v.Backend}
 }
 func ciCheckRunJSON(value service.CIJob, base string) map[string]any {
 	j := value.Job

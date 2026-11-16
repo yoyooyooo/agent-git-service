@@ -158,6 +158,7 @@ func (d *Deps) ForgejoWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	respond.JSON(w, http.StatusAccepted, map[string]any{
 		"handled":                      result.Handled,
+		"ignored_reason":               result.IgnoredReason,
 		"repo_full_name":               result.RepoFullName,
 		"pr_number":                    result.PRNumber,
 		"base_branch":                  result.BaseBranch,

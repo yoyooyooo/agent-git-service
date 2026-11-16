@@ -63,7 +63,52 @@ func (r forgejoRun) run() (Run, error) {
 	return Run{Untrusted: r.NeedApproval || r.ForkPullRequest, Key: strconv.FormatInt(r.ID, 10), Number: r.Number, Workflow: r.Workflow, Name: r.Workflow, Branch: branch, HeadSHA: r.Head, Event: r.Event, Status: status, Conclusion: conclusion, URL: r.URL, CreatedAt: r.Created, UpdatedAt: r.Updated, StartedAt: r.Started, Attempt: 1, PullRequests: prs}, nil
 }
 func (f *Forgejo) Runs(ctx context.Context, repo string, q Query) (Runs, error) {
-	return f.queryRuns(ctx, repo, q)
+	prefix, e := f.prefix(repo)
+	if e != nil {
+		return Runs{}, e
+	}
+	if q.Page == 0 {
+		q.Page = 1
+	}
+	if q.PerPage == 0 || q.PerPage > 50 {
+		q.PerPage = 50
+	}
+	if q.Page < 1 || q.Page > 1000 || q.PerPage < 1 {
+		return Runs{}, ErrInvalid
+	}
+	v := url.Values{"page": {strconv.Itoa(q.Page)}, "limit": {strconv.Itoa(q.PerPage)}}
+	if q.HeadSHA != "" {
+		v.Set("head_sha", q.HeadSHA)
+	}
+	if q.Event != "" {
+		v.Set("event", q.Event)
+	}
+	data, e := f.request(ctx, "GET", prefix+"runs?"+v.Encode(), false)
+	if e != nil {
+		return Runs{}, e
+	}
+	var body struct {
+		Total int          `json:"total_count"`
+		Items []forgejoRun `json:"workflow_runs"`
+	}
+	if e = decode(data, &body); e != nil {
+		return Runs{}, e
+	}
+	if body.Total < 0 || len(body.Items) > q.PerPage {
+		return Runs{}, ErrInvalid
+	}
+	result := Runs{Items: []Run{}, Total: body.Total, Complete: body.Total > 0 && q.Page*q.PerPage >= body.Total || len(body.Items) < q.PerPage}
+	for _, item := range body.Items {
+		r, e := item.run()
+		if e != nil {
+			return Runs{}, e
+		}
+		if q.Workflow != "" && r.Workflow != q.Workflow {
+			continue
+		}
+		result.Items = append(result.Items, r)
+	}
+	return result, nil
 }
 func (f *Forgejo) Run(ctx context.Context, repo, id string) (Run, error) {
 	prefix, e := f.prefix(repo)
@@ -102,7 +147,7 @@ func (f *Forgejo) findListedRun(ctx context.Context, repo, id string) (Run, erro
 	seen := map[string]bool{}
 	total := -1
 	for page := 1; page <= limit; page++ {
-		found, err := f.runPage(ctx, repo, url.Values{"page": {strconv.Itoa(page)}, "limit": {"50"}})
+		found, err := f.Runs(ctx, repo, Query{Page: page, PerPage: 50})
 		if err != nil {
 			return Run{}, err
 		}
@@ -390,17 +435,6 @@ func (f *Forgejo) boundJobLogs(ctx context.Context, repo string, run Run, job Jo
 }
 
 func (f *Forgejo) boundJobResource(ctx context.Context, repo string, run Run, job Job, steps bool) ([]byte, error) {
-	observation, err := f.boundJobObservation(ctx, repo, run, job, steps)
-	if err != nil {
-		return nil, err
-	}
-	if steps {
-		return json.Marshal(observation.Steps)
-	}
-	return []byte(observation.Text), nil
-}
-
-func (f *Forgejo) boundJobObservation(ctx context.Context, repo string, run Run, job Job, steps bool) (*forgejoJobObservation, error) {
 	if f.config.LogBridge == nil {
 		return nil, fmt.Errorf("%w: Forgejo log bridge is not configured", ErrUnsupported)
 	}
@@ -460,13 +494,25 @@ func (f *Forgejo) boundJobObservation(ctx context.Context, repo string, run Run,
 	}
 	defer response.Body.Close()
 	if response.StatusCode != 200 {
-		return nil, ErrUnavailable
+		return nil, bridgeStatusError(response.StatusCode)
 	}
 	body, e := bounded(response.Body)
 	if e != nil {
 		return nil, e
 	}
-	var log forgejoJobObservation
+	var log struct {
+		Schema      string `json:"schema"`
+		Repo        string `json:"repo"`
+		TaskID      int64  `json:"task_id"`
+		RunNumber   int64  `json:"run_number"`
+		JobName     string `json:"job_name"`
+		Head        string `json:"head_sha"`
+		ProviderPR  int    `json:"provider_pr"`
+		ProviderRef string `json:"provider_ref"`
+		Event       string `json:"event"`
+		Text        string `json:"text"`
+		Steps       []Step `json:"steps"`
+	}
 	if e = decode(body, &log); e != nil {
 		return nil, e
 	}
@@ -488,8 +534,9 @@ func (f *Forgejo) boundJobObservation(ctx context.Context, repo string, run Run,
 		if log.Steps == nil {
 			return nil, ErrInvalid
 		}
+		return json.Marshal(log.Steps)
 	}
-	return &log, nil
+	return []byte(log.Text), nil
 }
 func (f *Forgejo) RunLogs(ctx context.Context, repo, id string) ([]byte, error) {
 	if f.config.LogBridge == nil {
@@ -506,49 +553,37 @@ func (f *Forgejo) RunLogs(ctx context.Context, repo, id string) ([]byte, error) 
 	var b bytes.Buffer
 	writer := zip.NewWriter(&b)
 	total := 0
-	entryCount := 0
-	names := make(map[string]int, len(jobs.Items))
-	for _, job := range jobs.Items {
-		names[ghLogJobName(job.Name)]++
-	}
 	for index, j := range jobs.Items {
-		name := ghLogJobName(j.Name)
-		if names[name] != 1 || !safeGHLogJobName(name) {
-			// gh matches ZIP paths by display name. Ambiguous/unsafe names must
-			// use its existing job-ID log fallback, never another job's file.
-			continue
-		}
-		observation, e := f.boundJobObservation(ctx, repo, run, j, false)
-		var body []byte
-		var entries []forgejoLogEntry
+		body, e := f.boundJobLogs(ctx, repo, run, j)
 		if e != nil {
-			return nil, e
-		}
-		body = []byte(observation.Text)
-		if name != "" && name != "." && name != ".." {
-			entries = forgejoStepLogEntries(j, name, body, observation.StepLogs)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			// Never include provider bodies, credentials or unverified partial output.
+			body = []byte(fmt.Sprintf("AGS_LOG_UNAVAILABLE provider_job=%s status=%s; retrieve this job through AGS for diagnosis.\n", j.Key, DiagnosticStatus(e)))
 		}
 		total += len(body)
 		if total > MaxBody {
 			return nil, ErrUnavailable
 		}
-		if len(entries) == 0 || entryCount+len(entries) > 1000 {
-			// No partial step ZIP: gh switches entirely to step mode as soon
-			// as it finds any one step file, silently skipping missing steps.
-			entries = []forgejoLogEntry{{name: strconv.Itoa(index) + "_" + name + ".txt", body: body}}
-		}
-		entryCount += len(entries)
-		if entryCount > 1000 {
-			return nil, ErrUnavailable
-		}
-		for _, file := range entries {
-			entry, e := writer.Create(file.name)
-			if e != nil {
-				return nil, e
+		// A whole-job segment is honest about missing step metadata. gh may present
+		// UNKNOWN STEP; it must never fabricate successful steps or drop the log.
+		name := strings.Map(func(r rune) rune {
+			if r == '/' || r == ':' {
+				return -1
 			}
-			if _, e = entry.Write(file.body); e != nil {
-				return nil, e
+			if r == '\\' || r < 32 {
+				return '_'
 			}
+			return r
+		}, j.Name)
+		// Official gh recognizes whole-job logs as top-level <ordinal>_<job>.txt.
+		entry, e := writer.Create(strconv.Itoa(index) + "_" + name + ".txt")
+		if e != nil {
+			return nil, e
+		}
+		if _, e = entry.Write(body); e != nil {
+			return nil, e
 		}
 	}
 	if e = writer.Close(); e != nil {

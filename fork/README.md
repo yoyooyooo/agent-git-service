@@ -51,10 +51,18 @@ operator setup; merging the workflow does not grant network or deployment access
 
 [Release operations](../docs/operations/releases.md) owns exact-source native builds,
 artifact provenance, immutable assets, opt-in installation and data-safe rollback.
-Maintainers choose releases only through `bun scripts/release.ts rc|stable`;
-the resulting exact `fork-*` tag is the normal publication trigger. Stable
-promotion creates a new immutable tag at the accepted RC's exact source SHA; it
-does not rename or mutate the RC.
+`release-control.yml` keeps manual non-publishing candidates and adds gated
+`fork-*` tag wiring using reviewed control C and runtime R/T. Publication defaults
+closed through `AGS_RELEASE_PUBLICATION_ENABLED`; `release.yml` is a manual
+retired reject entry. No switch, ruleset, tag or run is activated by source
+acceptance. The legacy production-pin verifier remains disabled. V2 consumers
+require a complete reviewed checkout; the local upgrade policy admits no hosts
+or migrations pending acceptance. The following remain disabled:
+`bun scripts/release.ts rc|stable` tag writes. Historical v1 assets remain unchanged.
+Publication does not deploy; upgrades are manual operator actions. See the release
+operations guide for nine-asset verification, merged-PR/CI requirements and recovery.
+Only the runtime PR no longer requires a GitHub human approval; the control PR
+still requires one. Independent review before merge and CI carry that runtime-PR risk.
 The repository name has no `-fork` suffix; the `fork/*` branch prefix continues to
 identify a downstream generation. Prior private repository histories are not
 publication inputs. New metadata/build changes have their own exact-source CI;
@@ -65,3 +73,31 @@ the initial generation preservation receipt is not reused as a new runtime test.
 The public architecture and operational guide for the optional Edge are in [`docs/architecture/ags-edge.md`](../docs/architecture/ags-edge.md). Reusable examples use documentation-only hosts and addresses. Real hostnames, account paths, node certificates, operator tokens, and acceptance transcripts belong to the operator's private configuration and evidence store.
 
 Do not transplant another project's storage rules blindly. This server's existing GORM migrations, deployed SQLite data, TiDB test semantics and Git invariants remain binding compatibility constraints. Source cleanup must not turn a migration into data loss or broaden authorization.
+
+## Minimal upgrade source wiring (S5)
+
+S5 connects the existing backup/inventory, offline restore, cold-window and
+manual acceptance components under a root-pinned private host package. The
+checked-in deployments and migration admissions remain empty. Default apply,
+backup and transaction retain 83; direct v2 install stays unconditionally 83.
+The shared [regression entry](../scripts/upgrade-regression.sh) is referenced by
+`regression_gate.list` and Fork CI and includes the non-mocked total-gate synthetic
+flow. [Local upgrade](../docs/operations/local-upgrade.md#s5-two-layer-admission)
+owns the contract and retained restart/recovery stops. No version, release-source
+identity, publication switch, deployment setting or accepted-generation receipt
+is updated by wiring. Native platform/VM/production-copy startup remain separate
+unverified acceptance surfaces. Source PR/CI is not permission to provision or deploy.
+
+
+## S6 source preparation limits
+
+The [S6b source design](../docs/design/s6b-upgrade-recovery.md) records durable recovery, native evidence and non-installable pin/build identity boundaries, including the S6b-fix containment, host-binding, production-shim, injected native sequence and structural pin-evidence checks. The [source integration boundary](../docs/operations/local-upgrade.md#s613-source-integration-boundary)
+separates those source wires from live host recovery and real OS probes, which remain UNVERIFIED. An installable pin requires a separately approved real Release. Offline
+full-group plans, append-only human handoff and non-installable pin preparation
+are not recovery execution or publication. The dependency-complete bundle is
+staging only. Lifecycle/recovery planning helpers are not durable launcher/CLI
+authority. Default deployments and migrations remain empty; public apply and
+direct install retain 83. Source CI grants no provision, restart, tag, Release,
+deployment or merge permission. [CI scope](../docs/ci.md#s6-source-verification)
+and the [recovery matrix](../docs/operations/backup-recovery.md#s613-fault-matrix)
+list unverified gates.

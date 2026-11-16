@@ -17,8 +17,6 @@ ci:
     build-farm:
       kind: forgejo
       url: https://forgejo.example.test
-      # Optional trusted browser URL; never an API or credential destination.
-      web_url: https://build.example.test
       token_file: private/ci-forgejo.token
       task_page_limit: 100
       log_bridge:
@@ -49,12 +47,6 @@ provider or log bridge. HTTP requires explicit `allow_http: true`; production
 should use verified TLS. CI fields are strictly decoded: a misspelled selector
 cannot silently revert to another backend.
 
-`web_url` is a Forgejo browser alias for read locators; it does not change the API
-destination or any existing CI resource ID. If omitted, a Forgejo CI backend at
-the same API origin as the configured Forgejo integration may inherit that
-integration's validated `web_base_url`. An explicit CI `web_url` takes precedence;
-an unrelated provider never inherits the alias.
-
 `required_checks: []` is a known empty set; omission is unknown for an external
 backend. Current AGS branch protection requirements are unioned with configured
 requirements and cannot be removed by changing CI backend. Unknown policy cannot
@@ -82,69 +74,6 @@ transport failures and other provider errors do not trigger this fallback.
 Details, jobs and logs all use this lookup, so a successful `gh run list` does not
 lead to a false missing-run error solely because the single-run route is absent.
 
-### Forgejo read locators
-
-The GET run detail, jobs and logs routes (including attempt routes) also accept
-`forgejo:<repository-run-number>` or an encoded Forgejo browser run URL. This is
-an explicit AGS compatibility extension for stock `gh run view`. The service
-authorizes the AGS repository first, then the adapter queries the configured
-provider's public `run_number` filter and requires one exact result. Responses
-always contain the existing canonical AGS numeric ID; subsequent client requests
-use that ID normally.
-
-A URL must match the selected backend's configured API/browser base and exact
-external repository. It must have no credentials, query or fragment. The URL is
-parsed as a locator and is never fetched. A bare numeric value remains an AGS
-resource ID, so it cannot accidentally select a same-numbered provider run.
-Mutation routes continue to require canonical numeric IDs.
-
-```bash
-gh run view forgejo:9 -R team/service --json databaseId,number,headSha,jobs
-gh run view https://build.example.test/ci/service/actions/runs/9 \
-  -R team/service --log-failed
-```
-
-### Run filtering and pagination
-
-Forgejo listings are ordered by repository run number descending. Branch,
-workflow, head SHA, event and status/conclusion filters apply before the client
-page is selected. `status=failure` matches the conclusion of a completed run;
-`status=completed` matches its execution state. `total_count` counts the filtered
-inventory and pages may contain up to 100 runs even when Forgejo's public API
-caps each provider page at 50. The returned next link preserves the filters.
-
-An upgraded explicit bridge exposes the repository-bound read-only
-`GET /api/internal/provider-logs/repos/{owner}/{repo}/runs` resource with schema
-`ags.internal-provider-runs.v1`. It counts and selects an ordered page in one
-read-only repeatable-read transaction. It never returns event payloads or
-credentials. The adapter validates the response repository, query match, order,
-page size and run identities before mapping them.
-
-When an older bridge returns 404/501, AGS reads the public run collection within
-the configured `task_page_limit` budget and request deadline. Supported head,
-event and status filters reduce provider work; the complete remaining inventory
-is validated, sorted and filtered before pagination. Duplicate IDs or run
-numbers, changing totals, incomplete pages and exhausted budgets fail explicitly.
-The first provider page establishes the bounded inventory size. Up to four
-workers then fetch the remaining pages concurrently with separate query values;
-any error cancels the other reads, and every worker finishes before a result is
-returned. Completion order does not change page-size or identity validation.
-Provider denial, outage or malformed indexed evidence does not trigger fallback.
-The default budget is 100 provider pages (5,000 runs); select an exact head to
-reduce work or upgrade the bridge for larger inventories. The separate legacy
-single-run lookup still reads raw provider pages and may stop at an exact match;
-it does not repeat the full listing scan for each page.
-
-For repositories with large histories, deploy and verify the indexed bridge
-before upgrading the client-facing adapter. The public API includes complete
-event payloads and repository objects in every run; even an inventory below the
-page budget can exceed the request deadline while those bodies are transferred.
-Bounded concurrency reduces request latency but cannot remove that transfer
-cost. A missing indexed endpoint therefore provides protocol compatibility,
-not a guarantee that broad listings will finish in time. Verify an unfiltered
-100-item read and subsequent page against the actual repository during rollout;
-keep the previous client-facing version if this check fails.
-
 Missing capabilities return unsupported. Forgejo cancel and workflow catalogue
 management remain unsupported. Reruns use the public workflow dispatch API as
 described below; no private web endpoints, SQL or another backend are used.
@@ -153,7 +82,21 @@ observed workflow identities is available, with state `unknown`; this is not a
 list of enabled workflows.
 
 Forgejo runs are selected with the public `head_sha` filter. Forgejo jobs are then
-selected by exact repository run number, workflow and head. The public task list
+selected by exact repository run number, workflow and head, and intersected with
+the current `action_run_job.task_id` associations from the explicit bridge's
+`GET /api/internal/provider-logs/repos/{owner}/{repo}/runs/{run}/jobs` resource
+(`ags.internal-provider-jobs.v1`). The inventory binds repository, provider run ID,
+run number and commit; all job/task commits must agree. The bridge enumerates all
+jobs by the verified run ID before validating each job and task repository against
+the run repository. A mismatched repository fails the entire inventory with
+`metadata_invalid` (502), so the adapter cannot report a complete job list or
+return a partial run-log ZIP for that inventory. Historical retry tasks
+without a current job association are excluded, and previously mapped orphan job
+IDs return 404. Names are not deduplicated: matrix jobs may share a display name.
+Missing tasks, changed inventories and incomplete public task observations fail
+explicitly rather than dropping current jobs. Forgejo can skip a conditional job before allocating a task. The bridge accepts that absence only when the job belongs to the selected repository, run and commit, has a name, and records `task_id=0`, `status=4` (`Skipped`), `started=0` and `stopped=0`, with no joined task row. Such a job contributes no task or log. A run that contains only these skipped jobs has an empty current-task inventory. Historical tasks are never substituted. Other missing task associations, unknown states, and repository or commit mismatches still reject the whole inventory. Without a configured bridge, job
+inventory is unsupported (501); an older bridge lacking the resource returns 404.
+The bridge and adapter therefore need compatible source versions before activation. The public task list
 ignores `head_sha` and `run_number`, so the adapter reads that list from the newest
 task. Forgejo 12 returns it `id DESC`, and repository run numbers increase with
 those IDs, including retries of one run. After this run's tasks have been seen, the
@@ -223,8 +166,17 @@ All three Forgejo rerun routes execute the **whole workflow**, including success
 jobs, and return `X-AGS-CI-Rerun-Scope: workflow`. Original trigger context and
 custom dispatch inputs are not replayed; required inputs without defaults can
 prevent dispatch. Unapproved or fork PR runs are denied rather than escalating
-them to a trusted workflow dispatch. PR checks retain their existing preference
-for actual PR events, so a successful dispatch does not erase a failed PR check.
+them to a trusted workflow dispatch.
+
+PR checks select the newest eligible run per workflow file, regardless of event
+or conclusion. Eligibility still requires the current head SHA and matching
+branch or verified provider PR projection. Creation time orders runs; a higher
+repository run number breaks a timestamp tie, followed by the run attempt.
+A later `workflow_dispatch` can therefore replace an earlier failed PR run.
+A later failed or pending run also replaces an older success. Required checks
+must still all pass, including same-named checks in different workflow files.
+This is AGS's evidence selection rule, not a guarantee that the provider accepts
+a merge: provider branch protection and trigger-specific requirements still apply.
 
 ```bash
 gh run rerun "$RUN_ID"
@@ -237,9 +189,6 @@ Native Actions keeps its separate native execution contract; these external
 adapters never fall back to native state. See [command coverage](../operations/gh-command-parity.md).
 
 ## Logs
-
-See [Forgejo step logs](forgejo-step-logs.md) for the optional exact step layout,
-unassigned-output diagnostic segment and official gh ZIP selection contract.
 
 When Forgejo does not provide public logs, its adapter may use the explicit typed
 provider-log bridge. The bridge must match repository, task ID, run number, job
@@ -257,7 +206,12 @@ host actually serving the log bridge as well as any affected CI adapter; updatin
 only the AGS client-facing primary cannot repair an older remote bridge.
 
 Run ZIPs contain actual whole-job logs where step metadata is unavailable; no
-successful steps are fabricated. Signed download redirects require an exact
+successful steps are fabricated. If one verified job's log read fails, its
+whole-job segment contains `AGS_LOG_UNAVAILABLE`, the provider job key and a safe
+status category. Other jobs retain their original output; no provider error body
+or partial unverified log is included. Direct job log requests retain HTTP
+404/403/409/501 semantics. Inventory/binding failures before log collection,
+cancellation, archive size limits and malformed archives remain errors. Signed download redirects require an exact
 configured HTTPS hostname and receive no provider authorization, cookies or AGS
 credentials. Only one explicit GET is allowed. Archives are checked for path
 traversal, file type, entry count and total expanded bytes (8 MiB), not merely
@@ -312,20 +266,6 @@ projection with matching origin/repository/head; AGS PR numbers are never guesse
 as provider PR numbers. The same job name in two workflow files is two checks, identified by workflow file plus job name. A repeated name inside one workflow, malformed statuses, cross-run jobs,
 outages and incomplete pagination are errors, not empty success.
 
-Forgejo's public task collection includes historical rerun attempts. Current
-jobs require the authenticated bridge's read-only
-`/runs/{run}/jobs` inventory, bound through `action_run_job.task_id` to the exact
-repository, provider run and commit. A missing bridge, missing task or incomplete
-association fails explicitly; AGS does not choose a task by name, highest ID or
-successful outcome. Distinct current jobs with the same workflow/name retain
-the existing ambiguous-check rejection. This binding does not change the
-existing PR-event priority when selecting a run across events.
-
-Deploy the matching bridge endpoint before the adapter. Step metadata remains
-optional, but current-job identity is required even when logs have expired or
-the event does not support step projection. This rollout adds no database schema,
-runtime configuration or CLI changes.
-
 `HEAD /repos/...` preserves GET visibility for stock gh discovery. No-CI PRs still
 return a commit connection, with empty check contexts rather than a fictitious
 missing commit. Draft creation and standard merge expected-head semantics are
@@ -360,7 +300,12 @@ require retained log files. Names, statuses and timestamps come from
 `number`. Unknown status, absent times and absent conclusions remain null;
 no setup/cleanup steps or successful outcomes are synthesized. Step metadata is
 optional: an unavailable, denied or invalid step response is discarded and jobs
-(and their check-run views) remain available with empty steps. This does not
+(and their check-run views) remain available with empty steps. Job list and detail
+JSON include `ags_steps_status`: `available`, `missing` (a completed job with no
+stored steps), `not-projected`, `unsupported`, `not-found`, `forbidden`, `conflict`,
+`invalid`, `unavailable`, `timeout` or `cancelled`. This is an observation status,
+not a CI outcome; official gh's standard jobs view may omit the extension, so use
+`gh api` for diagnosis. This does not
 relax bridge access/binding checks or mandatory job/run identity checks.
 
 Run artifacts are bound to the exact repository, provider run ID and commit.
@@ -374,12 +319,12 @@ root-confined filesystem access and safe archive paths; expired, unavailable,
 oversize or unconfigured storage fails explicitly. External object storage is
 not supported by this bridge. No deployed database is migrated or written.
 
-For artifact lists, a configured bridge returning a missing endpoint or provider
-error is not converted into an empty successful collection, except for an explicit
-unsupported-capability response. Adapters without artifact support, including
-Forgejo without `log_bridge`, retain the partial-compatibility empty collection.
-Repository-wide artifact inventory is not projected; only run-scoped Forgejo
-artifacts are supported.
+For artifact lists, a confirmed empty bridge result remains HTTP 200 with an
+empty collection. Missing support (including Forgejo without `log_bridge` or a
+bridge returning 501) returns 501; missing resources, denial and provider errors
+remain explicit errors. Repository-wide artifact inventory is not projected and
+returns 501. Run-scoped list/download remains the supported `gh run download ID`
+path; a missing list cannot masquerade as “no artifacts”.
 No installed bridge activation is implied by source acceptance. Commit
 check-runs list the selected backend's jobs for that SHA, including a provider
 branch label that is not the AGS head ref. Caches, settings and other unsupported

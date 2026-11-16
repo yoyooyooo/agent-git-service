@@ -89,10 +89,11 @@ func (s *Service) enqueueMulticaExternalPRTerminalDeliveryTx(ctx context.Context
 		request.ProjectionFactsRevision = facts.ProjectionFactsRevision
 	}
 	delivery, err := multicaprojection.NewExternalPRTerminalDelivery(multicaprojection.ExternalPRTerminalDeliveryInput{
-		TargetInstance: s.MulticaProjection.TargetInstance(),
-		Request:        request,
-		AGSPrID:        fmt.Sprintf("%s#%d", pr.Repository.FullName, pr.Number),
-		ObservedAt:     observedAt,
+		LifecycleGeneration: pr.LifecycleGeneration,
+		TargetInstance:      s.MulticaProjection.TargetInstance(),
+		Request:             request,
+		AGSPrID:             fmt.Sprintf("%s#%d", pr.Repository.FullName, pr.Number),
+		ObservedAt:          observedAt,
 	})
 	if err != nil {
 		return err

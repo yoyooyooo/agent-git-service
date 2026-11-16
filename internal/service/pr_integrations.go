@@ -13,6 +13,9 @@ import (
 	"github.com/ngaut/agent-git-service/internal/githubintegration"
 	"github.com/ngaut/agent-git-service/internal/gitlabintegration"
 	"github.com/ngaut/agent-git-service/internal/multicaprojection"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // PullRequestIntegrationPolicy declares which provider convergence is required
@@ -312,39 +315,67 @@ func (s *Service) reopenForgejoProjection(ctx context.Context, repoFullName stri
 		return nil
 	}
 	projection, ok := s.forgejoProjectionForPullRequest(ctx, pr.ID)
-	if !ok || projection.State != ProjectionStateClosed || projection.ExternalNumber <= 0 {
+	if !ok || (projection.State != ProjectionStateClosed && !pr.ForgejoReopenPending) || projection.ExternalNumber <= 0 {
 		return nil
 	}
 	before, found, err := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, repoFullName, projection.ExternalRepo, projection.ExternalNumber)
 	if err != nil {
 		return err
 	}
-	if !found || before.Merged || before.HeadRef != pr.HeadRef || before.BaseRef != pr.BaseRef || (before.State != db.StateClosed && before.State != db.StateOpen) {
+	if !found || before.Number != projection.ExternalNumber || before.Merged || before.HeadRef != pr.HeadRef || before.BaseRef != pr.BaseRef || (before.State != db.StateClosed && before.State != db.StateOpen) {
 		return fmt.Errorf("mapped Forgejo pull request is not the unmerged head/base accepted for reopen")
 	}
-	if before.State == db.StateClosed {
-		if beforeWrite != nil {
-			if err := beforeWrite(ctx); err != nil {
+	// Serialize admission, the provider write, and intent consumption with every
+	// synchronous/async confirmation. A fresh pending read alone leaves a race
+	// between admission and PATCH. The exact GET above remains outside the lock.
+	return s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockPRProjectionSet(tx, pr.ID); err != nil {
+			return err
+		}
+		var binding db.PullRequestProjection
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&binding, projection.ID).Error; err != nil {
+			return err
+		}
+		var current db.PullRequest
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, pr.ID).Error; err != nil {
+			return err
+		}
+		if err := validateForgejoProjectionFact(current, pr, binding, projection.ExternalRepo, projection.ExternalNumber); err != nil {
+			return err
+		}
+		if err := validateForgejoReopenIntent(current, pr); err != nil {
+			return err
+		}
+		txCtx := ContextWithDB(ctx, tx)
+		confirmed := before
+		if before.State == db.StateClosed {
+			if beforeWrite != nil {
+				if err := beforeWrite(txCtx); err != nil {
+					return err
+				}
+			}
+			res, err := s.ForgejoIntegration.UpdatePullRequestState(ctx, repoFullName, projection.ExternalNumber, db.StateOpen)
+			if err != nil {
 				return err
 			}
+			if res.Number != projection.ExternalNumber || res.ExternalRepo != projection.ExternalRepo {
+				return fmt.Errorf("Forgejo reopen returned a different mapped pull request")
+			}
+			after, found, err := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, repoFullName, projection.ExternalRepo, projection.ExternalNumber)
+			if err != nil {
+				return err
+			}
+			if !found || after.Number != projection.ExternalNumber || after.Merged || after.State != db.StateOpen || after.HeadRef != pr.HeadRef || after.BaseRef != pr.BaseRef {
+				return fmt.Errorf("Forgejo reopen did not confirm the mapped open pull request")
+			}
+			confirmed = after
 		}
-		res, err := s.ForgejoIntegration.UpdatePullRequestState(ctx, repoFullName, projection.ExternalNumber, db.StateOpen)
+		at, err := providerLifecycleTime(confirmed.UpdatedAt)
 		if err != nil {
 			return err
 		}
-		if res.Number != projection.ExternalNumber || res.ExternalRepo != projection.ExternalRepo {
-			return fmt.Errorf("Forgejo reopen returned a different mapped pull request")
-		}
-		after, found, err := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, repoFullName, projection.ExternalRepo, projection.ExternalNumber)
-		if err != nil {
-			return err
-		}
-		if !found || after.Merged || after.State != db.StateOpen || after.HeadRef != pr.HeadRef || after.BaseRef != pr.BaseRef {
-			return fmt.Errorf("Forgejo reopen did not confirm the mapped open pull request")
-		}
-	}
-	projection.State = ProjectionStateOpen
-	return s.UpsertPullRequestProjection(ctx, projection)
+		return confirmForgejoReopenTx(tx, current, pr, binding, confirmed, at)
+	})
 }
 
 // retargetForgejoProjectionBase moves one open mapped Forgejo pull request
@@ -386,29 +417,81 @@ func (s *Service) retargetForgejoProjectionBase(ctx context.Context, repoFullNam
 	if strings.TrimSpace(headSHA) != "" {
 		projection.LastSyncedSHA = headSHA
 	}
-	if err := s.UpsertPullRequestProjection(ctx, projection); err != nil {
+	if err := s.recordForgejoPullRequestProjection(ctx, repoFullName, headSHA, pr, forgejointegration.PullRequestResult{ExternalRepo: projection.ExternalRepo, Number: projection.ExternalNumber, URL: projection.ExternalURL}); err != nil {
 		return fmt.Errorf("record retargeted Forgejo projection: %w", err)
 	}
 	return nil
 }
 
-func (s *Service) recordForgejoPullRequestProjection(ctx context.Context, repoFullName, headSHA string, pr db.PullRequest, res forgejointegration.PullRequestResult) error {
-	if err := s.UpsertPullRequestProjection(ctx, db.PullRequestProjection{
-		PullRequestID:  pr.ID,
-		RepositoryID:   pr.RepositoryID,
-		Provider:       ProjectionProviderForgejo,
-		ExternalRepo:   res.ExternalRepo,
-		ExternalNumber: res.Number,
-		ExternalURL:    res.URL,
-		SourceBranch:   pr.HeadRef,
-		TargetBranch:   pr.BaseRef,
-		State:          ProjectionStateOpen,
-		LastSyncedSHA:  headSHA,
-	}); err != nil {
-		return fmt.Errorf("record Forgejo projection: %w", err)
+// prepareForgejoProjectionConfirmation performs provider I/O before taking DB
+// locks. Both synchronous recording and generic worker completion use it.
+func (s *Service) prepareForgejoProjectionConfirmation(ctx context.Context, repoFullName string, pr db.PullRequest, res forgejointegration.PullRequestResult) (*forgejointegration.PullRequestSnapshot, error) {
+	if !pr.ForgejoReopenPending {
+		return nil, nil
 	}
-	slog.InfoContext(ctx, "forgejo pull request projection recorded", "repo", repoFullName, "pr_number", pr.Number, "external_number", res.Number)
-	return nil
+	if s.ForgejoIntegration == nil {
+		return nil, fmt.Errorf("Forgejo reopen confirmation unavailable")
+	}
+	snapshot, found, err := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, repoFullName, res.ExternalRepo, res.Number)
+	if err != nil {
+		return nil, err
+	}
+	if !found || snapshot.Number != res.Number || snapshot.State != db.StateOpen || snapshot.Merged || snapshot.HeadRef != pr.HeadRef || snapshot.BaseRef != pr.BaseRef {
+		return nil, fmt.Errorf("reopen projection open readback mismatch")
+	}
+	if _, err := providerLifecycleTime(snapshot.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
+}
+
+func (s *Service) recordForgejoProjectionTx(ctx context.Context, tx *gorm.DB, headSHA string, pr db.PullRequest, res forgejointegration.PullRequestResult, snapshot *forgejointegration.PullRequestSnapshot) error {
+	if err := lockPRProjectionSet(tx, pr.ID); err != nil {
+		return err
+	}
+	var binding db.PullRequestProjection
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("pull_request_id = ? AND provider = ?", pr.ID, ProjectionProviderForgejo).First(&binding).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	var current db.PullRequest
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, pr.ID).Error; err != nil {
+		return err
+	}
+	if err := validateForgejoProjectionFact(current, pr, binding, res.ExternalRepo, res.Number); err != nil {
+		return err
+	}
+	if current.ForgejoReopenPending {
+		if err := validateForgejoReopenIntent(current, pr); err != nil {
+			return err
+		}
+		if snapshot == nil {
+			return fmt.Errorf("Forgejo reopen exact confirmation missing")
+		}
+		at, err := providerLifecycleTime(snapshot.UpdatedAt)
+		if err != nil {
+			return err
+		}
+		if current.ForgejoLifecycleAt != nil && at.Before(*current.ForgejoLifecycleAt) {
+			return fmt.Errorf("Forgejo reopen readback lifecycle regressed")
+		}
+		if err := tx.Model(&current).Updates(map[string]any{"forgejo_reopen_pending": false, "forgejo_lifecycle_at": at}).Error; err != nil {
+			return err
+		}
+	}
+	return s.UpsertPullRequestProjection(ContextWithDB(ctx, tx), db.PullRequestProjection{
+		PullRequestID: pr.ID, RepositoryID: pr.RepositoryID, Provider: ProjectionProviderForgejo,
+		ExternalRepo: res.ExternalRepo, ExternalNumber: res.Number, ExternalURL: res.URL,
+		SourceBranch: pr.HeadRef, TargetBranch: pr.BaseRef, State: ProjectionStateOpen, LastSyncedSHA: headSHA,
+	})
+}
+
+func (s *Service) recordForgejoPullRequestProjection(ctx context.Context, repoFullName, headSHA string, pr db.PullRequest, res forgejointegration.PullRequestResult) error {
+	snapshot, err := s.prepareForgejoProjectionConfirmation(ctx, repoFullName, pr, res)
+	if err != nil {
+		return err
+	}
+	return s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error { return s.recordForgejoProjectionTx(ctx, tx, headSHA, pr, res, snapshot) })
 }
 
 func (s *Service) forgejoPullRequestBody(ctx context.Context, repoFullName string, pr db.PullRequest) string {

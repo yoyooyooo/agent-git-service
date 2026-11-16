@@ -174,23 +174,48 @@ func samePublic(a, b string) bool {
 	return len(aa) >= 2 && len(bb) >= 2 && aa[0] == bb[0] && aa[1] == bb[1]
 }
 func managedTitle(k managedKey) string { return "ags-managed:" + k.Instance + ":" + k.Identity }
+
+var (
+	errManagedKeyInvalidResponse = errors.New("managed SSH public key readback invalid response")
+	errManagedKeyInventoryBound  = errors.New("managed SSH key inventory exceeded bound")
+)
+
 func listManagedKeys(ctx context.Context, c *HTTPClient, login string) ([]providerKey, error) {
+	keys, err := listManagedKeysEvidence(ctx, c, login)
+	// Provisioning historically treats any page's 404 as an empty inventory.
+	// Diagnostics retain that status without changing registration or sync.
+	var providerErr *ProviderHTTPError
+	if errors.As(err, &providerErr) && providerErr.Status == http.StatusNotFound {
+		return nil, nil
+	}
+	// Provisioning retains its prior failure contract. Typed probe evidence must
+	// not silently change its callers' classification or recovery policy.
+	if err != nil && !errors.Is(err, errManagedKeyInventoryBound) {
+		return nil, errors.New("managed SSH public key readback failed")
+	}
+	return keys, err
+}
+
+func listManagedKeysEvidence(ctx context.Context, c *HTTPClient, login string) ([]providerKey, error) {
 	var all []providerKey
 	for page := 1; page <= 100; page++ {
 		status, data, err := c.rawRequest(ctx, http.MethodGet, apiPath("/api/v1/users/%s/keys", login)+fmt.Sprintf("?limit=50&page=%d", page), nil, "")
-		if status == 404 && err == nil {
-			return nil, nil
+		if err != nil {
+			return nil, gittransport.SafeError(err)
+		}
+		if status != http.StatusOK {
+			return nil, &ProviderHTTPError{Status: status, Method: http.MethodGet, RouteKind: "user_keys"}
 		}
 		var keys []providerKey
-		if err != nil || status != 200 || json.Unmarshal(data, &keys) != nil {
-			return nil, errors.New("managed SSH public key readback failed")
+		if json.Unmarshal(data, &keys) != nil {
+			return nil, errManagedKeyInvalidResponse
 		}
 		all = append(all, keys...)
 		if len(keys) < 50 {
 			return all, nil
 		}
 	}
-	return nil, errors.New("managed SSH key inventory exceeded bound")
+	return nil, errManagedKeyInventoryBound
 }
 func ensureManagedKey(ctx context.Context, c *HTTPClient, k managedKey) error {
 	keys, err := listManagedKeys(ctx, c, k.Login)
@@ -276,18 +301,19 @@ func ReconcileManagedSSH(ctx context.Context, cfg Config) error {
 }
 
 func (i *Integration) attributedPush(ctx context.Context, req PushRequest, push GitPusher) (result error) {
-	dispatched := false
-	pushLogin := i.cfg.TokenOwner
-	if pushLogin == "" {
-		pushLogin = "unverified"
+	if actor := attribution.FromContext(ctx); actor.RequestID == "" {
+		ctx = attribution.WithActor(ctx, actor)
 	}
+	dispatched := false
+	selectedPrincipal := unknownPrincipal()
 	defer func() {
 		if dispatched {
 			status := "success"
 			if result != nil {
 				status = ClassifyProjectionError("", "", result).Type
 			}
-			slog.InfoContext(ctx, "Forgejo projection push", "target_repo", req.Repo.Owner+"/"+req.Repo.Repo, "branch", req.BranchName, "authenticated_login", pushLogin, "status", status)
+			diagnostic := projectionDiagnostic(ctx, req, selectedPrincipal, result)
+			slog.InfoContext(ctx, "Forgejo projection push", "diagnostic", diagnostic, "authenticated_login", selectedPrincipal.Login, "status", status)
 		}
 		if result != nil && !dispatched {
 			result = fmt.Errorf("%w: %w", ErrMappedPushNotAttempted, result)
@@ -298,17 +324,9 @@ func (i *Integration) attributedPush(ctx context.Context, req PushRequest, push 
 	if !i.cfg.Attribution.Enabled() || login == "" {
 		// Resolve the selected credential, not the configured bot name. This is
 		// push-scoped diagnostics, never a startup/readiness dependency.
-		if i.nativePush && i.cfg.TokenOwner == "" {
-			identityCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			status, data, err := NewHTTPClient(i.cfg.BaseURL, i.cfg.Token).request(identityCtx, http.MethodGet, "/api/v1/user", nil)
-			cancel()
-			var user struct {
-				Login string `json:"login"`
-			}
-			if err == nil && status == http.StatusOK && json.Unmarshal(data, &user) == nil && user.Login != "" {
-				pushLogin = user.Login
-			}
-		}
+		identityCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		selectedPrincipal = i.pushPrincipal(identityCtx, req)
+		cancel()
 		dispatched = true
 		err := push(ctx, req)
 		status := 0
@@ -382,7 +400,13 @@ func (i *Integration) attributedPush(ctx context.Context, req PushRequest, push 
 			return err
 		}
 		req.SSH = &gittransport.SSHConfig{IdentityFile: path, KnownHostsFile: i.cfg.ManagedSSH.KnownHostsFile}
-		pushLogin = login
+		// This probe never creates keys or grants ACLs. The existing legacy
+		// provisioning above is unchanged and is not an attestation fallback.
+		if i.nativePush {
+			identityCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			selectedPrincipal = selectedSSHPrincipal(identityCtx, c, k)
+			cancel()
+		}
 		dispatched = true
 		return push(ctx, req)
 	})

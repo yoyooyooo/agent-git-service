@@ -33,7 +33,7 @@ jobs:
   checks:
     name: Source and governance
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,15 +60,17 @@ jobs:
       - name: Test publication scanner and scoped operator routing
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_audit.py
+          PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_historical_fixtures.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_ci_database.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_generation.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_public_ranges.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_casefold_policy.py
-          PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_release.py
           PYTHONDONTWRITEBYTECODE=1 python3 fork/scripts/test_install_sh.py
-          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_single_root.py
+          # Includes S1–S6 source contracts through the same isolated sequential runner.
+          bash scripts/upgrade-regression.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_deploy_handoff.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_deploy_probe.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ags_maintenance_window.py
           bun test scripts/release.test.ts
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_edge_client_route.py
           (cd fork/tools && go test ./... -count=1)
@@ -122,7 +124,7 @@ jobs:
           - name: fork-integrations
             packages: ./internal/attribution ./cmd/forgejo-authority ./internal/cibackend ./internal/delegationpolicy ./internal/executioncontext ./internal/forgejointegration ./internal/githubappmanifest ./internal/githubappreceiver ./internal/githubintegration ./internal/gitlabintegration ./internal/integrations ./internal/multicafailures ./internal/multicaprojection ./internal/notifications ./internal/operationcatalog ./internal/operationconstraints ./internal/projectionwatch ./internal/providerlogbridge ./internal/providerlogprotocol ./internal/sessionauthority ./internal/tenant ./internal/workloadidentity
           - name: misc
-            packages: ./auth ./cmd/gh-server ./config ./e2e/cmd/mock-embedding-server ./e2e/cmd/mock-oidc-server ./internal/apperrors ./internal/buildinfo ./internal/connectedlogin ./internal/crypto ./internal/embedding ./internal/httputil ./internal/logging ./internal/mentions ./internal/metrics ./internal/middleware ./internal/oauth ./internal/oidc ./internal/randutil ./internal/ratelimit
+            packages: ./auth ./cmd/ags-routeb-stage0 ./cmd/gh-server ./internal/interpreterauthority ./internal/routebstage0 ./config ./e2e/cmd/mock-embedding-server ./e2e/cmd/mock-oidc-server ./internal/apperrors ./internal/buildinfo ./internal/connectedlogin ./internal/crypto ./internal/embedding ./internal/httputil ./internal/logging ./internal/mentions ./internal/metrics ./internal/middleware ./internal/oauth ./internal/oidc ./internal/randutil ./internal/ratelimit
     env:
       TEST_DB_DSN: 'root:@tcp(127.0.0.1:45400)/?parseTime=true&timeout=10s'
       PACKAGES: ${{ matrix.packages }}
@@ -164,7 +166,7 @@ jobs:
           go-version-file: .go-version
       - run: bash fork/scripts/ci-database.sh start
       - run: go test -race -p 1 -count=1 -timeout=15m ./internal/edge ./internal/snapshotstore ./internal/gitbackend ./internal/edgeprotocol ./internal/replication
-      - run: go test -race ./internal/service -run 'TestExchangeDeviceCode|TestAccessGrantPRMergeConcurrentSameEffect|TestAuthorityBoundaryReceiptConcurrentCapture' -count=3 -timeout=5m
+      - run: go test -race ./internal/service -run 'TestLateClosed|TestLifecycleReview|TestExchangeDeviceCode|TestAccessGrantPRMergeConcurrentSameEffect|TestAuthorityBoundaryReceiptConcurrentCapture' -count=3 -timeout=5m
       - if: always()
         run: bash fork/scripts/ci-database.sh stop
 
