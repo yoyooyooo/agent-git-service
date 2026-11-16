@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -93,6 +95,28 @@ func (s *Service) CreateUserToken(ctx context.Context, userID uint, name string,
 	return tok, nil
 }
 
+// ErrProtectedToken is returned when a caller asks to delete a bootstrap
+// credential listed in Service.ProtectedTokenValues. It wraps ErrForbidden.
+var ErrProtectedToken = fmt.Errorf("%w: protected token cannot be deleted", ErrForbidden)
+
+func (s *Service) isProtectedToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, protected := range s.ProtectedTokenValues {
+		if protected != "" && subtle.ConstantTimeCompare([]byte(protected), []byte(value)) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) refuseProtectedToken(ctx context.Context, userID uint, token db.Token, via string) error {
+	// Never log the token value.
+	slog.WarnContext(ctx, "refused to delete protected token", "user_id", userID, "token_id", token.ID, "token_name", token.Name, "via", via)
+	return ErrProtectedToken
+}
+
 // DeleteTokenByID deletes a token by ID scoped to the user.
 func (s *Service) DeleteTokenByID(ctx context.Context, userID, tokenID uint) error {
 	if _, run := ClientRunFromContext(ctx); run {
@@ -102,6 +126,13 @@ func (s *Service) DeleteTokenByID(ctx context.Context, userID, tokenID uint) err
 		return fmt.Errorf("%w: token_id is required", ErrValidation)
 	}
 	return s.DBForCtx(ctx).Transaction(func(tx *gorm.DB) error {
+		var token db.Token
+		if err := tx.Where("user_id = ? AND id = ?", userID, tokenID).First(&token).Error; err != nil {
+			return wrapErr(err)
+		}
+		if s.isProtectedToken(token.Value) {
+			return s.refuseProtectedToken(ctx, userID, token, "id")
+		}
 		if err := tx.Model(&db.ClientRunSession{}).Where("user_id = ? AND parent_token_id = ?", userID, tokenID).Updates(map[string]any{"parent_token_id": nil, "revoked_at": time.Now().UTC()}).Error; err != nil {
 			return err
 		}
@@ -122,6 +153,9 @@ func (s *Service) DeleteTokenByValue(ctx context.Context, userID uint, tokenValu
 		var token db.Token
 		if err := tx.Where("user_id = ? AND value = ?", userID, tokenValue).First(&token).Error; err != nil {
 			return wrapErr(err)
+		}
+		if s.isProtectedToken(token.Value) {
+			return s.refuseProtectedToken(ctx, userID, token, "value")
 		}
 		if err := tx.Model(&db.ClientRunSession{}).Where("user_id = ? AND parent_token_id = ?", userID, token.ID).Updates(map[string]any{"parent_token_id": nil, "revoked_at": time.Now().UTC()}).Error; err != nil {
 			return err

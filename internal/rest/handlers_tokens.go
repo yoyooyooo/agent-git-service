@@ -1,12 +1,14 @@
 package rest
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/ngaut/agent-git-service/internal/rest/respond"
 	"github.com/ngaut/agent-git-service/internal/rest/transform"
+	"github.com/ngaut/agent-git-service/internal/service"
 )
 
 // ListTokens handles GET /api/ext/v1/user/tokens
@@ -87,7 +89,7 @@ func (d *Deps) DeleteToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if tokenID != 0 {
 		if err := d.Svc.DeleteTokenByID(r.Context(), u.ID, tokenID); err != nil {
-			respond.ServiceErrorRequest(r, w, err)
+			deleteTokenError(w, r, err)
 			return
 		}
 		respond.NoContent(w)
@@ -99,8 +101,23 @@ func (d *Deps) DeleteToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := d.Svc.DeleteTokenByValue(r.Context(), u.ID, body.Token); err != nil {
-		respond.ServiceErrorRequest(r, w, err)
+		deleteTokenError(w, r, err)
 		return
 	}
 	respond.NoContent(w)
+}
+
+// deleteTokenError gives a refused bootstrap-token deletion a stable,
+// machine-readable code instead of the generic 403 body.
+func deleteTokenError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, service.ErrProtectedToken) {
+		respond.JSON(w, http.StatusForbidden, map[string]any{
+			"error":             "protected_token",
+			"code":              "protected_token",
+			"message":           "This token is a protected bootstrap credential (ADMIN_TOKEN or seed token) and cannot be deleted through the token API",
+			"documentation_url": "https://docs.github.com/rest",
+		})
+		return
+	}
+	respond.ServiceErrorRequest(r, w, err)
 }
