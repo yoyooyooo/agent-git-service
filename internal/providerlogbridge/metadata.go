@@ -25,41 +25,25 @@ func timestamp(value int64) *time.Time {
 }
 
 func (h *Handler) serveSteps(w http.ResponseWriter, r *http.Request, owner, repo string, task int64, binding logBinding) {
-	var rows []struct {
-		Name             string
-		Index            int
-		Status           int
-		Started, Stopped int64
-	}
-	err := h.db.WithContext(r.Context()).Raw(`SELECT name, "index", status, started, stopped FROM action_task_step WHERE task_id = ? AND repo_id = (SELECT id FROM repository WHERE lower(owner_name)=lower(?) AND lower(lower_name)=lower(?)) ORDER BY "index" LIMIT 1001`, task, owner, repo).Scan(&rows).Error
-	if err != nil || len(rows) > 1000 {
+	rows, err := h.steps(r.Context(), task)
+	if err != nil {
 		h.fail(w, 502, "metadata_unavailable", "Provider step metadata unavailable")
 		return
 	}
 	steps := make([]map[string]any, 0, len(rows))
-	previous := -1
 	for _, row := range rows {
-		if row.Index < 0 || row.Index <= previous {
-			h.fail(w, 502, "metadata_invalid", "Invalid provider steps")
-			return
-		}
-		previous = row.Index
-		status := ""
+		step := stepMetadata(row)
 		var conclusion any
-		switch row.Status {
-		case 1, 2, 3, 4:
-			status = "completed"
-			conclusion = map[int]string{1: "success", 2: "failure", 3: "cancelled", 4: "skipped"}[row.Status]
-		case 5, 7:
-			status = "queued"
-		case 6:
-			status = "in_progress"
-		case 0: // Unknown is not a successful or queued step.
-		default:
-			h.fail(w, 502, "metadata_invalid", "Invalid provider step status")
-			return
+		if step.Conclusion != "" {
+			conclusion = step.Conclusion
 		}
-		steps = append(steps, map[string]any{"name": row.Name, "number": row.Index + 1, "status": status, "conclusion": conclusion, "started_at": timestamp(row.Started), "completed_at": timestamp(row.Stopped)})
+		steps = append(steps, map[string]any{"name": step.Name, "number": step.Number, "status": step.Status, "conclusion": conclusion, "started_at": step.StartedAt, "completed_at": step.CompletedAt})
+	}
+	if layout := h.stepLogLayout(r.Context(), task, rows); layout != nil {
+		last := layout.Steps[len(layout.Steps)-1]
+		if last.Diagnostic == "unattributed" {
+			steps = append(steps, map[string]any{"name": last.Name, "number": last.Number, "status": last.Status, "conclusion": last.Conclusion, "started_at": nil, "completed_at": nil, "diagnostic": last.Diagnostic})
+		}
 	}
 	verified, _ := verifyBinding(binding, mustExpected(r))
 	h.write(w, 200, map[string]any{"schema": "ags.internal-provider-steps.v1", "repo": owner + "/" + repo, "task_id": task, "run_number": binding.RunNumber, "job_name": binding.JobName, "head_sha": binding.CommitSHA, "provider_pr": verified.ProviderPR, "provider_ref": verified.ProviderRef, "event": verified.Event, "steps": steps})

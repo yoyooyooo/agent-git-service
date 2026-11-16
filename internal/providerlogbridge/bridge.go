@@ -85,17 +85,18 @@ type verifiedBinding struct {
 }
 
 type response struct {
-	Schema      string `json:"schema"`
-	Repo        string `json:"repo"`
-	TaskID      int64  `json:"task_id"`
-	RunNumber   int64  `json:"run_number"`
-	JobName     string `json:"job_name"`
-	HeadSHA     string `json:"head_sha"`
-	ProviderPR  int64  `json:"provider_pr,omitempty"`
-	HeadRef     string `json:"head_ref,omitempty"`
-	ProviderRef string `json:"provider_ref"`
-	Event       string `json:"event"`
-	Text        string `json:"text"`
+	Schema      string                        `json:"schema"`
+	Repo        string                        `json:"repo"`
+	TaskID      int64                         `json:"task_id"`
+	RunNumber   int64                         `json:"run_number"`
+	JobName     string                        `json:"job_name"`
+	HeadSHA     string                        `json:"head_sha"`
+	ProviderPR  int64                         `json:"provider_pr,omitempty"`
+	HeadRef     string                        `json:"head_ref,omitempty"`
+	ProviderRef string                        `json:"provider_ref"`
+	Event       string                        `json:"event"`
+	Text        string                        `json:"text"`
+	StepLogs    *providerlogprotocol.StepLogs `json:"step_logs,omitempty"`
 }
 
 func New(cfg Config) (*Handler, error) {
@@ -142,6 +143,10 @@ func New(cfg Config) (*Handler, error) {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if chi.URLParam(r, "run") == "" && strings.HasSuffix(r.URL.Path, "/runs") {
+		h.serveRuns(w, r)
+		return
+	}
 	if chi.URLParam(r, "run") != "" && strings.HasSuffix(r.URL.Path, "/jobs") {
 		h.serveJobs(w, r)
 		return
@@ -193,6 +198,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Schema: Schema, Repo: owner + "/" + repo, TaskID: taskID, RunNumber: binding.RunNumber,
 		JobName: binding.JobName, HeadSHA: binding.CommitSHA, ProviderPR: verified.ProviderPR,
 		HeadRef: verified.HeadRef, ProviderRef: verified.ProviderRef, Event: verified.Event, Text: string(text),
+		StepLogs: h.logSteps(r.Context(), taskID, text),
 	})
 }
 

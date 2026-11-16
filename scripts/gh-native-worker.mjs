@@ -96,6 +96,10 @@ try {
     const url = new URL(req.url, "http://127.0.0.1:7000"), bridge = url.pathname.startsWith("/api/internal/provider-logs/");
     const auth = bridge ? "Bearer " + bridgeToken : (currentBackend === "forgejo" ? "token " : "Bearer ") + providerToken;
     if (req.headers.authorization !== auth) { json(res, { error: "wrong credential boundary" }, 401); return; }
+    // Older bridges expose task logs but no indexed run inventory.
+    if (bridge && url.pathname === "/api/internal/provider-logs/repos/ci/project/runs") {
+      json(res, {}, 404); return;
+    }
     if (bridge && url.pathname.endsWith("/runs/17/jobs")) {
       if (url.searchParams.get("head_sha") !== head) { json(res, {}, 409); return; }
       json(res, {schema:"ags.internal-provider-jobs.v1",repo:"ci/project",run:"17",run_number:9,head_sha:head,jobs:jobs().map(j=>({task_id:j.id,name:j.name}))});return;
