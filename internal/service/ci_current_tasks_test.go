@@ -32,7 +32,7 @@ func TestCIChecksForgejoRetriedTasksUseCurrentJobBinding(t *testing.T) {
 	for _, statement := range []string{
 		`CREATE TABLE repository (id integer primary key, owner_name text, lower_name text)`,
 		`CREATE TABLE action_run (id integer primary key, repo_id integer, "index" integer, ref text, commit_sha text, event text)`,
-		`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text, status integer DEFAULT 0, started integer DEFAULT 0, stopped integer DEFAULT 0)`,
+		`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text, status integer DEFAULT 0, started integer DEFAULT 0, stopped integer DEFAULT 0, attempt integer DEFAULT 0)`,
 		`CREATE TABLE action_task (id integer primary key, repo_id integer, commit_sha text)`,
 		`INSERT INTO repository VALUES (1, 'ci', 'project')`,
 	} {
