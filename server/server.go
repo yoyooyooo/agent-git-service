@@ -308,6 +308,7 @@ func initServiceDeps(cfg config.Config, database *gorm.DB, store *gitstore.Store
 		SourceRevision:                     strings.ToLower(strings.TrimSpace(gitSHA)),
 		Embedder:                           embedder,
 		AllowAnyToken:                      cfg.AllowAnyToken,
+		ProtectedTokenValues:               protectedTokenValues(cfg),
 		ForgejoIntegration:                 forgejoIntegration,
 		CI:                                 ciBackends,
 		ForgejoProjectionWorkerTimeout:     cfg.ForgejoProjectionWorkerTimeout,
@@ -1770,4 +1771,20 @@ func readyzHandler(cfg readyzConfig) http.HandlerFunc {
 		}
 		_ = json.NewEncoder(w).Encode(response)
 	}
+}
+
+// protectedTokenValues lists bootstrap credentials the token API must not
+// delete: ADMIN_TOKEN whenever configured, plus the effective seed token in
+// development where Seed installs it.
+func protectedTokenValues(cfg config.Config) []string {
+	var values []string
+	if cfg.AdminToken != "" {
+		values = append(values, cfg.AdminToken)
+	}
+	if cfg.Environment == "development" {
+		if seed := db.SeedTokenValue(cfg.AdminLogin, cfg.AdminToken); seed != "" && seed != cfg.AdminToken {
+			values = append(values, seed)
+		}
+	}
+	return values
 }

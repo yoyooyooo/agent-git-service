@@ -136,3 +136,45 @@ func TestDeleteToken_Scoped(t *testing.T) {
 		t.Fatalf("expected ErrNotFound deleting other user's token by value, got %v", err)
 	}
 }
+
+func TestDeleteToken_RefusesProtectedValues(t *testing.T) {
+	svc, cleanup := setupTestService(t)
+	defer cleanup()
+
+	u := db.User{Login: "admin-user", Type: db.TypeUser}
+	if err := svc.DB.Create(&u).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	admin := db.Token{UserID: u.ID, Value: "shared-admin-token"}
+	if err := svc.DB.Create(&admin).Error; err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	other := db.Token{UserID: u.ID, Name: "other", Value: "other-token"}
+	if err := svc.DB.Create(&other).Error; err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	svc.ProtectedTokenValues = []string{"", "shared-admin-token"}
+
+	for name, del := range map[string]func() error{
+		"value": func() error { return svc.DeleteTokenByValue(context.Background(), u.ID, " shared-admin-token ") },
+		"id":    func() error { return svc.DeleteTokenByID(context.Background(), u.ID, admin.ID) },
+	} {
+		err := del()
+		if !errors.Is(err, service.ErrProtectedToken) || !errors.Is(err, service.ErrForbidden) {
+			t.Fatalf("%s: expected ErrProtectedToken (ErrForbidden), got %v", name, err)
+		}
+	}
+	var count int64
+	svc.DB.Model(&db.Token{}).Where("id = ?", admin.ID).Count(&count)
+	if count != 1 {
+		t.Fatal("protected token was deleted")
+	}
+
+	if err := svc.DeleteTokenByID(context.Background(), u.ID, other.ID); err != nil {
+		t.Fatalf("unprotected delete: %v", err)
+	}
+	// Unknown ids still report not found rather than protected.
+	if err := svc.DeleteTokenByID(context.Background(), u.ID, other.ID); !errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for deleted token, got %v", err)
+	}
+}

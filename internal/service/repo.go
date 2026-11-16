@@ -57,6 +57,10 @@ type Service struct {
 	ForgejoIntegration *forgejointegration.Integration
 	// CI is selected independently of Git hosting/projection. Nil means native Actions.
 	CI *cibackend.Registry
+	// ProtectedTokenValues are bootstrap credentials (ADMIN_TOKEN and the seed
+	// token) that the user token API must never delete: losing one locks every
+	// host that shares it out until the process restarts and reseeds it.
+	ProtectedTokenValues []string
 	// DisableForgejoProjectionWorker leaves admitted durable Forgejo PR projection
 	// jobs queued without starting the in-process worker. Delegated admission
 	// denials are persisted failed_terminal before this flag is considered.

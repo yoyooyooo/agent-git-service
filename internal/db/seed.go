@@ -11,6 +11,18 @@ import (
 // values are used so that existing acceptance tests keep working.
 // It returns an error if exactly one of login/token is provided,
 // since a partial pair would seed unusable credentials.
+// SeedTokenValue returns the token value Seed installs for the given
+// ADMIN_LOGIN/ADMIN_TOKEN pair, or "" when the pair is invalid.
+func SeedTokenValue(login, token string) string {
+	if (login == "") != (token == "") {
+		return ""
+	}
+	if token == "" {
+		return "mytoken"
+	}
+	return token
+}
+
 func Seed(database *gorm.DB, login, token string) error {
 	if (login == "") != (token == "") {
 		return fmt.Errorf("ADMIN_LOGIN and ADMIN_TOKEN must both be set or both be empty (login_set=%t, token_set=%t)", login != "", token != "")
