@@ -850,7 +850,7 @@ class SourceMappingTests(unittest.TestCase):
         model_sources = [(str(p.relative_to(ROOT)), hashlib.sha256(p.read_bytes()).hexdigest())
                          for p in sorted((ROOT / 'internal/db').glob('*.go'))
                          if not p.name.endswith('_test.go')]
-        self.assertEqual(c.fingerprint(model_sources), 'aba5c0035242f8e952352c857d45caf978b3f5aac2bb11fa2abebeee86a9f616')
+        self.assertEqual(c.fingerprint(model_sources), 'ae278e5e4c83b209fc3c4cf13a0b94a3dc341655948c6e965151a1b57afa71f5')
         for path, expected in SOURCE_LOCKS.items():
             self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), expected, path)
 
