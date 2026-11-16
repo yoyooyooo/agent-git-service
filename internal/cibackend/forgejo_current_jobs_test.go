@@ -18,7 +18,7 @@ import (
 )
 
 func TestForgejoJobsKeepOnlyCurrentTasksThroughRealBridge(t *testing.T) {
-	for _, mode := range []string{"valid", "skipped", "cancelled-before-start", "job-repository", "task-repository", "hidden-foreign-job", "missing-task", "missing-public-task", "no-bridge", "missing-endpoint"} {
+	for _, mode := range []string{"valid", "skipped", "cancelled-before-start", "waiting-before-start", "blocked-before-start", "waiting-only", "job-repository", "task-repository", "hidden-foreign-job", "missing-task", "missing-public-task", "no-bridge", "missing-endpoint"} {
 		t.Run(mode, func(t *testing.T) {
 			head := strings.Repeat("a", 40)
 			database, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "forgejo.db")), &gorm.Config{})
@@ -45,6 +45,13 @@ func TestForgejoJobsKeepOnlyCurrentTasksThroughRealBridge(t *testing.T) {
 				require.NoError(t, database.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped) VALUES (32,17,1,0,'conditional',?,4,0,0)`, head).Error)
 			case "cancelled-before-start":
 				require.NoError(t, database.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped,attempt) VALUES (32,17,1,0,'notify-on-failure',?,3,0,1794540600,0)`, head).Error)
+			case "waiting-before-start":
+				require.NoError(t, database.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped,attempt) VALUES (32,17,1,0,'CI Success',?,5,0,0,0)`, head).Error)
+			case "blocked-before-start":
+				require.NoError(t, database.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped,attempt) VALUES (32,17,1,0,'critical-e2e',?,7,0,0,0)`, head).Error)
+			case "waiting-only":
+				require.NoError(t, database.Exec(`DELETE FROM action_run_job WHERE id=31`).Error)
+				require.NoError(t, database.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped,attempt) VALUES (32,17,1,0,'CI Success',?,5,0,0,0)`, head).Error)
 			case "job-repository":
 				require.NoError(t, database.Exec(`UPDATE action_run_job SET repo_id=2 WHERE id=31`).Error)
 			case "task-repository":
@@ -105,7 +112,7 @@ func TestForgejoJobsKeepOnlyCurrentTasksThroughRealBridge(t *testing.T) {
 			backend, err := NewHTTP(config, "provider-only", "bridge-only")
 			require.NoError(t, err)
 			jobs, err := backend.Jobs(t.Context(), "ci/project", "17")
-			if mode != "valid" && mode != "skipped" && mode != "cancelled-before-start" {
+			if mode != "valid" && mode != "skipped" && mode != "cancelled-before-start" && mode != "waiting-before-start" && mode != "blocked-before-start" && mode != "waiting-only" {
 				expected := ErrUnavailable
 				if mode == "no-bridge" {
 					expected = ErrUnsupported
@@ -124,6 +131,11 @@ func TestForgejoJobsKeepOnlyCurrentTasksThroughRealBridge(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.True(t, jobs.Complete)
+			if mode == "waiting-only" {
+				require.Equal(t, 0, jobs.Total)
+				require.Empty(t, jobs.Items, "a queued job without a task must not invent a current binding")
+				return
+			}
 			require.Equal(t, 1, jobs.Total)
 			require.Len(t, jobs.Items, 1, "three attempts are one current job, not three checks")
 			require.Equal(t, "17:43", jobs.Items[0].Key)

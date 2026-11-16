@@ -147,7 +147,7 @@ func TestCIBridgeCurrentJobsAllowUnstartedSkippedJobsWithoutTasks(t *testing.T) 
 			req.Header.Set("Authorization", "Bearer bridge-secret")
 			res := httptest.NewRecorder()
 			router.ServeHTTP(res, req)
-			if mode != "mixed" && mode != "all_skipped" {
+			if mode != "mixed" && mode != "all_skipped" && mode != "waiting" && mode != "blocked" {
 				require.Equal(t, http.StatusBadGateway, res.Code, res.Body.String())
 				var body map[string]any
 				require.NoError(t, json.Unmarshal(res.Body.Bytes(), &body))
@@ -260,6 +260,104 @@ func TestCIBridgeCurrentJobsAllowNeverStartedCancelledJobsWithoutTasks(t *testin
 			require.NotNil(t, body.Jobs)
 			if mode == "all_cancelled" {
 				require.Empty(t, body.Jobs, "a cancelled job must not borrow a historical task")
+				return
+			}
+			require.Len(t, body.Jobs, 1)
+			require.Equal(t, int64(6949), body.Jobs[0].TaskID)
+			require.Equal(t, "Backend Smoke", body.Jobs[0].Name)
+		})
+	}
+}
+
+// Forgejo run 12451 job 24486 (CI Success on agent-kit PR 969) sat in Waiting
+// before any runner claimed it: task_id=0, attempt=0, started=0, stopped=0,
+// status=5. The previous predicate only accepted skipped or cancelled
+// never-started jobs, so check-runs and statusCheckRollup for the head 502'd
+// with "could not confirm the requested result" while CI was still queued.
+// Blocked jobs (status=7, for example a job waiting on needs) have the same shape.
+func TestCIBridgeCurrentJobsAllowNeverStartedWaitingOrBlockedJobsWithoutTasks(t *testing.T) {
+	accepted := map[string]bool{
+		"job_24486": true, "blocked": true, "all_waiting": true, "waiting_and_blocked": true, "waiting_beside_task": true,
+	}
+	for _, mode := range []string{
+		"job_24486", "blocked", "all_waiting", "waiting_and_blocked", "waiting_beside_task",
+		"started", "attempted", "stopped", "null_attempt", "null_stopped", "null_started", "null_status",
+		"failure_unstarted", "running_unstarted",
+		"negative_task", "null_task", "missing_task", "task_zero_exists", "foreign_repo", "wrong_sha", "empty_name",
+	} {
+		t.Run(mode, func(t *testing.T) {
+			h, _ := setupBridge(t, 1024)
+			require.NoError(t, h.db.Exec(`UPDATE action_run_job SET status=2,started=10,stopped=20,attempt=1 WHERE id=6763`).Error)
+			require.NoError(t, h.db.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped,attempt) VALUES (24486,4001,24,0,'CI Success',?,5,0,0,0)`, fixtureSHA).Error)
+			switch mode {
+			case "blocked":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET status=7 WHERE id=24486`).Error)
+			case "all_waiting":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET task_id=0,status=5,started=0,stopped=0,attempt=0 WHERE run_id=4001`).Error)
+			case "waiting_and_blocked":
+				require.NoError(t, h.db.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped,attempt) VALUES (24491,4001,24,0,'critical-e2e',?,7,0,0,0)`, fixtureSHA).Error)
+			case "waiting_beside_task":
+				// default fixture already has Backend Smoke as a current task
+			case "started":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET started=10 WHERE id=24486`).Error)
+			case "attempted":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=1 WHERE id=24486`).Error)
+			case "stopped":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET stopped=20 WHERE id=24486`).Error)
+			case "null_attempt":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=NULL WHERE id=24486`).Error)
+			case "null_stopped":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET stopped=NULL WHERE id=24486`).Error)
+			case "null_started":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET started=NULL WHERE id=24486`).Error)
+			case "null_status":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET status=NULL WHERE id=24486`).Error)
+			case "failure_unstarted":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET status=2 WHERE id=24486`).Error)
+			case "running_unstarted":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET status=6 WHERE id=24486`).Error)
+			case "negative_task":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET task_id=-1 WHERE id=24486`).Error)
+			case "null_task":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET task_id=NULL WHERE id=24486`).Error)
+			case "missing_task":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET task_id=9999 WHERE id=24486`).Error)
+			case "task_zero_exists":
+				require.NoError(t, h.db.Exec(`INSERT INTO action_task VALUES (0,24,?,'unused.log',true,false)`, fixtureSHA).Error)
+			case "foreign_repo":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET repo_id=25 WHERE id=24486`).Error)
+			case "wrong_sha":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET commit_sha=? WHERE id=24486`, strings.Repeat("2", 40)).Error)
+			case "empty_name":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET name='' WHERE id=24486`).Error)
+			}
+			router := chi.NewRouter()
+			router.Use(CaptureSocketPeer)
+			router.Get("/api/internal/provider-logs/repos/{owner}/{repo}/runs/{run}/jobs", h.ServeHTTP)
+			req := httptest.NewRequest(http.MethodGet, "/api/internal/provider-logs/repos/"+fixtureOwner+"/"+fixtureRepo+"/runs/4001/jobs?head_sha="+fixtureSHA, nil)
+			req.RemoteAddr = fixturePeer
+			req.Header.Set("Authorization", "Bearer bridge-secret")
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, req)
+			if !accepted[mode] {
+				require.Equal(t, http.StatusBadGateway, res.Code, res.Body.String())
+				var body map[string]any
+				require.NoError(t, json.Unmarshal(res.Body.Bytes(), &body))
+				require.Equal(t, "metadata_invalid", body["code"])
+				require.NotContains(t, body, "jobs", "invalid inventory must not return partial jobs")
+				return
+			}
+			require.Equal(t, http.StatusOK, res.Code, res.Body.String())
+			var body struct {
+				Jobs []struct {
+					TaskID int64  `json:"task_id"`
+					Name   string `json:"name"`
+				}
+			}
+			require.NoError(t, json.Unmarshal(res.Body.Bytes(), &body))
+			require.NotNil(t, body.Jobs)
+			if mode == "all_waiting" {
+				require.Empty(t, body.Jobs, "a waiting job must not borrow a historical task")
 				return
 			}
 			require.Len(t, body.Jobs, 1)

@@ -57,7 +57,7 @@ func (h *Handler) serveJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		taskID := *row.TaskID
-		if taskID == 0 && neverStartedTerminal(row.JobStatus, row.Started, row.Stopped, row.Attempt) &&
+		if taskID == 0 && neverStartedWithoutTask(row.JobStatus, row.Started, row.Stopped, row.Attempt) &&
 			row.ActualTaskID == nil && row.TaskRepoID == nil && row.TaskSHA == nil {
 			continue
 		}
@@ -71,23 +71,32 @@ func (h *Handler) serveJobs(w http.ResponseWriter, r *http.Request) {
 	h.write(w, 200, map[string]any{"schema": "ags.internal-provider-jobs.v1", "repo": owner + "/" + repo, "run": strconv.FormatInt(run, 10), "run_number": runs[0].Number, "head_sha": sha, "jobs": items})
 }
 
-// Forgejo 12 job states (models/actions/status.go).
+// Forgejo 12 job states (models/actions/status.go):
+// 0 Unknown, 1 Success, 2 Failure, 3 Cancelled, 4 Skipped,
+// 5 Waiting, 6 Running, 7 Blocked.
 const (
 	forgejoStatusCancelled = 3
 	forgejoStatusSkipped   = 4
+	forgejoStatusWaiting   = 5
+	forgejoStatusBlocked   = 7
 )
 
-// neverStartedTerminal reports a job that reached a final state before Forgejo
-// allocated a task, so it has no current task association and no log:
+// neverStartedWithoutTask reports a job that has no current task association
+// because Forgejo has not allocated a task yet, or already reached a final
+// state without ever allocating one:
+//   - Waiting / Blocked: the job is still queued, including a job blocked on
+//     `needs`. It keeps started=0, stopped=0 and attempt=0.
 //   - Skipped: a conditional job skipped before start keeps started=0 and
 //     stopped=0.
 //   - Cancelled: a job cancelled while still waiting or blocked (for example
 //     when its run is cancelled) keeps started=0 and attempt=0, but Forgejo
 //     stamps stopped with the cancellation time, so stopped may be non-zero.
 //
-// Neither case invents a task or log; the provider's run conclusion is
-// reported unchanged. Every other task-less shape still fails closed.
-func neverStartedTerminal(status, started, stopped, attempt *int64) bool {
+// The job contributes no task or log. A run that contains only these jobs has
+// an empty current-task inventory; callers then surface the provider run
+// status (queued, with a null conclusion, for waiting or blocked runs).
+// Every other task-less shape still fails closed.
+func neverStartedWithoutTask(status, started, stopped, attempt *int64) bool {
 	if status == nil || started == nil || stopped == nil || *started != 0 {
 		return false
 	}
@@ -96,6 +105,8 @@ func neverStartedTerminal(status, started, stopped, attempt *int64) bool {
 		return *stopped == 0
 	case forgejoStatusCancelled:
 		return *stopped >= 0 && attempt != nil && *attempt == 0
+	case forgejoStatusWaiting, forgejoStatusBlocked:
+		return *stopped == 0 && attempt != nil && *attempt == 0
 	}
 	return false
 }

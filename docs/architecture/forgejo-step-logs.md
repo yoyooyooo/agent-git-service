@@ -22,12 +22,22 @@ is cancelled while the job is still waiting or blocked: `task_id=0`, `status=3`
 `stopped` with the cancellation time, so `stopped` may be non-zero (but not
 negative) for this case only.
 
-Such a job contributes no task or log entry. A run containing only these skipped
-jobs has an empty current-task inventory. Historical tasks are never substituted.
-Other missing task associations, unknown states and repository or commit
-mismatches still reject the whole inventory. The adapter can therefore retrieve
-the executed jobs and their logs when a sibling job was skipped, without claiming
-that the skipped job ran or changing the provider's run conclusion.
+It also applies while the job is still queued: `status=5` (`Waiting`) or
+`status=7` (`Blocked`, including a job blocked on `needs`), with `task_id=0`,
+`started=0`, `stopped=0`, `attempt=0` and no joined task row. Those jobs are
+not terminal, but they also have no task or log. Rejecting them used to make
+`check-runs` and `statusCheckRollup` return HTTP 502 ("Selected CI backend
+could not confirm the requested result") for a head whose CI had not been
+claimed yet. After the inventory accepts them, an empty current-task list lets
+the adapter report the provider run as `queued` with a null conclusion.
+
+Such a job contributes no task or log entry. A run containing only these skipped,
+cancelled, waiting or blocked jobs has an empty current-task inventory. Historical
+tasks are never substituted. Other missing task associations, unknown or running
+or failed task-less states, and repository or commit mismatches still reject the
+whole inventory. The adapter can therefore retrieve the executed jobs and their
+logs when a sibling job was skipped or is still queued, without claiming that the
+queued job ran or changing the provider's run conclusion.
 
 ## Exact boundaries
 
