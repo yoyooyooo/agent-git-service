@@ -158,7 +158,7 @@ func (d *Deps) ResetAgentToken(w http.ResponseWriter, r *http.Request) {
 	agentLogin := pathParam(r, "agent_login")
 	tok, err := d.Svc.ResetAgentToken(r.Context(), u.ID, agentLogin)
 	if err != nil {
-		respond.ServiceErrorRequest(r, w, err)
+		deleteTokenError(w, r, err)
 		return
 	}
 	respond.JSON(w, http.StatusOK, map[string]any{
