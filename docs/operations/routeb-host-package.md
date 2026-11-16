@@ -32,14 +32,16 @@ unexpected programming errors remain errors rather than capability blockers.
 
 The package policy requires the same application revision and tree on
 both sides of the transaction. The tool bundle has a separate revision, tree
-and byte manifest. The offline verifier binds one directory descriptor and
-lists it against the closed member set before the members and again after
-they close, then checks the
-manifest file, its closed content, and each ordinary member through that
-descriptor
+and byte manifest. The offline verifier binds one directory descriptor, checks the manifest
+file and its closed content through that descriptor, lists the descriptor
+against the closed member set, checks each ordinary member, and lists that
+same descriptor again after those member reads have closed
 ([directory](upgrade-provisioning.md#offline-staging-directory),
 [manifest](upgrade-provisioning.md#offline-staging-manifest),
 [members](upgrade-provisioning.md#offline-staging-members)).
+The old wording on this page said the verifier lists and then checks the
+manifest. That sequence was only a wording correction for the existing
+verifier (AH-994); this page does not change verifier behavior.
 Those two listings are not a tool revision, Git tree, or recovery binding
 and do not admit production. The builder's
 source read is a separate input check: one file descriptor supplies the copy
@@ -49,9 +51,11 @@ is missing inside the held source directory
 directory, and `fork` only when that fallback is actually selected, are each
 bound for lookup. Those input binds are not the output bind. Its output
 check binds the new staging directory to its own descriptor, creates each
-member and the manifest by basename through that descriptor, and refuses
-success if the caller path no longer names it
-([outputs](upgrade-provisioning.md#offline-staging-outputs)). The builder's
+member and the manifest by basename through that descriptor, lists that
+descriptor once after the manifest close, and refuses success if the name set
+differs or the caller path no longer names it
+([outputs](upgrade-provisioning.md#offline-staging-outputs)). That one builder
+listing is not the verifier's initial and final listings. The builder's
 input and output directory descriptors and the verifier's directory descriptor
 are separate binds. None of them is a long-term authorization, a tool
 revision, or a recovery binding, and none of them proves one Git tree. None of these
@@ -174,7 +178,9 @@ The output, directory, manifest, and member checks remain
 [directory](upgrade-provisioning.md#offline-staging-directory),
 [manifest](upgrade-provisioning.md#offline-staging-manifest), and
 [members](upgrade-provisioning.md#offline-staging-members).
-That acceptance includes finishing each descriptor close; a close failure
+The builder's acceptance also includes one name listing of its held output
+descriptor after the manifest close. That listing is not the verifier's two
+directory listings. That acceptance includes finishing each descriptor close; a close failure
 refuses the staging directory and is not an installable result. The builder
 input directory, the builder output directory, and the verifier read directory
 are pinned separately for that operation only. None of those pins is a

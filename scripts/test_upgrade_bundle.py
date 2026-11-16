@@ -5332,16 +5332,37 @@ class BuilderOutputDirectoryTests(unittest.TestCase):
             with self.subTest(kept=kind):
                 self._close_keeps(kind)
 
-    def test_listing_capability_is_not_required_for_build(self):
+    def test_missing_listing_capability_refuses_before_members(self):
+        """The old no-list success contract is now a destination ENOTSUP."""
         root, source = self._fill('no-list')
         staging = root / 'staging'
         saved = os.supports_fd
-        os.supports_fd = set(saved) - {os.listdir}
+        calls = []
+        real_list, real_open = os.listdir, os.open
+
+        def listed(path='.'):
+            calls.append(path if isinstance(path, int) else os.fspath(path))
+            return real_list(path)
+
+        def opened(path, flags, mode=0o777, *, dir_fd=None):
+            if flags & os.O_CREAT:
+                calls.append('creat:' + (os.fspath(path) if not isinstance(path, int) else str(path)))
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        os.supports_fd = set(saved) - {os.listdir, self.bundle._OS_LISTDIR}
+        os.listdir, os.open = listed, opened
         try:
-            built = self.bundle.build(source, staging)
+            with self.assertRaises(OSError) as caught:
+                self.bundle.build(source, staging)
         finally:
             os.supports_fd = saved
-        self._assert_verified(staging, built)
+            os.listdir, os.open = real_list, real_open
+        self.assertEqual(caught.exception.errno, errno.ENOTSUP)
+        self.assertNotIsInstance(caught.exception, self.bundle.BundleError)
+        self.assertNotIn('INERT', str(caught.exception))
+        self.assertNotIn('sentinel', str(caught.exception))
+        self.assertEqual(calls, [])
+        self.assertEqual(list(staging.iterdir()), [])
 
     def test_legal_paths_fallback_and_empty_member_use_one_directory(self):
         self._relative_and_absolute()
@@ -6080,6 +6101,534 @@ class BuilderOutputDirectoryTests(unittest.TestCase):
         self.assertFalse(primary.exists())
         self.assertEqual((root / 'staging' / 'release-source.json').read_bytes(), payload)
         self._assert_verified(root / 'staging', built)
+
+
+    def test_output_name_set_refuses_nineteen_mutations(self):
+        """Nineteen post-close name changes are destination_changed. Count is not enough."""
+        cases = [
+            (kind, phase)
+            for phase in ('first', 'last', 'manifest')
+            for kind in ('file', 'exec', 'dir', 'link', 'fifo')
+        ]
+        cases.extend((
+            ('remove', 'last'), ('remove', 'manifest'),
+            ('same_count', 'manifest'), ('remove_manifest', 'manifest'),
+        ))
+        self.assertEqual(len(cases), 19)
+        for kind, phase in cases:
+            with self.subTest(kind=kind, phase=phase):
+                state = self._run_output_inventory('set-%s-%s' % (kind, phase), kind=kind, phase=phase)
+                detail = 'kind=%s phase=%s build=%s verify=%s injected=%s lists=%s opens=%s' % (
+                    kind, phase, state['build'], state['verify'], state['injected'],
+                    state['list_ids'], state['extra_opens'])
+                self.assertEqual(state['injected'], 1, detail)
+                self.assertEqual(state['output_opens'], 1, detail)
+                self.assertEqual(state['other_lists'], [], detail)
+                self.assertEqual(state['extra_opens'], 0, detail)
+                self.assertEqual(state['sentinel_opens'], 0, detail)
+                self.assertEqual(state['build'], 'destination_changed', detail)
+                self.assertEqual(state['exit_code'], 69, detail)
+                self.assertEqual(state['message'], 'destination_changed', detail)
+                self.assertIsNone(state['cause'], detail)
+                self.assertNotIn('synthetic', state['message'])
+                self.assertNotIn('sentinel-secret', state['message'])
+                self.assertEqual(state['list_ids'], [state['output_id']], detail)
+                self.assertEqual(state['output_closes'], 1, detail)
+                self.assertEqual(state['input_closes'], [1], detail)
+                self.assertTrue(state['source_unchanged'], detail)
+                self.assertTrue(state['sentinel_unchanged'], detail)
+                self.assertTrue(state['fd_unchanged'], detail)
+                self.assertEqual(state['double_close'], 0, detail)
+                expected = 'manifest_missing' if kind == 'remove_manifest' else 'unexpected_member'
+                self.assertEqual(state['verify'], expected, detail)
+                self.assertTrue(state['residue'], detail)
+
+    def test_output_name_set_stable_control(self):
+        """No injection still builds and verifies. Success does not gain installable."""
+        state = self._run_output_inventory('set-stable', kind='stable', phase='manifest')
+        detail = 'build=%s verify=%s' % (state['build'], state['verify'])
+        self.assertEqual(state['injected'], 0, detail)
+        self.assertEqual(state['build'], 'success', detail)
+        self.assertEqual(state['verify'], 'success', detail)
+        self.assertEqual(set(state['result']), {'manifest_sha256', 'members'}, detail)
+        self.assertEqual(state['result']['members'], len(self.bundle.REQUIRED), detail)
+        self.assertEqual(state['manifest_sha256'], state['result']['manifest_sha256'], detail)
+        self.assertIs(state['verified_flag'], True, detail)
+        self.assertIs(state['installable_flag'], False, detail)
+        self.assertTrue(state['source_unchanged'], detail)
+        self.assertTrue(state['sentinel_unchanged'], detail)
+        self.assertTrue(state['fd_unchanged'], detail)
+        self.assertEqual(state['output_opens'], 1, detail)
+        self.assertEqual(state['output_closes'], 1, detail)
+
+    def test_output_listing_uses_the_held_directory_fd(self):
+        """One late listing of the original fd. Order, history, and a later name are bounded."""
+        for case in (
+            'once', 'reversed', 'transient', 'after-list',
+            'swap-before', 'swap-after',
+        ):
+            with self.subTest(case=case):
+                self._assert_listing_observation(case)
+
+    def test_output_listing_faults_stay_destination_errors(self):
+        """Listing faults hit the real call and do not borrow the verifier's codes."""
+        for case in (
+            'wrapper-kept', 'wrapper-only', 'type', 'notimpl', 'eintr', 'eio', 'eacces',
+        ):
+            with self.subTest(case=case):
+                self._assert_listing_fault(case)
+
+    def test_output_listing_close_keeps_the_first_error(self):
+        """A set or listing error wins over a later directory close. One close each."""
+        for case in (
+            'mismatch-close-eio', 'mismatch-close-eintr',
+            'eio-close-eio', 'eio-close-eintr',
+            'success-output-eio', 'success-output-eintr', 'success-source-eio',
+            'handled-mismatch', 'handled-output-eio',
+            'runtime', 'cancel',
+        ):
+            with self.subTest(case=case):
+                self._assert_listing_close(case)
+
+    def _assert_listing_observation(self, case):
+        if case == 'swap-before':
+            state = self._run_output_inventory('obs-swap-before', swap_before=True)
+            detail = 'build=%s lists=%s opens=%s' % (state['build'], state['list_ids'], state['output_opens'])
+            self.assertEqual(state['build'], 'destination_changed', detail)
+            self.assertEqual(state['exit_code'], 69, detail)
+            self.assertEqual(state['message'], 'destination_changed', detail)
+            self.assertEqual(state['list_ids'], [], detail)
+            self.assertEqual(state['output_opens'], 1, detail)
+            self.assertEqual(state['other_lists'], [], detail)
+            self.assertEqual(state['replacement_opens'], 0, detail)
+            self.assertTrue(state['fd_unchanged'], detail)
+            return
+        if case == 'swap-after':
+            state = self._run_output_inventory('obs-swap-after', after_list='swap')
+            detail = 'build=%s lists=%s' % (state['build'], state['list_ids'])
+            self.assertEqual(state['list_hits'], 1, detail)
+            self.assertEqual(state['build'], 'destination_changed', detail)
+            self.assertEqual(state['message'], 'destination_changed', detail)
+            self.assertEqual(state['exit_code'], 69, detail)
+            self.assertEqual(state['list_ids'], [state['output_id']], detail)
+            self.assertEqual(state['output_opens'], 1, detail)
+            self.assertEqual(state['replacement_opens'], 0, detail)
+            self.assertEqual(state['other_lists'], [], detail)
+            self.assertTrue(state['source_unchanged'], detail)
+            self.assertTrue(state['fd_unchanged'], detail)
+            return
+        state = self._run_output_inventory(
+            'obs-' + case,
+            reverse=case == 'reversed',
+            transient=case == 'transient',
+            after_list='extra' if case == 'after-list' else None)
+        detail = 'case=%s build=%s verify=%s hits=%s names=%s events=%s' % (
+            case, state['build'], state['verify'], state['list_hits'],
+            state['listed_names'] is not None, state['events'])
+        self.assertEqual(state['list_hits'], 1, detail)
+        self.assertEqual(state['list_ids'], [state['output_id']], detail)
+        self.assertEqual(state['other_lists'], [], detail)
+        self.assertEqual(state['build'], 'success', detail)
+        self.assertEqual(state['output_closes'], 1, detail)
+        self.assertLess(state['events'].index('list'), state['events'].index('dir-close'), detail)
+        self.assertEqual(state['files_before_list'], len(self.bundle.REQUIRED) + 1, detail)
+        self.assertEqual(set(state['raw_names']), set(self.bundle.REQUIRED) | {'manifest.json'}, detail)
+        if case == 'after-list':
+            self.assertEqual(state['verify'], 'unexpected_member', detail)
+            self.assertTrue(state['residue'], detail)
+            return
+        self.assertEqual(state['verify'], 'success', detail)
+        self.assertEqual(set(state['result']), {'manifest_sha256', 'members'}, detail)
+        self.assertIs(state['installable_flag'], False, detail)
+        self.assertEqual(state['manifest_sha256'], state['result']['manifest_sha256'], detail)
+        if case == 'reversed':
+            self.assertEqual(state['listed_names'], list(reversed(state['raw_names'])), detail)
+        if case == 'transient':
+            self.assertNotIn('extra-inventory-name', state['names_after'], detail)
+
+    def _assert_listing_fault(self, case):
+        if case in ('wrapper-kept', 'wrapper-only'):
+            self._assert_listing_identity(case)
+            return
+        fault = {'type': 'type', 'notimpl': 'notimpl', 'eintr': 'eintr', 'eio': 'eio', 'eacces': 'eacces'}[case]
+        state = self._run_output_inventory('fault-' + case, fault=fault)
+        detail = 'case=%s build=%s hits=%s message=%s' % (case, state['build'], state['list_hits'], state['message'])
+        self.assertGreaterEqual(state['list_hits'], 1, detail)
+        self.assertEqual(state['other_lists'], [], detail)
+        self.assertNotIn('synthetic', state['message'], detail)
+        self.assertNotIn('sentinel-secret', state['message'], detail)
+        self.assertTrue(state['fd_unchanged'], detail)
+        self.assertEqual(state['output_closes'], 1, detail)
+        if case == 'eintr':
+            self.assertEqual(state['list_hits'], 2, detail)
+            self.assertEqual(state['build'], 'success', detail)
+            self.assertEqual(state['verify'], 'success', detail)
+            self.assertIs(state['installable_flag'], False, detail)
+            return
+        if case in ('type', 'notimpl'):
+            self.assertEqual(state['build'], 'OSError:%s' % errno.ENOTSUP, detail)
+            self.assertNotIn('staging_unreadable', state['message'], detail)
+            self.assertNotIn('source_unreadable', state['message'], detail)
+            return
+        number = errno.EIO if case == 'eio' else errno.EACCES
+        self.assertEqual(state['build'], 'OSError:%s' % number, detail)
+        self.assertIn('injected listing', state['message'], detail)
+        self.assertNotIsInstance(state['error'], self.bundle.BundleError)
+
+    def _assert_listing_identity(self, case):
+        root, source = self._fill('identity-' + case)
+        staging = root / 'staging'
+        sentinel = root / 'sentinel'
+        sentinel.write_bytes(b'untouched-sentinel-secret')
+        sentinel.chmod(0o600)
+        real_list, real_open = os.listdir, os.open
+        saved = os.supports_fd
+        calls = []
+
+        def wrapped(path='.'):
+            calls.append(path if isinstance(path, int) else os.fspath(path))
+            if isinstance(path, int):
+                return real_list(path)
+            raise AssertionError('path listing is not the output fd')
+
+        if case == 'wrapper-kept':
+            os.listdir = wrapped
+            self.assertIn(self.bundle._OS_LISTDIR, os.supports_fd)
+            self.assertNotIn(wrapped, os.supports_fd)
+        else:
+            os.listdir = wrapped
+            os.supports_fd = (set(saved) - {real_list, self.bundle._OS_LISTDIR}) | {wrapped}
+            self.assertNotIn(self.bundle._OS_LISTDIR, os.supports_fd)
+            self.assertIn(wrapped, os.supports_fd)
+        try:
+            if case == 'wrapper-only':
+                with self.assertRaises(OSError) as caught:
+                    self.bundle.build(source, staging)
+            else:
+                built = self.bundle.build(source, staging)
+        finally:
+            os.listdir = real_list
+            os.supports_fd = saved
+        if case == 'wrapper-only':
+            self.assertEqual(caught.exception.errno, errno.ENOTSUP)
+            self.assertNotIsInstance(caught.exception, self.bundle.BundleError)
+            self.assertEqual(calls, [])
+            self.assertEqual([item.name for item in staging.iterdir()], [])
+            self.assertNotIn('INERT', str(caught.exception))
+            return
+        self.assertTrue(any(isinstance(item, int) for item in calls), calls)
+        self.assertTrue(all(isinstance(item, int) for item in calls), calls)
+        self._assert_verified(staging, built)
+
+    def _assert_listing_close(self, case):
+        fault = None
+        kind = None
+        phase = None
+        close_errno = None
+        close_on = None
+        handled = case.startswith('handled-')
+        if case in ('mismatch-close-eio', 'mismatch-close-eintr', 'handled-mismatch'):
+            kind, phase = 'file', 'manifest'
+            close_errno = errno.EINTR if case.endswith('eintr') else errno.EIO
+            close_on = 'directories'
+        elif case in ('eio-close-eio', 'eio-close-eintr'):
+            fault = 'eio'
+            close_errno = errno.EINTR if case.endswith('eintr') else errno.EIO
+            close_on = 'directories'
+        elif case in ('success-output-eio', 'success-output-eintr', 'handled-output-eio'):
+            close_errno = errno.EINTR if 'eintr' in case else errno.EIO
+            close_on = 'output'
+        elif case == 'success-source-eio':
+            close_errno = errno.EIO
+            close_on = 'source'
+        elif case == 'runtime':
+            fault = 'runtime'
+        elif case == 'cancel':
+            fault = 'cancel'
+        state = self._run_output_inventory(
+            'close-' + case, kind=kind, phase=phase, fault=fault,
+            close_errno=close_errno, close_on=close_on, handled=handled)
+        detail = 'case=%s build=%s hits=%s injected=%s closes=%s double=%s message=%s' % (
+            case, state['build'], state['list_hits'], state['injected'],
+            state['output_closes'], state['double_close'], state['message'])
+        self.assertEqual(state['double_close'], 0, detail)
+        self.assertEqual(state['output_closes'], 1, detail)
+        self.assertEqual(state['input_closes'], [1], detail)
+        self.assertTrue(state['fd_unchanged'], detail)
+        self.assertTrue(state['sentinel_unchanged'], detail)
+        self.assertNotIn('already-handled-caller-error', state['message'], detail)
+        self.assertNotIn('synthetic', state['message'], detail)
+        if case in ('mismatch-close-eio', 'mismatch-close-eintr', 'handled-mismatch'):
+            self.assertEqual(state['injected'], 1, detail)
+            self.assertGreaterEqual(state['list_hits'], 1, detail)
+            self.assertEqual(state['build'], 'destination_changed', detail)
+            self.assertEqual(state['message'], 'destination_changed', detail)
+            self.assertEqual(state['exit_code'], 69, detail)
+            self.assertNotIn('injected directory close', state['message'], detail)
+            return
+        if case in ('eio-close-eio', 'eio-close-eintr'):
+            self.assertGreaterEqual(state['list_hits'], 1, detail)
+            self.assertEqual(state['build'], 'OSError:%s' % errno.EIO, detail)
+            self.assertIn('injected listing eio', state['message'], detail)
+            self.assertNotIn('injected directory close', state['message'], detail)
+            return
+        if case in ('success-output-eio', 'success-output-eintr', 'handled-output-eio'):
+            self.assertEqual(state['list_hits'], 1, detail)
+            number = errno.EINTR if 'eintr' in case else errno.EIO
+            self.assertEqual(state['build'], 'OSError:%s' % number, detail)
+            self.assertIn('injected directory close', state['message'], detail)
+            self.assertLess(state['events'].index('list'), state['events'].index('dir-close'), detail)
+            return
+        if case == 'success-source-eio':
+            self.assertEqual(state['list_hits'], 1, detail)
+            self.assertEqual(state['build'], 'source_unreadable', detail)
+            self.assertEqual(state['message'], 'source_unreadable', detail)
+            self.assertEqual(state['exit_code'], 69, detail)
+            self.assertNotIn('injected directory close', state['message'], detail)
+            return
+        self.assertEqual(state['list_hits'], 1, detail)
+        if case == 'runtime':
+            self.assertIsInstance(state['error'], RuntimeError)
+            self.assertEqual(state['message'], 'programming-marker')
+            return
+        self.assertIsInstance(state['error'], CancelMarker)
+        self.assertEqual(state['message'], 'cancel-marker')
+
+    def _run_output_inventory(self, label, kind=None, phase=None, fault=None, after_list=None,
+                              reverse=False, transient=False, swap_before=False,
+                              close_errno=None, close_on=None, handled=False):
+        bundle = self.bundle
+        root = self.root / label
+        root.mkdir(mode=0o700)
+        source = root / 'source'
+        source.mkdir(mode=0o700)
+        payloads = {}
+        for name in bundle.REQUIRED:
+            raw = b'synthetic\x00\xff' + name.encode()
+            path = source / name
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            payloads[name] = hashlib.sha256(raw).hexdigest()
+        staging = root / 'staging'
+        sentinel = root / 'sentinel'
+        sentinel.write_bytes(b'untouched-sentinel-secret')
+        sentinel.chmod(0o600)
+        alternate = root / 'alternate'
+        alternate.mkdir(mode=0o700)
+        target = None
+        if kind not in (None, 'stable'):
+            target = {'first': bundle.REQUIRED[0], 'last': bundle.REQUIRED[-1],
+                      'manifest': 'manifest.json'}[phase]
+        state = {
+            'injected': 0, 'output': None, 'output_id': None, 'output_opens': 0,
+            'output_closes': 0, 'input_fds': [], 'input_closes': [], 'tracked': {},
+            'list_ids': [], 'list_hits': 0, 'listed_names': None, 'other_lists': [],
+            'extra_opens': 0, 'sentinel_opens': 0, 'replacement_opens': 0,
+            'events': [], 'files_before_list': 0, 'double_close': 0, 'sentinels': set(),
+            'eintr_left': 1 if fault == 'eintr' else 0, 'file_closes': [], 'raw_names': None,
+        }
+        staging_text = os.path.normpath(os.fspath(staging))
+        source_text = os.path.normpath(os.fspath(source))
+        real_open, real_close, real_list = os.open, os.close, os.listdir
+
+        def swap():
+            os.rename(staging, root / 'held-staging')
+            os.rename(alternate, staging)
+
+        def mutate():
+            extra = staging / 'extra-inventory-name'
+            if kind == 'remove':
+                os.rename(staging / bundle.REQUIRED[0], root / 'held-member')
+            elif kind == 'remove_manifest':
+                os.rename(staging / 'manifest.json', root / 'held-manifest')
+            elif kind == 'same_count':
+                os.rename(staging / bundle.REQUIRED[0], root / 'held-member')
+                extra.write_bytes(b'extra')
+            elif kind == 'file':
+                extra.write_bytes(b'extra')
+            elif kind == 'exec':
+                extra.write_bytes(b'extra')
+                extra.chmod(0o700)
+            elif kind == 'dir':
+                extra.mkdir(mode=0o700)
+            elif kind == 'link':
+                extra.symlink_to(sentinel)
+            elif kind == 'fifo':
+                os.mkfifo(extra, 0o600)
+            else:
+                self.fail(kind)
+
+        def opened(path, flags, mode=0o777, *, dir_fd=None):
+            fd = real_open(path, flags, mode, dir_fd=dir_fd)
+            text = '' if isinstance(path, int) else os.path.normpath(os.fspath(path))
+            name = '' if isinstance(path, int) else Path(text).name
+            if name == 'extra-inventory-name':
+                state['extra_opens'] += 1
+            if text == os.path.normpath(os.fspath(sentinel)):
+                state['sentinel_opens'] += 1
+            directory_open = bool(flags & getattr(os, 'O_DIRECTORY', 0)) and not flags & os.O_CREAT
+            if directory_open and text == staging_text:
+                if state['output'] is None:
+                    info = os.fstat(fd)
+                    state['output'] = fd
+                    state['output_id'] = (info.st_dev, info.st_ino)
+                    state['output_opens'] += 1
+                else:
+                    state['replacement_opens'] += 1
+            elif directory_open and text == source_text:
+                state['input_fds'].append(fd)
+            elif directory_open and text == os.path.normpath(os.fspath(alternate)):
+                state['replacement_opens'] += 1
+            if flags & os.O_CREAT and dir_fd is not None and dir_fd == state['output']:
+                state['tracked'][fd] = name
+            return fd
+
+        def closed(fd):
+            if fd in state['sentinels']:
+                state['double_close'] += 1
+                return real_close(fd)
+            name = state['tracked'].pop(fd, None)
+            is_output = fd == state['output']
+            is_input = fd in state['input_fds']
+            inject_close = False
+            if close_errno is not None and (is_output or is_input):
+                if close_on == 'directories' or (close_on == 'output' and is_output) or (
+                        close_on == 'source' and is_input):
+                    inject_close = True
+            if is_output or is_input or name is not None or inject_close:
+                real_close(fd)
+                if is_output:
+                    state['output_closes'] += 1
+                    state['events'].append('dir-close')
+                if is_input:
+                    state['input_closes'].append(1)
+                    state['events'].append('dir-close')
+                if name is not None:
+                    state['file_closes'].append(name)
+                    if name == bundle.REQUIRED[0] and transient and not state['injected']:
+                        (staging / 'extra-inventory-name').write_bytes(b'transient')
+                        state['injected'] += 1
+                    if name == 'manifest.json' and transient:
+                        os.rename(staging / 'extra-inventory-name', root / 'held-transient')
+                    if swap_before and name == 'manifest.json' and state['injected'] == 0:
+                        swap()
+                        state['injected'] += 1
+                    if target is not None and name == target and state['injected'] == 0 and not transient:
+                        mutate()
+                        state['injected'] += 1
+                if inject_close:
+                    holder = real_open(sentinel, os.O_RDONLY)
+                    state['sentinels'].add(holder)
+                    raise OSError(close_errno, 'injected directory close')
+                return None
+            return real_close(fd)
+
+        def listed(path='.'):
+            if not (isinstance(path, int) and path == state['output']):
+                state['other_lists'].append(path if isinstance(path, int) else os.fspath(path))
+                return real_list(path)
+            info = os.fstat(path)
+            state['list_hits'] += 1
+            state['list_ids'].append((info.st_dev, info.st_ino))
+            if fault == 'eintr' and state['eintr_left']:
+                state['eintr_left'] -= 1
+                raise OSError(errno.EINTR, 'injected listing interrupt')
+            if fault == 'eio':
+                raise OSError(errno.EIO, 'injected listing eio')
+            if fault == 'eacces':
+                raise OSError(errno.EACCES, 'injected listing eacces')
+            if fault == 'type':
+                raise TypeError('listing capability seam')
+            if fault == 'notimpl':
+                raise NotImplementedError('listing capability seam')
+            if fault == 'runtime':
+                raise RuntimeError('programming-marker')
+            if fault == 'cancel':
+                raise CancelMarker('cancel-marker')
+            names = list(real_list(path))
+            state['raw_names'] = list(names)
+            state['files_before_list'] = len(state['file_closes'])
+            state['events'].append('list')
+            if after_list == 'extra':
+                (staging / 'extra-inventory-name').write_bytes(b'later')
+            elif after_list == 'swap':
+                swap()
+            if reverse:
+                names = list(reversed(names))
+            state['listed_names'] = names
+            return names
+
+        def invoke():
+            if not handled:
+                return bundle.build(source, staging)
+            try:
+                raise ValueError('already-handled-caller-error')
+            except ValueError:
+                return bundle.build(source, staging)
+
+        before_fds = self._open_fds()
+        os.open, os.close, os.listdir = opened, closed, listed
+        error = None
+        result = None
+        try:
+            try:
+                result = invoke()
+            except BaseException as exc:
+                error = exc
+        finally:
+            os.open, os.close, os.listdir = real_open, real_close, real_list
+            for held in list(state['sentinels']):
+                os.fstat(held)
+                real_close(held)
+            state['sentinels'].clear()
+        state['fd_unchanged'] = before_fds == self._open_fds()
+        state['source_unchanged'] = all(
+            hashlib.sha256((source / name).read_bytes()).hexdigest() == digest
+            for name, digest in payloads.items())
+        state['sentinel_unchanged'] = sentinel.read_bytes() == b'untouched-sentinel-secret'
+        state['result'] = result
+        state['error'] = error
+        if error is None:
+            state['build'] = 'success'
+            state['exit_code'] = None
+            state['message'] = ''
+            state['cause'] = None
+        elif isinstance(error, bundle.BundleError):
+            state['build'] = error.code
+            state['exit_code'] = error.exit_code
+            state['message'] = str(error)
+            state['cause'] = error.__cause__
+        elif isinstance(error, OSError):
+            state['build'] = 'OSError:%s' % error.errno
+            state['exit_code'] = None
+            state['message'] = str(error)
+            state['cause'] = error.__cause__
+        else:
+            state['build'] = type(error).__name__
+            state['exit_code'] = None
+            state['message'] = str(error)
+            state['cause'] = error.__cause__
+        verify_error = None
+        verified = None
+        try:
+            verified = bundle.verify(staging)
+        except bundle.BundleError as exc:
+            verify_error = exc.code
+        state['verify'] = 'success' if verify_error is None and verified is not None else verify_error
+        state['verified_flag'] = None if verified is None else verified.get('verified')
+        state['installable_flag'] = None if verified is None else verified.get('installable')
+        if verified is not None and result is not None:
+            state['manifest_sha256'] = hashlib.sha256((staging / 'manifest.json').read_bytes()).hexdigest()
+        else:
+            state['manifest_sha256'] = None
+        names_after = []
+        if staging.exists() and not staging.is_symlink():
+            names_after = [item.name for item in staging.iterdir()]
+        state['names_after'] = names_after
+        state['residue'] = (
+            'extra-inventory-name' in names_after or 'held-member' in os.listdir(root)
+            or 'held-manifest' in os.listdir(root) or 'held-staging' in os.listdir(root))
+        return state
 
 
 def _refuse_replaced_staging_root(kind, source, staging, sentinel):

@@ -91,8 +91,11 @@ created. It is not the root-owned runtime bundle rule and does not make the
 staging directory a host trust root.
 The copies and `manifest.json` are new files created exclusively through one
 output directory descriptor, by basename, not by joining the caller path
-again. Before success the caller path must still name that directory. The
-member mode is set on the file descriptor, and the builder refuses when that
+again. Before success the caller path must still name that directory, and the
+builder lists that same descriptor once. The names must be the closed members
+plus `manifest.json`. That one builder listing is not the verifier's initial
+and final listings above, and it is not the root-owned runtime bundle rule.
+The member mode is set on the file descriptor, and the builder refuses when that
 basename no longer names it. See
 [offline staging outputs](upgrade-provisioning.md#offline-staging-outputs).
 That output directory bind is not the verifier's later directory read, does

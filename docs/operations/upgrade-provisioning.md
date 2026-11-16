@@ -19,7 +19,10 @@ binds `fork` only when `release-source.json` is absent inside that directory.
 Each selected file is then read from its own no-follow descriptor; see
 [Offline staging sources](#offline-staging-sources). After `mkdir`, the builder
 binds that new directory to one descriptor and creates every output by
-basename through it. That bind is not the verifier's later directory read.
+basename through it. Before success it lists that same descriptor once,
+requires the closed member names plus `manifest.json`, and checks the root
+again. That one builder listing is not the verifier's before-and-after
+listings. That bind is not the verifier's later directory read.
 Each output file is still created exclusively and checked on its own file
 descriptor; see
 [Offline staging outputs](#offline-staging-outputs). The manifest must match
@@ -125,9 +128,16 @@ kept, and the remaining directory descriptors are still closed once. If the
 body already raised, that exception is kept. A source-directory `close`
 failure can leave a byte-complete manifest. That residue is not a successful
 build and is not deleted. The manifest is created exclusively only after every selected
-member has been copied and still matches its opening identity. See
+member has been copied and still matches its opening identity. After that
+close, and after the output root and bound inputs still match, the builder
+lists the held output descriptor once. The names must be exactly the required
+members and `manifest.json`. A missing name, an extra name, or the same count
+under another name is `destination_changed`, and the message is only that
+code. The list does not open an extra name, follow a link, or read a fifo.
+The output root and bound inputs are checked again after the list, before the
+directory descriptors are closed. See
 [Offline staging outputs](#offline-staging-outputs). A refusal may leave an
-incomplete staging directory. That directory is not success, is not reused, and
+incomplete staging directory, including a manifest and other residue. That directory is not success, is not reused, and
 is not deleted by the builder. An existing staging directory is still
 `staging_exists`. Success is `verified=true` and `installable=false` only after
 the checks in [Offline staging manifest](#offline-staging-manifest) and
@@ -157,9 +167,14 @@ same device, inode, and type. Size and timestamps are not directory identity.
 If the platform cannot open a directory that way, cannot `stat` a basename
 through a directory descriptor, or cannot `stat` without following, the
 builder raises a destination `OSError` with `ENOTSUP` and does not create
-members by path. It does not need to list the directory. `EINTR` from that
-`lstat`, open, or `fstat` is retried only at that call. Another directory
-I/O error stays a destination `OSError`. It is not `source_unreadable`, does
+members by path. Listing the held descriptor is required: the import-time
+`os.listdir` must be in `os.supports_fd`. If it is not, the same destination
+`OSError` with `ENOTSUP` is raised before an ordinary member is created, and
+the builder does not list by path. A `TypeError` or `NotImplementedError`
+from the listing call is that same `ENOTSUP`. `EINTR` from that
+`lstat`, open, `fstat`, or the one listing call is retried only at that call.
+Another directory I/O error, including `EIO` or `EACCES` from the listing,
+stays a destination `OSError`. It is not `source_unreadable`, does
 not select the fallback, and is not the verifier's `staging_unreadable` or
 `manifest_missing`.
 
@@ -216,7 +231,10 @@ destination check has succeeded. Its bytes use the same write loop as member
 bytes. A short write continues. `EINTR` from `write` is retried only for that
 call. A return of zero or a negative count is refused. The build returns
 success only after the manifest length, identity check, and its one close all
-succeed.
+succeed, and then only after the held output directory has been listed once,
+the names matched the closed set, and the output root and bound inputs were
+checked again. A different name set is `destination_changed` and is not
+success.
 
 Each output descriptor is closed once, on success and on failure. `EINTR`
 from `close` is not retried, and the descriptor is not closed again. Whether
@@ -248,9 +266,13 @@ later creates: those stay on the held descriptor, and success is refused when
 the caller path no longer names it. An ancestor symlink remains allowed when
 the final component is the ordinary directory that was bound. The builder
 does not claim same-user isolation, a freeze of every member, or a consistent
-snapshot of the whole directory. A failed build may leave partial or complete
+snapshot of the whole directory. The listing guarantees only that, in that one
+observation after the manifest close, the names were exactly the closed set.
+It does not prove those names still refer to the inodes or bytes checked
+earlier, and it does not see a name that appears only after the list returns.
+A failed build may leave partial or complete
 residue in the held directory, including a manifest created after the last
-passing check. That residue is not deleted, not marked, and not success.
+passing check. That residue is not deleted, not rolled back, not marked, and not success.
 
 Success remains `verified=true` and `installable=false` only after
 [Offline staging manifest](#offline-staging-manifest) and

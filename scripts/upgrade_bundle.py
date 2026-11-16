@@ -29,7 +29,18 @@ created by basename on that descriptor, and the final no-follow stat uses
 the same descriptor. The caller path must still name that directory before
 success. A replaced, removed, or non-directory root is destination_changed.
 A directory I/O error stays a destination OSError. Missing directory
-capability is ENOTSUP and does not fall back to path creates. The directory
+capability is ENOTSUP and does not fall back to path creates. Descriptor
+listing is part of that capability. After the manifest close and the root
+and input checks, the builder lists the held output descriptor once. The
+names must equal the required members plus manifest.json. Any other set is
+destination_changed, and the message is only that code. The list does not
+open an extra name, follow a link, wait on a fifo, or reopen the caller path.
+A TypeError or NotImplementedError from that call is ENOTSUP. EINTR retries
+only that call. Another listing OSError stays a destination OSError. The root
+and the bound inputs are checked again after the list. The list does not prove
+member inodes or bytes, does not freeze the directory, and does not see a name
+that appears only after it returns. Failure may leave the manifest and other
+residue. That residue is not deleted, rolled back, or published. The directory
 descriptor is closed once. The first lstat does not prove it observed the
 mkdir inode. This does not publish the directory atomically, does not prove
 a Git revision, and does not make the bundle installable.
@@ -152,6 +163,10 @@ def build(source, staging):
         manifest = {'schema': SCHEMA, 'entry': ENTRY, 'files': files}
         raw = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()
         _write_exclusive('manifest.json', raw, 0o666, None, directory)
+        _recheck_output_directory(directory, staging, identity)
+        _recheck_bound_inputs(
+            source_fd, source, source_identity, fallback_fd, fallback_path, fallback_identity)
+        _list_output_directory(directory)
         _recheck_output_directory(directory, staging, identity)
         _recheck_bound_inputs(
             source_fd, source, source_identity, fallback_fd, fallback_path, fallback_identity)
@@ -946,8 +961,9 @@ def _output_directory_flags():
     """Flags for one no-follow output-directory open. None means unavailable.
 
     Capability is the import-time os functions. A later test seam may replace
-    os.open without making a capable platform look incapable. The builder does
-    not list the directory, so a descriptor listing is not required.
+    os.open or os.listdir without making a capable platform look incapable.
+    Descriptor listing is required. The check uses the import-time listdir,
+    not a mocked os.listdir that was installed later.
     """
     nofollow = getattr(os, 'O_NOFOLLOW', None)
     nonblock = getattr(os, 'O_NONBLOCK', None)
@@ -955,8 +971,10 @@ def _output_directory_flags():
     if nofollow is None or nonblock is None or directory is None:
         return None
     dir_fds = getattr(os, 'supports_dir_fd', ())
+    fd_paths = getattr(os, 'supports_fd', ())
     followers = getattr(os, 'supports_follow_symlinks', ())
-    if (_OS_STAT not in dir_fds or _OS_OPEN not in dir_fds or _OS_STAT not in followers):
+    if (_OS_STAT not in dir_fds or _OS_OPEN not in dir_fds or _OS_LISTDIR not in fd_paths
+            or _OS_STAT not in followers):
         return None
     return os.O_RDONLY | directory | nofollow | nonblock
 
@@ -996,6 +1014,28 @@ def _recheck_output_directory(fd, staging, identity):
             raise BundleError('destination_changed') from None
         raise
     _require_output_directory(current, identity)
+
+
+def _list_output_directory(dir_fd):
+    """Compare names on the held output descriptor. Not a content snapshot.
+
+    The call is os.listdir on that descriptor, not a reopened path. TypeError
+    and NotImplementedError are a missing listing capability. EINTR retries
+    only this call. Any other OSError stays a destination OSError. A different
+    name set is destination_changed and carries no path or body.
+    """
+    while True:
+        try:
+            names = os.listdir(dir_fd)
+            break
+        except (TypeError, NotImplementedError):
+            raise OSError(errno.ENOTSUP, 'destination directory unavailable') from None
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise
+    if set(names) != set(REQUIRED) | {'manifest.json'}:
+        raise BundleError('destination_changed')
 
 
 def _bind_output_directory(staging):
