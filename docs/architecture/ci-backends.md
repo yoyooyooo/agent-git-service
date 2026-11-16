@@ -94,7 +94,7 @@ return a partial run-log ZIP for that inventory. Historical retry tasks
 without a current job association are excluded, and previously mapped orphan job
 IDs return 404. Names are not deduplicated: matrix jobs may share a display name.
 Missing tasks, changed inventories and incomplete public task observations fail
-explicitly rather than dropping current jobs. Without a configured bridge, job
+explicitly rather than dropping current jobs. Forgejo can skip a conditional job before allocating a task. The bridge accepts that absence only when the job belongs to the selected repository, run and commit, has a name, and records `task_id=0`, `status=4` (`Skipped`), `started=0` and `stopped=0`, with no joined task row. Such a job contributes no task or log. A run that contains only these skipped jobs has an empty current-task inventory. Historical tasks are never substituted. Other missing task associations, unknown states, and repository or commit mismatches still reject the whole inventory. Without a configured bridge, job
 inventory is unsupported (501); an older bridge lacking the resource returns 404.
 The bridge and adapter therefore need compatible source versions before activation. The public task list
 ignores `head_sha` and `run_number`, so the adapter reads that list from the newest

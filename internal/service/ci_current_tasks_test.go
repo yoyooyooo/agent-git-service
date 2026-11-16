@@ -32,7 +32,7 @@ func TestCIChecksForgejoRetriedTasksUseCurrentJobBinding(t *testing.T) {
 	for _, statement := range []string{
 		`CREATE TABLE repository (id integer primary key, owner_name text, lower_name text)`,
 		`CREATE TABLE action_run (id integer primary key, repo_id integer, "index" integer, ref text, commit_sha text, event text)`,
-		`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text)`,
+		`CREATE TABLE action_run_job (id integer primary key, run_id integer, repo_id integer, task_id integer, name text, commit_sha text, status integer DEFAULT 0, started integer DEFAULT 0, stopped integer DEFAULT 0)`,
 		`CREATE TABLE action_task (id integer primary key, repo_id integer, commit_sha text)`,
 		`INSERT INTO repository VALUES (1, 'ci', 'project')`,
 	} {
@@ -44,7 +44,7 @@ func TestCIChecksForgejoRetriedTasksUseCurrentJobBinding(t *testing.T) {
 		`INSERT INTO action_run VALUES (17, 1, 9, 'refs/heads/feature', ?, 'push')`,
 		`INSERT INTO action_task VALUES (40, 1, ?)`,
 		`INSERT INTO action_task VALUES (41, 1, ?)`,
-		`INSERT INTO action_run_job VALUES (31, 17, 1, 41, 'unit', ?)`,
+		`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha) VALUES (31, 17, 1, 41, 'unit', ?)`,
 	} {
 		if err := providerDB.Exec(statement, pr.HeadSHA).Error; err != nil {
 			t.Fatal(err)
@@ -130,7 +130,7 @@ func TestCIChecksForgejoRetriedTasksUseCurrentJobBinding(t *testing.T) {
 
 	// Two current jobs really sharing a name are still ambiguous. Filtering
 	// historical tasks must not turn a conflicting current check into success.
-	if err := providerDB.Exec(`INSERT INTO action_run_job VALUES (32, 17, 1, 40, 'unit', ?)`, pr.HeadSHA).Error; err != nil {
+	if err := providerDB.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha) VALUES (32, 17, 1, 40, 'unit', ?)`, pr.HeadSHA).Error; err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ReadCIChecks(ctx, pr); !errors.Is(err, cibackend.ErrInvalid) {
