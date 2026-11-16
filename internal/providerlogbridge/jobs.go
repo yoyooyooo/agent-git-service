@@ -40,10 +40,11 @@ func (h *Handler) serveJobs(w http.ResponseWriter, r *http.Request) {
 		Name, JobSHA                string
 		TaskSHA                     *string
 		JobStatus, Started, Stopped *int64
+		Attempt                     *int64
 	}
 	// Enumerate by run before validating repository bindings: filtering invalid
 	// bindings in a JOIN would silently turn corrupt metadata into missing jobs.
-	err = h.db.WithContext(r.Context()).Raw(`SELECT arj.task_id, arj.repo_id AS job_repo_id, arj.name, arj.commit_sha AS job_sha, arj.status AS job_status, arj.started, arj.stopped, at.id AS actual_task_id, at.repo_id AS task_repo_id, at.commit_sha AS task_sha FROM action_run_job arj LEFT JOIN action_task at ON at.id=arj.task_id WHERE arj.run_id=? ORDER BY arj.id LIMIT 1001`, run).Scan(&rows).Error
+	err = h.db.WithContext(r.Context()).Raw(`SELECT arj.task_id, arj.repo_id AS job_repo_id, arj.name, arj.commit_sha AS job_sha, arj.status AS job_status, arj.started, arj.stopped, arj.attempt, at.id AS actual_task_id, at.repo_id AS task_repo_id, at.commit_sha AS task_sha FROM action_run_job arj LEFT JOIN action_task at ON at.id=arj.task_id WHERE arj.run_id=? ORDER BY arj.id LIMIT 1001`, run).Scan(&rows).Error
 	if err != nil || len(rows) > 1000 {
 		h.fail(w, 502, "metadata_unavailable", "Provider job inventory unavailable")
 		return
@@ -56,10 +57,7 @@ func (h *Handler) serveJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		taskID := *row.TaskID
-		// Forgejo 12 uses status 4 for Skipped. A never-started skipped job
-		// has no current task association; do not invent a task or log for it.
-		if taskID == 0 && row.JobStatus != nil && *row.JobStatus == 4 &&
-			row.Started != nil && *row.Started == 0 && row.Stopped != nil && *row.Stopped == 0 &&
+		if taskID == 0 && neverStartedTerminal(row.JobStatus, row.Started, row.Stopped, row.Attempt) &&
 			row.ActualTaskID == nil && row.TaskRepoID == nil && row.TaskSHA == nil {
 			continue
 		}
@@ -71,4 +69,33 @@ func (h *Handler) serveJobs(w http.ResponseWriter, r *http.Request) {
 		items = append(items, map[string]any{"task_id": taskID, "name": row.Name})
 	}
 	h.write(w, 200, map[string]any{"schema": "ags.internal-provider-jobs.v1", "repo": owner + "/" + repo, "run": strconv.FormatInt(run, 10), "run_number": runs[0].Number, "head_sha": sha, "jobs": items})
+}
+
+// Forgejo 12 job states (models/actions/status.go).
+const (
+	forgejoStatusCancelled = 3
+	forgejoStatusSkipped   = 4
+)
+
+// neverStartedTerminal reports a job that reached a final state before Forgejo
+// allocated a task, so it has no current task association and no log:
+//   - Skipped: a conditional job skipped before start keeps started=0 and
+//     stopped=0.
+//   - Cancelled: a job cancelled while still waiting or blocked (for example
+//     when its run is cancelled) keeps started=0 and attempt=0, but Forgejo
+//     stamps stopped with the cancellation time, so stopped may be non-zero.
+//
+// Neither case invents a task or log; the provider's run conclusion is
+// reported unchanged. Every other task-less shape still fails closed.
+func neverStartedTerminal(status, started, stopped, attempt *int64) bool {
+	if status == nil || started == nil || stopped == nil || *started != 0 {
+		return false
+	}
+	switch *status {
+	case forgejoStatusSkipped:
+		return *stopped == 0
+	case forgejoStatusCancelled:
+		return *stopped >= 0 && attempt != nil && *attempt == 0
+	}
+	return false
 }

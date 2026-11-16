@@ -16,6 +16,12 @@ run and commit, has a name, and records `task_id=0`, `status=4` (`Skipped`),
 `started=0` and `stopped=0`, with no joined task row. These status values come from
 [Forgejo 12's status model](https://codeberg.org/forgejo/forgejo/src/tag/v12.0.4/models/actions/status.go).
 
+The same applies to a job cancelled before it started, for example when its run
+is cancelled while the job is still waiting or blocked: `task_id=0`, `status=3`
+(`Cancelled`), `started=0`, `attempt=0` and no joined task row. Forgejo stamps
+`stopped` with the cancellation time, so `stopped` may be non-zero (but not
+negative) for this case only.
+
 Such a job contributes no task or log entry. A run containing only these skipped
 jobs has an empty current-task inventory. Historical tasks are never substituted.
 Other missing task associations, unknown states and repository or commit
