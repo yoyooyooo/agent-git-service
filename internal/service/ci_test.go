@@ -454,3 +454,29 @@ func TestPreferObservedCIRunOrdersEvidenceNotConclusions(t *testing.T) {
 		})
 	}
 }
+
+func TestCIChecksWaitingRunWithNoJobsReturnsQueued(t *testing.T) {
+	s, ctx, repo, pr, backend, config := ciFixture(t)
+	selected := config.Backends["builder"]
+	selected.Kind = "forgejo"
+	config.Backends["builder"] = selected
+	backend.runs[0].Status = "queued"
+	backend.runs[0].Conclusion = ""
+	backend.runs[0].Name = "CI Success"
+	backend.jobs = nil
+	binding := config.Repositories[repo.FullName]
+	binding.RequiredChecks = nil
+	config.Repositories[repo.FullName] = binding
+	registry, err := cibackend.WithBackends(config, map[string]cibackend.Backend{"builder": backend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.CI = registry
+	observed, err := s.ReadCIChecksForSHA(ctx, repo, pr.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.Checks) != 1 || observed.Checks[0].Status != "queued" || observed.Checks[0].Conclusion != "" || observed.Checks[0].Name != "CI Success" {
+		t.Fatalf("waiting run with no current tasks: %#v", observed)
+	}
+}

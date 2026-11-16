@@ -399,6 +399,11 @@ func (d *Deps) CombinedStatus(w http.ResponseWriter, r *http.Request) {
 	if statuses == nil {
 		statuses = []any{}
 	}
+	// GitHub's combined status is pending when no statuses have been reported.
+	// An empty success hid queued Forgejo CI that lives outside commit_statuses.
+	if len(statuses) == 0 {
+		overallState = "pending"
+	}
 	respond.JSON(w, 200, map[string]any{
 		"state":       overallState,
 		"statuses":    statuses,
