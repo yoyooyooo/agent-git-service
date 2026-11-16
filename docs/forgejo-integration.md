@@ -509,6 +509,18 @@ go run ./cmd/forgejo-authority -config /path/to/integrations.yaml -mode apply
 go run ./cmd/forgejo-authority -config /path/to/integrations.yaml -mode verify
 ```
 
+To onboard or check one repository without touching the others, add `-repo
+owner/name` (repeatable). A selector matches a mapping by its AGS repository or
+its Forgejo repository; the command then plans, applies and verifies only the
+selected mappings and makes no provider calls for any other repository. A
+selector that names no enabled mapping (unknown, disabled, ambiguous or not
+`owner/name`) fails before any provider call. Without `-repo` the command covers
+every enabled mapping, as before:
+
+```bash
+go run ./cmd/forgejo-authority -config /path/to/integrations.yaml -mode plan -repo jackie/lumi
+```
+
 `forgejo.token_file` (or `token`) is the projection credential for both REST and
 Git, with or without an attribution map. It must belong to the integration bot
 allowed by the Forgejo protected-branch push policy; being a site administrator

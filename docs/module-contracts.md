@@ -617,7 +617,7 @@ Current state:
 - wired through `service.Service.ForgejoIntegration`
 - triggered from `githttp` after existing AGS webhook and PR-head post-push follow-up
 - configured through `AGS_INTEGRATIONS_CONFIG`; legacy Forgejo environment variables remain supported for bootstrapping
-- `cmd/forgejo-authority` exposes the external plan/apply/verify workflow and refuses onboarding without an enabled `projection_drift` target
+- `cmd/forgejo-authority` exposes the external plan/apply/verify workflow and refuses onboarding without an enabled `projection_drift` target; repeatable `-repo owner/name` restricts plan/apply/verify to the selected enabled mappings (AGS or Forgejo name), makes zero provider calls for unselected repositories, and rejects unknown/disabled/ambiguous selectors before any provider call
 
 Assessment:
 
