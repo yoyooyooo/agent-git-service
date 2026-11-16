@@ -647,6 +647,15 @@ func (s *Service) ResetAgentToken(ctx context.Context, humanID uint, agentLogin 
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&binding, "human_user_id = ? AND agent_user_id = ?", humanID, agent.ID).Error; err != nil {
 			return wrapErr(err)
 		}
+		var existing []db.Token
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("user_id = ?", agent.ID).Find(&existing).Error; err != nil {
+			return err
+		}
+		for _, current := range existing {
+			if s.isProtectedToken(current.Value) {
+				return s.refuseProtectedToken(ctx, agent.ID, current, "reset")
+			}
+		}
 		if err := tx.Where("user_id = ?", agent.ID).Delete(&db.Token{}).Error; err != nil {
 			return err
 		}

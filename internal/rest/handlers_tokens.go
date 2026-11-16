@@ -114,7 +114,7 @@ func deleteTokenError(w http.ResponseWriter, r *http.Request, err error) {
 		respond.JSON(w, http.StatusForbidden, map[string]any{
 			"error":             "protected_token",
 			"code":              "protected_token",
-			"message":           "This token is a protected bootstrap credential (ADMIN_TOKEN or seed token) and cannot be deleted through the token API",
+			"message":           "This token is a protected bootstrap credential (ADMIN_TOKEN or seed token) and cannot be deleted",
 			"documentation_url": "https://docs.github.com/rest",
 		})
 		return
