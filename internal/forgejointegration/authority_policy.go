@@ -78,16 +78,76 @@ func (i *Integration) AuthorityPolicyConfigured() error {
 	return nil
 }
 
-// PlanRepositoryAuthority reads live provider state and returns only required mutations.
+// PlanRepositoryAuthority reads live provider state for every enabled mapping
+// and returns only required mutations.
 func (i *Integration) PlanRepositoryAuthority(ctx context.Context) ([]RepositoryAuthorityPlan, error) {
-	if err := i.AuthorityPolicyConfigured(); err != nil {
-		return nil, err
-	}
-	client := i.authorityClient
-	targets, err := i.authorityPolicyTargets()
+	return i.PlanSelectedRepositoryAuthority(ctx, nil)
+}
+
+// ApplyRepositoryAuthority idempotently applies a generated plan for every
+// enabled mapping and verifies convergence.
+func (i *Integration) ApplyRepositoryAuthority(ctx context.Context) ([]RepositoryAuthorityPlan, error) {
+	return i.ApplySelectedRepositoryAuthority(ctx, nil)
+}
+
+// VerifyRepositoryAuthority fails unless every mapped repository preserves AGS authority.
+func (i *Integration) VerifyRepositoryAuthority(ctx context.Context) ([]RepositoryAuthorityPlan, error) {
+	return i.VerifySelectedRepositoryAuthority(ctx, nil)
+}
+
+// PlanSelectedRepositoryAuthority is PlanRepositoryAuthority restricted to the
+// selected repositories. An empty selection means every enabled mapping.
+// Each selector names a mapping by its AGS repository or its Forgejo
+// repository ("owner/name"); a selector that matches no enabled mapping fails
+// before any provider call.
+func (i *Integration) PlanSelectedRepositoryAuthority(ctx context.Context, selection []string) ([]RepositoryAuthorityPlan, error) {
+	targets, err := i.selectedAuthorityTargets(selection)
 	if err != nil {
 		return nil, err
 	}
+	return i.planAuthorityTargets(ctx, targets)
+}
+
+// ApplySelectedRepositoryAuthority is ApplyRepositoryAuthority restricted to
+// the selected repositories. Unselected repositories receive no provider calls.
+func (i *Integration) ApplySelectedRepositoryAuthority(ctx context.Context, selection []string) ([]RepositoryAuthorityPlan, error) {
+	targets, err := i.selectedAuthorityTargets(selection)
+	if err != nil {
+		return nil, err
+	}
+	plans, err := i.planAuthorityTargets(ctx, targets)
+	if err != nil {
+		return nil, err
+	}
+	client := i.authorityClient
+	for index, plan := range plans {
+		if plan.Converged {
+			continue
+		}
+		target := targets[index]
+		state, err := client.InspectRepositoryAuthority(ctx, target.owner, target.repo, target.baseBranch, i.cfg.WebhookURL, i.cfg.IntegrationBot)
+		if err != nil {
+			return nil, fmt.Errorf("refresh Forgejo authority for %s: %w", target.externalRepo(), err)
+		}
+		if err := client.ApplyRepositoryAuthority(ctx, target.owner, target.repo, target.baseBranch, i.cfg.WebhookURL, i.cfg.WebhookSecret, i.cfg.IntegrationBot, state); err != nil {
+			return nil, fmt.Errorf("apply Forgejo authority for %s: %w", target.externalRepo(), err)
+		}
+	}
+	return i.verifyAuthorityTargets(ctx, targets)
+}
+
+// VerifySelectedRepositoryAuthority is VerifyRepositoryAuthority restricted to
+// the selected repositories.
+func (i *Integration) VerifySelectedRepositoryAuthority(ctx context.Context, selection []string) ([]RepositoryAuthorityPlan, error) {
+	targets, err := i.selectedAuthorityTargets(selection)
+	if err != nil {
+		return nil, err
+	}
+	return i.verifyAuthorityTargets(ctx, targets)
+}
+
+func (i *Integration) planAuthorityTargets(ctx context.Context, targets []authorityPolicyTarget) ([]RepositoryAuthorityPlan, error) {
+	client := i.authorityClient
 	plans := make([]RepositoryAuthorityPlan, 0, len(targets))
 	for _, target := range targets {
 		state, err := client.InspectRepositoryAuthority(ctx, target.owner, target.repo, target.baseBranch, i.cfg.WebhookURL, i.cfg.IntegrationBot)
@@ -103,36 +163,8 @@ func (i *Integration) PlanRepositoryAuthority(ctx context.Context) ([]Repository
 	return plans, nil
 }
 
-// ApplyRepositoryAuthority idempotently applies a generated plan and verifies convergence.
-func (i *Integration) ApplyRepositoryAuthority(ctx context.Context) ([]RepositoryAuthorityPlan, error) {
-	plans, err := i.PlanRepositoryAuthority(ctx)
-	if err != nil {
-		return nil, err
-	}
-	client := i.authorityClient
-	targets, err := i.authorityPolicyTargets()
-	if err != nil {
-		return nil, err
-	}
-	for index, plan := range plans {
-		if plan.Converged {
-			continue
-		}
-		target := targets[index]
-		state, err := client.InspectRepositoryAuthority(ctx, target.owner, target.repo, target.baseBranch, i.cfg.WebhookURL, i.cfg.IntegrationBot)
-		if err != nil {
-			return nil, fmt.Errorf("refresh Forgejo authority for %s: %w", target.externalRepo(), err)
-		}
-		if err := client.ApplyRepositoryAuthority(ctx, target.owner, target.repo, target.baseBranch, i.cfg.WebhookURL, i.cfg.WebhookSecret, i.cfg.IntegrationBot, state); err != nil {
-			return nil, fmt.Errorf("apply Forgejo authority for %s: %w", target.externalRepo(), err)
-		}
-	}
-	return i.VerifyRepositoryAuthority(ctx)
-}
-
-// VerifyRepositoryAuthority fails unless every mapped repository preserves AGS authority.
-func (i *Integration) VerifyRepositoryAuthority(ctx context.Context) ([]RepositoryAuthorityPlan, error) {
-	plans, err := i.PlanRepositoryAuthority(ctx)
+func (i *Integration) verifyAuthorityTargets(ctx context.Context, targets []authorityPolicyTarget) ([]RepositoryAuthorityPlan, error) {
+	plans, err := i.planAuthorityTargets(ctx, targets)
 	if err != nil {
 		return nil, err
 	}
@@ -142,6 +174,50 @@ func (i *Integration) VerifyRepositoryAuthority(ctx context.Context) ([]Reposito
 		}
 	}
 	return plans, nil
+}
+
+// selectedAuthorityTargets validates the authority configuration and narrows
+// the enabled mappings to the selection, preserving the default ordering.
+func (i *Integration) selectedAuthorityTargets(selection []string) ([]authorityPolicyTarget, error) {
+	if err := i.AuthorityPolicyConfigured(); err != nil {
+		return nil, err
+	}
+	targets, err := i.authorityPolicyTargets()
+	if err != nil {
+		return nil, err
+	}
+	if len(selection) == 0 {
+		return targets, nil
+	}
+	selected := make(map[int]bool, len(selection))
+	for _, raw := range selection {
+		name := strings.TrimSpace(raw)
+		owner, repo, ok := strings.Cut(name, "/")
+		if !ok || strings.TrimSpace(owner) == "" || strings.TrimSpace(repo) == "" || strings.Contains(repo, "/") {
+			return nil, fmt.Errorf("Forgejo authority repository selector %q must be owner/name", raw)
+		}
+		match := -1
+		for index, target := range targets {
+			if !strings.EqualFold(target.agsRepo, name) && !strings.EqualFold(target.externalRepo(), name) {
+				continue
+			}
+			if match >= 0 && match != index {
+				return nil, fmt.Errorf("Forgejo authority repository selector %q is ambiguous: matches %s and %s", name, targets[match].agsRepo, target.agsRepo)
+			}
+			match = index
+		}
+		if match < 0 {
+			return nil, fmt.Errorf("Forgejo authority repository %q is not an enabled repository mapping", name)
+		}
+		selected[match] = true
+	}
+	filtered := make([]authorityPolicyTarget, 0, len(selected))
+	for index, target := range targets {
+		if selected[index] {
+			filtered = append(filtered, target)
+		}
+	}
+	return filtered, nil
 }
 
 // VerifyPullRequestMergeAuthority performs the exact provider preflight needed

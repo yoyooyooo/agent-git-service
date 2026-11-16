@@ -24,3 +24,18 @@ func TestValidateAuthorityConfigRequiresProjectionDriftTarget(t *testing.T) {
 		t.Fatalf("expected valid projection target: %v", err)
 	}
 }
+
+func TestRepoFlagCollectsRepeatableSelectors(t *testing.T) {
+	var repos repoFlag
+	for _, value := range []string{"jackie/lumi", " ci/widget "} {
+		if err := repos.Set(value); err != nil {
+			t.Fatalf("set %q: %v", value, err)
+		}
+	}
+	if got := repos.String(); got != "jackie/lumi,ci/widget" {
+		t.Fatalf("unexpected selectors: %q", got)
+	}
+	if err := repos.Set("  "); err == nil {
+		t.Fatal("empty -repo was accepted")
+	}
+}
