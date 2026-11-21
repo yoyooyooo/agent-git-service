@@ -44,6 +44,23 @@ The `Handler` struct holds:
 
 ## Main Flows
 
+### Authentication probes
+
+Credential helpers can send `HEAD` to a regular repository URL before requesting
+credentials. `HEAD /{owner}/{repo}` with or without `.git` and a trailing slash,
+and `GET` to the explicit `.git` URL, use the same optional identity middleware
+and read authorization as Git transport. They never redirect to the browser
+console. A successful probe has no body; a private unauthenticated request uses
+the existing Git Basic challenge, and invalid credentials or denied repository
+access retain the transport's authentication and authorization behavior.
+
+These probes do not initialize repository storage, refresh receive hooks, run
+`git-http-backend`, or grant push permission. Smart HTTP still authorizes its
+own upload-pack or receive-pack operation. Browser `GET` requests without the
+`.git` suffix retain the configured console redirect. Without a configured
+production console, that browser redirect is disabled while Git probes remain
+available.
+
 ### Clone / Fetch
 
 ```

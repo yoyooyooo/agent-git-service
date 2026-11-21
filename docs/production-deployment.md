@@ -194,13 +194,28 @@ For a partial rebase incident, only the same nonterminal bound generation may re
 
 ### Browser Console And CORS
 
-Set the console URL and allowed browser origins:
+If a browser console is deployed, set its URL and allowed browser origins:
 
 ```env
 CONSOLE_BASE_URL=https://console.example.com
 OAUTH_DEVICE_VERIFICATION_URL=https://console.example.com/device-login
 CORS_ALLOWED_ORIGINS=https://console.example.com
 ```
+
+Leave `CONSOLE_BASE_URL` empty when no console is deployed. An unset console
+does not default to a loopback address when `ENVIRONMENT=production` or
+`LISTEN_MODE=production`. The local `http://localhost:5173` fallback is limited
+to explicit development environment with development listeners; an explicit
+console URL is respected in either mode.
+
+The connected-login browser callback currently requires an explicit console
+URL; keep that URL configured when enabling the connected-login provider.
+
+Repository `HEAD` requests and explicit `.git` URLs use Git authentication
+responses instead of browser redirects. This lets Git Credential Manager
+probe HTTP and HTTPS remotes without following a console URL on the client's
+own machine. Browser `GET` requests without `.git` can still redirect to a
+configured console. See [Git authentication probes](architecture/git-http.md#authentication-probes).
 
 When `CORS_ALLOWED_ORIGINS` is empty, the server derives local development
 origins from `CONSOLE_BASE_URL`.

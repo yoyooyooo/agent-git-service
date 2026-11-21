@@ -110,7 +110,9 @@ type Config struct {
 	ConnectedLoginDescriptionClaim          string
 	ConnectedLoginScopeClaim                string
 
-	// ConsoleBaseURL is the base URL of the console frontend used for browser redirects.
+	// ConsoleBaseURL is the optional console frontend used for browser redirects.
+	// An unset production console stays disabled; only explicit development mode
+	// with development listeners defaults to the local frontend.
 	ConsoleBaseURL string
 	// OAuthDeviceVerificationURL is the optional external console URL shown to
 	// device-flow users. When empty, the built-in /login/device fallback is used.
@@ -346,7 +348,7 @@ func Normalize(cfg Config) (Config, error) {
 		}
 		cfg.APIBaseURL = strings.TrimRight(value.String(), "/")
 	}
-	cfg.ConsoleBaseURL = firstNonEmpty(cfg.ConsoleBaseURL, "http://localhost:5173")
+	cfg.ConsoleBaseURL = strings.TrimSpace(cfg.ConsoleBaseURL)
 	cfg.OAuthDeviceVerificationURL = strings.TrimSpace(cfg.OAuthDeviceVerificationURL)
 	cfg.GitRepoDir = firstNonEmpty(cfg.GitRepoDir, "gitrepos")
 	cfg.ArtifactRetirementIntentFile = strings.TrimSpace(cfg.ArtifactRetirementIntentFile)
@@ -356,6 +358,9 @@ func Normalize(cfg Config) (Config, error) {
 	cfg.IntegrationsConfigFile = strings.TrimSpace(cfg.IntegrationsConfigFile)
 	cfg.ListenMode = firstNonEmpty(cfg.ListenMode, "development")
 	cfg.Environment = strings.ToLower(strings.TrimSpace(firstNonEmpty(cfg.Environment, "production")))
+	if cfg.ConsoleBaseURL == "" && cfg.Environment == "development" && cfg.ListenMode == "development" {
+		cfg.ConsoleBaseURL = "http://localhost:5173"
+	}
 	cfg.EmbeddingBaseURL = firstNonEmpty(cfg.EmbeddingBaseURL, "https://api.openai.com")
 	cfg.EmbeddingModel = firstNonEmpty(cfg.EmbeddingModel, "text-embedding-3-small")
 	cfg.OIDCScopes = firstNonEmpty(strings.TrimSpace(cfg.OIDCScopes), "openid profile email")

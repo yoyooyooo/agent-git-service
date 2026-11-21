@@ -1365,8 +1365,8 @@ func TestConsoleRedirects(t *testing.T) {
 			want: "http://console.localhost/vault/alice/testrepo?token=abc",
 		},
 		{
-			name: "repo redirect trims .git",
-			path: "/alice/testrepo.git",
+			name: "repo redirect accepts trailing slash",
+			path: "/alice/testrepo/",
 			want: "http://console.localhost/vault/alice/testrepo",
 		},
 		{

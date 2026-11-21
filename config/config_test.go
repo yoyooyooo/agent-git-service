@@ -6,12 +6,49 @@ import (
 	"time"
 )
 
+func TestConsoleBaseURLDefaultsRespectDeploymentMode(t *testing.T) {
+	cases := []struct {
+		name        string
+		environment string
+		listenMode  string
+		consoleURL  string
+		want        string
+	}{
+		{name: "implicit production disables browser redirects"},
+		{name: "production environment with development listeners", environment: "production", listenMode: "development"},
+		{name: "production listener with development environment", environment: "development", listenMode: "production"},
+		{name: "production whitespace is unset", environment: "production", listenMode: "production", consoleURL: " \t "},
+		{name: "explicit development keeps local console", environment: "development", listenMode: "development", want: "http://localhost:5173"},
+		{name: "development default listeners", environment: "development", want: "http://localhost:5173"},
+		{name: "explicit production console", environment: "production", listenMode: "production", consoleURL: " https://console.example.test/ ", want: "https://console.example.test/"},
+		{name: "explicit local console is operator choice", environment: "production", listenMode: "production", consoleURL: "http://localhost:5173", want: "http://localhost:5173"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Normalize(Config{
+				DBdsn:          "root:@tcp(127.0.0.1:4000)/unused",
+				Environment:    tc.environment,
+				ListenMode:     tc.listenMode,
+				ConsoleBaseURL: tc.consoleURL,
+			})
+			if err != nil {
+				t.Fatalf("normalize: %v", err)
+			}
+			if cfg.ConsoleBaseURL != tc.want {
+				t.Fatalf("ConsoleBaseURL = %q, want %q", cfg.ConsoleBaseURL, tc.want)
+			}
+		})
+	}
+}
+
 func TestNewDefaults(t *testing.T) {
 	t.Setenv("DB_DSN", "user:pass@tcp(localhost)/testdb")
 	// Set optional vars to empty to verify defaults (t.Setenv restores on cleanup)
 	t.Setenv("PORT", "")
 	t.Setenv("BASE_URL", "")
 	t.Setenv("CONSOLE_BASE_URL", "")
+	t.Setenv("ENVIRONMENT", "")
+	t.Setenv("LISTEN_MODE", "")
 	t.Setenv("GIT_REPO_DIR", "")
 
 	cfg, err := New()
@@ -25,8 +62,8 @@ func TestNewDefaults(t *testing.T) {
 	if cfg.BaseURL != "http://localhost:8080" {
 		t.Errorf("expected default BaseURL, got %q", cfg.BaseURL)
 	}
-	if cfg.ConsoleBaseURL != "http://localhost:5173" {
-		t.Errorf("expected default ConsoleBaseURL, got %q", cfg.ConsoleBaseURL)
+	if cfg.ConsoleBaseURL != "" {
+		t.Errorf("expected unconfigured production console to remain disabled, got %q", cfg.ConsoleBaseURL)
 	}
 	if cfg.OAuthDeviceVerificationURL != "" {
 		t.Errorf("expected default OAuthDeviceVerificationURL empty, got %q", cfg.OAuthDeviceVerificationURL)
