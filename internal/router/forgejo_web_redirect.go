@@ -56,6 +56,12 @@ func forgejoWebRedirectMiddleware(svc *service.Service, routes chi.Router) func(
 				next.ServeHTTP(w, r)
 				return
 			}
+			// Credential helpers also HEAD clone URLs without a .git suffix.
+			// Repository probes must reach Git auth regardless of their user agent.
+			if r.Method == http.MethodHead && (len(parts) == 2 || (len(parts) == 3 && parts[2] == "")) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			// Check every registered method: GET must retain 405 for POST-only
 			// endpoints, and HEAD must not shadow a GET-only AGS handler. Use a
 			// fresh context so probing cannot alter request routing or URL params.

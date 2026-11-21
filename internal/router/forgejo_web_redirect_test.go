@@ -48,15 +48,16 @@ func TestForgejoWebRedirects(t *testing.T) {
 	mux := forgejoWebMux(t)
 
 	cases := []struct {
-		name string
-		path string
-		want string
+		name      string
+		path      string
+		want      string
+		headProbe bool
 	}{
 		{name: "pull singular", path: "/alice/testrepo/pull/875", want: forgejoWebTestBase + "/mirror/testrepo-ci/pulls/876"},
 		{name: "pulls plural", path: "/alice/testrepo/pulls/875", want: forgejoWebTestBase + "/mirror/testrepo-ci/pulls/876"},
 		{name: "pulls list", path: "/alice/testrepo/pulls", want: forgejoWebTestBase + "/mirror/testrepo-ci/pulls"},
-		{name: "repo root", path: "/alice/testrepo", want: forgejoWebTestBase + "/mirror/testrepo-ci"},
-		{name: "repo root trailing slash", path: "/alice/testrepo/", want: forgejoWebTestBase + "/mirror/testrepo-ci"},
+		{name: "repo root", path: "/alice/testrepo", want: forgejoWebTestBase + "/mirror/testrepo-ci", headProbe: true},
+		{name: "repo root trailing slash", path: "/alice/testrepo/", want: forgejoWebTestBase + "/mirror/testrepo-ci", headProbe: true},
 		{name: "commit", path: "/alice/testrepo/commit/0123456789abcdef0123456789abcdef01234567", want: forgejoWebTestBase + "/mirror/testrepo-ci/commit/0123456789abcdef0123456789abcdef01234567"},
 		{name: "commits plural", path: "/alice/testrepo/commits/0123456", want: forgejoWebTestBase + "/mirror/testrepo-ci/commit/0123456"},
 		{name: "tree maps to src", path: "/alice/testrepo/tree/main/internal", want: forgejoWebTestBase + "/mirror/testrepo-ci/src/main/internal"},
@@ -69,11 +70,15 @@ func TestForgejoWebRedirects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, method := range []string{http.MethodGet, http.MethodHead} {
 				w := servedBy(t, mux, method, tc.path)
-				if w.Code != http.StatusFound {
-					t.Fatalf("%s %s: expected 302, got %d: %s", method, tc.path, w.Code, w.Body.String())
+				wantStatus, wantLocation := http.StatusFound, tc.want
+				if method == http.MethodHead && tc.headProbe {
+					wantStatus, wantLocation = http.StatusOK, ""
 				}
-				if loc := w.Header().Get("Location"); loc != tc.want {
-					t.Fatalf("%s %s: expected Location %q, got %q", method, tc.path, tc.want, loc)
+				if w.Code != wantStatus {
+					t.Fatalf("%s %s: expected %d, got %d: %s", method, tc.path, wantStatus, w.Code, w.Body.String())
+				}
+				if loc := w.Header().Get("Location"); loc != wantLocation {
+					t.Fatalf("%s %s: expected Location %q, got %q", method, tc.path, wantLocation, loc)
 				}
 			}
 		})
@@ -202,15 +207,14 @@ func TestForgejoWebRedirectIntegrationWithoutWebBaseURLIsNoOp(t *testing.T) {
 func TestForgejoWebRedirectKeepsDotGitRepoRootUnchanged(t *testing.T) {
 	mux := forgejoWebMux(t)
 
-	// A *.git repository segment is a git transport URL. With the browser base
-	// URL configured it must still resolve to the pre-existing console
-	// redirect, never to Forgejo.
+	// A *.git repository segment is a Git transport URL. Configuring a browser
+	// base must not redirect its authentication probe to either frontend.
 	w := servedBy(t, mux, http.MethodGet, "/alice/testrepo.git")
-	if w.Code != http.StatusFound {
-		t.Fatalf("expected 302, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected public Git probe to return 200, got %d", w.Code)
 	}
-	if loc := w.Header().Get("Location"); loc != "http://console.localhost/vault/alice/testrepo" {
-		t.Fatalf("*.git repo root must keep the console redirect, got %q", loc)
+	if loc := w.Header().Get("Location"); loc != "" {
+		t.Fatalf("*.git repo root must not redirect, got %q", loc)
 	}
 
 	for _, path := range []string{"/alice/testrepo.git/pull/1", "/alice/testrepo.git/pulls", "/alice/testrepo.git/tree/main"} {

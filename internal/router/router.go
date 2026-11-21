@@ -226,14 +226,33 @@ func registerAgentPublicRoutes(r chi.Router, handlers *rest.Deps, rateLimitMw fu
 func registerGitHTTPRoutes(r chi.Router, gitHandler *githttp.Handler, handlers *rest.Deps, consoleBaseURL string, embeddedAuth srvmiddleware.EmbeddedAuthConfig) {
 	// Git Smart HTTP
 	r.Route("/{owner}/{repo}", func(r chi.Router) {
+		authMw := srvmiddleware.OptionalTokenAuthWithEmbeddedIdentity(handlers.Svc, embeddedAuth)
+		probe := authMw(http.HandlerFunc(gitHandler.CredentialProbe))
+		// Credential helpers probe the repository URL before smart HTTP. Keep
+		// HEAD and explicit .git GET requests on the Git authentication boundary.
+		repoRoot := func(w http.ResponseWriter, r *http.Request) {
+			// Unknown API paths must retain their API 404, even with credentials.
+			if pathParam(r, "owner") == "api" {
+				notFoundHandler(w, r)
+				return
+			}
+			if r.Method == http.MethodHead || strings.HasSuffix(pathParam(r, "repo"), ".git") {
+				probe.ServeHTTP(w, r)
+				return
+			}
+			if strings.TrimSpace(consoleBaseURL) != "" {
+				consoleRedirectHandler(consoleBaseURL, false)(w, r)
+				return
+			}
+			notFoundHandler(w, r)
+		}
+		r.Head("/", repoRoot)
+		r.Get("/", repoRoot)
 		if strings.TrimSpace(consoleBaseURL) != "" {
-			r.Get("/", consoleRedirectHandler(consoleBaseURL, false))
-			r.Head("/", consoleRedirectHandler(consoleBaseURL, false))
 			r.Get("/issues/{issue_id}", consoleRedirectHandler(consoleBaseURL, true))
 			r.Head("/issues/{issue_id}", consoleRedirectHandler(consoleBaseURL, true))
 		}
 
-		authMw := srvmiddleware.OptionalTokenAuthWithEmbeddedIdentity(handlers.Svc, embeddedAuth)
 		r.With(authMw).Get("/info/refs", gitHandler.InfoRefs)
 		r.With(authMw).Post("/git-upload-pack", gitHandler.UploadPack)
 		r.With(authMw).Post("/git-receive-pack", gitHandler.ReceivePack)
@@ -1066,15 +1085,17 @@ func registerEnvByRepoIDRoutes(r chi.Router, handlers *rest.Deps) {
 
 func registerNotFoundHandler(r chi.Router) {
 	// Catch-all: 404 for unknown routes
-	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
-		if strings.HasPrefix(req.URL.Path, "/api/") {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(404)
-			_, _ = fmt.Fprintf(w, `{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}`)
-			return
-		}
-		http.NotFound(w, req)
-	})
+	r.NotFound(notFoundHandler)
+}
+
+func notFoundHandler(w http.ResponseWriter, req *http.Request) {
+	if strings.HasPrefix(req.URL.Path, "/api/") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(404)
+		_, _ = fmt.Fprintf(w, `{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}`)
+		return
+	}
+	http.NotFound(w, req)
 }
 
 // registerHostMux creates a host-aware multiplexer that rewrites
