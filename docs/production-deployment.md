@@ -93,6 +93,24 @@ Important production notes:
 - `GIT_REPO_DIR` must survive restarts. Do not point it at an ephemeral
   container filesystem.
 
+### Bind the primary listeners
+
+`AGS_LISTEN_HOST` optionally binds the primary HTTP and TLS listeners to one IP
+address. Leave it unset or empty to retain wildcard listening. For a reverse proxy
+on the same host, set `AGS_LISTEN_HOST=127.0.0.1` to accept connections only through
+IPv4 loopback, or `AGS_LISTEN_HOST=::1` for IPv6 loopback.
+
+The value must be an IP literal. Surrounding whitespace is trimmed; hostnames,
+URLs, ports, brackets, and IPv6 zone identifiers are rejected before database
+initialization. For IPv6, supply `::1`, not `[::1]` or `[::1]:8080`.
+
+`LISTEN_MODE=production` still starts one HTTP listener on `PORT`. Development
+mode applies the same host to every existing listener, including ports 443, 8081,
+80, and 4003. Their protocols and ports are unchanged. `BASE_URL` and
+`AGS_API_BASE_URL` continue to advertise client-facing origins independently of
+the bind address. The optional replication listener and the separate Edge process
+retain their own listener configuration.
+
 ## Bootstrap Access
 
 Production does not seed `octocat` or `local-dev-token`. Use one of these

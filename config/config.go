@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -46,6 +47,9 @@ type Config struct {
 	// ListenMode controls listener setup: "development" (default) starts
 	// multiple listeners with TLS; "production" starts a single HTTP listener.
 	ListenMode string
+	// ListenHost binds primary HTTP/TLS listeners to one IP address literal.
+	// Empty preserves wildcard listening; advertised URLs are independent.
+	ListenHost string
 
 	// AllowAnyToken, when true, accepts any non-empty token when no
 	// tokens exist in the database (dev-mode convenience).
@@ -188,6 +192,7 @@ func New() (Config, error) {
 		ReplicationAuthorityID:                  os.Getenv("AGS_REPLICATION_AUTHORITY_ID"),
 		IntegrationsConfigFile:                  os.Getenv("AGS_INTEGRATIONS_CONFIG"),
 		ListenMode:                              os.Getenv("LISTEN_MODE"),
+		ListenHost:                              os.Getenv("AGS_LISTEN_HOST"),
 		AllowAnyToken:                           os.Getenv("ALLOW_ANY_TOKEN") == "true" || os.Getenv("ALLOW_ANY_TOKEN") == "1",
 		AdminLogin:                              os.Getenv("ADMIN_LOGIN"),
 		AdminToken:                              os.Getenv("ADMIN_TOKEN"),
@@ -332,6 +337,10 @@ func New() (Config, error) {
 
 // Normalize applies defaults and validates a programmatically supplied config.
 func Normalize(cfg Config) (Config, error) {
+	cfg.ListenHost = strings.TrimSpace(cfg.ListenHost)
+	if cfg.ListenHost != "" && net.ParseIP(cfg.ListenHost) == nil {
+		return Config{}, fmt.Errorf("AGS_LISTEN_HOST must be an IP address literal")
+	}
 	if strings.TrimSpace(cfg.ControlPlaneDSN) != "" {
 		return Config{}, fmt.Errorf("CONTROL_PLANE_DSN is not supported by this single-database runtime; refusing root database fallback")
 	}
