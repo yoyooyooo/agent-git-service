@@ -1210,7 +1210,14 @@ func buildHTTPMux(cfg httpMuxConfig) (muxDeps, error) {
 }
 
 func buildServers(cfg config.Config, mux http.Handler) (serverDeps, error) {
-	addr := ":" + cfg.Port
+	addr := net.JoinHostPort(cfg.ListenHost, cfg.Port)
+	label := func(scheme, defaultHost, port string) string {
+		host := cfg.ListenHost
+		if host == "" {
+			host = defaultHost
+		}
+		return scheme + "://" + net.JoinHostPort(host, port)
+	}
 
 	if cfg.ListenMode == "production" {
 		return serverDeps{
@@ -1218,7 +1225,7 @@ func buildServers(cfg config.Config, mux http.Handler) (serverDeps, error) {
 				{Addr: addr, Handler: mux},
 			},
 			labels: []string{
-				fmt.Sprintf("http://0.0.0.0:%s", cfg.Port),
+				label("http", "0.0.0.0", cfg.Port),
 			},
 		}, nil
 	}
@@ -1231,18 +1238,18 @@ func buildServers(cfg config.Config, mux http.Handler) (serverDeps, error) {
 
 	return serverDeps{
 		servers: []*http.Server{
-			{Addr: ":443", Handler: mux, TLSConfig: tlsCfg},
+			{Addr: net.JoinHostPort(cfg.ListenHost, "443"), Handler: mux, TLSConfig: tlsCfg},
 			{Addr: addr, Handler: mux, TLSConfig: tlsCfg},
-			{Addr: ":8081", Handler: mux, TLSConfig: tlsCfg},
-			{Addr: ":80", Handler: mux},
-			{Addr: ":4003", Handler: mux},
+			{Addr: net.JoinHostPort(cfg.ListenHost, "8081"), Handler: mux, TLSConfig: tlsCfg},
+			{Addr: net.JoinHostPort(cfg.ListenHost, "80"), Handler: mux},
+			{Addr: net.JoinHostPort(cfg.ListenHost, "4003"), Handler: mux},
 		},
 		labels: []string{
-			"https://github.localhost:443",
-			fmt.Sprintf("https://localhost:%s", cfg.Port),
-			"https://github.localhost:8081",
-			"http://github.localhost:80",
-			"http://github.localhost:4003",
+			label("https", "github.localhost", "443"),
+			label("https", "localhost", cfg.Port),
+			label("https", "github.localhost", "8081"),
+			label("http", "github.localhost", "80"),
+			label("http", "github.localhost", "4003"),
 		},
 	}, nil
 }

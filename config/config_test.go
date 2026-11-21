@@ -49,6 +49,7 @@ func TestNewDefaults(t *testing.T) {
 	t.Setenv("CONSOLE_BASE_URL", "")
 	t.Setenv("ENVIRONMENT", "")
 	t.Setenv("LISTEN_MODE", "")
+	t.Setenv("AGS_LISTEN_HOST", "")
 	t.Setenv("GIT_REPO_DIR", "")
 
 	cfg, err := New()
@@ -58,6 +59,9 @@ func TestNewDefaults(t *testing.T) {
 
 	if cfg.Port != "8080" {
 		t.Errorf("expected default Port=8080, got %q", cfg.Port)
+	}
+	if cfg.ListenHost != "" {
+		t.Errorf("expected default ListenHost to preserve wildcard listening, got %q", cfg.ListenHost)
 	}
 	if cfg.BaseURL != "http://localhost:8080" {
 		t.Errorf("expected default BaseURL, got %q", cfg.BaseURL)
@@ -103,6 +107,7 @@ func TestNewDefaults(t *testing.T) {
 func TestNewOverrides(t *testing.T) {
 	t.Setenv("DB_DSN", "custom-dsn")
 	t.Setenv("PORT", "9090")
+	t.Setenv("AGS_LISTEN_HOST", " 127.0.0.1 ")
 	t.Setenv("BASE_URL", "https://example.com")
 	t.Setenv("CONSOLE_BASE_URL", "https://console.example.com")
 	t.Setenv("OAUTH_DEVICE_VERIFICATION_URL", "https://console.example.com/device-login")
@@ -127,6 +132,9 @@ func TestNewOverrides(t *testing.T) {
 
 	if cfg.Port != "9090" {
 		t.Errorf("expected Port=9090, got %q", cfg.Port)
+	}
+	if cfg.ListenHost != "127.0.0.1" {
+		t.Errorf("expected ListenHost=127.0.0.1 from environment, got %q", cfg.ListenHost)
 	}
 	if cfg.BaseURL != "https://example.com" {
 		t.Errorf("expected BaseURL=https://example.com, got %q", cfg.BaseURL)
