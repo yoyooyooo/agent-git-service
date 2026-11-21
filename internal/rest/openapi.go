@@ -199,6 +199,12 @@ func buildGitHubCompatibleOpenAPIPaths() map[string]any {
 			"get":  operation("listIssues", "List repository issues.", nil, nil, pathParams(param("owner", "string"), param("repo", "string")), response(200, "Issue list returned")),
 			"post": operation("createIssue", "Create an issue.", auth(), nil, pathParams(param("owner", "string"), param("repo", "string")), response(201, "Issue created")),
 		},
+		"/api/v3/repos/{owner}/{repo}/actions/variables": map[string]any{
+			"get": repositoryVariablesOpenAPIOperation(false),
+		},
+		"/api/v3/repos/{owner}/{repo}/actions/variables/{name}": map[string]any{
+			"get": repositoryVariablesOpenAPIOperation(true),
+		},
 		"/api/v3/repos/{owner}/{repo}/issues/{number}": map[string]any{
 			"get":   operation("getIssue", "Get an issue.", nil, nil, pathParams(param("owner", "string"), param("repo", "string"), param("number", "integer")), response(200, "Issue returned")),
 			"patch": operation("updateIssue", "Update an issue.", auth(), nil, pathParams(param("owner", "string"), param("repo", "string"), param("number", "integer")), response(200, "Issue updated")),

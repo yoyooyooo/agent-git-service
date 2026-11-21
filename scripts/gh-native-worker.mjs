@@ -17,6 +17,9 @@ const secrets = [token, providerToken, bridgeToken];
 const clean = value => secrets.reduce((s, secret) => s.split(secret).join("[REDACTED]"), String(value));
 const env = { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: work, LANG: "C.UTF-8", NO_PROXY: "*", GH_CONFIG_DIR: ghHome, GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1", GH_NO_EXTENSION_UPDATE_NOTIFIER: "1", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.test", SSL_CERT_FILE: join(work, "cert.pem") };
 const repo = "fixture/gh-native", base = "http://127.0.0.1:6666";
+const variableNames = ["EMPTY", ...Array.from({ length: 165 }, (_, i) => `VAR_${String(i).padStart(3, "0")}`)];
+const variableValues = new Map(variableNames.map((name, i) => [name, i === 0 ? "" : `provider-value-${String(i - 1).padStart(3, "0")}`]));
+let variableWrites = 0;
 const report = { schema: "ags.official-gh-acceptance.v1", network: "isolated loopback-only user+network namespace", productionData: false, productionCredentials: false, shim: false, routingOverrides: false, checks: [], startedAt: new Date().toISOString() };
 let primary, front, provider, stage = "start", serverLog = "", head = "a".repeat(40), outcome = "failure", currentBackend = "native", effects = 0, annotationReads = 0, diagnosticGaps = false;
 const assertions = (value, message) => { if (!value) throw new Error(message); };
@@ -119,6 +122,25 @@ try {
       json(res, { schema: "ags.internal-provider-log.v1", repo: "ci/project", task_id: task, run_number: 9, job_name: name, head_sha: head, provider_pr: 0, provider_ref: "refs/heads/feature", event: "push", text: `2026-01-01T00:00:00Z ${name} fixture log\n` }); return;
     }
     const path = url.pathname.replace(/^\/api\/v1/, "");
+    if (currentBackend === "forgejo" && path === "/repos/ci/project") { json(res, { id: 42, full_name: "ci/project" }); return; }
+    if (currentBackend === "forgejo" && path === "/settings/api") { json(res, { max_response_items: 50, default_paging_num: 30 }); return; }
+    const variablePath = "/repos/ci/project/actions/variables";
+    if (path === variablePath || path.startsWith(variablePath + "/")) {
+      if (req.method !== "GET") { variableWrites++; json(res, {}, 405); return; }
+      if (currentBackend !== "forgejo") { json(res, {}, 501); return; }
+      if (path === variablePath) {
+        const page = Number(url.searchParams.get("page") || 1), limit = Math.min(Number(url.searchParams.get("limit") || 30), 50);
+        if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1) { json(res, {}, 400); return; }
+        res.setHeader("X-Total-Count", String(variableNames.length));
+        // Forgejo 12 lists names with empty data, including nonempty values.
+        json(res, variableNames.slice((page - 1) * limit, page * limit).map(name => ({ owner_id: 0, repo_id: 42, name, data: "" })));
+      } else {
+        const name = decodeURIComponent(path.slice(variablePath.length + 1)).toUpperCase();
+        if (!variableValues.has(name)) { json(res, {}, 404); return; }
+        json(res, { owner_id: 0, repo_id: 42, name, data: variableValues.get(name) });
+      }
+      return;
+    }
     if (req.method === "POST") {
       if (currentBackend === "forgejo" && path === "/repos/ci/project/actions/workflows/ci.yml/dispatches") {
         let text = "";
@@ -148,6 +170,8 @@ try {
   }); await new Promise(r => provider.listen(7000, "127.0.0.1", r));
   await start("native");
   let response = await api("/api/v3/user/repos", "POST", { name: "gh-native", private: true, auto_init: true, default_branch: "main" }); assertions(response.status === 201, "native repository creation failed");
+  response = await api(`/api/v3/repos/${repo}/actions/variables`, "POST", { name: "VAR_000", value: "native-must-not-be-returned" });
+  assertions(response.status === 201, "native variable conflict fixture was not created");
   await git(["clone", "https://127.0.0.1/" + repo + ".git", checkout], work); await git(["switch", "-c", "feature"]); writeFileSync(join(checkout, "feature.txt"), "fixture\n"); await git(["add", "feature.txt"]); await git(["commit", "-m", "feature"]); await git(["push", "-u", "origin", "feature"]); head = await git(["rev-parse", "HEAD"]);
   const viewedRepository = await ghCheck("origin-only repository", ["repo", "view", "--json", "nameWithOwner,url"]);
   assertions(JSON.parse(viewedRepository.stdout).url === "http://127.0.0.2:6666/" + repo, "official gh repository URL changed the configured browser origin");
@@ -183,6 +207,21 @@ try {
   outcome = "pending"; await ghCheck("GitHub Actions pending", ["pr", "checks", "1", "--required"], [8]);
   outcome = "success"; await ghCheck("GitHub Actions success", ["pr", "checks", "1", "--required"]);
   await start("forgejo");
+  const variable = JSON.parse((await ghCheck("Forgejo variable get uses provider value", ["variable", "get", "VAR_000", "--json", "name,value"])).stdout);
+  assertions(variable.name === "VAR_000" && variable.value === variableValues.get("VAR_000"), "variable get returned list data or native state");
+  const variables = JSON.parse((await ghCheck("Forgejo variable list spans provider pages", ["variable", "list", "--json", "name,value"])).stdout);
+  assertions(variables.length === variableNames.length && new Set(variables.map(v => v.name)).size === variableNames.length && variables.every(v => variableValues.has(v.name) && v.value === variableValues.get(v.name)), "variable list lost names, values or page boundaries");
+  const pagedVariables = await ghCheck("Forgejo variables paginate through AGS links", ["api", "--paginate", `/repos/${repo}/actions/variables?per_page=100`, "--jq", ".variables[].name"]);
+  assertions(JSON.stringify(pagedVariables.stdout.split("\n")) === JSON.stringify(variableNames), "variable pagination lost, duplicated or reordered names");
+  const emptyVariable = JSON.parse((await ghCheck("Forgejo empty variable remains an observed value", ["variable", "get", "EMPTY", "--json", "name,value"])).stdout);
+  assertions(emptyVariable.name === "EMPTY" && emptyVariable.value === "", "empty variable was changed or discarded");
+  const missingVariable = await ghCheck("Forgejo missing variable remains 404", ["variable", "get", "MISSING", "--json", "name,value"], [1]);
+  assertions(missingVariable.stderr.includes("404"), "missing variable fabricated an empty value");
+  for (const [method, suffix, body] of [["POST", "", { name: "NEW", value: "fixture" }], ["PATCH", "/VAR_000", { name: "VAR_000", value: "fixture" }], ["DELETE", "/VAR_000", undefined]]) {
+    const denied = await api(`/api/v3/repos/${repo}/actions/variables${suffix}`, method, body);
+    assertions(denied.status === 501, `Forgejo variable ${method} did not fail as unsupported`);
+  }
+  assertions(variableWrites === 0, "read-only variables acceptance sent a provider mutation");
   await ghCheck("Forgejo required checks", ["pr", "checks", "1", "--required"]);
   const forgejoListed = await ghCheck("Forgejo native run shape", ["run", "list", "--json", "databaseId,workflowName,status,conclusion,headSha"]); const forgejoRun = JSON.parse(forgejoListed.stdout)[0].databaseId; assertions(forgejoRun !== githubRun, "backend switch aliased a historical ID");
   response = await api(`/api/v3/repos/${repo}/actions/runs/${githubRun}`); assertions(response.status === 404, "old backend run remains addressable as new backend");

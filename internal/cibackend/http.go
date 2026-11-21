@@ -58,6 +58,19 @@ func (h *HTTP) request(ctx context.Context, method, path string, download bool) 
 }
 
 func (h *HTTP) requestBody(ctx context.Context, method, path string, download bool, body []byte) ([]byte, error) {
+	response, err := h.requestBodyResponse(ctx, method, path, download, body)
+	return response.Body, err
+}
+
+type httpResponse struct {
+	Body       []byte
+	Header     http.Header
+	StatusCode int
+}
+
+// requestBodyResponse preserves pagination headers without changing transport,
+// response size or credential handling for existing CI operations.
+func (h *HTTP) requestBodyResponse(ctx context.Context, method, path string, download bool, body []byte) (httpResponse, error) {
 	base := strings.TrimRight(h.config.URL, "/")
 	api := "/api/v1"
 	if h.config.Kind == "github-actions" {
@@ -65,7 +78,7 @@ func (h *HTTP) requestBody(ctx context.Context, method, path string, download bo
 	}
 	req, err := http.NewRequestWithContext(ctx, method, base+api+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, ErrInvalid
+		return httpResponse{}, ErrInvalid
 	}
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
@@ -80,7 +93,7 @@ func (h *HTTP) requestBody(ctx context.Context, method, path string, download bo
 	}
 	response, err := h.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: transport did not confirm %s", ErrUnavailable, method)
+		return httpResponse{}, fmt.Errorf("%w: transport did not confirm %s", ErrUnavailable, method)
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 300 && response.StatusCode < 400 && download && method == http.MethodGet {
@@ -94,41 +107,50 @@ func (h *HTTP) requestBody(ctx context.Context, method, path string, download bo
 			}
 		}
 		if !allowed {
-			return nil, fmt.Errorf("%w: log redirect destination is not configured", ErrUnsupported)
+			return httpResponse{}, fmt.Errorf("%w: log redirect destination is not configured", ErrUnsupported)
 		}
 		// One explicit GET to an allowed signed URL; never forward provider auth,
 		// cookies or an AGS user credential, and never follow another redirect.
 		next, _ := http.NewRequestWithContext(ctx, http.MethodGet, location.String(), nil)
 		other, e := h.client.Do(next)
 		if e != nil {
-			return nil, ErrUnavailable
+			return httpResponse{}, ErrUnavailable
 		}
 		defer other.Body.Close()
 		if other.StatusCode != 200 {
-			return nil, ErrUnavailable
+			return httpResponse{}, ErrUnavailable
 		}
-		return bounded(other.Body)
+		return readHTTPResponse(other)
 	}
 	switch response.StatusCode {
 	case 200, 201, 202, 204:
-		return bounded(response.Body)
+		return readHTTPResponse(response)
 	case 403:
-		return nil, ErrForbidden
+		return httpResponse{}, ErrForbidden
 	case 409:
-		return nil, ErrConflict
+		return httpResponse{}, ErrConflict
 	case 400, 422:
 		if method == http.MethodPost {
-			return nil, ErrConflict
+			return httpResponse{}, ErrConflict
 		}
-		return nil, ErrInvalid
+		return httpResponse{}, ErrInvalid
 	case 404:
-		return nil, ErrNotFound
+		return httpResponse{}, ErrNotFound
 	case 405, 501:
-		return nil, ErrUnsupported
+		return httpResponse{}, ErrUnsupported
 	default:
-		return nil, fmt.Errorf("%w: HTTP %d", ErrUnavailable, response.StatusCode)
+		return httpResponse{}, fmt.Errorf("%w: HTTP %d", ErrUnavailable, response.StatusCode)
 	}
 }
+
+func readHTTPResponse(response *http.Response) (httpResponse, error) {
+	body, err := bounded(response.Body)
+	if err != nil {
+		return httpResponse{}, err
+	}
+	return httpResponse{Body: body, Header: response.Header.Clone(), StatusCode: response.StatusCode}, nil
+}
+
 func bounded(r io.Reader) ([]byte, error) {
 	b, err := io.ReadAll(io.LimitReader(r, MaxBody+1))
 	if err != nil || len(b) > MaxBody {

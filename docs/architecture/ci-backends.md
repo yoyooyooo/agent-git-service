@@ -365,12 +365,96 @@ run outcome. Repository access failures and provider outages remain errors; they
 are never converted to 404 for this purpose. Use the separately implemented job
 logs for provider diagnostics. No synthetic file/line annotations are invented.
 
+## Repository Actions variables
+
+For a Forgejo-bound repository, the standard GitHub-compatible routes read the
+configured Forgejo repository directly:
+
+```text
+GET /api/v3/repos/{owner}/{repo}/actions/variables
+GET /api/v3/repos/{owner}/{repo}/actions/variables/{name}
+```
+
+These reads require an authenticated AGS repository administrator or owner.
+AGS checks the caller's repository permission before using the provider token.
+Public visibility and write permission do not grant access to variable values.
+Existing delegated `review.read` and `ci.read` sessions remain denied, even if
+their executor is the repository owner. A future delegated variable capability
+needs an explicit grant and is not part of this implementation. Native repositories
+keep their existing storage and permission checks.
+
+Forgejo is the only source for these reads. AGS never falls back to a local
+variable row. Forgejo 12's list response contains names with empty `data` fields,
+so AGS reads each returned variable's detail to obtain its value. Each response
+must identify the bound repository with the expected `repo_id` and `owner_id: 0`.
+An observed empty string remains `""`; missing or null detail data is an error.
+The GitHub response uses `name` and `value`. Forgejo does not supply variable
+timestamps, so AGS omits `created_at` and `updated_at`.
+
+List accepts a positive integer `page` and `per_page` from 1 to 100, defaulting to
+1 and 30. AGS reads `/settings/api` for the provider page limit, validates
+`X-Total-Count`, and combines the provider pages needed for the requested slice.
+Only that slice's details are fetched, with at most four concurrent requests.
+Pagination links point to AGS, allowing both `gh variable list` and
+`gh api --paginate` to retrieve more than one provider page. Invalid pagination
+or inconsistent provider responses fail the whole request. Variable GET responses
+include `Cache-Control: no-store`; no value cache or implicit retry is used.
+
+| Result | HTTP status | Meaning |
+| --- | --- | --- |
+| Observed repository definition, including an empty string | 200 | The value was read from the selected source |
+| Missing AGS authentication | 401 | No authenticated caller |
+| Denied delegated capability | 403 | The session does not grant variable access |
+| Hidden or missing AGS repository | 404 | Existing AGS repository visibility rules apply |
+| Confirmed missing Forgejo variable | 404 | The named repository definition is absent in a verified repository |
+| Invalid name or pagination | 422 | The caller's request is invalid |
+| Unsupported backend, operation, or scope | 501 | No local fallback or provider write is attempted |
+| Provider denial, outage, timeout, invalid data, or inconsistent paging | 502 | AGS could not verify the requested values |
+
+Provider 401/403 responses describe the server's configured credentials and
+become 502, not a caller permission denial. Errors do not include provider bodies,
+tokens, or variable values. Callers without the required repository permission
+retain the normal AGS hidden-resource behavior.
+
+Repository create/update/delete operations remain native-only. All environment
+variable operations require a native repository backend, for both slug and numeric
+repository routes. Organization variable routes have no repository binding with
+which to choose a provider. They therefore require a native default and no
+nonnative repository override anywhere in the registry. An unused external backend
+declaration does not make the registry mixed. Mixed, external-default, and `none`
+configurations return 501 for organization reads and writes. The same source guards
+protect direct native service calls. Secrets are outside this variable bridge.
+
+These endpoints report current repository definitions. They do not resolve owner,
+organization, or global inheritance, and they do not describe the value captured
+by an already running workflow task. A missing repository variable does not prove
+a feature is disabled. A business gate must evaluate the observed value using its
+own exact enablement predicate; missing values and failed reads remain unknown.
+
+The router and service tests use isolated TiDB databases and an HTTP Forgejo
+fixture, including conflicting native rows, ordinary repo owners, public readers,
+and real delegated transport sessions:
+
+```sh
+go test ./internal/router ./internal/service -run '^TestActionsVariables' -count=1
+```
+
+To run the additional local official-client test, set
+`AGS_VARIABLES_GH_BINARY` to an absolute path to an unmodified official `gh` binary.
+It uses a temporary Unix socket and fresh client configuration; no workstation
+credentials or host routing configuration are inherited. Without that variable,
+only this optional local client test is skipped. The existing CI
+`Official gh and CI backend acceptance` job also runs variable get/list and
+`gh api --paginate` with 166 synthetic variables, a 50-item provider cap, and empty
+list data, using its downloaded and checksum-verified official client.
+
 ## Verification and scope
 
 `node scripts/gh-native-acceptance.mjs` builds this checkout and uses a hash-pinned,
 unmodified official gh. It tests origin-only routing, draft/HEAD, native-no-CI,
 GitHub Actions then Forgejo protocol fixtures, required checks, logs, old ID denial,
-rerun dispatch and unsupported cancel, standard merge, run identity and revocation. All resources
+rerun dispatch and unsupported cancel, repository variable get/list/pagination,
+standard merge, run identity and revocation. All resources
 are disposable in a loopback-only user/network namespace. Backend fixtures use the
 published API shapes; they are not evidence of running real hosted CI jobs.
 

@@ -56,6 +56,24 @@ type Registry struct {
 	namespaces map[string]string
 }
 
+// NativeVariablesOnly reports whether every selected CI scope is native.
+// Declaring an unused external backend does not change organization variables;
+// selecting one (or disabling CI with none) makes that scope unsupported.
+func (r *Registry) NativeVariablesOnly() bool {
+	if r == nil {
+		return true
+	}
+	if r.config.Default != "native" {
+		return false
+	}
+	for _, binding := range r.config.Repositories {
+		if binding.Backend != "" && binding.Backend != "native" {
+			return false
+		}
+	}
+	return true
+}
+
 var slugPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 var namePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
 

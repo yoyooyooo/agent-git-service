@@ -904,9 +904,9 @@ func registerActionsRoutes(r chi.Router, handlers *rest.Deps) {
 
 func registerActionsVariableRoutes(r chi.Router, handlers *rest.Deps) {
 	// Actions: Variables (repo)
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/variables", handlers.CI(handlers.ListRepoVariables, "unsupported"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/variables", handlers.CI(handlers.ListRepoVariables, "variables"))
 	r.Post("/api/v3/repos/{owner}/{repo}/actions/variables", handlers.CI(handlers.CreateRepoVariable, "unsupported"))
-	r.Get("/api/v3/repos/{owner}/{repo}/actions/variables/{name}", handlers.CI(handlers.GetRepoVariable, "unsupported"))
+	r.Get("/api/v3/repos/{owner}/{repo}/actions/variables/{name}", handlers.CI(handlers.GetRepoVariable, "variable"))
 	r.Patch("/api/v3/repos/{owner}/{repo}/actions/variables/{name}", handlers.CI(handlers.UpdateRepoVariable, "unsupported"))
 	r.Delete("/api/v3/repos/{owner}/{repo}/actions/variables/{name}", handlers.CI(handlers.DeleteRepoVariable, "unsupported"))
 

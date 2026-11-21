@@ -22,6 +22,9 @@ import (
 // Native fallback is a configuration choice, never an error-recovery strategy.
 func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if operation == "variables" || operation == "variable" {
+			w.Header().Set("Cache-Control", "no-store")
+		}
 		repo := d.mustGetRepo(w, r)
 		if repo == nil {
 			return
@@ -57,6 +60,12 @@ func (d *Deps) CI(native http.HandlerFunc, operation string) http.HandlerFunc {
 			return id, true
 		}
 		switch operation {
+		case "variables":
+			d.ciRepositoryVariables(w, r, repo.FullName)
+			return
+		case "variable":
+			d.ciRepositoryVariable(w, r, repo.FullName)
+			return
 		case "dispatch":
 			var payload struct {
 				Ref    string         `json:"ref"`

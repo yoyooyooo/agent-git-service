@@ -143,6 +143,9 @@ func (s *Service) DeleteEnvironment(ctx context.Context, repoID uint, name strin
 
 // ListVariables retrieves variables for a given repository and environment.
 func (s *Service) ListVariables(ctx context.Context, repoID uint, env string) ([]db.Variable, error) {
+	if err := s.requireNativeVariableScope(ctx, &repoID); err != nil {
+		return nil, err
+	}
 	var vars []db.Variable
 	if err := repoScope(s.DBForCtx(ctx), repoID, env).Find(&vars).Error; err != nil {
 		return nil, err
@@ -152,6 +155,9 @@ func (s *Service) ListVariables(ctx context.Context, repoID uint, env string) ([
 
 // ListOrgVariables retrieves variables for a given organization.
 func (s *Service) ListOrgVariables(ctx context.Context, orgID uint) ([]db.Variable, error) {
+	if err := s.requireNativeVariableScope(ctx, nil); err != nil {
+		return nil, err
+	}
 	var vars []db.Variable
 	if err := orgScope(s.DBForCtx(ctx), orgID).Find(&vars).Error; err != nil {
 		return nil, err
@@ -161,6 +167,9 @@ func (s *Service) ListOrgVariables(ctx context.Context, orgID uint) ([]db.Variab
 
 // CreateVariable creates a new variable.
 func (s *Service) CreateVariable(ctx context.Context, ownerID uint, repoID *uint, env, name, value string) (db.Variable, error) {
+	if err := s.requireNativeVariableScope(ctx, repoID); err != nil {
+		return db.Variable{}, err
+	}
 	v := db.Variable{OwnerID: ownerID, RepositoryID: repoID, Environment: env, Name: name, Value: value}
 	if err := s.DBForCtx(ctx).Create(&v).Error; err != nil {
 		return db.Variable{}, err
@@ -170,6 +179,9 @@ func (s *Service) CreateVariable(ctx context.Context, ownerID uint, repoID *uint
 
 // GetVariable retrieves a specific variable by name.
 func (s *Service) GetVariable(ctx context.Context, repoID uint, env, name string) (db.Variable, error) {
+	if err := s.requireNativeVariableScope(ctx, &repoID); err != nil {
+		return db.Variable{}, err
+	}
 	var v db.Variable
 	if err := repoScope(s.DBForCtx(ctx), repoID, env).Where("name = ?", name).First(&v).Error; err != nil {
 		return db.Variable{}, wrapErr(err)
@@ -179,6 +191,9 @@ func (s *Service) GetVariable(ctx context.Context, repoID uint, env, name string
 
 // GetOrgVariable retrieves a specific organization variable by name.
 func (s *Service) GetOrgVariable(ctx context.Context, orgID uint, name string) (db.Variable, error) {
+	if err := s.requireNativeVariableScope(ctx, nil); err != nil {
+		return db.Variable{}, err
+	}
 	var v db.Variable
 	if err := orgScope(s.DBForCtx(ctx), orgID).Where("name = ?", name).First(&v).Error; err != nil {
 		return db.Variable{}, wrapErr(err)
@@ -188,21 +203,33 @@ func (s *Service) GetOrgVariable(ctx context.Context, orgID uint, name string) (
 
 // UpdateVariable updates the value of a specific variable.
 func (s *Service) UpdateVariable(ctx context.Context, repoID uint, env, name, value string) error {
+	if err := s.requireNativeVariableScope(ctx, &repoID); err != nil {
+		return err
+	}
 	return checkAffected(repoScope(s.DBForCtx(ctx).Model(&db.Variable{}), repoID, env).Where("name = ?", name).Update("value", value))
 }
 
 // UpdateOrgVariable updates the value of a specific organization variable.
 func (s *Service) UpdateOrgVariable(ctx context.Context, orgID uint, name, value string) error {
+	if err := s.requireNativeVariableScope(ctx, nil); err != nil {
+		return err
+	}
 	return checkAffected(orgScope(s.DBForCtx(ctx).Model(&db.Variable{}), orgID).Where("name = ?", name).Update("value", value))
 }
 
 // DeleteVariable deletes a specific variable.
 func (s *Service) DeleteVariable(ctx context.Context, repoID uint, env, name string) error {
+	if err := s.requireNativeVariableScope(ctx, &repoID); err != nil {
+		return err
+	}
 	return checkAffected(repoScope(s.DBForCtx(ctx), repoID, env).Where("name = ?", name).Delete(&db.Variable{}))
 }
 
 // DeleteOrgVariable deletes a specific organization variable.
 func (s *Service) DeleteOrgVariable(ctx context.Context, orgID uint, name string) error {
+	if err := s.requireNativeVariableScope(ctx, nil); err != nil {
+		return err
+	}
 	return checkAffected(orgScope(s.DBForCtx(ctx), orgID).Where("name = ?", name).Delete(&db.Variable{}))
 }
 
