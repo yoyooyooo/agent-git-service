@@ -216,7 +216,9 @@ try {
   const emptyVariable = JSON.parse((await ghCheck("Forgejo empty variable remains an observed value", ["variable", "get", "EMPTY", "--json", "name,value"])).stdout);
   assertions(emptyVariable.name === "EMPTY" && emptyVariable.value === "", "empty variable was changed or discarded");
   const missingVariable = await ghCheck("Forgejo missing variable remains 404", ["variable", "get", "MISSING", "--json", "name,value"], [1]);
-  assertions(missingVariable.stderr.includes("404"), "missing variable fabricated an empty value");
+  assertions(missingVariable.stdout === "" && missingVariable.stderr.includes("variable MISSING was not found"), "missing variable did not produce the official client diagnostic");
+  const missingVariableResponse = await api(`/api/v3/repos/${repo}/actions/variables/MISSING`);
+  assertions(missingVariableResponse.status === 404 && !Object.hasOwn(missingVariableResponse.data ?? {}, "value"), "missing variable fabricated an empty value or lost its HTTP status");
   for (const [method, suffix, body] of [["POST", "", { name: "NEW", value: "fixture" }], ["PATCH", "/VAR_000", { name: "VAR_000", value: "fixture" }], ["DELETE", "/VAR_000", undefined]]) {
     const denied = await api(`/api/v3/repos/${repo}/actions/variables${suffix}`, method, body);
     assertions(denied.status === 501, `Forgejo variable ${method} did not fail as unsupported`);
