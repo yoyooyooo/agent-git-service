@@ -5,36 +5,20 @@ This document describes the GitHub Actions workflows carried by the public
 
 ## Overview
 
-The repository uses a layered CI gate:
-
-- `ci.yml` runs formatting, vet, regression, unit, integration, TiDB migration
-  smoke, compatibility, E2E, and backend smoke jobs.
-- `cli-pr-check.yml` keeps the vendored GitHub CLI test inventory visible on
-  pull requests.
-- `doc-lint.yml` verifies documentation links, workflow inventory, and module
-  contract coverage.
-- `secret-scan.yml` runs gitleaks against checked-out files on pull requests and
-  pushes to `main`.
-- `license-check.yml` verifies root Go module dependency license metadata.
-
-Publishing, deployment, and benchmark-history workflows are intentionally not
-part of the default public CI set. `scripts/upgrade-regression.sh` does not
-list `scripts/test_routeb_launchd_native.py`. A skipped native run is not a
-source-CI pass and does not authorize deployment. See
-[Route B host package](operations/routeb-host-package.md).
+[Fork CI](../.github/workflows/ci.yml) is the source gate for the maintained
+GitHub fork. Use [the test strategy](test-strategy.md) for local regression
+commands. Hosted source checks do not prove platform-native recovery or
+approve publication or deployment. See the [Route B host package](operations/routeb-host-package.md)
+for native acceptance requirements.
 
 ## Workflow Files
 
-- `ci.yml` - main layered CI gate for pull requests, pushes to `main`, and
-  manual runs
-- `cli-pr-check.yml` - full vendored `cli/` unit-test workflow for pull
-  requests and manual runs
-- `doc-lint.yml` - verifies core CI/testing docs and workflow inventory stay in
-  sync
-- `secret-scan.yml` - scans checked-out files for secrets; manual runs can also
-  scan full git history
-- `license-check.yml` - verifies dependency licenses and reviewed third-party
-  NOTICE files
+- `ci.yml` runs Fork CI.
+- `cli-pr-check.yml` runs the full vendored CLI suite on manual dispatch. Fork
+  CI runs the core client contracts automatically.
+- `doc-lint.yml` is the manual documentation gate. Fork CI runs the same lint.
+- `secret-scan.yml` scans the fork's reachable commit range for secrets.
+- `license-check.yml` checks dependency licenses and third-party notices.
 
 ## Release candidate workflows
 
@@ -68,112 +52,51 @@ run is authorized by wiring. See [release operations](operations/releases.md).
 
 ## Main CI Workflow
 
-Trigger:
+Fork CI runs for PRs targeting `main` or `fork/**`, pushes to `main`, `fork/**`,
+or `prepare/public-fork-*`, and manual dispatch. PR jobs check out the exact PR
+head rather than GitHub's synthetic merge commit. See the workflow YAML for
+package inventory, job conditions, and commands:
 
-- pull requests targeting `main`
-- pushes to `main`
-- manual `workflow_dispatch`
+| Job | What it checks |
+| --- | --- |
+| Source and governance | Fork provenance, package inventory, focused regressions, documentation lint, build, vet, and formatting. |
+| Root tests | Seven shards cover the root module. Each job owns a disposable loopback TiDB. Each root package is assigned to one shard. |
+| Edge and authority race checks | Race-enabled Edge and service authority tests with a disposable TiDB. |
+| Vendored client compatibility | Compile the vendored CLI, test core CLI contracts, and run the local `go-gh` module tests. |
+| Official gh and CI backend acceptance | Run official `gh` against an isolated primary and CI fixtures. |
+| Real Forgejo protected-branch projection | Exercise projection against a real Forgejo fixture with generated credentials. |
 
-Jobs:
-
-1. `lint`
-   - checks Go formatting outside the nested `cli/` module
-   - runs `go vet ./...`
-2. `regression-gate`
-   - installs `tiup` plus the MySQL client for the local TiDB playground
-   - starts the local TiDB playground for database-backed regression coverage
-   - runs `bash scripts/regression_gate.sh`
-   - compiles the backend tree with `go test ./... -run '^$'`
-   - compiles the vendored `cli/` tree and `cli/_go-gh-local`
-   - runs the stable package pack defined in `scripts/regression_gate.list`
-   - stops the local TiDB playground after the job
-3. `unit-tests`
-   - installs `tiup` plus the MySQL client for the local TiDB playground
-   - runs `make test-unit` in a package matrix using `GO_TEST_PACKAGES`
-   - starts the local TiDB playground and drops stale per-test schemas before
-     running Go tests
-   - executes the backend Go unit-test inventory with `go test -v`
-   - stops the local TiDB playground after the job
-4. `integration-tests`
-   - installs `tiup` plus the MySQL client for the local TiDB playground
-   - starts the local TiDB playground for real-router integration coverage
-   - runs `bash scripts/integration_tests.sh`
-   - executes stable real-router and Git HTTP integration coverage
-   - stops the local TiDB playground after the job
-5. `tidb-migration-smoke`
-   - installs `tiup` plus the MySQL client for the local TiDB playground
-   - runs `make test-migrate-tidb`
-   - creates a fresh temporary TiDB database
-   - boots `gh-server` against that TiDB DSN and waits for `/readyz`
-   - catches TiDB-incompatible migration or bootstrap DDL before the heavier
-     compatibility and E2E suites
-6. `compatibility-tests`
-   - provisions the test-only TiDB playground with `make test-setup`
-   - starts `gh-server` against TiDB
-   - runs the vendored GitHub CLI acceptance inventory with `make test`
-   - cleans up with `make test-clean-all`
-7. `e2e-tests`
-   - provisions the test-only TiDB playground with `make test-setup`
-   - starts the deterministic mock OIDC issuer used by the OIDC-backed login E2E flows
-   - starts `gh-server` against TiDB
-   - runs the shell E2E inventory with `make test-e2e`
-   - cleans up with `make test-clean-all`
-8. `backend-smoke`
-   - installs `tiup` plus the MySQL client for the local TiDB playground
-   - starts the local TiDB playground before the smoke flow
-   - runs `bash scripts/backend_smoke.sh`
-   - builds and starts `gh-server` against a fresh TiDB playground database
-   - probes readiness and basic API endpoints
-   - validates repository creation and Git Smart HTTP clone behavior
-   - stops the local TiDB playground after the job
-9. `ci-success`
-   - fails if any required CI job fails
-
-This gives the repository one explicit merge gate with a clear layer split:
-
-- `Regression Gate` protects fast, deterministic regressions.
-- `Unit Tests` protect backend package behavior.
-- `Integration Tests` protect stable real-router and Git HTTP paths.
-- `TiDB Migration Smoke` protects service bootstrap and migrations against a real
-  TiDB dialect.
-- `Compatibility Tests` protect the vendored GitHub CLI compatibility inventory.
-- `E2E Tests` and `Backend Smoke` prove runtime behavior across real process
-  boundaries.
-- `doc-lint.yml` keeps gate definitions and documentation expectations in sync.
+Preparation pushes omit the root matrix, race checks, and client acceptance
+jobs. A skipped job does not count as a pass. Compare evidence with the exact
+head and required job inventory. The legacy Regression Gate, Integration Tests,
+Compatibility Tests, E2E Tests, and Backend Smoke commands remain in the
+[test strategy](test-strategy.md); they are not separate jobs in Fork CI.
 
 ## Secret Scan Workflow
 
-`secret-scan.yml` runs `scripts/secret_scan.sh --worktree-only` on pull requests
-targeting `main` and pushes to `main`. The workflow installs a pinned gitleaks
-version through Go so scan behavior stays deterministic.
-
-Manual `workflow_dispatch` runs include a `full_history` input. When enabled,
-the workflow also runs `scripts/secret_scan.sh --history-only` against the full
-git history. The default PR path scans only checked-out files so the gate stays
-fast and focused on newly introduced leaks.
+[`secret-scan.yml`](../.github/workflows/secret-scan.yml) scans the range from the
+frozen upstream baseline to the checked-out head, including removed files. It
+uses checksum-pinned gitleaks and checks the policy's narrow exceptions. Fork
+generation refs and PRs targeting them also run the public disclosure preflight.
+A clean scan is not authorization to publish private evidence.
 
 ## Dependency License Workflow
 
-`license-check.yml` runs `python3 scripts/license_check.py --report
-artifacts/dependency-licenses.tsv` on pull requests, pushes to `main`, and
-manual dispatch. The script scans the root Go module build list, checks each
-module's top-level license files against the reviewed allowlist, and fails on
-unknown or disallowed licenses.
-
-The script also reports third-party NOTICE files. Currently reviewed NOTICE
-entries must remain present in the root `NOTICE`; newly introduced NOTICE files
-fail the workflow until they are reviewed and documented in
-[`docs/governance/dependency-licensing.md`](governance/dependency-licensing.md).
+[`license-check.yml`](../.github/workflows/license-check.yml) runs on PRs to
+`main` or `fork/**`, on matching pushes that change dependency or license inputs,
+and on manual dispatch. The scanner checks the root Go module build list and
+third-party notices; see [dependency licensing](governance/dependency-licensing.md)
+for the reviewed allowlist and `NOTICE` policy.
 
 ## Documentation Workflow
 
-`doc-lint.yml` runs `python3 scripts/doc_lint.py` to verify that:
+Fork CI and the manual `doc-lint.yml` run `python3 scripts/doc_lint.py` to verify that:
 
 - required CI/testing docs and workflow files exist
 - relative links inside the core CI/test docs resolve
 - `docs/ci.md` mentions the active core workflows
 - `.github/pull_request_template.md` points contributors at current CI/test docs
-- CI helper scripts used by the main gate still exist
+- documented verification helper scripts still exist
 - every top-level `internal/*` package has a contract entry in
   `docs/module-contracts.md` via `scripts/check-module-contracts.sh`
 

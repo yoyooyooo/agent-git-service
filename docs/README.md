@@ -1,7 +1,8 @@
 # Documentation
 
-Start here when you need the shape of the repo rather than a specific source
-file.
+Use the [project README](../README.md) to choose how to try or install AGS.
+For source changes, start with [repository guidelines](../AGENTS.md) and the
+contract for the component you are changing.
 
 ## Run Locally
 
@@ -48,6 +49,7 @@ accepted direction, or incremental work that has not fully landed yet.
 ## Testing And Operations
 
 - [Fork Governance](../fork/README.md) - GitHub source workflow, upstream generations, capability review and publication gates.
+- [Release operations](operations/releases.md) - artifact identity, historical v1 installation, v2 verification, and upgrade and rollback boundaries.
 - [Production Deployment](production-deployment.md)
 - [S6b Upgrade Recovery Design](design/s6b-upgrade-recovery.md) - durable journal, recovery boundaries, native adapter evidence and non-installable pin/build identity work.
 - [Reviewed Maintenance Windows](operations/maintenance-window.md) - opt-in executor admission, exact candidate import, complete startup recovery review and default forward repair.

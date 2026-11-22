@@ -46,13 +46,14 @@ temporary instance.
 ## Start The Server
 
 ```bash
-git clone https://github.com/ngaut/agent-git-service.git
+git clone https://github.com/yoyooyooo/agent-git-service.git
 cd agent-git-service
 cp .env.example .env
 ```
 
-The `.env` file supplies local listener and seed-user defaults. The exported
-`DB_DSN` points the server at TiDB Zero.
+This clones the maintained fork's default branch. The `.env` file supplies local
+listener and seed-user defaults. The exported `DB_DSN` points the server at
+TiDB Zero.
 
 ```bash
 go run ./cmd/gh-server

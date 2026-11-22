@@ -12,15 +12,6 @@ developer workflows.**
 
 </div>
 
-This maintained repository is the native GitHub fork of [`ngaut/agent-git-service`](https://github.com/ngaut/agent-git-service) and uses standard hosted CI.
-No running AGS, private network or self-hosted build runner is needed to contribute.
-The active generation is [`fork/main.20260924`](fork/releases/main.20260924.md).
-See [fork governance](fork/README.md) for frozen upstream generations,
-[capability preservation](fork/FEATURE_PARITY.md) for the downstream contract map,
-and [publication gates](fork/PUBLICATION.md) for source/disclosure boundaries.
-The release manifest binds the exact tested source to its own hosted CI;
-upstream CI alone is not evidence that this fork has passed verification.
-
 `agent-git-service` lets GitHub-speaking clients work with repositories you
 own, and its agent-first design treats AI agents as first-class citizens with
 durable identities, scoped tokens, default workspaces, and ownership/recovery
@@ -43,7 +34,6 @@ run where your agents run:
   transfer flows.
 - Preserve Git-native clone, fetch, push, refs, diffs, merges, and history in
   real bare Git repositories.
-- Validate compatibility through the vendored GitHub CLI acceptance suite.
 
 ## agent-git-service vs GitHub
 
@@ -75,100 +65,28 @@ run where your agents run:
 Known GitHub-compatibility gaps are tracked in
 [`docs/github-api-compatibility-matrix.md`](docs/github-api-compatibility-matrix.md).
 
-## Release and installation
+## Install or try AGS
 
-Maintainers publish with a tag-driven helper:
+- **Try the service from source.** Follow the [quick start](docs/quickstart.md)
+  to run a local server with a disposable TiDB Zero database. The guide takes
+  you through readiness, an authenticated `gh` request, and your first Git push.
+- **Install an existing release.** Check the [published releases](https://github.com/yoyooyooo/agent-git-service/releases)
+  and follow the [installation instructions for historical v1 bundles](docs/operations/releases.md#historical-v1-install-and-upgrade)
+  if your release uses v1. The [v2 consumer](docs/operations/releases.md#v2-consumer-and-local-upgrade-source)
+  can verify a v2 release from a complete reviewed checkout, but direct v2
+  installation is closed. Installing binaries does not upgrade a running service.
+- **Plan production use.** Read the [production deployment guide](docs/production-deployment.md)
+  for prerequisites and configuration. Use the [release operations guide](docs/operations/releases.md)
+  for provenance, upgrade, and rollback boundaries.
 
-```bash
-bun scripts/release.ts status
-bun scripts/release.ts rc
-# once the chosen RC is accepted without changing its source:
-bun scripts/release.ts stable
-```
+## Contribute
 
-The helper pushes one exact release tag; GitHub Actions builds and publishes from
-that tag. RC and stable releases are separate immutable tags, and stable
-promotion keeps the exact RC source SHA.
-
-Native release bundles, signed provenance, platform requirements, installation and
-data-safe rollback are documented in [Release operations](docs/operations/releases.md).
-Release installation does not require building this repository or running an AGS
-instance. An immutable tag also exposes a thin Bash bootstrap:
-
-```bash
-curl -fsSL "https://github.com/yoyooyooo/agent-git-service/releases/latest/download/install.sh" |
-  bash -s -- install
-```
-
-By default this follows GitHub Latest, which must be a stable immutable release.
-Use `--version fork-YYYYMMDD.N` to pin or roll back. RCs require an explicit
-`--version ...-rcN --allow-prerelease`. Use `upgrade` instead of `install`
-when an installer-owned `current` selector already exists. Publishing and
-**runtime service** upgrades remain separate explicit actions.
-
-## Quick Start
-
-This local path uses [TiDB Zero](https://zero.tidbcloud.com/)
-for a disposable TiDB database.
-
-Install `curl` and `jq` before running this quickstart. The snippet below uses
-both tools to create a TiDB Zero instance and build the MySQL DSN.
-
-```bash
-git clone --branch fork/main.20260924 https://github.com/yoyooyooo/agent-git-service.git
-cd agent-git-service
-cp .env.example .env
-
-ZERO_INSTANCE="$(
-  curl -fsS -X POST https://zero.tidbapi.com/v1beta1/instances \
-    -H "Content-Type: application/json" \
-    -d '{"tag":"agent-git-service-quickstart"}'
-)"
-export DB_DSN="$(
-  printf '%s' "$ZERO_INSTANCE" | jq -r '
-    .instance.connection as $c |
-    "\($c.username):\($c.password)@tcp(\($c.host):\($c.port))/test?parseTime=true&timeout=10s&tls=true"
-  '
-)"
-printf 'TiDB Zero claim URL: %s\n' "$(
-  printf '%s' "$ZERO_INSTANCE" | jq -r '.instance.claimInfo.claimUrl'
-)"
-
-go run ./cmd/gh-server
-```
-
-Claim the TiDB Zero instance from its claim URL if you want to keep the database
-after evaluation. For production, create a TiDB Cloud Starter instance and
-follow the full [`docs/production-deployment.md`](docs/production-deployment.md)
-guide.
-
-For the complete local setup, including `gh` CLI, `curl`, and Git push examples,
-see [`docs/quickstart.md`](docs/quickstart.md).
-
-## Development
-
-```bash
-make build       # compile gh-server
-make check       # build + go vet
-make test-unit   # go test -timeout 20m -v ./...
-make test        # gh CLI acceptance tests; requires a running local server
-make test-e2e    # shell E2E flows under e2e/
-```
-
-Local setup helpers:
-
-```bash
-make setup       # persistent setup with an external DB_DSN
-make test-setup  # test-only setup using tiup playground
-make run-bg      # start the local server in the background
-make stop        # stop it
-make status      # show local status
-```
-
-`make run-bg` first tries the privileged `github.localhost` listener path used
-by acceptance tests. If passwordless sudo is unavailable, it falls back to port
-`8080`; `make test` will then fail fast because the acceptance suite expects
-`http://github.localhost` on port `80`.
+This repository is the maintained GitHub fork of
+[`ngaut/agent-git-service`](https://github.com/ngaut/agent-git-service).
+You do not need a running AGS, a private network, or a self-hosted runner to
+contribute. Read the [contributing guide](CONTRIBUTING.md) for development
+checks or the [documentation index](docs/README.md) for contracts, testing,
+and fork governance.
 
 ## License
 
