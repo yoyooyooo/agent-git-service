@@ -167,9 +167,16 @@ IDs return 404. Names are not deduplicated: matrix jobs may share a display name
 Missing tasks, changed inventories and incomplete public task observations fail
 explicitly rather than dropping current jobs. Forgejo can skip a conditional job before allocating a task. The bridge accepts that absence only when the job belongs to the selected repository, run and commit, has a name, and records `task_id=0`, `status=4` (`Skipped`), `started=0` and `stopped=0`, with no joined task row. The same applies to a job cancelled before it started, for example when its run is cancelled while the job is still waiting or blocked: `task_id=0`, `status=3` (`Cancelled`), `started=0`, `attempt=0` and no joined task row. Forgejo stamps `stopped` with the cancellation time, so `stopped` may be non-zero (but not negative) for this case only. It also applies while the job is still queued: `status=5` (`Waiting`) or `status=7` (`Blocked`, including a job blocked on `needs`), with `task_id=0`, `started=0`, `stopped=0`, `attempt=0` and no joined task row. Those jobs are not terminal, but they also have no task or log. Rejecting them used to make `check-runs` and `statusCheckRollup` return HTTP 502 for a head whose CI had not been claimed yet. After the inventory accepts them, an empty current-task list lets the adapter report the provider run as `queued` with a null conclusion. Such a job contributes no task or log. A run that contains only these skipped, cancelled, waiting or blocked jobs has an empty current-task inventory. Historical tasks are never substituted. Other missing task associations, unknown or running or failed task-less states, and repository or commit mismatches still reject the whole inventory. Without a configured bridge, job
 inventory is unsupported (501); an older bridge lacking the resource returns 404.
-The bridge and adapter therefore need compatible source versions before activation. The public task list
-ignores `head_sha` and `run_number`, so the adapter reads that list from the newest
-task. Forgejo 12 returns it `id DESC`, and repository run numbers increase with
+The bridge and adapter therefore need compatible source versions before activation.
+
+After the run, its repository index and the bridge inventory are verified, an
+empty current-task set returns a complete empty job collection without reading
+repository task history. Completeness describes the current task enumeration,
+not a successful workflow: waiting or blocked runs remain queued with a null
+conclusion. Missing or invalid inventories and bridge errors still fail explicitly.
+
+For a nonempty current-task set, the public task list ignores `head_sha` and
+`run_number`, so the adapter reads that list from the newest task. Forgejo 12 returns it `id DESC`, and repository run numbers increase with
 those IDs, including retries of one run. After this run's tasks have been seen, the
 scan stops at the first full page whose maximum run number is smaller. It does not
 stop merely because the first page contained a match: a retry can place another

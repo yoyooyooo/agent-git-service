@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -57,6 +58,7 @@ func TestForgejoWaitingAndBlockedJobsReturnQueuedCheckRuns(t *testing.T) {
 			bridge := httptest.NewServer(router)
 			defer bridge.Close()
 
+			var taskRequests atomic.Int32
 			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				require.Equal(t, "token provider-only", r.Header.Get("Authorization"))
 				now := "2026-11-16T07:16:46Z"
@@ -73,7 +75,8 @@ func TestForgejoWaitingAndBlockedJobsReturnQueuedCheckRuns(t *testing.T) {
 				case "/api/v1/repos/ci/project/actions/runs":
 					_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "workflow_runs": []any{run}})
 				case "/api/v1/repos/ci/project/actions/tasks":
-					_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 0, "workflow_runs": []any{}})
+					taskRequests.Add(1)
+					http.Error(w, "unrelated repository history is unavailable", http.StatusServiceUnavailable)
 				default:
 					t.Errorf("unexpected provider route: %s", r.URL.Path)
 					http.NotFound(w, r)
@@ -102,6 +105,7 @@ func TestForgejoWaitingAndBlockedJobsReturnQueuedCheckRuns(t *testing.T) {
 			require.Equal(t, "queued", row["status"])
 			require.Nil(t, row["conclusion"])
 			require.Equal(t, head, row["head_sha"])
+			require.Zero(t, taskRequests.Load(), "verified empty current tasks must not query repository history")
 		})
 	}
 }
