@@ -152,7 +152,7 @@ func TestForgejoJobsDoNotStopOnAPartialPageOfTheSameRun(t *testing.T) {
 func TestForgejoJobInventoryRejectsBudgetAndUnstablePages(t *testing.T) {
 	const total = 1359
 	mode := "complete"
-	provider := httptest.NewServer(withCurrentJobFixture(map[int64]string{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	provider := httptest.NewServer(withCurrentJobFixture(map[int64]string{1: "late-job"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/runs/17") {
 			_ = json.NewEncoder(w).Encode(forgejoFixtureRun())
 			return
@@ -166,6 +166,9 @@ func TestForgejoJobInventoryRejectsBudgetAndUnstablePages(t *testing.T) {
 		for offset := 0; offset < 50 && (page-1)*50+offset < total; offset++ {
 			id := total - ((page-1)*50 + offset)
 			value := map[string]any{"id": id, "run_number": 40}
+			if id == 1 {
+				value = map[string]any{"id": id, "run_number": 9, "workflow_id": "ci.yml", "name": "late-job", "head_sha": strings.Repeat("a", 40), "status": "success", "url": "https://ci.example.test/ci/project/actions/runs/9", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:01:00Z"}
+			}
 			if mode == "duplicate" && page == 2 && offset == 0 {
 				value["id"] = total
 			}
@@ -190,6 +193,10 @@ func TestForgejoJobInventoryRejectsBudgetAndUnstablePages(t *testing.T) {
 	backend, err := NewHTTP(config, "fixture-only", "bridge-only")
 	if err != nil {
 		t.Fatal(err)
+	}
+	found, err := backend.Jobs(context.Background(), "ci/project", "17")
+	if err != nil || !found.Complete || len(found.Items) != 1 || found.Items[0].Name != "late-job" {
+		t.Fatalf("stable inventory must observe the current task: jobs=%+v error=%v", found, err)
 	}
 	for _, value := range []string{"moving", "duplicate"} {
 		mode = value

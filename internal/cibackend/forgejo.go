@@ -176,6 +176,11 @@ func (f *Forgejo) Jobs(ctx context.Context, repo, id string) (Jobs, error) {
 	if e != nil {
 		return Jobs{}, e
 	}
+	// The verified current task set is authoritative even before a job has
+	// a task. Unrelated repository history cannot add a current association.
+	if len(current) == 0 {
+		return Jobs{Items: []Job{}, Total: 0, Complete: true}, nil
+	}
 	result := Jobs{Items: []Job{}}
 	matched := false
 	finish := func() (Jobs, error) {
