@@ -23,6 +23,8 @@ type accessGrantMergeProvider struct {
 	runs                []forgejointegration.WorkflowRun
 	authority           forgejointegration.RepositoryAuthorityState
 	mergeMode           string
+	mergeError          error
+	mergeSnapshot       *forgejointegration.PullRequestSnapshot
 	hideMergedReads     int
 	mergeableAfterReads int
 	snapshotReads       int
@@ -82,6 +84,13 @@ func (p *accessGrantMergeProvider) MergePullRequest(_ context.Context, _, _ stri
 	}
 	if request.ExpectedHead != p.snapshot.HeadSHA || request.Method != "rebase" || request.DeleteBranch {
 		return errors.New("noncanonical merge payload")
+	}
+	if p.mergeSnapshot != nil {
+		p.snapshot = *p.mergeSnapshot
+		return p.mergeError
+	}
+	if p.mergeError != nil {
+		return p.mergeError
 	}
 	if p.mergeMode == "success" {
 		p.snapshot.State = "closed"

@@ -112,7 +112,7 @@ func (s *Service) executeNativeProviderMerge(ctx context.Context, repository str
 	// A retry after a lost response must read the exact provider coordinate and
 	// return without another provider POST. The signed provider webhook remains
 	// the sole owner of AGS base/terminal convergence.
-	if snapshot, found, readErr := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, repository, projection.ExternalRepo, projection.ExternalNumber); readErr == nil && found && snapshot.Merged {
+	if snapshot, found, readErr := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, repository, projection.ExternalRepo, projection.ExternalNumber); readErr == nil && found && snapshot.Number == projection.ExternalNumber && snapshot.Merged {
 		if mergeSHA, canonical := canonicalProviderMergeSnapshotSHA(snapshot, expectedHead); canonical {
 			receipt.ProviderMerged = true
 			receipt.ProviderMergeSHA = strings.ToLower(mergeSHA)
@@ -166,6 +166,9 @@ func (s *Service) executeNativeProviderMerge(ctx context.Context, repository str
 		forgejointegration.PullRequestMergeRequest{Method: mergeMethod, ExpectedHead: expectedHead, DeleteBranch: false})
 	mergeSHA, confirmed := canonicalProviderMergeResult(result, mergeErr, expectedHead)
 	if !confirmed {
+		if result.ProviderOutcome == "rejected" && mergeErr != nil {
+			return HumanProviderMergeReceipt{}, fmt.Errorf("%w: provider rejected merge at the expected head; inspect required checks, reviews, and branch protection before a new merge attempt: %w", ErrInvalidState, mergeErr)
+		}
 		observed, obsErr := s.ObserveHumanProviderMerge(ctx, repository, prNumber, expectedHead)
 		if obsErr == nil && (observed.ProviderMerged || observed.Outcome == providerMergeOutcomeSourceSuccess) {
 			return observed, nil

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -1089,6 +1090,9 @@ func (i *Integration) MergePullRequest(ctx context.Context, repoFullName, extern
 		return PullRequestMergeResult{}, fmt.Errorf("Forgejo client cannot execute a pull request merge")
 	}
 	mergeErr := merger.MergePullRequest(ctx, target.Owner, target.Repo, number, request)
+	var providerErr *ProviderHTTPError
+	definiteDenial := errors.As(mergeErr, &providerErr) && providerErr.Status == http.StatusMethodNotAllowed &&
+		providerErr.Method == http.MethodPost && providerErr.RouteKind == "pull_merge"
 	delays := []time.Duration{0, 100 * time.Millisecond, 250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second}
 	var last PullRequestSnapshot
 	for _, delay := range delays {
@@ -1105,12 +1109,19 @@ func (i *Integration) MergePullRequest(ctx context.Context, repoFullName, extern
 		}
 		if found {
 			last = snapshot
-			if snapshot.Merged && exactGitSHA(snapshot.HeadSHA, request.ExpectedHead) {
+			if snapshot.Number == number && snapshot.Merged && exactGitSHA(snapshot.HeadSHA, request.ExpectedHead) {
 				outcome := "confirmed"
 				if mergeErr != nil {
 					outcome = "reconciled_after_error"
 				}
 				return PullRequestMergeResult{ProviderOutcome: outcome, Snapshot: snapshot}, nil
+			}
+			// Only a typed merge denial and a fresh matching open PR prove this
+			// attempt was rejected. Transport errors and uncertain reads remain
+			// unknown; an exact observed merge above always takes precedence.
+			if definiteDenial && snapshot.Number == number && snapshot.State == "open" && !snapshot.Merged &&
+				exactGitSHA(snapshot.HeadSHA, request.ExpectedHead) {
+				return PullRequestMergeResult{ProviderOutcome: "rejected", Snapshot: snapshot}, fmt.Errorf("Forgejo rejected merge at the expected head: %w", mergeErr)
 			}
 		}
 	}
