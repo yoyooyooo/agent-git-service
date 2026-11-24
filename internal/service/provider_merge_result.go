@@ -18,6 +18,9 @@ func canonicalProviderMergeResult(result forgejointegration.PullRequestMergeResu
 }
 
 func canonicalProviderMergeSnapshotSHA(snapshot forgejointegration.PullRequestSnapshot, expectedHeadSHA string) (string, bool) {
+	if !snapshot.Merged || !exactGitSHA(snapshot.HeadSHA, expectedHeadSHA) {
+		return "", false
+	}
 	if canonicalActionSHA(snapshot.MergeCommitSHA) {
 		return snapshot.MergeCommitSHA, true
 	}
@@ -66,7 +69,7 @@ func (s *Service) providerMergePreflight(ctx context.Context, repository, extern
 		if snapshot.State != "open" || snapshot.Merged {
 			return snapshot, fmt.Errorf("%w: Forgejo pull request is not open and mergeable", ErrInvalidState)
 		}
-		if !exactGitSHA(snapshot.HeadSHA, expectedHeadSHA) || snapshot.BaseRef != expectedBaseRef || !exactGitSHA(snapshot.BaseSHA, providerBaseSHA) {
+		if snapshot.Number != forgejoPRNumber || !exactGitSHA(snapshot.HeadSHA, expectedHeadSHA) || snapshot.BaseRef != expectedBaseRef || !exactGitSHA(snapshot.BaseSHA, providerBaseSHA) {
 			return snapshot, fmt.Errorf("%w: Forgejo pull request head/base drift ags_base=%s provider_ref=%s pr_base=%s pr_head=%s expected_head=%s",
 				ErrConflict, strings.TrimSpace(agsBaseSHA), strings.TrimSpace(providerBaseSHA), strings.TrimSpace(snapshot.BaseSHA), strings.TrimSpace(snapshot.HeadSHA), strings.TrimSpace(expectedHeadSHA))
 		}

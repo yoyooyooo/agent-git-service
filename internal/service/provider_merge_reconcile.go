@@ -158,7 +158,7 @@ func (s *Service) ObserveHumanProviderMerge(ctx context.Context, repository stri
 		return receipt, nil
 	}
 	snapshot, found, snapErr := s.ForgejoIntegration.ExactPullRequestSnapshot(ctx, repository, projection.ExternalRepo, projection.ExternalNumber)
-	if snapErr == nil && found && snapshot.Merged {
+	if snapErr == nil && found && snapshot.Number == projection.ExternalNumber && snapshot.Merged {
 		if mergeSHA, canonical := canonicalProviderMergeSnapshotSHA(snapshot, expectedHead); canonical {
 			receipt.ProviderMerged = true
 			receipt.ProviderMergeSHA = strings.ToLower(mergeSHA)

@@ -696,6 +696,17 @@ After a signed Forgejo merged-PR callback, AGS resolves the exact base ref from 
 
 Human `POST /pulls/{number}/provider/merge` and Access Grant `pr.merge` preflight compare sides independently: AGS head against AGS refs, Forgejo PR head against the mapped provider head, and `Forgejo PR.base.sha` against the live mapped Forgejo target ref `F`. They do not require `F == A`. Creation-time `BaseSHA` is historical diff metadata. HTTP 409 / unknown merge outcomes are observed through exact GET (`GET /pulls/{number}/provider/merge?expected_head_sha=` or Access Grant invocation GET); they never authorize a second provider merge POST. When a repository mapping sets `fast_forward_ack: true` and the method is `fast-forward-only`, a live `F == expected head` may acknowledge the AGS PR through `UpdateRefCAS` without POSTing Forgejo merge and without claiming the Forgejo PR is merged. If AGS `main` has already fast-forwarded past that head, acknowledgement keeps the advanced ref and does not rewind. Protected Git HTTP push to `main` remains rejected.
 
+For native standard merges and the Human provider-merge endpoint, a typed Forgejo
+`POST pull_merge` HTTP 405 is a definite rejection only after an exact readback
+finds the same PR number and expected head still open and unmerged. REST returns
+422; GraphQL retains HTTP 200 and puts the rejection in `errors[].message`. Both
+retain the provider status and a diagnostic to inspect required checks, reviews,
+and branch protection before a new merge attempt. A matching confirmed
+merge takes precedence over the error. Transport failures, 5xx, generic 409, and
+missing, failed, or contradictory readbacks remain unknown and never trigger an
+automatic second POST. This does not change the Access Grant invocation or effect
+retry contract, and it does not reconstruct historical rejection receipts.
+
 Projection status is exposed at:
 
 ```text
