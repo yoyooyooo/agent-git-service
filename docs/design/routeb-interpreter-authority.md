@@ -169,6 +169,26 @@ PT_LOAD ranges, including contiguous ranges spanning multiple segments.
 Section headers may corroborate that view but cannot replace it. Audit,
 depaudit, filter, auxiliary and unsupported loader flags refuse entry.
 
+The Linux entry catalog fixes `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `TZ=UTC0`
+and `TZDIR=/usr/local/libexec/ags-routeb-interpreters/<authority-id>/timezone`.
+The supervisor takes these four values from the validated catalog, without
+inheriting the caller's environment. The timezone directory is a real
+root-owned external directory with an exact identity and a `closed-directory`
+search declaration whose members are empty. Both checks run through the
+existing file verifier and recheck path; a replaced directory, added resource
+or writable metadata refuses entry.
+
+[CPython initializes the C timezone state when importing `time`](https://github.com/python/cpython/blob/v3.13.18/Modules/timemodule.c),
+even when application timestamps use aware UTC.
+[Glibc first tries a timezone file](https://github.com/bminor/glibc/blob/release/2.39/master/time/tzset.c)
+for `UTC0` before parsing the POSIX value. The fixed empty `TZDIR` binds that
+negative lookup, so this Linux entry does not depend on `/etc/localtime` or
+host zoneinfo. Setting `TZ` alone would leave an unbound file lookup. The
+fixture creates only its own directory and does not change host tzdata
+permissions. Other catalog modes, including Darwin and file-only catalogs
+without a Linux entry, retain the two locale variables. This resource
+contract does not establish native admission.
+
 The kernel executable identity of this child is the loader. Its Python main
 image must independently appear in the registered file-backed mappings.
 The parent also rejects unknown mappings, checks exact process births and

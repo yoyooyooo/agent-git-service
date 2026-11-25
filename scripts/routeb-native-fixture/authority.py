@@ -1,6 +1,6 @@
 """Produce a catalog from pinned publisher bytes and actual Linux files.
 
-Only the later unchanged Go verifier decides whether this inventory closes the
+Only the production Go verifier decides whether this inventory closes the
 interpreter. This producer never writes catalog_verified/native_pass claims.
 """
 import os
@@ -191,7 +191,7 @@ def produce(pin_path, authority_id, binding, inspector):
     directory = INTERPRETERS / authority_id
     protected_directory(directory.parent)
     directory.mkdir(mode=0o755)
-    for name in ('publisher', 'runtime-libraries', 'recovery-assets'):
+    for name in ('publisher', 'runtime-libraries', 'recovery-assets', 'timezone'):
         (directory / name).mkdir(mode=0o755)
     pin, _ = read_json(pin_path)
     publisher = publisher_download(pin, directory / 'publisher')
@@ -201,6 +201,8 @@ def produce(pin_path, authority_id, binding, inspector):
     require(executable.is_file() and not executable.is_symlink(), 'publisher_executable')
     external_paths, images, sealed = {}, {}, {}
     libraries = directory / 'runtime-libraries'
+    timezone = directory / 'timezone'
+    os.chmod(timezone, 0o755)  # Newly created, root-owned input; never host tzdata.
 
     def inspect(path):
         value = object_json(command([str(inspector), 'inspect-elf', str(path)], operation='inspect_elf', timeout=10))
@@ -285,7 +287,8 @@ def produce(pin_path, authority_id, binding, inspector):
 
     loader = resolve(images[str(executable)]['interpreter'])
     add_external(libraries)
-    for path in (Path('/etc/passwd'), Path('/etc/group'), Path('/etc/nsswitch.conf'), Path('/etc/localtime')):
+    add_external(timezone)
+    for path in (Path('/etc/passwd'), Path('/etc/group'), Path('/etc/nsswitch.conf')):
         add_external(resolve(path))
     locale = Path('/usr/lib/locale/C.utf8')
     require(locale.is_dir(), 'utf8_locale_unavailable')
@@ -296,7 +299,8 @@ def produce(pin_path, authority_id, binding, inspector):
     require(not Path('/etc/ld.so.preload').exists() and not Path('/etc/ld.so.preload').is_symlink(),
             'loader_preload_present')
     searches = [{'path': '/etc/ld.so.preload', 'state': 'absent', 'members': []},
-                {'path': str(libraries), 'state': 'closed-directory', 'members': sorted(sealed)}]
+                {'path': str(libraries), 'state': 'closed-directory', 'members': sorted(sealed)},
+                {'path': str(timezone), 'state': 'closed-directory', 'members': []}]
     for image in images.values():
         for group in image['rpath'] + image['runpath']:
             for part in group.split(':'):
@@ -321,6 +325,7 @@ def produce(pin_path, authority_id, binding, inspector):
              'publisher': publisher, 'prefix': {'root': str(prefix), 'entries': prefix_entries},
              'executable': pin['executable'], 'external': externals,
              'search_paths': searches, 'native_images': [images[key] for key in sorted(images)],
-             'environment': {'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'},
+             'environment': {'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8',
+                             'TZ': 'UTC0', 'TZDIR': str(timezone)},
              'linux': {'loader': str(loader), 'library_directory': str(libraries)}}
     return exclusive_json(directory / 'authority.json', value, mode=0o644)

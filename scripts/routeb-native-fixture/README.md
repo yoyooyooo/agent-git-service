@@ -43,7 +43,11 @@ The job builds the actual accepted gh-server through `build-exact-source.sh`, a
 static stage0 with the same revision/tree, and the small fixture data tool. It
 downloads the pinned official standalone Python release, inventories its real
 ELF dependencies, and asks the production catalog verifier to read that sealed
-closure. Failure to establish a closure stops the attempt.
+closure. Failure to establish a closure stops the attempt. The real Linux
+child uses catalog-bound `TZ=UTC0` and an authority-owned empty `TZDIR`. The
+existing verifier checks that directory's identity and closed empty member set
+before entry and on recheck. This removes the host localtime dependency; no
+system tzdata permission is changed. The two locale variables remain fixed.
 
 Provisioning uses the VM's actual non-root account, machine identity and home.
 It creates one new private runtime root and fixed root-owned registry, bundle,
