@@ -49,6 +49,12 @@ existing verifier checks that directory's identity and closed empty member set
 before entry and on recheck. This removes the host localtime dependency; no
 system tzdata permission is changed. The two locale variables remain fixed.
 
+The Linux/amd64 fixture also registers glibc's `gconv-modules.cache` as external
+data, with its resolved aliases, actual file identity and bytes, and an independent
+recovery asset. ELF dependency enumeration does not cover this data mapping.
+Missing or changed inputs still fail the existing closure checks;
+the producer does not learn trusted files from a running process.
+
 Provisioning uses the VM's actual non-root account, machine identity and home.
 It creates one new private runtime root and fixed root-owned registry, bundle,
 units and interpreter authority. The initial database comes from real
