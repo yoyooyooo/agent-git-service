@@ -25,6 +25,70 @@ from source_evidence import validate
 import run as fixture_run
 
 
+class MappingDiagnosticsTests(unittest.TestCase):
+    def export_failure(self, mutate=None):
+        # Exercise the real artifact writer with a kernel-row-shaped failure.
+        # The profile is a test-owned file; no root namespace or service exists.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            registry, output = base / 'registry', base / 'export'
+            (registry / 'state/failures').mkdir(parents=True)
+            (registry / 'fixture-evidence').mkdir()
+            invocation = {'id': 'bootstrap-one', 'phase': 'bootstrap'}
+            registration = {'host_profile': {}, 'interpreter': {'sha256': 'a' * 64},
+                            'invocations': [invocation]}
+            registration_raw = canonical(registration)
+            (registry / 'stage0-registration.json').write_bytes(registration_raw)
+            process = {'pid': 501, 'start_ticks': 101, 'parent_pid': 500,
+                       'uid': 1001, 'gid': 1001, 'executable_sha256': 'b' * 64}
+            value = {'schema': 'ags.routeb-stage0-mapping-refusal.v1',
+                     'registration_sha256': sha(registration_raw), 'catalog_sha256': 'a' * 64,
+                     'invocation_id': 'bootstrap-one', 'subject_invocation_id': 'bootstrap-one',
+                     'phase': 'bootstrap', 'boot_id': 'fixture-boot',
+                     'supervisor': {**process, 'pid': 500, 'parent_pid': 1, 'uid': 0, 'gid': 0},
+                     'child': process, 'code': 'stage0_mapping_unknown',
+                     'maps_sha256': 'c' * 64, 'maps_bytes': 170,
+                     'mapping': {'branch': 'catalog_file_identity', 'line_number': 2,
+                                 'line': '1000-2000 r--p 00000000 08:01 42 /usr/lib/example.cache',
+                                 'field_count': 6, 'catalog_match': 'absent', 'expected': None}}
+            if mutate:
+                mutate(value)
+            raw = canonical(value)
+            failure = registry / 'state/failures/bootstrap-one.json'
+            failure.write_bytes(raw)
+            # A different private diagnostic is never a blanket export grant.
+            (registry / 'state/failures/private.json').write_bytes(canonical(
+                {'schema': 'other', 'env': 'private-env-sentinel'}))
+            with mock.patch.object(fixture_run, 'file_reference', return_value=canonical({'root': str(base)})), \
+                 mock.patch.object(fixture_run.os, 'chown'), mock.patch.object(fixture_run.os, 'fchown'):
+                fixture_run.export(registry, output, os.getuid(), os.getgid())
+            index = json.loads((output / 'index.json').read_bytes())
+            files = [(row, (output / row['name']).read_bytes()) for row in index['files']]
+            self.assertNotIn('private-env-sentinel', repr(files))
+            return value, raw, files
+
+    def test_export_keeps_exact_refusal_object_and_identity_in_the_same_artifact(self):
+        value, raw, files = self.export_failure()
+        self.assertEqual(len(files), 1)
+        row, actual = files[0]
+        self.assertEqual(actual, raw)
+        self.assertEqual(row['sha256'], sha(raw))
+        self.assertEqual(row['size'], len(raw))
+        self.assertEqual(json.loads(actual), value)
+        self.assertIn('/usr/lib/example.cache', actual.decode())
+
+    def test_export_does_not_accept_unbound_or_expanded_private_records(self):
+        for field, replacement in (('registration_sha256', 'd' * 64),
+                                   ('catalog_sha256', 'd' * 64),
+                                   ('invocation_id', 'unregistered'),
+                                   ('subject_invocation_id', 'unregistered'),
+                                   ('phase', 'transaction'),
+                                   ('env', 'private-env-sentinel')):
+            with self.subTest(field=field):
+                _, _, files = self.export_failure(lambda value: value.update({field: replacement}))
+                self.assertEqual(files, [])
+
+
 class CommandDiagnosticsTests(unittest.TestCase):
     def failed(self, operation='candidate_version', stderr=b'private-stderr-sentinel'):
         stdout = b'private-stdout-sentinel'

@@ -33,6 +33,8 @@ type supervisor struct {
 	fatal         error
 	stopped       *RuntimeIdentity
 	restoreSealed bool
+
+	mappingFailureRecorded bool
 }
 
 func (s *supervisor) recheck() error {
@@ -59,6 +61,7 @@ func (s *supervisor) recheck() error {
 		return err
 	}
 	if err = verifyMappings(child.PID, l.catalog); err != nil {
+		s.keepMappingFailure(err, s.context)
 		return err
 	}
 	if err = l.verifyUnit(l.invocation, true); err != nil {
