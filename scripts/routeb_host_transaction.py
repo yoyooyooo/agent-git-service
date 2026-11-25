@@ -40,12 +40,12 @@ class HostFailure(Exception):
 def parse(argv):
     parser = argparse.ArgumentParser(prog='ags-maintenance-transaction --mode host')
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('plan', 'run'):
+    for name in ('plan', 'run', 'continue-installed'):
         command = sub.add_parser(name)
         command.add_argument('--host', required=True)
         command.add_argument('--package', default='')
         command.add_argument('--approval', default='')
-        if name == 'run':
+        if name in ('run', 'continue-installed'):
             command.add_argument('--execute', action='store_true')
     inspect = sub.add_parser('status')
     inspect.add_argument('--transaction-id', required=True)
@@ -80,6 +80,11 @@ def dispatch(args):
             print(json.dumps(status(args.journal, args.transaction_id), sort_keys=True))
             return 0
         require(args.execute is True, 'execute_required')
+        if args.command == 'continue-installed':
+            from routeb_native_continuation import run as continue_installed
+            require(args.package and args.approval, 'package_missing')
+            print(json.dumps(continue_installed(args.package, args.approval, args.host), sort_keys=True))
+            return 0
         package = package_for(args)
         planned = preflight(package)
         if not planned['execution_allowed']:

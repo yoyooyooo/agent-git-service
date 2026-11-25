@@ -119,14 +119,19 @@ func (a RecoveryApproval) subject() string {
 }
 
 func (l *loaded) recoveryActor(a RecoveryApproval, checkTime bool) bool {
-	if a.Schema == "ags.routeb-recovery-approval.v1" {
-		return strings.HasPrefix(a.Actor, "human:") && len(a.Actor) > 6 && a.Delegation == nil
+	return l.approvalActor(a.Schema, "ags.routeb-recovery-approval.v1", "ags.routeb-recovery-approval.v2",
+		a.Actor, a.IssuedAt, a.subject(), a.Delegation, checkTime)
+}
+
+func (l *loaded) approvalActor(schema, humanSchema, delegatedSchema, actor, issuedAt, subject string, delegation *Delegation, checkTime bool) bool {
+	if schema == humanSchema {
+		return strings.HasPrefix(actor, "human:") && len(actor) > 6 && delegation == nil
 	}
-	if a.Schema != "ags.routeb-recovery-approval.v2" || !strings.HasPrefix(a.Actor, "agent:") || len(a.Actor) <= 6 || a.Delegation == nil || l.registration.ScopeGrant == nil {
+	if schema != delegatedSchema || !strings.HasPrefix(actor, "agent:") || len(actor) <= 6 || delegation == nil || l.registration.ScopeGrant == nil {
 		return false
 	}
-	d := a.Delegation
-	if d.ScopeGrantSHA256 != l.registration.ScopeGrant.SHA256 || d.Review.Actor != a.Actor || d.Review.SubjectSHA256 != a.subject() || len(d.Review.EvidenceRefs) < 1 || len(d.Review.EvidenceRefs) > 32 {
+	d := delegation
+	if d.ScopeGrantSHA256 != l.registration.ScopeGrant.SHA256 || d.Review.Actor != actor || d.Review.SubjectSHA256 != subject || len(d.Review.EvidenceRefs) < 1 || len(d.Review.EvidenceRefs) > 32 {
 		return false
 	}
 	seen := map[string]bool{}
@@ -138,7 +143,7 @@ func (l *loaded) recoveryActor(a RecoveryApproval, checkTime bool) bool {
 		seen[key] = true
 	}
 	reviewed, err := time.Parse(time.RFC3339, d.Review.ReviewedAt)
-	issued, issuedErr := time.Parse(time.RFC3339, a.IssuedAt)
+	issued, issuedErr := time.Parse(time.RFC3339, issuedAt)
 	return err == nil && issuedErr == nil && !reviewed.After(issued) && (!checkTime || !reviewed.After(time.Now()))
 }
 
@@ -184,8 +189,12 @@ func (l *loaded) readRecoveryApproval(reference interpreterauthority.File, purpo
 }
 
 func recoveryApprovalTime(value RecoveryApproval, checkTime bool, now time.Time) bool {
-	issued, e1 := time.Parse(time.RFC3339, value.IssuedAt)
-	expires, e2 := time.Parse(time.RFC3339, value.ExpiresAt)
+	return approvalTime(value.IssuedAt, value.ExpiresAt, checkTime, now)
+}
+
+func approvalTime(issuedAt, expiresAt string, checkTime bool, now time.Time) bool {
+	issued, e1 := time.Parse(time.RFC3339, issuedAt)
+	expires, e2 := time.Parse(time.RFC3339, expiresAt)
 	return e1 == nil && e2 == nil && expires.After(issued) && (!checkTime || (!now.Before(issued) && now.Before(expires)))
 }
 

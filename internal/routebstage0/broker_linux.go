@@ -27,10 +27,19 @@ func (s *supervisor) serveInvocation(id string) (Invocation, error) {
 func (s *supervisor) validateRuntimeContext(c Context, i Invocation) error {
 	l := s.loaded
 	b := l.registration.Binding
+	late, err := l.invocationLateHash(i, false)
+	if err != nil {
+		return err
+	}
+	grant := ""
+	if l.registration.ScopeGrant != nil {
+		grant = l.registration.ScopeGrant.SHA256
+	}
 	if c.Schema != "ags.routeb-stage0-context.v1" || c.RegistrationID != l.registration.ID || c.RegistrationSHA256 != l.registrationSHA ||
 		c.Root != l.host.Root || c.Operation != "serve" || c.Phase != i.Phase || c.InvocationID != i.ID || c.AttemptID != i.AttemptID || c.AuthorityEpoch != i.AuthorityEpoch ||
 		c.AuthorizationID != i.AuthorizationID || c.BootID != s.platform.boot || c.InterpreterAuthoritySHA256 != l.registration.Interpreter.SHA256 ||
-		c.ToolRevision != b.ToolRevision || c.ToolTree != b.ToolTree || c.ToolManifestSHA256 != b.ToolManifestSHA256 {
+		c.ToolRevision != b.ToolRevision || c.ToolTree != b.ToolTree || c.ToolManifestSHA256 != b.ToolManifestSHA256 ||
+		c.RecoveryRegistrationSHA256 != late || c.ScopeGrantSHA256 != grant {
 		return refused("stage0_runtime_context_binding")
 	}
 	parent, err := processIdentity(c.Supervisor.PID, l.registration.NativeImage.Path, l.registration.NativeImage.SHA256)
@@ -250,7 +259,7 @@ func (s *supervisor) managerAction(method string) error {
 		s.stopped = &before
 		return nil
 	}
-	if method != "manager_start" || (operation != "transaction" && operation != "old-start") {
+	if method != "manager_start" || (operation != "transaction" && operation != "continue-installed" && operation != "old-start") {
 		return refused("stage0_manager_operation_invalid")
 	}
 	phase := "serve-candidate"
@@ -259,6 +268,16 @@ func (s *supervisor) managerAction(method string) error {
 			return refused("stage0_normal_stop_required")
 		}
 		if _, err := s.runtimeExit(s.stopped.Context.InvocationID); err != nil {
+			return err
+		}
+	} else if operation == "continue-installed" {
+		if err := l.loadContinuation(true); err != nil {
+			return err
+		}
+		if err := l.verifyContinuationWindow(true); err != nil {
+			return err
+		}
+		if _, err := s.stoppedIdentity(); err != nil {
 			return err
 		}
 	} else {
@@ -288,8 +307,17 @@ func (s *supervisor) managerAction(method string) error {
 	if err := l.verifyUnit(*target, false); err != nil {
 		return err
 	}
-	ticket := Ticket{"ags.routeb-stage0-ticket.v1", l.registrationSHA, target.ID, target.Phase, target.AttemptID, target.AuthorityEpoch, target.AuthorizationID, l.invocation.ID, l.recoverySHA}
+	lateSHA, err := l.invocationLateHash(l.invocation, true)
+	if err != nil {
+		return err
+	}
+	ticket := Ticket{"ags.routeb-stage0-ticket.v1", l.registrationSHA, target.ID, target.Phase, target.AttemptID, target.AuthorityEpoch, target.AuthorizationID, l.invocation.ID, lateSHA}
 	if err := l.withStateLock(func() error {
+		if phase == "serve-candidate" {
+			if err := l.candidateNotAttempted(); err != nil {
+				return err
+			}
+		}
 		if err := writeExclusive(l.statePath("effects", l.invocation.ID+"-manager-start-intent"), ticket); err != nil {
 			return err
 		}
@@ -297,6 +325,6 @@ func (s *supervisor) managerAction(method string) error {
 	}); err != nil {
 		return err
 	}
-	_, err := systemctl("start", target.Unit)
+	_, err = systemctl("start", target.Unit)
 	return err
 }

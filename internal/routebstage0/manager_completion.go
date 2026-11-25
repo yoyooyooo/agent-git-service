@@ -77,12 +77,9 @@ func managerStartInvocation(r Registration, operation, managerID string, anchors
 }
 
 func (l *loaded) verifyManagerContext(i Invocation, context Context, boot string) error {
-	recoverySHA := ""
-	if i.Operation == "restore" || i.Operation == "old-start" || i.Phase == "serve-old" {
-		recoverySHA = l.recoverySHA
-		if !validDigest(recoverySHA) {
-			return refused("stage0_manager_context_binding")
-		}
+	recoverySHA, err := l.invocationLateHash(i, false)
+	if err != nil {
+		return err
 	}
 	grantSHA := ""
 	if l.registration.ScopeGrant != nil {
@@ -158,11 +155,7 @@ func validateManagerCompletion(value ManagerCompletion, anchor ManagerStart, con
 // Durable exit evidence and present quiescence are both required. Only the
 // former supplies an exit code: systemd may have garbage-collected that code
 // by the time this independent operation consumes it.
-func validateStoppedManager(value ManagerCompletion, anchor ManagerStart, context Context, record ExitRecord,
-	anchorRaw, contextRaw, exitRaw []byte, i Invocation, properties map[string]string, processesGone bool, members []int) error {
-	if err := validateManagerCompletion(value, anchor, context, record, anchorRaw, contextRaw, exitRaw, i); err != nil {
-		return err
-	}
+func validateCurrentStoppedManager(properties map[string]string, processesGone bool, members []int) error {
 	if !processesGone {
 		return refused("stage0_manager_process_not_exited")
 	}

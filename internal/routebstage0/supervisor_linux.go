@@ -149,6 +149,12 @@ func (s *supervisor) dispatch(request Request) Response {
 			return Response{Schema: Protocol, Error: errorCode(err)}
 		}
 		response.Runtime = &value
+	case "stopped_identity":
+		value, err := s.stoppedIdentity()
+		if err != nil {
+			return Response{Schema: Protocol, Error: errorCode(err)}
+		}
+		response.Stopped = &value
 	case "runtime_exit":
 		value, completion, err := s.runtimeExitEvidence(request.InvocationID)
 		if err != nil {
@@ -195,6 +201,14 @@ func Run(id, operation string) error {
 			return err
 		}
 	}
+	if operation == "continue-installed" {
+		if err = l.loadContinuation(true); err != nil {
+			return err
+		}
+		if err = l.verifyContinuationWindow(false); err != nil {
+			return err
+		}
+	}
 	platform, parent, err := platformPrerequisites(l)
 	if err != nil {
 		return err
@@ -226,7 +240,16 @@ func Run(id, operation string) error {
 	if file.Path == "" {
 		return refused("stage0_loader_unregistered")
 	}
+	if operation == "continue-installed" {
+		if _, err = l.prestartStopped(platform.boot, ""); err != nil {
+			return err
+		}
+	}
 	if err = l.claim(operation, parent, platform.boot); err != nil {
+		return err
+	}
+	lateSHA, err := l.invocationLateHash(l.invocation, true)
+	if err != nil {
 		return err
 	}
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath(os.Getpid()), Net: "unix"})
@@ -291,7 +314,7 @@ func Run(id, operation string) error {
 	if l.registration.ScopeGrant != nil {
 		grantSHA = l.registration.ScopeGrant.SHA256
 	}
-	s.context = Context{"ags.routeb-stage0-context.v1", l.registration.ID, l.registrationSHA, l.host.Root, operation, i.Phase, i.ID, i.AttemptID, i.AuthorityEpoch, i.AuthorizationID, platform.boot, parent, s.child, l.registration.Interpreter.SHA256, b.ToolRevision, b.ToolTree, b.ToolManifestSHA256, l.recoverySHA, grantSHA}
+	s.context = Context{"ags.routeb-stage0-context.v1", l.registration.ID, l.registrationSHA, l.host.Root, operation, i.Phase, i.ID, i.AttemptID, i.AuthorityEpoch, i.AuthorizationID, platform.boot, parent, s.child, l.registration.Interpreter.SHA256, b.ToolRevision, b.ToolTree, b.ToolManifestSHA256, lateSHA, grantSHA}
 	close(s.ready)
 	acceptDone := make(chan struct{})
 	go func() {

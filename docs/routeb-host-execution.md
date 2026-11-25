@@ -32,10 +32,12 @@ The host command accepts these operations:
 ```text
 plan --host HOST --package ABSOLUTE_PACKAGE --approval ABSOLUTE_APPROVAL
 run --host HOST --package ABSOLUTE_PACKAGE --approval ABSOLUTE_APPROVAL --execute
+continue-installed --host HOST --package ABSOLUTE_PACKAGE --approval ABSOLUTE_APPROVAL --execute
 status --transaction-id TRANSACTION --journal ABSOLUTE_HOST_JOURNAL
 ```
 
-`plan` and `status` are read-only. `run` requires the explicit execution flag.
+`plan` and `status` are read-only. `run` and `continue-installed` require the
+explicit execution flag and their own registered native invocation.
 The package fixes the runtime root, native manager, candidate, recovery group,
 interpreter, tool bundle, profile and approvals. No manager-directory adapter,
 fault hook, alternate HOME or environment import path is accepted as native
@@ -84,7 +86,7 @@ The installation receipt identifies the actual exact source and tree, binary,
 candidate manifest and tool bundle. It does not relabel that build as a release
 or retain a stale release attestation.
 
-## Installed state rebind component
+## Installed state continuation
 
 `ColdWindow.reopen_installed` lets a new coordinator object read the same
 exact-source cold window after installation completed and before any start
@@ -104,14 +106,53 @@ Any partial install, prior start intent, unknown writer, changed protected
 data or changed evidence is refused. A change outside the recovery group does
 not expand that group's data comparison.
 
-This is a source component, not an executable host continuation command.
-`run` still refuses an existing claim. Native continuation still needs a
-separately registered invocation and independent authorization, durable
-readback of the original root-owned normal-stop evidence, and a candidate
-ticket issuer bound to that invocation. The component's fixture authorization
-and writer callbacks cannot supply those native facts. Source tests exercise
-a separate Python process and preserve the original host failure; they do not
-claim native mount-alias, Docker, manager or production acceptance.
+The isolated Linux host entry connects this component to a separately
+registered `continue-installed` invocation. `run` still refuses an existing
+claim. The initial root registration must reserve exactly one continuation
+slot, the original transaction slot and the existing initial/candidate serve
+slots. A later approval cannot add an invocation to an old registration.
+
+After the actual installed failure, the authorized root provisioner may write
+one `continuation-registration.json` under the fixed native registry. This
+typed record binds the original registration and transaction invocation, host,
+cold binding, generation, original failed host and cold journal hashes, and
+sealed snapshot, manifest and group. Its sole approval is fixed at
+`<transaction>/continuation/approval.json`. The approval's purpose is
+`continue-installed`; restore or old-start permission cannot substitute for it.
+The command's package and approval arguments still select the original fixed
+package/window files. They cannot select the late continuation authority.
+
+Before claiming the new invocation, stage0 reads the original root-owned stop
+intent/result, initial service Context/ExitRecord and normal manager completion.
+It verifies the original failed controller's claim, manager-start anchor,
+Context, bound exit and actual terminal state. Only the covered child exit 78
+failure is admitted; a user journal, unknown exit or still living controller
+cannot establish that the service is stopped. Any candidate ticket, claim,
+manager-start intent or other candidate effect record refuses continuation,
+even if no new process is visible.
+
+Under the existing owner/install/runtime locks, the child reconstructs the
+same stopped identity from that root proof. It reads the old installation from
+the fixed pending preimage and sealed backup, then verifies the complete
+derived installed receipt. It exclusively archives the original journal bytes
+in `pending/continuation/` and writes its own host journal and evidence there.
+The original host failure remains unchanged. The same cold generation then
+uses the original `start_intent`, manager request, handoff consumption and
+observation tail. No stop, copy, restore or install is repeated.
+
+A failed continuation keeps its consumed controller slot. If the root proves
+that no candidate effect was initiated and every claimed controller has the
+covered terminal failure, the independently approved full-restore path may use
+the original normal stop. This is a positive root readback, never a fallback
+after a failed active stop. Once a candidate start is initiated or unknown,
+the prestart restore route is refused. After a successful restore, old-start
+uses the root-sealed historical stopped identity; a legitimately running old
+service does not have to become inactive again to read that history.
+
+Source tests cover the continuation and refusal paths using private fixtures
+and explicit mock root peers. They do not establish a complete native
+continuation, mount-alias, Docker, manager or production acceptance. That
+requires the real isolated Linux lifecycle and its original evidence.
 
 ## Observation and running health
 

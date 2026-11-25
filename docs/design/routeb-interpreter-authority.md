@@ -282,6 +282,33 @@ proof still refuses. Recovery completion reads the same pinned authorization
 and snapshot without requiring a new execution window after the work exits.
 New restore/old-start execution retains its own fresh authorization-time check. The original package and transaction window remain exact historical consumption evidence; their expiry does not authorize or block the independent recovery approval, and one recovery purpose does not renew the other.
 
+Installed continuation has a separate optional invocation slot and fixed
+`continuation-registration.json`. Its typed approval binds the original
+failed installed window and sealed snapshot. It cannot replace or occupy
+`recovery-registration.json`. The candidate still has one serve slot; its
+ticket names either the original transaction issuer or the continuation
+issuer. Context keeps the existing `recovery_registration_sha256` envelope,
+whose value is selected from the verified target invocation/ticket issuer:
+empty for the ordinary candidate, continuation digest for a continued
+candidate, and recovery digest for old serve. A controller's currently loaded
+late record does not choose another invocation's authority.
+
+New ticket issuance, unclaimed serve selection and starts validate the current
+approval window. Consumed claims and their tickets retain strict identity and
+byte validation as historical evidence. An expired consumed continuation
+ticket therefore cannot block a new independently approved old-start, and an
+unclaimed expired ticket cannot become a new permission. Missing or damaged
+claimed-slot evidence is refused, never refunded.
+
+Before any candidate effect, restore may instead consume the original initial
+service's normal-stop evidence and root-proven failed controller exits. The
+producer rechecks current stopped state and writer closure under the original
+locks before sealing the restore result. Its old-start and old-serve consumers
+read the sealed historical normal-stop binding, rather than requiring the
+shared service unit to remain inactive after a legitimate old start. Any
+candidate effect intent, ticket, claim or unknown controller state closes
+this prestart route.
+
 Ordinary full-group restore preserves and rechecks the live root interpreter
 authority and its independent recovery material. It does not reconstruct a
 root prefix or modify system libraries. A separate root reconstruction in a

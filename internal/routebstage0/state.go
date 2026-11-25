@@ -106,6 +106,31 @@ func absentFile(path string) (bool, error) {
 }
 
 func (l *loaded) readTicket(i Invocation) (Ticket, error) {
+	return l.readTicketEvidence(i, true)
+}
+
+func ticketPurpose(r Registration, i Invocation, t Ticket) (string, error) {
+	if i.Phase == "serve-initial" {
+		if t.IssuedByInvocationID == "provision" {
+			return "", nil
+		}
+	} else {
+		for _, issuer := range r.Invocations {
+			if issuer.ID != t.IssuedByInvocationID {
+				continue
+			}
+			if i.Phase == "serve-old" && issuer.Operation == "old-start" {
+				return "old-start", nil
+			}
+			if i.Phase == "serve-candidate" && (issuer.Operation == "transaction" || issuer.Operation == "continue-installed") {
+				return issuer.Operation, nil
+			}
+		}
+	}
+	return "", refused("stage0_ticket_issuer")
+}
+
+func (l *loaded) readTicketEvidence(i Invocation, checkTime bool) (Ticket, error) {
 	raw, err := interpreterauthority.ReadProtected(l.statePath("tickets", i.ID), 65536)
 	if err != nil {
 		return Ticket{}, err
@@ -118,33 +143,27 @@ func (l *loaded) readTicket(i Invocation) (Ticket, error) {
 		t.AttemptID != i.AttemptID || t.AuthorityEpoch != i.AuthorityEpoch || t.AuthorizationID != i.AuthorizationID {
 		return t, refused("stage0_ticket_binding")
 	}
-	if i.Phase == "serve-initial" {
-		if t.IssuedByInvocationID != "provision" {
-			return t, refused("stage0_ticket_issuer")
-		}
-	} else {
-		wanted := "transaction"
-		if i.Phase == "serve-old" {
-			wanted = "old-start"
-		}
-		found := false
-		for _, issuer := range l.registration.Invocations {
-			if issuer.ID == t.IssuedByInvocationID && issuer.Operation == wanted {
-				found = true
-			}
-		}
-		if !found {
-			return t, refused("stage0_ticket_issuer")
-		}
+	purpose, err := ticketPurpose(l.registration, i, t)
+	if err != nil {
+		return t, err
 	}
-	if i.Phase == "serve-old" {
-		if err := l.loadRecovery("old-start"); err != nil {
+	expected := ""
+	if purpose == "old-start" {
+		op := ""
+		if checkTime {
+			op = "old-start"
+		}
+		if err = l.loadRecoveryEvidence(op); err != nil {
 			return t, err
 		}
-		if t.RecoveryRegistrationSHA256 != l.recoverySHA {
-			return t, refused("stage0_ticket_recovery_binding")
+		expected = l.recoverySHA
+	} else if purpose == "continue-installed" {
+		if err = l.loadContinuation(checkTime); err != nil {
+			return t, err
 		}
-	} else if t.RecoveryRegistrationSHA256 != "" {
+		expected = l.continuationSHA
+	}
+	if t.RecoveryRegistrationSHA256 != expected {
 		return t, refused("stage0_ticket_recovery_binding")
 	}
 	return t, nil
@@ -153,30 +172,25 @@ func (l *loaded) readTicket(i Invocation) (Ticket, error) {
 func (l *loaded) claim(operation string, supervisor ProcessIdentity, boot string) error {
 	return l.withStateLock(func() error {
 		matches := []Invocation{}
-		for _, i := range l.registration.Invocations {
-			if i.Operation != operation {
-				continue
-			}
-			if operation == "serve" {
+		if operation == "serve" {
+			var err error
+			matches, err = selectServeInvocations(l.registration.Invocations, l.claimed, func(i Invocation, current bool) (bool, error) {
 				missing, err := absentFile(l.statePath("tickets", i.ID))
-				if err != nil {
-					return err
+				if err != nil || missing {
+					return false, err
 				}
-				if missing {
-					continue
-				}
-				if _, err = l.readTicket(i); err != nil {
-					return err
-				}
-				unclaimed, err := absentFile(l.statePath("claims", i.ID))
-				if err != nil {
-					return err
-				}
-				if !unclaimed {
-					continue
+				_, err = l.readTicketEvidence(i, current)
+				return true, err
+			})
+			if err != nil {
+				return err
+			}
+		} else {
+			for _, i := range l.registration.Invocations {
+				if i.Operation == operation {
+					matches = append(matches, i)
 				}
 			}
-			matches = append(matches, i)
 		}
 		if len(matches) != 1 {
 			return refused("stage0_invocation_missing_ambiguous_or_consumed")
@@ -184,6 +198,59 @@ func (l *loaded) claim(operation string, supervisor ProcessIdentity, boot string
 		l.invocation = matches[0]
 		return writeExclusive(l.statePath("claims", l.invocation.ID), Claim{"ags.routeb-stage0-claim.v1", l.registrationSHA, l.invocation, supervisor, boot})
 	})
+}
+
+// Claimed tickets are historical identity, never fresh start permission. Keep
+// this selection shared with the filesystem adapter so expired consumed
+// candidates cannot block a separately approved old-start slot.
+func selectServeInvocations(invocations []Invocation, claimed func(Invocation) (bool, error), ticket func(Invocation, bool) (bool, error)) ([]Invocation, error) {
+	var result []Invocation
+	for _, i := range invocations {
+		if i.Operation != "serve" {
+			continue
+		}
+		consumed, err := claimed(i)
+		if err != nil {
+			return nil, err
+		}
+		exists, err := ticket(i, !consumed)
+		if err != nil {
+			return nil, err
+		}
+		if consumed && !exists {
+			return nil, refused("stage0_claim_ticket_missing")
+		}
+		if exists && !consumed {
+			result = append(result, i)
+		}
+	}
+	return result, nil
+}
+
+func validateClaim(r Registration, registrationSHA string, i Invocation, claim Claim) error {
+	p := claim.Supervisor
+	if claim.Schema != "ags.routeb-stage0-claim.v1" || claim.RegistrationSHA256 != registrationSHA || claim.Invocation != i ||
+		len(claim.BootID) != 36 || p.PID <= 1 || p.StartTicks == 0 || p.ParentPID != 1 || p.UID != 0 || p.GID != 0 || p.ExecutableSHA256 != r.NativeImage.SHA256 {
+		return refused("stage0_claim_binding")
+	}
+	return nil
+}
+
+func (l *loaded) claimed(i Invocation) (bool, error) {
+	path := l.statePath("claims", i.ID)
+	missing, err := absentFile(path)
+	if err != nil || missing {
+		return false, err
+	}
+	raw, err := interpreterauthority.ReadProtected(path, 65536)
+	var claim Claim
+	if err != nil {
+		return false, err
+	}
+	if err = decodeExact(raw, &claim); err != nil {
+		return false, err
+	}
+	return true, validateClaim(l.registration, l.registrationSHA, i, claim)
 }
 
 func processGone(identity ProcessIdentity) bool {

@@ -104,8 +104,15 @@ def _validate_context(value, registration, host, registration_sha, parent):
     require(type(value['authority_epoch']) is int and value['authority_epoch'] == 1
             and type(value['boot_id']) is str and len(value['boot_id']) == 36, 'stage0_context_shape')
     recovery = value['operation'] in ('restore', 'old-start') or value['phase'] == 'serve-old'
-    require(_digest(value['recovery_registration_sha256']) if recovery else value['recovery_registration_sha256'] == '',
-            'stage0_recovery_context_binding')
+    continuation = value['operation'] == 'continue-installed' or (value['phase'] == 'serve-candidate'
+                                                                  and value['recovery_registration_sha256'] != '')
+    if continuation:
+        require(_digest(value['recovery_registration_sha256']), 'stage0_recovery_context_binding')
+        from routeb_native_continuation import read_late
+        read_late(value, registration, host)
+    else:
+        require(_digest(value['recovery_registration_sha256']) if recovery else value['recovery_registration_sha256'] == '',
+                'stage0_recovery_context_binding')
     grant = registration.get('scope_grant')
     require(value['scope_grant_sha256'] == (grant['sha256'] if grant is not None else ''),
             'stage0_scope_grant_binding')
@@ -152,7 +159,7 @@ def _request(method, *, root=None, invocation_id=None, generation=None, result_s
         require(os.getppid() == parent, 'stage0_parent_changed')
     response = strict_json(bytes(raw))
     require(type(response) is dict and response.get('schema') == PROTOCOL
-            and set(response) <= {'schema', 'ok', 'error', 'context', 'runtime', 'exit', 'manager_completion', 'action', 'writers', 'restore'},
+            and set(response) <= {'schema', 'ok', 'error', 'context', 'runtime', 'stopped', 'exit', 'manager_completion', 'action', 'writers', 'restore'},
             'stage0_response_invalid')
     if response.get('ok') is not True:
         reason = response.get('error')
@@ -165,6 +172,10 @@ def _request(method, *, root=None, invocation_id=None, generation=None, result_s
                 'stage0_response_invalid')
     else:
         require('manager_completion' not in response, 'stage0_response_invalid')
+    if method == 'stopped_identity':
+        require(set(response) == {'schema', 'ok', 'context', 'stopped'}, 'stage0_response_invalid')
+    else:
+        require('stopped' not in response, 'stage0_response_invalid')
     return response
 
 
@@ -187,6 +198,10 @@ def manager_action(root, action):
 
 def runtime_identity(root):
     return _request('runtime_identity', root=root)['runtime']
+
+
+def stopped_identity(root):
+    return _request('stopped_identity', root=root)['stopped']
 
 
 def runtime_exit(root, invocation_id):

@@ -19,6 +19,11 @@ func (s *supervisor) completeRestore(resultSHA string) (RestoreCompletion, error
 	if l.invocation.Operation != "restore" || l.recovery == nil || !validDigest(resultSHA) || s.stopped == nil || s.restoreSealed {
 		return RestoreCompletion{}, refused("stage0_restore_completion_invalid")
 	}
+	if s.stopped.Context.Phase == "serve-initial" {
+		if _, err := s.stoppedIdentity(); err != nil {
+			return RestoreCompletion{}, err
+		}
+	}
 	if _, err := s.runtimeExit(s.stopped.Context.InvocationID); err != nil {
 		return RestoreCompletion{}, err
 	}
@@ -78,8 +83,14 @@ func (s *supervisor) restoreResult() (RestoreCompletion, error) {
 		return value, refused("stage0_restore_completion_binding")
 	}
 	stopped, err := s.serveInvocation(value.StoppedInvocationID)
-	if err != nil || stopped.Phase != "serve-candidate" {
+	if err != nil || (stopped.Phase != "serve-candidate" && stopped.Phase != "serve-initial") {
 		return value, refused("stage0_restore_stopped_phase")
+	}
+	if stopped.Phase == "serve-initial" {
+		proof, err := l.originalStop(s.platform.boot, false)
+		if err != nil || proof.Runtime.Context.InvocationID != value.StoppedInvocationID {
+			return value, refused("stage0_restore_original_stop_binding")
+		}
 	}
 	c, err := s.completedControl(*invocation)
 	if err != nil {

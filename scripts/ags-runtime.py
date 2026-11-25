@@ -36,6 +36,9 @@ def startup_permitted(root, *, native_context=None):
                 from routeb_native_recovery import old_start_binding
                 old_start_binding(root, native)
                 return True
+            if native['phase'] == 'serve-candidate' and native['recovery_registration_sha256']:
+                from routeb_native_continuation import candidate_binding
+                candidate_binding(root, native)
         except Exception:
             return False
     control = root / 'state/ags-autodeploy/local-v2/control'
@@ -78,6 +81,9 @@ def consume_start(root, *, native_context=None):
         if native['phase'] == 'serve-old':
             from routeb_native_recovery import consume_old_generation
             return consume_old_generation(root, native)
+        if native['phase'] == 'serve-candidate' and native['recovery_registration_sha256']:
+            from routeb_native_continuation import candidate_binding
+            candidate_binding(root, native)
     if cold_pending(root):
         from upgrade_identity import runtime_identity
         runtime_identity(root)
@@ -97,6 +103,9 @@ def running_permitted(root, generation, child_pid, *, native_context=None):
             if native['phase'] == 'serve-old':
                 from routeb_native_recovery import old_generation_running
                 return old_generation_running(root, generation, child_pid, native)
+            if native['phase'] == 'serve-candidate' and native['recovery_registration_sha256']:
+                from routeb_native_continuation import candidate_binding
+                candidate_binding(root, native, check_time=False)
         except Exception:
             return False
     if not cold_pending(root):

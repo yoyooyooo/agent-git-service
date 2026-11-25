@@ -25,10 +25,12 @@ native supervisor described below. The coordinator in `routeb_host_execution.py`
 manager components retain source-level tests for backup, independent restore
 verification and a single start. An unknown start is not replayed. These
 component tests do not admit a native transaction.
-The installed-state rebind component can verify an existing installed,
-unstarted cold window without rewriting its failure history or replaying
-prior effects. It does not add a host continuation CLI or native invocation;
-see [its boundary](../routeb-host-execution.md#installed-state-rebind-component).
+The separately registered `continue-installed --execute` host operation can
+rebind an installed, unstarted cold window without rewriting its failure
+history or replaying prior effects. It requires its own typed late authority,
+original root-owned stop and failed-controller evidence, and an unused
+candidate slot. Direct Python invocation remains refused. See the
+[continuation contract](../routeb-host-execution.md#installed-state-continuation).
 
 The public admission gate reports this same blocker for each refused native
 context. Its exception cause preserves the client's specific refusal reason;
@@ -81,6 +83,12 @@ protected unit bytes and the effective manager properties must disable forced
 termination. A native stop timeout fails the transaction and retains the
 supervisor, runtime lock and output pipe while the child remains alive; it does
 not escalate the signal or proceed to backup.
+
+An isolated Linux profile binds the actual non-root account, UID/GID, real
+home, machine ID, host alias and platform of its disposable environment.
+It does not require a production account name or UID. Root registration,
+the live OS identity and the delegated grant must agree on that exact profile;
+this does not change production host templates or admit a production root.
 Every v2 unit also has exactly one fixed `ExecStopPost` command using the
 same registered native image:
 `ags-routeb-stage0 manager-complete --registration <id> --operation <operation>`.
