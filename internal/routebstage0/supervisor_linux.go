@@ -265,7 +265,7 @@ func Run(id, operation string) error {
 	}
 	command := exec.Command(loader[0], append(loader[1:], python[1:]...)...)
 	command.Dir = l.host.ToolBundle
-	command.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "HOME=" + l.host.Home, "USER=" + l.host.User, "LOGNAME=" + l.host.User}
+	command.Env = append(l.catalog.ProcessEnvironment(), "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME="+l.host.Home, "USER="+l.host.User, "LOGNAME="+l.host.User)
 	command.SysProcAttr = childProcessAttributes(l.host.UID, l.host.GID)
 	command.Stdin = nil
 	command.Stdout = os.Stdout

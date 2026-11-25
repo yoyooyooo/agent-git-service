@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 )
 
 // RegisteredCatalog is created only by reading the fixed root registry. Its
@@ -50,6 +51,17 @@ func OpenRegistered(id, expectedSHA string, expected Binding) (*RegisteredCatalo
 }
 
 func (r *RegisteredCatalog) Evidence() Evidence { return r.evidence }
+
+// ProcessEnvironment returns the fixed, validated resource selection. It does
+// not inherit caller variables or expose the registered map for mutation.
+func (r *RegisteredCatalog) ProcessEnvironment() []string {
+	out := make([]string, 0, len(r.document.Environment))
+	for name, value := range r.document.Environment {
+		out = append(out, name+"="+value)
+	}
+	sort.Strings(out)
+	return out
+}
 
 func (r *RegisteredCatalog) Recheck() error {
 	_, err := OpenRegistered(r.id, r.digest, r.binding)

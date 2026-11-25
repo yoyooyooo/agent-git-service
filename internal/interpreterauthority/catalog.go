@@ -371,7 +371,13 @@ func (value Document) Validate() error {
 		value.Linux.LibraryDirectory != filepath.Join(Registry, value.ID, "runtime-libraries")) {
 		return refusal("authority_linux_entry_invalid")
 	}
-	if len(value.Environment) != 2 || value.Environment["LANG"] != "C.UTF-8" || value.Environment["LC_ALL"] != "C.UTF-8" {
+	timezoneDirectory := filepath.Join(Registry, value.ID, "timezone")
+	environment := map[string]string{"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+	if value.Linux != nil {
+		environment["TZ"] = "UTC0"
+		environment["TZDIR"] = timezoneDirectory
+	}
+	if !reflect.DeepEqual(value.Environment, environment) {
 		return refusal("authority_environment_invalid")
 	}
 	pub := value.Publisher
@@ -424,6 +430,7 @@ func (value Document) Validate() error {
 		}
 	}
 	seen := map[string]bool{}
+	timezoneRegistered := false
 	for _, external := range value.External {
 		e := external.Entry
 		if err := e.validate(true); err != nil {
@@ -433,6 +440,9 @@ func (value Document) Validate() error {
 			return refusal("authority_duplicate_path")
 		}
 		seen[e.Path] = true
+		if e.Path == timezoneDirectory && e.Kind == "directory" {
+			timezoneRegistered = true
+		}
 		if e.Kind == "file" {
 			if external.Asset == nil {
 				return refusal("authority_recovery_asset_missing")
@@ -449,6 +459,7 @@ func (value Document) Validate() error {
 		}
 	}
 	seen = map[string]bool{}
+	timezoneClosed := false
 	for _, search := range value.SearchPaths {
 		if !absolute(search.Path) || seen[search.Path] || within(search.Path, value.Prefix.Root) ||
 			(search.State != "absent" && search.State != "closed-directory") {
@@ -465,6 +476,12 @@ func (value Document) Validate() error {
 		if search.State == "absent" && len(search.Members) != 0 {
 			return refusal("authority_search_path_invalid")
 		}
+		if search.Path == timezoneDirectory && search.State == "closed-directory" && len(search.Members) == 0 {
+			timezoneClosed = true
+		}
+	}
+	if value.Linux != nil && (!timezoneRegistered || !timezoneClosed) {
+		return refusal("authority_linux_search_unbound")
 	}
 	seen = map[string]bool{}
 	for _, image := range value.NativeImages {
