@@ -120,6 +120,12 @@
       "object": "1b047d1961e654591fc84ce1dccaa5f48e0c1c51",
       "rule": "credential-in-url",
       "reason": "Synthetic user/sentinel-token example.test URL and non-URL sentinels exercise existing SQLite status/notification safety after typed transport classification; no provider request uses this input."
+    },
+    {
+      "path": "internal/gitlabintegration/mirror_facts_test.go",
+      "object": "4c7a476e2373a4b2cc24338f8b19f9a65071a7ac",
+      "rule": "credential-in-url",
+      "reason": "Independent agent source review: documentation-host URLs with literal sentinel credentials test rejection and redaction by the read-only mirror facts API; no real credential or provider request is used."
     }
   ],
   "historical_examples": [
