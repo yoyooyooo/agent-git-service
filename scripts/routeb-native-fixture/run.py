@@ -338,11 +338,18 @@ def export(registry, destination, uid, gid):
     mapping_failures = {}
     for row in registration['invocations']:
         path = registry / 'state/failures' / (row['id'] + '.json')
-        if path.is_file():
+        try:
+            if not path.is_file():
+                continue
             value, raw = read_json(path, 8 << 20)
-            if exportable_mapping_failure(value, registration, sha(registration_raw), row['id']):
-                candidates.append(path)
-                mapping_failures[path] = raw
+            if not exportable_mapping_failure(value, registration, sha(registration_raw), row['id']):
+                continue
+        except (Refused, OSError, UnicodeError):
+            # A failed diagnostic write may leave a partial file. It must not
+            # hide the original result/index or relax required effect reads.
+            continue
+        candidates.append(path)
+        mapping_failures[path] = raw
     for suffix in ('continuation/host-execution.json', 'continuation/observation/capture.json'):
         path = root / 'state/ags-autodeploy/local-v2/pending' / suffix
         if path.is_file():
