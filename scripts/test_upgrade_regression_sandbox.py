@@ -115,7 +115,7 @@ class SandboxTests(unittest.TestCase):
                 child.terminate()
                 child.wait(timeout=5)
 
-    def test_real_shell_runner_uses_temp_root_and_terminal_trap(self):
+    def test_real_shell_runner_preserves_home_parent_and_terminal_trap(self):
         for passed in (True, False):
             case = self.owner().path
             scripts = case / 'scripts'
@@ -137,8 +137,8 @@ class SandboxTests(unittest.TestCase):
             self.assertEqual(len(records), 1, result.stdout)
             receipt = records[0]
             sandbox = Path(receipt['root'])
-            self.assertEqual(sandbox.parent, temporary.resolve())
-            self.assertEqual(list(home.iterdir()), [])
+            self.assertEqual(sandbox.parent, home.resolve())
+            self.assertEqual(list(temporary.iterdir()), [])
             if not passed:
                 self.assertEqual(receipt['cleanup'], 'retained_failed')
                 self.assertTrue((sandbox / resource.RECEIPT).exists())
@@ -167,8 +167,10 @@ class SandboxTests(unittest.TestCase):
         (scripts / 'probe.py').write_text(program)
         temporary = case / 'tmp'
         temporary.mkdir()
+        home = case / 'home'
+        home.mkdir()
         child = subprocess.Popen(['bash', str(scripts / 'upgrade-regression.sh')], cwd=case,
-                                 env=dict(os.environ, TMPDIR=str(temporary)),
+                                 env=dict(os.environ, HOME=str(home), TMPDIR=str(temporary)),
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         pids = []
         try:

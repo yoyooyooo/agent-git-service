@@ -222,7 +222,10 @@ release/binding/installer-shell tests. New full-restore, handoff, pin and integr
 included through `scripts/regression_gate.list` and the existing Fork CI step.
 The Source and governance job has a 30-minute bound for the expanded sequential
 source suites and owning Go checks. Each entry has isolated HOME/TMPDIR/cwd
-under one owner-marked system temporary directory, honoring the caller's TMPDIR.
+under one owner-marked directory in the caller's HOME. This preserves the
+trusted-ancestor contract of identity-reader fixtures; a world-writable /tmp
+ancestor cannot satisfy those positive cases. Entries still receive their own
+isolated HOME and TMPDIR under that root.
 The runner's terminal trap records the actual exit status. Top-level INT/TERM
 cancellation terminates its tracked supervisors with TERM and waits for them,
 while preserving the caller's 130/143 exit code. Each Python entry runs

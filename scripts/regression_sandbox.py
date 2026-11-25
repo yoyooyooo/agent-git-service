@@ -207,7 +207,9 @@ def main() -> int:
     run.add_argument('argv', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.command == 'create':
-        sandbox = create(None, args.owner_pid)
+        # Preserve the runner's trusted-ancestor fixture contract. Linux /tmp
+        # is world-writable and cannot host the positive identity-reader cases.
+        sandbox = create(Path.home(), args.owner_pid)
         print(f'{sandbox.path}\t{sandbox.identity}')
     elif args.command == 'finish':
         print(json.dumps(finish(Sandbox(args.root, args.identity, args.owner_pid), args.exit_code)))
