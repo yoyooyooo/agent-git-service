@@ -120,21 +120,34 @@ class HostPackageBoundaryTests(unittest.TestCase):
             command.assert_not_called()
 
     def test_bootstrap_cli_plan_and_activate_are_closed_before_any_binding_read(self):
-        from contextlib import redirect_stderr, redirect_stdout
+        from contextlib import ExitStack, redirect_stderr, redirect_stdout
         import io
         import json
         import sys
         import routeb_native_bootstrap as bootstrap
-        for command in ('plan', 'activate'):
+        import routeb_stage0_client as peer_client
+        for system, command in ((system, command) for system in ('linux', 'darwin')
+                                for command in ('plan', 'activate')):
             stdout, stderr = io.StringIO(), io.StringIO()
             argv = ['routeb-native-bootstrap', command, '--root', str(self.root),
                     '--approval', str(self.root / 'approval.json')]
-            with self.subTest(command=command), patch.object(sys, 'argv', argv), \
-                    patch.object(bootstrap, 'read_bindings', side_effect=AssertionError('binding read')) as read, \
-                    redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.subTest(system=system, command=command), ExitStack() as stack:
+                # Control child entry facts without changing the CLI's real account/interpreter.
+                stack.enter_context(patch.object(peer_client, 'sys', SimpleNamespace(
+                    platform=system, dont_write_bytecode=True, flags=SimpleNamespace(
+                        isolated=0, ignore_environment=0, no_site=0, no_user_site=0))))
+                stack.enter_context(patch.object(peer_client, 'os', SimpleNamespace(
+                    **{name: lambda: 1001 for name in ('getuid', 'geteuid', 'getgid', 'getegid')})))
+                stack.enter_context(patch.object(sys, 'argv', argv))
+                read = stack.enter_context(patch.object(bootstrap, 'read_bindings',
+                                                       side_effect=AssertionError('binding read')))
+                stack.enter_context(redirect_stdout(stdout))
+                stack.enter_context(redirect_stderr(stderr))
                 self.assertEqual(bootstrap.main(), 78)
             read.assert_not_called()
+            diagnostic = 'code=stage0_isolated_interpreter_required\n' if system == 'linux' else ''
             if command == 'plan':
+                self.assertEqual(stderr.getvalue(), diagnostic)
                 value = json.loads(stdout.getvalue())
                 self.assertEqual(value['status'], 'blocked')
                 self.assertFalse(value['native_execution_allowed'])
@@ -143,7 +156,8 @@ class HostPackageBoundaryTests(unittest.TestCase):
                 self.assertEqual(value['blockers'], ['interpreter_full_closure_required'])
                 self.assertEqual(value['effects'], [])
             else:
-                self.assertEqual(stderr.getvalue(), 'code=interpreter_full_closure_required\n')
+                self.assertEqual(stdout.getvalue(), '')
+                self.assertEqual(stderr.getvalue(), diagnostic + 'code=interpreter_full_closure_required\n')
 
     def test_verified_bundle_launcher_still_refuses_runtime_execution(self):
         """Synthetic root trust exercises the gate, never a native acceptance."""
@@ -154,15 +168,22 @@ class HostPackageBoundaryTests(unittest.TestCase):
         import sys
         import routeb_launcher as launcher
         import routeb_host_identity
+        import routeb_stage0_client as peer_client
         import upgrade
         import upgrade_identity
         bundle = self.root / 'bundle'
         bundle.mkdir(mode=0o700)
         launcher_raw = Path(launcher.__file__).read_bytes()
         trusted = lambda path, **_kwargs: b'{}' if path.name == 'manifest.json' else launcher_raw
-        for command in ('doctor', 'serve'):
+        for system, command in ((system, command) for system in ('linux', 'darwin')
+                                for command in ('doctor', 'serve')):
             stdout, stderr = io.StringIO(), io.StringIO()
-            with self.subTest(command=command), ExitStack() as stack:
+            with self.subTest(system=system, command=command), ExitStack() as stack:
+                stack.enter_context(patch.object(peer_client, 'sys', SimpleNamespace(
+                    platform=system, dont_write_bytecode=True, flags=SimpleNamespace(
+                        isolated=1, ignore_environment=1, no_site=1, no_user_site=1))))
+                stack.enter_context(patch.object(peer_client, 'os', SimpleNamespace(
+                    **{name: lambda: 1001 for name in ('getuid', 'geteuid', 'getgid', 'getegid')})))
                 stack.enter_context(patch.object(sys, 'path', list(sys.path)))
                 stack.enter_context(patch.object(sys, 'argv', list(sys.argv)))
                 stack.enter_context(patch.object(sys, 'flags', SimpleNamespace(
@@ -181,7 +202,9 @@ class HostPackageBoundaryTests(unittest.TestCase):
                 self.assertEqual(launcher.main(['--root', str(self.root), command]), 78)
                 verifier.assert_called_once()
                 runtime.assert_not_called()
+            diagnostic = 'code=stage0_fixed_bundle_required\n' if system == 'linux' else ''
             if command == 'doctor':
+                self.assertEqual(stderr.getvalue(), diagnostic)
                 value = json.loads(stdout.getvalue())
                 self.assertEqual(value['status'], 'blocked')
                 self.assertFalse(value['native_execution_allowed'])
@@ -189,7 +212,8 @@ class HostPackageBoundaryTests(unittest.TestCase):
                 self.assertEqual(value['blockers'], ['interpreter_full_closure_required'])
                 self.assertEqual(value['effects'], [])
             else:
-                self.assertEqual(stderr.getvalue(), 'code=interpreter_full_closure_required\n')
+                self.assertEqual(stdout.getvalue(), '')
+                self.assertEqual(stderr.getvalue(), diagnostic + 'code=interpreter_full_closure_required\n')
 
     def profile(self):
         identity = SimpleNamespace(root=str(self.root), platform='Linux', uid=1000)
