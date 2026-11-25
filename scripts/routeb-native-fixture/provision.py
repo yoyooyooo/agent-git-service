@@ -41,11 +41,11 @@ def parent_directories(path, uid=0, gid=0, mode=0o755):
     require(path.resolve() == path and path.is_dir(), 'directory_alias')
 
 
-def as_user(account, argv, *, timeout=120, cwd=None):
+def as_user(account, argv, *, operation, timeout=120, cwd=None):
     return command(['/usr/sbin/runuser', '-u', account.pw_name, '--', '/usr/bin/env', '-i',
                     'HOME=' + account.pw_dir, 'USER=' + account.pw_name,
                     'PATH=/usr/local/bin:/usr/bin:/bin', 'LANG=C.UTF-8',
-                    *map(str, argv)], timeout=timeout, cwd=cwd)
+                    *map(str, argv)], operation=operation, timeout=timeout, cwd=cwd)
 
 
 def unit(registration_id, operation, stage0):
@@ -108,9 +108,9 @@ def provision(source, build, source_evidence, authorization_path, authorization_
     require(dispatch['event'] == 'workflow_dispatch' and dispatch['runner_environment'] == 'github-hosted'
             and dispatch['repository'] == 'yoyooyooo/agent-git-service'
             and transaction == 'gha-%s-%s' % (dispatch['run_id'], dispatch['attempt']), 'dispatch_scope')
-    require(as_user(account, ['git', '-C', source, 'rev-parse', 'HEAD']).decode().strip() == revision
-            and as_user(account, ['git', '-C', source, 'rev-parse', 'HEAD^{tree}']).decode().strip() == tree
-            and not as_user(account, ['git', '-C', source, 'status', '--porcelain']), 'source_changed')
+    require(as_user(account, ['git', '-C', source, 'rev-parse', 'HEAD'], operation='source_head').decode().strip() == revision
+            and as_user(account, ['git', '-C', source, 'rev-parse', 'HEAD^{tree}'], operation='source_tree').decode().strip() == tree
+            and not as_user(account, ['git', '-C', source, 'status', '--porcelain'], operation='source_status'), 'source_changed')
     base = Path(account.pw_dir) / '.local/state/ags-routeb-native'
     parent_directories(base, account.pw_uid, account.pw_gid, 0o700)
     parent = mkdir(base / transaction, account.pw_uid, account.pw_gid)
@@ -153,7 +153,8 @@ def provision(source, build, source_evidence, authorization_path, authorization_
     interpreter = {'path': str(interpreter_path), 'sha256': sha(read_bytes(interpreter_path, 128 << 20))}
     catalog_input = exclusive_json(evidence / 'catalog-input.json', {
         'id': transaction, 'sha256': catalog_ref['sha256'], 'binding': binding})
-    catalog_result = command([str(build / 'native-tools'), 'verify-catalog', catalog_input['path']], timeout=120)
+    catalog_result = command([str(build / 'native-tools'), 'verify-catalog', catalog_input['path']],
+                             operation='verify_catalog', timeout=120)
     exclusive(evidence / 'catalog-result.json', catalog_result)
     grant_ref = authorization.grant(registry / 'scope-grant.json', auth, host)
     stage = mkdir(registry / 'stage0', mode=0o755)
@@ -185,7 +186,7 @@ def provision(source, build, source_evidence, authorization_path, authorization_
     binary_sha = sha(binary_raw)
     exclusive(package_dir / 'candidate-bin', binary_raw, mode=0o700, **user)
     exclusive(root / 'bin/gh-server', binary_raw, mode=0o700, **user)
-    version_raw = as_user(account, [root / 'bin/gh-server', '--version'], timeout=15)
+    version_raw = as_user(account, [root / 'bin/gh-server', '--version'], operation='candidate_version', timeout=15)
     version = object_json(version_raw)
     require(version.get('schema') == 'ags.build.v1' and version.get('command') == 'gh-server'
             and version.get('revision') == revision and version.get('tree') == tree
@@ -224,7 +225,7 @@ def provision(source, build, source_evidence, authorization_path, authorization_
     env_ref = exclusive(root / 'config/runtime.env',
                         ''.join(k + '=' + shlex.quote(v) + '\n' for k, v in environment.items()).encode(), **user)
     exclusive(root / 'logs/runtime.log', b'', **user)
-    seed = as_user(account, [build / 'native-tools', 'seed-db', root / 'data/main.db'])
+    seed = as_user(account, [build / 'native-tools', 'seed-db', root / 'data/main.db'], operation='seed_database')
     exclusive(evidence / 'database-seed.json', seed)
     inventory_module = importlib.import_module('upgrade_inventory')
     schema_sha = inventory_module.schema_digest(root / 'data/main.db')

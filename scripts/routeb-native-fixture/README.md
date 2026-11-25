@@ -24,6 +24,16 @@ authorization text into a dispatch input, issue, log, or artifact. The workflow
 does not create credentials or change deployment settings. Its token has only
 repository contents and Actions read permissions.
 
+Bind the digest to the bytes the CLI actually transports. GitHub CLI v2.102.0
+removes all trailing CR/LF bytes from noninteractive `gh secret set` stdin
+(`getBody` in `pkg/cmd/secret/set/set.go`); a raw-byte subprocess pipe does not
+prevent this. Keep the reviewed source unchanged. If it ends in CR/LF, retain a
+private transport copy with only those final bytes removed, check that its JSON
+value is unchanged, and record both digests. Feed that copy through stdin and
+use its SHA256 for `authorization_sha256`. Do not put private contents in argv.
+The workflow must continue to reject any mismatch, and the operator must remove
+the temporary secret after every terminal result.
+
 The original injected-only job remains a separate default-off input. It cannot
 stand in for this job. Both jobs use GitHub-hosted runners.
 
@@ -79,6 +89,13 @@ Original failed and continued journals are distinct. Each result retains the
 actual exit code and source binding. A terminal failure is UNVERIFIED, never an
 empty or successful observation. Unsupported VM capability, tool closure or
 manager behavior is recorded as a real failure for diagnosis, not bypassed.
+
+A failed subprocess retains a fixed operation label, its actual return code,
+and stdout/stderr byte lengths and SHA256 digests in `command_failure`. Native
+tools can add only a matching fixed stage and an allowlisted reason. Unknown
+text and extra fields stay opaque; argv, environment and output contents are
+not exported. These fields describe a failure, not native admission. Digests
+identify captured output and do not establish a root cause on their own.
 
 Passing this job proves only the exercised disposable Linux cases for its exact
 source and VM. It is not production activation, Darwin acceptance, a complete

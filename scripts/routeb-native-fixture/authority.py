@@ -145,7 +145,7 @@ def produce(pin_path, authority_id, binding, inspector):
     libraries = directory / 'runtime-libraries'
 
     def inspect(path):
-        value = object_json(command([str(inspector), 'inspect-elf', str(path)], timeout=10))
+        value = object_json(command([str(inspector), 'inspect-elf', str(path)], operation='inspect_elf', timeout=10))
         if value['native']:
             images[str(path)] = value['image']
             return value['image']

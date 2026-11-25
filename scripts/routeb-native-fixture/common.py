@@ -20,6 +20,85 @@ class Refused(RuntimeError):
     pass
 
 
+# Closed vocabulary shared with native-tools' diagnostic boundary. Unknown
+# error text, including text that resembles a code, is never exported.
+NATIVE_FAILURE_REASONS = frozenset("""
+already_exists authority_absence_changed authority_acl_unsupported authority_ancestor_not_directory
+authority_ancestor_unavailable authority_asset_changed authority_asset_not_independent
+authority_asset_unreadable authority_binding_invalid authority_binding_mismatch
+authority_directory_invalid authority_document_changed authority_document_size
+authority_duplicate_path authority_elf_dynamic authority_elf_dynamic_disagreement
+authority_elf_dynamic_duplicate authority_elf_dynamic_unmapped authority_elf_dynamic_unterminated
+authority_elf_flags_unsupported authority_elf_interpreter authority_elf_invalid
+authority_elf_loader_extension_unsupported authority_elf_mapping_ambiguous_or_gap
+authority_elf_mapping_discontinuous authority_elf_mapping_invalid authority_elf_mapping_unmapped
+authority_elf_mapping_unreadable authority_elf_string_invalid authority_elf_string_offset
+authority_elf_string_table_missing authority_elf_string_table_size authority_elf_string_termination
+authority_entry_invalid authority_environment_invalid authority_executable_invalid
+authority_executable_not_native authority_expanded_size authority_fat_image_unsupported
+authority_file_invalid authority_file_unavailable authority_file_unsafe authority_invalid
+authority_inventory_unavailable authority_json_depth authority_json_duplicate authority_json_invalid
+authority_json_missing authority_json_null authority_json_shape authority_json_trailing
+authority_json_unknown authority_kind_invalid authority_link_changed authority_link_cycle
+authority_link_dangling authority_link_depth authority_link_escape authority_link_invalid
+authority_linux_entry_invalid authority_linux_entry_required authority_linux_external_rpath
+authority_linux_library_member authority_linux_loader_missing authority_linux_needed_soname
+authority_linux_needed_unbound authority_linux_needed_unsupported authority_linux_search_unbound
+authority_linux_search_unsupported authority_macho_invalid authority_macho_loader_unsupported
+authority_member_changed authority_member_count authority_member_kind_changed
+authority_member_unavailable authority_metadata_changed authority_metadata_unavailable
+authority_metadata_unsupported authority_native_architecture authority_native_dependency_missing
+authority_native_image_changed authority_native_image_invalid authority_native_image_set
+authority_native_image_unavailable authority_native_loader_configuration_missing
+authority_native_loader_missing authority_native_needed_path authority_native_platform
+authority_native_resolution_incomplete authority_native_search_unbound
+authority_native_search_unsupported authority_native_soname_mismatch authority_parent_missing
+authority_path_outside_boundary authority_path_untrusted authority_prefix_member_set
+authority_prefix_metadata_unsupported authority_prefix_unavailable authority_publisher_invalid
+authority_read_limit authority_recovery_asset_invalid authority_recovery_asset_mismatch
+authority_recovery_asset_missing authority_reference_invalid authority_search_members_changed
+authority_search_path_invalid authority_search_unavailable authority_xattrs_changed catalog_error
+database_error elf_architecture elf_interpreter end_of_file filesystem_error fixture_command
+fixture_database_path invalid_elf invalid_json json_type_mismatch not_found operation_error
+output_encoding permission_denied publisher_archive_changed publisher_archive_invalid
+publisher_archive_stream_limit publisher_archive_trailing publisher_checksum_mismatch
+publisher_checksum_missing_or_duplicate publisher_checksums_unreadable publisher_expanded_size
+publisher_link_invalid publisher_member_collision publisher_member_count publisher_member_path
+publisher_member_size publisher_member_unsupported publisher_parent_invalid
+publisher_prefix_content_mismatch publisher_prefix_link_mismatch publisher_prefix_member_mismatch
+publisher_prefix_member_set unexpected_eof
+""".split())
+NATIVE_COMMAND_STAGES = {
+    'inspect_elf': 'inspect-elf', 'verify_catalog': 'verify-catalog', 'seed_database': 'seed-db',
+}
+COMMAND_OPERATIONS = frozenset({
+    'source_metadata', 'source_head', 'source_tree', 'source_status', 'candidate_version',
+    'inspect_elf', 'verify_catalog', 'seed_database', 'manager_properties', 'manager_reload', 'initial_start',
+})
+
+
+class CommandFailed(Refused):
+    def __init__(self, operation, result):
+        super().__init__('command_failed')
+        self.diagnostic = {
+            'operation': operation, 'returncode': result.returncode,
+            'stdout': {'bytes': len(result.stdout), 'sha256': sha(result.stdout)},
+            'stderr': {'bytes': len(result.stderr), 'sha256': sha(result.stderr)},
+        }
+        # Only the fixed native tool may supply a closed, stage-matched reason.
+        # Raw argv, environment, stdout and stderr never enter the result.
+        if operation in NATIVE_COMMAND_STAGES:
+            try:
+                value = object_json(result.stderr, 4096)
+                if (set(value) == {'schema', 'stage', 'reason'}
+                        and value['schema'] == 'ags.routeb-fixture-command-error.v1'
+                        and value['stage'] == NATIVE_COMMAND_STAGES[operation]
+                        and type(value['reason']) is str and value['reason'] in NATIVE_FAILURE_REASONS):
+                    self.diagnostic['native_tools'] = value
+            except Refused:
+                pass
+
+
 def require(condition, code):
     if not condition:
         raise Refused(code)
@@ -168,7 +247,9 @@ def process_identity(pid):
             'uid': identities['Uid'], 'gid': identities['Gid']}
 
 
-def command(argv, *, timeout=60, cwd=None, env=None):
+def command(argv, *, operation, timeout=60, cwd=None, env=None):
+    require(operation in COMMAND_OPERATIONS, 'command_operation_invalid')
     result = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, timeout=timeout)
-    require(result.returncode == 0, 'command_failed')
+    if result.returncode != 0:
+        raise CommandFailed(operation, result)
     return result.stdout

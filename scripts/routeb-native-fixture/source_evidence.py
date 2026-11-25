@@ -34,15 +34,15 @@ def collect(directory, run_id):
 
     def get(route):
         return object_json(command(['gh', 'api', '--hostname', 'github.com',
-                                   'repos/' + REPOSITORY + route], timeout=60), 8 << 20)
+                                   'repos/' + REPOSITORY + route], operation='source_metadata', timeout=60), 8 << 20)
 
     repo, commit, ci = get(''), get('/commits/' + revision), get('/actions/runs/' + str(run_id))
     workflow = get('/actions/workflows/' + str(ci['workflow_id']))
     tree = validate(repo, commit, ci, workflow, revision)
     require(os.environ['GITHUB_REF'] == 'refs/heads/' + repo['default_branch'], 'default_branch_dispatch_required')
-    require(command(['git', 'rev-parse', 'HEAD']).decode().strip() == revision
-            and command(['git', 'rev-parse', 'HEAD^{tree}']).decode().strip() == tree
-            and not command(['git', 'status', '--porcelain']), 'source_checkout_changed')
+    require(command(['git', 'rev-parse', 'HEAD'], operation='source_head').decode().strip() == revision
+            and command(['git', 'rev-parse', 'HEAD^{tree}'], operation='source_tree').decode().strip() == tree
+            and not command(['git', 'status', '--porcelain'], operation='source_status'), 'source_checkout_changed')
     directory.mkdir(mode=0o700)
     for name, value in [('repository', repo), ('commit', commit), ('ci-run', ci), ('workflow', workflow)]:
         exclusive_json(directory / (name + '.json'), value)
