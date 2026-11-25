@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 from approval_fault import (FAN_OPEN_PERM, FAN_Q_OVERFLOW, METADATA,
                             events, select_checkpoint, start_paths)
@@ -19,6 +20,73 @@ import authorization
 from common import Refused, canonical, exclusive, fingerprint, object_json, read_bytes, sha
 from provision import unit
 from source_evidence import validate
+import run as fixture_run
+
+
+class LifecycleOwnershipTests(unittest.TestCase):
+    def attempt(self, *, execute, provision_error=None, operation_error=None):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            registry = base / 'registry'
+            transaction = registry / 'gha-12-1'
+            transaction.mkdir(parents=True)
+            (transaction / 'fixture-evidence').mkdir()
+            before = exclusive(transaction / 'stage0-registration.json', canonical({
+                'invocations': [{'unit': 'existing-fixture.service'}], 'host_profile': {}}))
+            output = base / 'output'
+            output.mkdir()
+            argv = ['fixture', '--source', str(base), '--build', str(base),
+                    '--source-evidence', str(base), '--authorization-file', str(base / 'authorization.json'),
+                    '--authorization-sha256', '1' * 64, '--uid', str(os.getuid()),
+                    '--transaction', 'gha-12-1', '--scenario', 'continue', '--export-directory', str(output)]
+            if execute:
+                argv.append('--execute')
+            with mock.patch.object(sys, 'argv', argv), mock.patch.object(fixture_run, 'REGISTRY', registry), \
+                 mock.patch.object(fixture_run, 'provision', side_effect=provision_error) as prepare, \
+                 mock.patch.object(fixture_run, 'execute', side_effect=operation_error) as operation, \
+                 mock.patch.object(fixture_run.subprocess, 'run', return_value=mock.Mock(returncode=0)) as manager, \
+                 mock.patch.object(fixture_run, 'properties', return_value={'MainPID': '0', 'ControlPID': '0'}), \
+                 mock.patch.object(fixture_run, 'file_reference', return_value=canonical({'uid': os.getuid(), 'gid': os.getgid()})), \
+                 mock.patch.object(fixture_run, 'export'), mock.patch('builtins.print'):
+                self.assertEqual(fixture_run.main(), 78)
+                self.assertEqual(sha((transaction / 'stage0-registration.json').read_bytes()), before['sha256'])
+                if not execute or provision_error is not None:
+                    manager.assert_not_called()
+                    operation.assert_not_called()
+                    self.assertEqual(list((transaction / 'fixture-evidence').iterdir()), [])
+                else:
+                    manager.assert_called_once_with(['/usr/bin/systemctl', 'stop', 'existing-fixture.service'],
+                                                    capture_output=True, timeout=150)
+                if not execute:
+                    prepare.assert_not_called()
+
+    def test_missing_execute_does_not_stop_existing_instance(self):
+        self.attempt(execute=False)
+
+    def test_rejected_provision_does_not_stop_existing_instance(self):
+        self.attempt(execute=True, provision_error=Refused('vm_preflight_refused'))
+
+    def test_existing_transaction_does_not_stop_existing_instance(self):
+        self.attempt(execute=True, provision_error=FileExistsError('transaction exists'))
+
+    def test_owned_provision_keeps_cleanup_after_execution_failure(self):
+        self.attempt(execute=True, operation_error=Refused('native_execution_failed'))
+
+    def test_invalid_transaction_is_rejected_before_registry_derivation(self):
+        class RegistryGuard:
+            def __truediv__(self, other):
+                raise AssertionError('registry derived from unvalidated transaction')
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            argv = ['fixture', '--source', '/source', '--build', '/build', '--source-evidence', '/evidence',
+                    '--authorization-file', '/input', '--authorization-sha256', '1' * 64, '--uid', str(os.getuid()),
+                    '--transaction', '../existing', '--scenario', 'continue', '--export-directory', str(output), '--execute']
+            with mock.patch.object(sys, 'argv', argv), mock.patch.object(fixture_run, 'REGISTRY', RegistryGuard()), \
+                 mock.patch.object(fixture_run, 'provision') as prepare, \
+                 mock.patch.object(fixture_run.subprocess, 'run') as manager, mock.patch('builtins.print'):
+                self.assertEqual(fixture_run.main(), 78)
+                prepare.assert_not_called()
+                manager.assert_not_called()
 
 
 class CheckpointTests(unittest.TestCase):

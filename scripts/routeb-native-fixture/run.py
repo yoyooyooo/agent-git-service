@@ -309,17 +309,22 @@ def main():
     parser.add_argument('--scenario', choices=('continue', 'expired'), required=True)
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args()
-    registry = REGISTRY / args.transaction
+    registry, provisioned = None, False
     result, code = {'native_pass': False, 'case': args.scenario}, 78
     try:
         require(args.execute, 'execute_required')
+        require(ID.fullmatch(args.transaction) and args.transaction.startswith('gha-'), 'transaction_id')
+        registry = REGISTRY / args.transaction
         provision(args.source, args.build, args.source_evidence, args.authorization_file,
                   args.authorization_sha256, args.uid, args.transaction)
+        provisioned = True
         result, code = execute(registry, args.scenario), 0
     except (Refused, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         result['code'] = str(error) if isinstance(error, Refused) else type(error).__name__
     finally:
-        if (registry / 'stage0-registration.json').is_file():
+        # provision() starts no service. Only its successful return gives this
+        # invocation ownership; a pre-existing registry is never that proof.
+        if provisioned and (registry / 'stage0-registration.json').is_file():
             registration, _ = read_json(registry / 'stage0-registration.json')
             # Stop only this transaction's fixed units. No removal/reset-failed,
             # restart, forced kill, or other service operation is available.
@@ -340,7 +345,7 @@ def main():
             exclusive_json(registry / 'fixture-evidence/result.json', {**result, 'recorded_at': utc(), 'exit_code': code})
             profile = object_json(file_reference(registration['host_profile']))
             export(registry, args.export_directory, profile['uid'], profile['gid'])
-        elif not args.export_directory.exists():
+        elif registry is not None and not args.export_directory.exists():
             args.export_directory.mkdir(mode=0o700)
             import pwd
             account = pwd.getpwuid(args.uid)
