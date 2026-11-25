@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import sqlite3
 import stat
+import sys
 from urllib.parse import urlsplit
 
 from upgrade import bundle_engine, directory_fd
@@ -45,13 +46,27 @@ def require_interpreter_closure(root=None, operations=None):
 
     File-only evidence, a flag and direct Python invocation cannot satisfy it.
     The parent currently admits only its isolated Linux authority contract.
-    Public callers retain one blocker; the client preserves the exact refusal
-    as its cause for diagnosis. Unexpected programming errors are not masked.
+    Public callers retain one blocker. Closed client causes use the existing
+    code= stderr channel; raw exceptions and response bytes are never emitted.
+    Unexpected programming errors are not masked.
     """
     from routeb_stage0_client import context
     try:
         return context(root, operations=operations)
     except ContractError as error:
+        cause, emitted = error, set()
+        for _ in range(4):
+            if not isinstance(cause, ContractError):
+                break
+            code = str(cause)
+            if (code != INTERPRETER_CLOSURE_BLOCKER and code not in emitted
+                    and re.fullmatch('[a-z][a-z0-9_]{0,95}', code)):
+                try:
+                    print('code=' + code, file=sys.stderr)
+                except (OSError, ValueError):
+                    break
+                emitted.add(code)
+            cause = cause.__cause__
         raise ContractError(INTERPRETER_CLOSURE_BLOCKER) from error
 
 

@@ -102,6 +102,31 @@ class CommandDiagnosticsTests(unittest.TestCase):
             self.assertEqual(value['command_failure'], error.diagnostic)
             self.assertNotIn('private-', json.dumps(value))
 
+    def test_existing_journal_export_preserves_closed_causes_without_raw_messages(self):
+        messages = ['code=stage0_mapping_unknown', 'code=interpreter_full_closure_required',
+                    'private-sentinel raw exception /fixture/socket',
+                    'code=private-sentinel extra fields',
+                    json.dumps({'schema': 'ags.routeb-stage0-result.v1', 'status': 'blocked',
+                                'reason': 'stage0_child_or_authority_failed'})]
+        raw = b''.join(canonical({'MESSAGE': text, '__REALTIME_TIMESTAMP': str(index)})
+                       for index, text in enumerate(messages))
+        requests = [mock.Mock(returncode=0, stdout=b'', stderr=b''),
+                    mock.Mock(returncode=0, stdout=raw, stderr=b'')]
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary).resolve()
+            with mock.patch.object(fixture_run.subprocess, 'run', side_effect=requests), \
+                    mock.patch.object(fixture_run, 'wait_unit', return_value={'ExecMainStatus': '78'}):
+                observed = fixture_run.start_controller({'unit': 'fixture-bootstrap.service'}, evidence, 'bootstrap')
+            value = json.loads((evidence / 'bootstrap-reason-codes.json').read_bytes())
+            self.assertEqual((evidence / 'bootstrap-journal.private').read_bytes(), raw)
+        self.assertEqual(observed, {'ExecMainStatus': '78'})
+        self.assertEqual([item['code'] for item in value['codes']],
+                         ['stage0_mapping_unknown', 'interpreter_full_closure_required',
+                          'stage0_child_or_authority_failed'])
+        self.assertEqual(value['raw_sha256'], sha(raw))
+        self.assertNotIn('private-sentinel', json.dumps(value))
+        self.assertNotIn('/fixture/', json.dumps(value))
+
 
 class LifecycleOwnershipTests(unittest.TestCase):
     def attempt(self, *, execute, provision_error=None, operation_error=None):

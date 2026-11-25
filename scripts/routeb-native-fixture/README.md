@@ -101,6 +101,16 @@ text and extra fields stay opaque; argv, environment and output contents are
 not exported. These fields describe a failure, not native admission. Digests
 identify captured output and do not establish a root cause on their own.
 
+Context refusal keeps the public `interpreter_full_closure_required` blocker and
+exit 78. The existing `code=` channel also retains bounded, credential-free
+causes: local input failures, unavailable peer transport, invalid response or
+context shape, and the native parent's own refusal code. The journal collector
+exports these codes without raw exceptions, response bytes, or paths. This does
+not change any identity check or authorize a retry. `context_verified=false`
+means the parent did not complete its first recheck and active/manager-start
+records; it does not prove that no peer request arrived. The exit's final
+authority-file recheck is a separate observation.
+
 Only after the real verifier returns `authority_file_invalid`, the failure can
 include conditions from the digest-bound catalog input: a fixed file category,
 entry index, field, numeric mode/size, and a path digest. At most eight conditions

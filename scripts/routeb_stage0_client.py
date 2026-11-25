@@ -15,7 +15,7 @@ import struct
 import sys
 
 from upgrade_backup_contract import ContractError, canonical, identifier, require, strict_json
-from upgrade_identity import read_trusted
+from upgrade_identity import IdentityError, read_trusted
 
 
 REGISTRY = Path('/usr/local/libexec/ags-routeb-native')
@@ -141,22 +141,28 @@ def _request(method, *, root=None, invocation_id=None, generation=None, result_s
     if result_sha256 is not None:
         require(_digest(result_sha256), 'stage0_restore_result_digest')
         request['result_sha256'] = result_sha256
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(155)
-        connection.connect(str(path))
-        peer_pid, peer_uid, peer_gid = struct.unpack('3i', connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-        require((peer_pid, peer_uid, peer_gid) == (parent, 0, 0) and os.getppid() == parent,
-                'stage0_root_peer_required')
-        connection.sendall(canonical(request))
-        connection.shutdown(socket.SHUT_WR)
-        raw = bytearray()
-        while True:
-            part = connection.recv(min(65536, 1024 * 1024 + 1 - len(raw)))
-            if not part:
-                break
-            raw.extend(part)
-            require(len(raw) <= 1024 * 1024, 'stage0_response_too_large')
-        require(os.getppid() == parent, 'stage0_parent_changed')
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(155)
+            connection.connect(str(path))
+            peer_pid, peer_uid, peer_gid = struct.unpack('3i', connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            require((peer_pid, peer_uid, peer_gid) == (parent, 0, 0) and os.getppid() == parent,
+                    'stage0_root_peer_required')
+            connection.sendall(canonical(request))
+            connection.shutdown(socket.SHUT_WR)
+            raw = bytearray()
+            while True:
+                part = connection.recv(min(65536, 1024 * 1024 + 1 - len(raw)))
+                if not part:
+                    break
+                raw.extend(part)
+                require(len(raw) <= 1024 * 1024, 'stage0_response_too_large')
+            require(os.getppid() == parent, 'stage0_parent_changed')
+    except OSError:
+        if method != 'recheck':
+            raise
+        # Keep the public refusal, without retaining an OS error's path/message.
+        raise ContractError('interpreter_full_closure_required') from ContractError('stage0_context_transport_unavailable')
     response = strict_json(bytes(raw))
     require(type(response) is dict and response.get('schema') == PROTOCOL
             and set(response) <= {'schema', 'ok', 'error', 'context', 'runtime', 'stopped', 'exit', 'manager_completion', 'action', 'writers', 'restore'},
@@ -185,10 +191,14 @@ def context(root=None, operations=None):
         value = _request('recheck', root=root)['context']
         require(operations is None or value['operation'] in operations, 'stage0_operation_mismatch')
         return value
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except IdentityError as error:
+        raise ContractError('interpreter_full_closure_required') from ContractError(error.code)
+    except OSError:
+        raise ContractError('interpreter_full_closure_required') from ContractError('stage0_context_local_unavailable')
+    except (ValueError, KeyError, TypeError) as error:
         if isinstance(error, ContractError):
             raise
-        raise ContractError('interpreter_full_closure_required') from None
+        raise ContractError('interpreter_full_closure_required') from ContractError('stage0_context_invalid')
 
 
 def manager_action(root, action):
