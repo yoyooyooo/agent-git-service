@@ -20,8 +20,8 @@ import sys
 
 import authority
 import authorization
-from common import (ID, INTERPRETERS, REGISTRY, Refused, absent, absolute, command,
-                    exclusive, exclusive_json, fingerprint, object_json,
+from common import (ID, INTERPRETERS, REGISTRY, CommandFailed, Refused, absent, absolute, command,
+                    exclusive, exclusive_json, file_reference, fingerprint, object_json,
                     protected_directory, read_bytes, read_json, reference,
                     require, sha, utc)
 from source_evidence import validate as validate_source
@@ -95,6 +95,22 @@ def make_profile(account, root, registry, transaction):
     return value, ref
 
 
+def verify_catalog(inspector, input_path, catalog, catalog_digest):
+    try:
+        return command([str(inspector), 'verify-catalog', str(input_path)],
+                       operation='verify_catalog', timeout=120)
+    except CommandFailed as error:
+        if error.diagnostic.get('native_tools') == {
+                'schema': 'ags.routeb-fixture-command-error.v1',
+                'stage': 'verify-catalog', 'reason': 'authority_file_invalid'}:
+            try:
+                error.diagnostic['catalog_file_conditions'] = authority.catalog_file_conditions(catalog, catalog_digest)
+            except (AttributeError, KeyError, TypeError, ValueError, UnicodeError):
+                # A diagnostic failure must not mask or relax the real refusal.
+                error.diagnostic['catalog_file_conditions'] = {'authority_sha256': catalog_digest, 'unavailable': True}
+        raise
+
+
 def provision(source, build, source_evidence, authorization_path, authorization_digest, uid, transaction):
     source, build = absolute(source), absolute(build)
     require(ID.fullmatch(transaction) and transaction.startswith('gha-'), 'transaction_id')
@@ -148,13 +164,12 @@ def provision(source, build, source_evidence, authorization_path, authorization_
                'platform': 'linux', 'architecture': 'amd64'}
     catalog_ref = authority.produce(source / 'scripts/routeb-native-fixture/python-publisher.json',
                                     transaction, binding, build / 'native-tools')
-    catalog = read_json(catalog_ref['path'], 16 << 20)[0]
+    catalog = object_json(file_reference(catalog_ref, maximum=16 << 20), 16 << 20)
     interpreter_path = Path(catalog['prefix']['root']) / catalog['executable']
     interpreter = {'path': str(interpreter_path), 'sha256': sha(read_bytes(interpreter_path, 128 << 20))}
     catalog_input = exclusive_json(evidence / 'catalog-input.json', {
         'id': transaction, 'sha256': catalog_ref['sha256'], 'binding': binding})
-    catalog_result = command([str(build / 'native-tools'), 'verify-catalog', catalog_input['path']],
-                             operation='verify_catalog', timeout=120)
+    catalog_result = verify_catalog(build / 'native-tools', catalog_input['path'], catalog, catalog_ref['sha256'])
     exclusive(evidence / 'catalog-result.json', catalog_result)
     grant_ref = authorization.grant(registry / 'scope-grant.json', auth, host)
     stage = mkdir(registry / 'stage0', mode=0o755)

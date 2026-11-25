@@ -293,6 +293,99 @@ class AuthorityTests(unittest.TestCase):
                 object_json(raw)
 
 
+class CatalogFailureFactsTests(unittest.TestCase):
+    def catalog(self):
+        content = {'sha256': 'a' * 64, 'size': 21}
+        external = {'path': '/private-path-sentinel/dependency', 'kind': 'file',
+                    'metadata': {'mode': 0o644}, 'file': content.copy()}
+        reference = {'path': '/private-path-sentinel/asset', **content}
+        return {'publisher': {'archive': reference.copy(), 'checksums': reference.copy()},
+                'prefix': {'entries': []}, 'external': [{'entry': external, 'asset': reference.copy()}]}
+
+    def test_non_owner_write_bits_are_facts_not_permission_to_change_the_file(self):
+        value = self.catalog()
+        before = copy.deepcopy(value)
+        self.assertEqual(authority.catalog_file_conditions(value, 'b' * 64)['matching_conditions'], 0)
+        for mode in (0o664, 0o666):
+            with self.subTest(mode=mode):
+                value['external'][0]['entry']['metadata']['mode'] = mode
+                facts = authority.catalog_file_conditions(value, 'b' * 64)
+                self.assertEqual(facts['authority_sha256'], 'b' * 64)
+                self.assertEqual(facts['matching_conditions'], 1)
+                row = facts['conditions'][0]
+                self.assertEqual((row['scope'], row['index'], row['field'], row['mode']),
+                                 ('external_entry', 0, 'mode', mode))
+                self.assertEqual(row['non_owner_write_bits'], mode & 0o022)
+                self.assertEqual(row['path_sha256'], sha(b'/private-path-sentinel/dependency'))
+                self.assertNotIn('private-path-sentinel', json.dumps(facts))
+                self.assertNotIn('native_pass', facts)
+        value['external'][0]['entry']['metadata']['mode'] = 0o644
+        self.assertEqual(value, before)
+
+    def test_all_file_invalid_fields_are_projected_without_input_values(self):
+        changes = [
+            ('publisher_archive', 'path', lambda v: v['publisher']['archive'].update(path='private-relative-sentinel')),
+            ('publisher_checksums', 'sha256', lambda v: v['publisher']['checksums'].update(sha256='private-digest-sentinel')),
+            ('publisher_archive', 'size', lambda v: v['publisher']['archive'].update(size=(256 << 20) + 1)),
+            ('external_asset', 'path', lambda v: v['external'][0]['asset'].update(path='/private-path-sentinel/../asset')),
+            ('prefix_entry', 'mode', lambda v: v['prefix']['entries'].append({**v['external'][0]['entry'],
+                'path': 'lib/private-prefix-sentinel', 'metadata': {'mode': 0o664}})),
+            ('external_entry', 'file', lambda v: v['external'][0]['entry'].pop('file')),
+            ('external_entry', 'link', lambda v: v['external'][0]['entry'].update(link='private-link-sentinel')),
+            ('external_entry', 'sha256', lambda v: v['external'][0]['entry']['file'].update(sha256='0' * 64)),
+            ('external_entry', 'size', lambda v: v['external'][0]['entry']['file'].update(size=-1)),
+        ]
+        for scope, field, change in changes:
+            with self.subTest(scope=scope, field=field):
+                value = self.catalog()
+                change(value)
+                facts = authority.catalog_file_conditions(value, 'b' * 64)
+                self.assertEqual(facts['matching_conditions'], 1)
+                self.assertEqual((facts['conditions'][0]['scope'], facts['conditions'][0]['field']), (scope, field))
+                self.assertNotIn('private-', json.dumps(facts))
+
+    def test_projection_is_bounded_and_keeps_the_original_command_failure(self):
+        import provision
+        from subprocess import CompletedProcess
+        value = self.catalog()
+        value['external'][0]['entry']['metadata']['mode'] = 0o666
+        value['external'] *= 20
+        facts = authority.catalog_file_conditions(value, 'b' * 64)
+        self.assertEqual(facts['matching_conditions'], 20)
+        self.assertEqual(len(facts['conditions']), 8)
+        self.assertTrue(facts['truncated'])
+        for reason in ('authority_file_invalid', 'authority_path_untrusted'):
+            payload = {'schema': 'ags.routeb-fixture-command-error.v1', 'stage': 'verify-catalog', 'reason': reason}
+            error = common.CommandFailed('verify_catalog', CompletedProcess([], 78, b'', canonical(payload)))
+            with mock.patch.object(provision, 'command', side_effect=error):
+                with self.assertRaises(common.CommandFailed) as caught:
+                    provision.verify_catalog(Path('/unused-tool'), Path('/unused-input'), value, 'b' * 64)
+            self.assertIs(caught.exception, error)
+            self.assertEqual(error.diagnostic['returncode'], 78)
+            self.assertEqual('catalog_file_conditions' in error.diagnostic, reason == 'authority_file_invalid')
+            self.assertNotIn('private-', json.dumps(error.diagnostic))
+
+
+    def test_diagnostic_problem_cannot_replace_the_refusal_or_run_on_success(self):
+        import provision
+        from subprocess import CompletedProcess
+        payload = {'schema': 'ags.routeb-fixture-command-error.v1', 'stage': 'verify-catalog',
+                   'reason': 'authority_file_invalid'}
+        error = common.CommandFailed('verify_catalog', CompletedProcess([], 78, b'', canonical(payload)))
+        with mock.patch.object(provision, 'command', side_effect=error), \
+             mock.patch.object(authority, 'catalog_file_conditions', side_effect=ValueError('private-detail-sentinel')):
+            with self.assertRaises(common.CommandFailed) as caught:
+                provision.verify_catalog(Path('/unused-tool'), Path('/unused-input'), self.catalog(), 'b' * 64)
+        self.assertIs(caught.exception, error)
+        self.assertEqual(error.diagnostic['catalog_file_conditions'], {'authority_sha256': 'b' * 64, 'unavailable': True})
+        self.assertNotIn('private-', json.dumps(error.diagnostic))
+        with mock.patch.object(provision, 'command', return_value=b'original-success-bytes'), \
+             mock.patch.object(authority, 'catalog_file_conditions') as diagnose:
+            self.assertEqual(provision.verify_catalog(Path('/unused-tool'), Path('/unused-input'), self.catalog(), 'b' * 64),
+                             b'original-success-bytes')
+            diagnose.assert_not_called()
+
+
 class DelegationTests(unittest.TestCase):
     def test_subject_uses_production_contract(self):
         scripts = Path(__file__).resolve().parent.parent
