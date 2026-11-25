@@ -87,7 +87,7 @@ _OS_STAT = os.stat
 _OS_LISTDIR = os.listdir
 REQUIRED = (
     'routeb_stage0_client.py', 'routeb_stage0_probe.py',
-    'routeb_native_delegation.py', 'routeb_native_recovery.py',
+    'routeb_native_delegation.py', 'routeb_native_recovery.py', 'routeb_native_continuation.py',
     'upgrade', 'ags-python.sh', 'ags-runtime.py', 'upgrade.py', 'upgrade_host.py',
     'upgrade_engine.py', 'upgrade_identity.py', 'upgrade_host_evidence.py',
     'upgrade_bootstrap.py', 'upgrade_adapter_launchd.py', 'upgrade_adapter_systemd.py',

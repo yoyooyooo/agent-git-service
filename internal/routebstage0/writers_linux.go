@@ -142,10 +142,15 @@ func (b *boundedOutput) Write(raw []byte) (int, error) {
 func (s *supervisor) writerProbe(generation string) (WriterResult, error) {
 	result := WriterResult{Generation: generation, Writers: []Writer{}, Unknown: []string{}}
 	operation := s.loaded.invocation.Operation
-	if !interpreterauthority.ValidID(generation) || (operation != "transaction" && operation != "restore" && operation != "old-start") {
+	if !interpreterauthority.ValidID(generation) || (operation != "transaction" && operation != "continue-installed" && operation != "restore" && operation != "old-start") {
 		return result, refused("stage0_writer_phase_invalid")
 	}
 	stopped := ""
+	if operation == "continue-installed" || (operation == "restore" && s.stopped != nil && s.stopped.Context.Phase == "serve-initial") {
+		if _, err := s.stoppedIdentity(); err != nil {
+			return result, err
+		}
+	}
 	if operation == "old-start" {
 		completion, err := s.restoreResult()
 		if err != nil {

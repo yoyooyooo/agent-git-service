@@ -68,8 +68,11 @@ func (f managerEvidenceFixture) stopped(properties map[string]string, gone bool,
 	if err := f.loaded.verifyManagerContext(f.invocation, f.context, f.context.BootID); err != nil {
 		return err
 	}
-	return validateStoppedManager(f.completion, f.anchor, f.context, f.exit, f.anchorRaw, f.contextRaw, f.exitRaw,
-		f.invocation, properties, gone, members)
+	if err := validateManagerCompletion(f.completion, f.anchor, f.context, f.exit,
+		f.anchorRaw, f.contextRaw, f.exitRaw, f.invocation); err != nil {
+		return err
+	}
+	return validateCurrentStoppedManager(properties, gone, members)
 }
 
 func collectedManager() map[string]string {

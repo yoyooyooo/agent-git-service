@@ -63,6 +63,25 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(self.grant['source']['messages'][0]['sent_at'], None)
         self.assertNotEqual(self.grant['grantor'], self.approval['actor'])
 
+    def test_continuation_is_its_own_grant_purpose_and_candidate_phase(self):
+        self.grant['purposes'] = ['continue-installed']
+        self.grant['host'] = self.profile['logical_host'] = 'runner-vm'
+        self.rebind()
+        self.context.update(operation='continue-installed', phase='continue-installed')
+        decision = {'schema': delegation.SCHEMAS['continue-installed'], 'approval_id': 'continue-one',
+                    'purpose': 'continue-installed', 'subject_sha256': 'f' * 64,
+                    'actor': self.approval['actor'], 'issued_at': self.issued, 'expires_at': self.expires,
+                    'delegation': copy.deepcopy(self.approval['delegation'])}
+        decision['delegation']['review']['subject_sha256'] = delegation.subject_sha256(decision, 'continue-installed')
+        with patch.object(delegation, '_context', return_value=self.context), \
+                patch.object(delegation, '_protected', side_effect=lambda path: self.raw[path]):
+            self.assertEqual(delegation.require_delegation(decision, 'continue-installed'), self.context)
+            self.context.update(operation='serve', phase='serve-candidate')
+            self.assertEqual(delegation.require_delegation(decision, 'continue-installed'), self.context)
+            self.context['phase'] = 'serve-old'
+            with self.assertRaisesRegex(ContractError, 'delegation_purpose_invalid'):
+                delegation.require_delegation(decision, 'continue-installed')
+
     def test_files_and_review_cannot_replace_a_live_native_parent(self):
         with patch.object(delegation, '_context', side_effect=ContractError('stage0_root_peer_required')), \
                 patch.object(delegation, '_protected') as read, self.assertRaises(ContractError):

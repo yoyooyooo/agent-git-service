@@ -182,7 +182,7 @@ class HostPackage:
 
     def authorize(self, *, consumed_at=None):
         if self.profile.get('schema') == NATIVE_PROFILE_SCHEMA:
-            require_interpreter_closure(self.root, operations=('plan', 'transaction', 'restore', 'old-start'))
+            require_interpreter_closure(self.root, operations=('plan', 'transaction', 'continue-installed', 'restore', 'old-start'))
         self.host.recheck()
         _, raw, _ = read_document(self.path)
         require(raw == self.package_raw, 'package_replaced')
@@ -218,7 +218,7 @@ class HostPackage:
         blockers = python_capability_blockers()
         try:
             require(self.profile.get('schema') == NATIVE_PROFILE_SCHEMA, INTERPRETER_CLOSURE_BLOCKER)
-            value = require_interpreter_closure(self.root, operations=('plan', 'transaction', 'restore', 'old-start'))
+            value = require_interpreter_closure(self.root, operations=('plan', 'transaction', 'continue-installed', 'restore', 'old-start'))
             require(value['registration_id'] == self.profile['stage0']['registration_id']
                     and value['tool_revision'] == self.profile['tool_revision']
                     and value['tool_tree'] == self.profile['tool_tree']
@@ -324,6 +324,52 @@ def validate_authority_coverage(group, host, tool_sha256):
 
 
 def load(package_path, approval_path, expected_host, *, consumed_at=None):
+    return _load(package_path, approval_path, expected_host, consumed_at=consumed_at)
+
+
+def load_preimage(package_path, approval_path, expected_host, *, consumed_at,
+                  journal_sha256, manifest_sha256):
+    """Authenticate the consumed package using its fixed, sealed old image.
+
+    Neither a caller-selected receipt path nor a supplied receipt dictionary is
+    accepted. The effect entry separately admits its current operation/window.
+    """
+    digest(journal_sha256); digest(manifest_sha256)
+    require(consumed_at is not None, 'original_consumption_required')
+    return _load(package_path, approval_path, expected_host, consumed_at=consumed_at,
+                 preimage=(journal_sha256, manifest_sha256))
+
+
+def _old_installation(root, group, policy, preimage):
+    if preimage is None:
+        old, _, sha = read_document(root / 'state/installation.json')
+        binary_sha = file_digest(root / 'bin/gh-server')
+    else:
+        from upgrade_recovery import read_original_binding, read_window
+        from upgrade_restore_verify import load_sealed
+        _, cold, pending = read_window(root)
+        require(file_digest(pending / 'cold-journal.json') == preimage[0], 'installed_journal_changed')
+        binding = read_original_binding(pending)
+        backup, manifest, receipt, _ = load_sealed(cold['backup_dir'], group)
+        require(receipt['manifest_sha256'] == preimage[1]
+                and manifest['binding'] == binding == cold['backup_binding'], 'preimage_snapshot_binding')
+        old, _, sha = read_document(pending / 'old-installation.json')
+        binary_sha = file_digest(pending / 'old-binary')
+        sealed_receipt = backup / group_object(group, 'installation')['id']
+        sealed_binary = backup / group_object(group, 'old_binary')['id']
+        entries = {entry['path']: entry for entry in manifest['entries']}
+        require(sha == cold['old_receipt_sha256'] == file_digest(sealed_receipt)
+                == entries[sealed_receipt.name]['sha256']
+                and binary_sha == binding['old_binary_sha256'] == file_digest(sealed_binary)
+                == entries[sealed_binary.name]['sha256'], 'old_evidence_mismatch')
+    require(old.get('schema') == 'ags.installation.v2' and old.get('source') == policy['old_revision']
+            and old.get('binaries', {}).get('gh-server', {}).get('identity', {}).get('tree') == policy['old_tree']
+            and old.get('binaries', {}).get('gh-server', {}).get('sha256') == binary_sha,
+            'old_installation_mismatch')
+    return old, sha
+
+
+def _load(package_path, approval_path, expected_host, *, consumed_at=None, preimage=None):
     path, approval_path = Path(package_path), Path(approval_path)
     package, raw, _ = read_document(path)
     approval, _, approval_sha = read_document(approval_path)
@@ -389,11 +435,7 @@ def load(package_path, approval_path, expected_host, *, consumed_at=None):
     require(sqlite_path(dsn) == Path(group_object(group, 'sqlite')['source'])
             and environment.get('GIT_REPO_DIR') == group_object(group, 'git_root')['source'],
             'runtime_data_mapping_mismatch')
-    old, _, old_sha = read_document(root / 'state/installation.json')
-    require(old.get('schema') == 'ags.installation.v2' and old.get('source') == policy['old_revision']
-            and old.get('binaries', {}).get('gh-server', {}).get('identity', {}).get('tree') == policy['old_tree']
-            and old.get('binaries', {}).get('gh-server', {}).get('sha256') == file_digest(root / 'bin/gh-server'),
-            'old_installation_mismatch')
+    old, old_sha = _old_installation(root, group, policy, preimage)
     build = sidecars['build-review.json']
     fields(build, ('schema', 'revision', 'tree', 'binary_sha256', 'manifest_sha256', 'decision', 'reviewer'))
     require(build['schema'] == 'ags.routeb-build-review.v1' and build['decision'] == 'approve'

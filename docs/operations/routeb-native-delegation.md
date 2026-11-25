@@ -31,6 +31,8 @@ real review timestamp, and bounded evidence references. Those references are
 provenance for the operator to inspect, not signatures or independently
 verified native outcomes. The approval bytes remain subject to the existing
 root input registration or separately provisioned late recovery registration.
+Installed continuation uses its own typed late registration, so it does not
+consume the separate full-restore/old-start registration.
 
 Neither a caller-provided file, a matching digest, a process argument, an
 environment variable, nor a serialized context can replace the live native
@@ -43,6 +45,7 @@ remain explicit trust bases. This mechanism does not create a human grant.
 | Ordinary immutable dependencies | `ags.immutable-authority-approval.v2` | Host instance, tool manifest, installer and complete object list |
 | First lifecycle activation | `ags.routeb-native-bootstrap-approval.v2` | Root, host instance, transaction, provision, identity and epoch |
 | Host transaction | `ags.routeb-window.v3` | Original package bytes |
+| Installed continuation | `ags.routeb-continuation-approval.v2` | Approval ID, continuation purpose and exact failed-window subject digest |
 | Full restore | `ags.routeb-recovery-approval.v2` | Approval ID, purpose, host, actual snapshot and manifest, plus both acknowledgements |
 | Old binary start | `ags.routeb-recovery-approval.v2` | A separate approval ID and old-start purpose bound to the actual snapshot |
 
@@ -51,6 +54,21 @@ the review itself, avoiding a circular hash. A restore review cannot be reused
 for old-start: both its purpose and approval ID are bound, and the existing
 one-use consumption rules still apply. Future snapshot hashes are never filled
 in ahead of the real sealed backup and review.
+
+For continuation, the approval's `subject_sha256` is the fingerprint of the
+ten-field subject in `continuation-registration.json`: original registration
+and transaction invocation, host instance, cold binding, generation, failed
+host and cold journal hashes, snapshot, manifest and group. The delegated
+review then fingerprints `{approval_id, purpose, subject_sha256}`. These are
+different digests. The review is made only after those concrete artifacts
+exist. No data-loss or external-reconciliation acknowledgement is inherited
+from a restore approval.
+
+The grant's logical host must exactly match the registered isolated profile.
+A disposable Linux runner can use its actual registered identity; neither a
+production-host enum nor an environment override supplies that identity.
+Continuation permission covers its controller and the existing candidate
+serve target only. Old-start keeps its separate recovery approval and issuer.
 
 `routeb_native_delegation.py` provides `is_delegated`, `subject_sha256` and
 `require_delegation`. The last function accepts no grant path or capability

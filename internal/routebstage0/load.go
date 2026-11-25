@@ -21,6 +21,8 @@ type loaded struct {
 	invocation      Invocation
 	recovery        *RecoveryRegistration
 	recoverySHA     string
+	continuation    *ContinuationRegistration
+	continuationSHA string
 }
 
 type bundleManifest struct {
@@ -210,6 +212,11 @@ func (l *loaded) recheckFiles() error {
 	}
 	if l.recovery != nil {
 		if err = l.recheckRecovery(); err != nil {
+			return err
+		}
+	}
+	if l.continuation != nil {
+		if err = l.loadContinuation(false); err != nil {
 			return err
 		}
 	}

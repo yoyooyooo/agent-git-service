@@ -195,10 +195,12 @@ class BrokerManagerTests(unittest.TestCase):
                 with self.subTest(hook=value), self.assertRaisesRegex(ContractError, 'stage0_manager_completion_command_changed'):
                     self.manager.definition()
 
-    def stop_fixture(self, *, mutation=None, runtime_mutation=None, manager_result='success', manager_code='0'):
+    def stop_fixture(self, *, mutation=None, runtime_mutation=None, manager_result='success', manager_code='0', phase='serve-candidate'):
         tree = NativeTreeTests()
         tree.setUp()
         context = tree.context
+        context.update(phase=phase, invocation_id=phase + '-one')
+        tree.runtime['stage0'] = copy.deepcopy(context)
         self.manager.before = {'stage0': context, 'runtime': {**tree.runtime, 'generation': 'one'},
                                'pids': {1101, 1102, 1103}, 'boot_id': 'fixture-boot'}
         stopped = {**tree.runtime, 'generation': 'one', 'exit_code': 0, 'forced_kill': False,
@@ -242,6 +244,40 @@ class BrokerManagerTests(unittest.TestCase):
         self.assertTrue(result['stage0_exit']['normal_exit'])
         self.assertEqual(result['stage0_exit']['manager_completion']['manager']['exec_main_code'], 1)
         self.client.runtime_exit.assert_called_once_with(self.root, 'serve-candidate-one')
+
+    def test_new_controller_rebinds_exact_root_stop_without_repeating_a_stop(self):
+        from upgrade_backup_contract import fingerprint
+        result = self.stop_fixture(phase='serve-initial',
+            runtime_mutation={'schema': 'ags.runtime.v1', 'stopped_at': 'fixture-time'})
+        context = result['stage0']
+        exited = result['stage0_exit']
+        proof = {'schema': 'ags.routeb-stage0-stopped.v1',
+                 'runtime': {'context': context, 'manager_unit': self.manager.spec['target'],
+                             'pids': [context['supervisor'], context['child'], identity(1103, 1102, 501, 20, 102, 'c')]},
+                 'exit': {k: v for k, v in exited.items() if k != 'manager_completion'},
+                 'manager_completion': exited['manager_completion'],
+                 'transaction_invocation_id': 'transaction-one', 'failed_controller_invocations': ['transaction-one']}
+        raw = capture.canonical({k: v for k, v in result.items()
+                if k not in ('supervisor_exited', 'supervisor_exit_code', 'runtime_sha256', 'stage0_exit')})
+        self.assertEqual(capture.sha(raw), result['runtime_sha256'])
+        client = SimpleNamespace(stopped_identity=Mock(return_value=proof), manager_action=Mock())
+        cold = {'runtime_generation': 'one', 'stop_evidence_sha256': fingerprint(result)}
+        with patch.object(capture, 'stage0_client', return_value=client), \
+                patch.object(capture, 'boot_identity', return_value=('fixture-boot', b'')), \
+                patch.object(capture, 'read_regular', return_value=raw), \
+                patch.object(native, 'absent', return_value=True), patch.object(native.FixedManager, 'definition'):
+            reopened = native.FixedManager(self.root, self.manager.profile, self.manager.host)
+            self.assertEqual(reopened.rebind_stopped(cold), result)
+            self.assertEqual(reopened.before['pids'], {1101, 1102, 1103})
+            client.manager_action.assert_not_called()
+            bad = native.FixedManager(self.root, self.manager.profile, self.manager.host)
+            with self.assertRaisesRegex(ContractError, 'original_stop_record_changed'):
+                bad.rebind_stopped({**cold, 'stop_evidence_sha256': 'f' * 64})
+            self.assertIsNone(bad.before); self.assertIsNone(bad.stopped)
+            client.stopped_identity.side_effect = ContractError('stage0_candidate_start_attempted_or_unknown')
+            with self.assertRaisesRegex(ContractError, 'stage0_candidate_start_attempted_or_unknown'):
+                bad.rebind_stopped(cold)
+            client.manager_action.assert_not_called()
 
     def test_gc_zero_cannot_replace_the_root_manager_completion(self):
         for manager_code in ('0', '1'):

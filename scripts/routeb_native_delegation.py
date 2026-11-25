@@ -25,17 +25,20 @@ SCHEMAS = {
     'host-window': 'ags.routeb-window.v3',
     'full-restore': 'ags.routeb-recovery-approval.v2',
     'old-start': 'ags.routeb-recovery-approval.v2',
+    'continue-installed': 'ags.routeb-continuation-approval.v2',
 }
 OPERATIONS = {
     'native-provision': ('bootstrap-plan', 'bootstrap'),
     'immutable-provision': ('probe', 'bootstrap-plan', 'bootstrap', 'plan', 'transaction',
-                            'serve', 'doctor', 'restore', 'old-start'),
+                            'serve', 'doctor', 'continue-installed', 'restore', 'old-start'),
     'native-bootstrap': ('bootstrap-plan', 'bootstrap'),
-    'host-window': ('plan', 'transaction', 'restore', 'old-start'),
+    'host-window': ('plan', 'transaction', 'continue-installed', 'restore', 'old-start'),
     'full-restore': ('restore',),
     'old-start': ('old-start', 'serve'),
+    'continue-installed': ('continue-installed', 'serve'),
 }
 SUBJECT_FIELDS = {
+    'continue-installed': ('approval_id', 'purpose', 'subject_sha256'),
     'native-bootstrap': ('root', 'host_instance', 'transaction_id', 'provision_sha256',
                          'identity_sha256', 'epoch'),
     'immutable-provision': ('host_instance', 'tool_manifest_sha256', 'installer_sha256', 'objects'),
@@ -112,6 +115,8 @@ def require_delegation(approval, purpose, *, root=None, host_instance=None):
             and context['operation'] in OPERATIONS[purpose], 'delegation_grant_binding')
     if purpose == 'old-start' and context['operation'] == 'serve':
         require(context['phase'] == 'serve-old', 'delegation_purpose_invalid')
+    if purpose == 'continue-installed' and context['operation'] == 'serve':
+        require(context['phase'] == 'serve-candidate', 'delegation_purpose_invalid')
     transaction = context['registration_id']; identifier(transaction)
     registry = REGISTRY / transaction
     registration_raw = _protected(registry / 'stage0-registration.json')
@@ -143,8 +148,7 @@ def require_delegation(approval, purpose, *, root=None, host_instance=None):
     profile = strict_json(profile_raw)
     require(profile['scope'] == 'isolated-native' and profile['transaction_id'] == transaction
             and profile['root'] == grant['root'] and profile['logical_host'] == grant['host']
-            and profile['host_instance'] == grant['host_instance']
-            and grant['host'] in ('mini', 'imile-win'), 'delegation_scope_invalid')
+            and profile['host_instance'] == grant['host_instance'], 'delegation_scope_invalid')
     require(all(key not in approval or approval[key] == grant[key]
                 for key in ('host', 'host_instance', 'transaction_id', 'root')),
             'delegation_scope_invalid')

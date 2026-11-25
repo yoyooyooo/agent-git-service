@@ -103,7 +103,7 @@ func validFile(f interpreterauthority.File, limit int64) bool {
 
 func operationPhase(operation, phase string) bool {
 	switch operation {
-	case "probe", "bootstrap-plan", "bootstrap", "plan", "transaction", "doctor", "restore", "old-start":
+	case "probe", "bootstrap-plan", "bootstrap", "plan", "transaction", "continue-installed", "doctor", "restore", "old-start":
 		return phase == operation
 	case "serve":
 		return phase == "serve-initial" || phase == "serve-candidate" || phase == "serve-old"
@@ -163,11 +163,14 @@ func (r Registration) Validate() error {
 				return refused("stage0_input_missing")
 			}
 		}
-		if i.Operation == "restore" || i.Operation == "old-start" {
+		if i.Operation == "restore" || i.Operation == "old-start" || i.Operation == "continue-installed" {
 			if r.Inputs.Package == nil || r.Inputs.Approval == nil {
 				return refused("stage0_input_missing")
 			}
 		}
+	}
+	if phases["continue-installed"] && (!phases["transaction"] || !phases["serve-initial"] || !phases["serve-candidate"]) {
+		return refused("stage0_continuation_unregistered")
 	}
 	for _, f := range []*interpreterauthority.File{r.Inputs.Package, r.Inputs.Approval, r.Inputs.BootstrapApproval} {
 		if f != nil && !validFile(*f, 16<<20) {
@@ -181,7 +184,7 @@ func (r Registration) validateHost(h HostProfile) error {
 	expectedArch := map[string]string{"amd64": "x86_64", "arm64": "arm64"}[r.Binding.Architecture]
 	expectedPlatform := map[string]string{"linux": "linux", "darwin": "darwin"}[r.Binding.Platform]
 	if h.Schema != "ags.routeb-native-identity.v1" || h.Scope != r.Scope || h.TransactionID != r.ID || h.HostInstance != r.Binding.HostInstance ||
-		h.User != "yoyo" || h.UID == 0 || h.GID == 0 || !absolute(h.Home) ||
+		!interpreterauthority.ValidID(h.LogicalHost) || !interpreterauthority.ValidID(h.User) || h.UID == 0 || h.GID == 0 || !absolute(h.Home) || h.Home == "/" ||
 		h.Root != filepath.Join(h.Home, ".local/state/ags-routeb-native", r.ID, "ags") || h.ToolBundle != filepath.Join(rootFor(r.ID), "bundle") ||
 		strings.ToLower(h.Platform) != expectedPlatform || h.Architecture != expectedArch || !validDigest(h.MachineIDSHA256) || len(h.Aliases) == 0 || len(h.Aliases) > 8 {
 		return refused("stage0_host_binding")
@@ -189,8 +192,8 @@ func (r Registration) validateHost(h HostProfile) error {
 	if runtime.GOOS != r.Binding.Platform || runtime.GOARCH != r.Binding.Architecture {
 		return refused("stage0_platform_mismatch")
 	}
-	if (r.Binding.Platform == "linux" && (h.LogicalHost != "imile-win" || h.UID != 1000 || h.GID != 1000 || h.MachineIDKind != "machine-id")) ||
-		(r.Binding.Platform == "darwin" && (h.LogicalHost != "mini" || h.UID != 501 || h.GID != 20 || h.MachineIDKind != "ioplatformuuid")) {
+	if (r.Binding.Platform == "linux" && h.MachineIDKind != "machine-id") ||
+		(r.Binding.Platform == "darwin" && (h.LogicalHost != "mini" || h.User != "yoyo" || h.UID != 501 || h.GID != 20 || h.MachineIDKind != "ioplatformuuid")) {
 		return refused("stage0_host_binding")
 	}
 	for _, a := range h.Aliases {
@@ -223,16 +226,18 @@ func childArguments(r Registration, h HostProfile, executable, operation string)
 			action = "activate"
 		}
 		args = append(args, filepath.Join(bundle, "routeb_native_bootstrap.py"), action, "--root", h.Root, "--approval", r.Inputs.BootstrapApproval.Path)
-	case "plan", "transaction":
+	case "plan", "transaction", "continue-installed":
 		if r.Inputs.Package == nil || r.Inputs.Approval == nil {
 			return nil, refused("stage0_input_missing")
 		}
 		action := "plan"
 		if operation == "transaction" {
 			action = "run"
+		} else if operation == "continue-installed" {
+			action = operation
 		}
 		args = append(args, filepath.Join(bundle, "routeb_host_transaction.py"), action, "--host", h.LogicalHost, "--package", r.Inputs.Package.Path, "--approval", r.Inputs.Approval.Path)
-		if operation == "transaction" {
+		if operation != "plan" {
 			args = append(args, "--execute")
 		}
 	case "serve", "doctor":

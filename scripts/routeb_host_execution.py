@@ -136,6 +136,8 @@ class HostExecution:
         self.package = package
         self.root = package.root
         self.pending = package.pending
+        self.journal_path = self.pending / JOURNAL
+        self.evidence_directory = self.pending
         self.manager = FixedManager(self.root, package.profile, package.host)
         self.trash = SystemTrash(package.group['storage']['restore_root'], package.profile['trash_root'])
         self.binding = package.cold_binding()
@@ -152,7 +154,7 @@ class HostExecution:
 
     def stage(self, phase, **values):
         self.journal.update(phase=phase, updated_at=utc(), **values)
-        replace_json(self.pending / JOURNAL, self.journal)
+        replace_json(self.journal_path, self.journal)
 
     def claim(self):
         require(not self.pending.exists() and not self.pending.is_symlink(), 'transaction_already_claimed')
@@ -310,7 +312,7 @@ class HostExecution:
                                'sequence': snapshot['projection']['sequence']},
                       start_once={'attempted': True, 'token_consumed': True, 'manager_requested': True},
                       accepted=False, installable=False)
-        archive = capture.Archive(self.pending / 'startup-evidence')
+        archive = capture.Archive(self.evidence_directory / 'startup-evidence')
         for name, (raw, kind) in snapshot['artifacts'].items():
             archive.write(name, raw, kind)
         artifacts, ranges = startup_reader.log_delta()
@@ -347,9 +349,44 @@ class HostExecution:
             record['validated_start']['stage0_tree_sha256'] = fresh['stage0_tree_sha256']
         require(capture.sha(capture.read_regular(package.profile['capture']['runtime_path'])) ==
                 record['validated_start']['runtime_sha256'], 'runtime_changed_during_probe')
-        target = self.pending / 'execution.json'
+        if 'continuation' in self.journal:
+            record['continuation'] = dict(self.journal['continuation'])
+        target = self.evidence_directory / 'execution.json'
         durable_bytes(target, capture.canonical(record))
         return target
+
+    def start_and_observe(self, authorize):
+        """The shared original start tail; neither caller can refund its intent."""
+        package, window = self.package, self.window
+        startup_reader = None
+        try:
+            authorize()
+            window.start_intent()
+            self.stage('start_attempted', start_attempted=True)
+            startup_reader = capture.NativeProbe(
+                {'root': str(self.root),
+                 'validated_start': {'log_baseline': log_baselines(package.profile['capture'])}},
+                package.profile['capture'])
+            window.release()
+            window.start(authorize=authorize)
+            snapshot = self.observe_start()
+            execution_path = self.publish_execution(snapshot, startup_reader)
+            startup_reader.close()
+            startup_reader = None
+            self.stage('awaiting_observation', execution_receipt=str(execution_path))
+            observation = capture.capture(execution_path, package.path.parent / 'native-profile.json',
+                                          self.evidence_directory / 'observation')
+            require(observation['status'] == 'observed' and observation['accepted'] is False,
+                    'native_observation_interrupted')
+            require(observation['kind'] == 'native' and observation['installable'] is False
+                    and observation['mode'] == package.profile['capture']['mode'],
+                    'native_observation_unverified')
+            self.stage('observed', status='observed',
+                       observation_receipt=str(self.evidence_directory / 'observation/capture.json'))
+            return dict(self.journal)
+        finally:
+            if startup_reader is not None:
+                startup_reader.close()
 
     def run(self):
         require_interpreter_closure(self.root, operations=('transaction',))
@@ -358,7 +395,6 @@ class HostExecution:
         require(read_version(package.candidate.binary_path) == package.candidate.value['version']
                 and read_version(self.root / 'bin/gh-server') == package.old_receipt['binaries']['gh-server']['identity'],
                 'program_identity_mismatch')
-        startup_reader = None
         window.acquire_owner()
         try:
             package.authorize()
@@ -381,31 +417,7 @@ class HostExecution:
             self.stage('install_started')
             self.install()
             self.stage('installed')
-            package.authorize()
-            window.start_intent()
-            self.stage('start_attempted', start_attempted=True)
-            # NativeProbe's log reader is also used for the startup range. It
-            # performs no process/health sample until a complete receipt exists.
-            startup_reader = capture.NativeProbe(
-                {'root': str(self.root),
-                 'validated_start': {'log_baseline': log_baselines(package.profile['capture'])}},
-                package.profile['capture'])
-            window.release()
-            window.start(authorize=package.authorize)
-            snapshot = self.observe_start()
-            execution_path = self.publish_execution(snapshot, startup_reader)
-            startup_reader.close()
-            startup_reader = None
-            self.stage('awaiting_observation', execution_receipt=str(execution_path))
-            observation = capture.capture(execution_path, package.path.parent / 'native-profile.json',
-                                          self.pending / 'observation')
-            require(observation['status'] == 'observed' and observation['accepted'] is False,
-                    'native_observation_interrupted')
-            require(observation['kind'] == 'native' and observation['installable'] is False
-                    and observation['mode'] == package.profile['capture']['mode'],
-                    'native_observation_unverified')
-            self.stage('observed', status='observed', observation_receipt=str(self.pending / 'observation/capture.json'))
-            return dict(self.journal)
+            return self.start_and_observe(package.authorize)
         except BaseException as error:
             if self.journal is not None:
                 self.stage(self.journal['phase'], status='failed', code=failure_code(error),
@@ -413,8 +425,6 @@ class HostExecution:
                            service_state='stopped_or_unknown' if self.journal['stop_attempted'] else 'unchanged')
             raise
         finally:
-            if startup_reader is not None:
-                startup_reader.close()
             window.release()
             window.release_owner()
 

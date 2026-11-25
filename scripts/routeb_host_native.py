@@ -188,6 +188,19 @@ def native_manager_completion(value, context, unit):
     return value
 
 
+def normal_native_exit(value, context, unit):
+    require(type(value) is dict and value.get('schema') == 'ags.routeb-stage0-exit.v1'
+            and all(value.get(key) == context[key] for key in
+                    ('registration_sha256', 'invocation_id', 'phase', 'boot_id', 'supervisor', 'child'))
+            and value.get('child_exit_code') == 0 and type(value.get('child_exit_code')) is int
+            and value.get('forced_kill') is False
+            and all(value.get(key) is True for key in
+                    ('signal_forwarded', 'context_verified', 'authority_rechecked', 'normal_exit')),
+            'stage0_normal_stop_unproven')
+    native_manager_completion(value.get('manager_completion'), context, unit)
+    return value
+
+
 class FixedManager:
     def __init__(self, root, profile, host):
         self.root = Path(root)
@@ -211,7 +224,7 @@ class FixedManager:
             expected = [self.profile['interpreter']['path'], '-I', '-B', str(self.root / 'bin/ags-runtime.py'),
                         '--root', str(self.root), 'serve']
         else:
-            context = cap.stage0_client().context(self.root, operations=('plan', 'transaction', 'restore', 'old-start'))
+            context = cap.stage0_client().context(self.root, operations=('plan', 'transaction', 'continue-installed', 'restore', 'old-start'))
             identifier = registration['registration_id']
             require(context['root'] == str(self.root) and context['registration_id'] == identifier
                     and self.spec['kind'] == 'systemd' and self.spec['scope'] == 'system'
@@ -302,6 +315,60 @@ class FixedManager:
         self.definition()
         return {'suppressed': True}
 
+    def rebind_stopped(self, cold):
+        """Read the original stopped generation through the live root peer.
+
+        No stop command is issued and no memory from the failed controller is
+        trusted. Root proves its failed exit and absence of candidate effects.
+        """
+        require(self.native_registration() is not None and self.before is None and self.stopped is None,
+                'native_stopped_readback_required')
+        self.host.recheck(); self.definition()
+        cap = capture_module()
+        proof = cap.stage0_client().stopped_identity(self.root)
+        require(type(proof) is dict and set(proof) == {
+            'schema', 'runtime', 'exit', 'manager_completion', 'transaction_invocation_id',
+            'failed_controller_invocations'} and proof['schema'] == 'ags.routeb-stage0-stopped.v1'
+            and type(proof['failed_controller_invocations']) is list
+            and proof['transaction_invocation_id'] in proof['failed_controller_invocations'],
+            'stage0_stopped_readback_invalid')
+        before = proof['runtime']
+        require(type(before) is dict and set(before) == {'context', 'pids', 'manager_unit'}
+                and before['manager_unit'] == self.spec['target'], 'stage0_stopped_readback_invalid')
+        context = before['context']
+        require(context['phase'] == 'serve-initial' and context['root'] == str(self.root)
+                and context['boot_id'] == cap.boot_identity()[0], 'stage0_stopped_readback_invalid')
+        native_exit = normal_native_exit({**proof['exit'], 'manager_completion': proof['manager_completion']},
+                                        context, self.spec['target'])
+        require(type(before['pids']) is list and 2 <= len(before['pids']) <= 256,
+                'stage0_stopped_readback_invalid')
+        pids = {row['pid'] for row in before['pids']}
+        require(len(pids) == len(before['pids']) and context['supervisor']['pid'] in pids
+                and context['child']['pid'] in pids and all(absent(pid) for pid in pids),
+                'stage0_normal_stop_unproven')
+        raw = cap.read_regular(self.root / 'state/runtime.json')
+        stopped = cap.object_json(raw)
+        require(stopped.get('schema') == 'ags.runtime.v1' and stopped.get('root') == str(self.root)
+                and stopped.get('generation') == cold['runtime_generation']
+                and stopped.get('stage0') == context and stopped.get('supervisor_pid') == context['child']['pid']
+                and type(stopped.get('supervisor_pid')) is int and type(stopped.get('pid')) is int
+                and stopped.get('pid') in pids and 'stopped_at' in stopped
+                and type(stopped.get('exit_code')) is int and stopped['exit_code'] == 0
+                and stopped.get('forced_kill') is False and stopped.get('stop_requested') is True
+                and stopped.get('process_group_empty') is True
+                and stopped.get('supervision_failed', False) is False
+                and stopped.get('stop_timed_out', False) is False
+                and type(stopped.get('supervisor_exit_code', 0)) is int
+                and stopped.get('supervisor_exit_code', 0) == 0, 'normal_stop_unproven')
+        normalized = {**stopped, 'supervisor_exited': True, 'supervisor_exit_code': 0,
+                      'runtime_sha256': cap.sha(raw), 'stage0_exit': native_exit}
+        from upgrade_backup_contract import fingerprint
+        require(fingerprint(normalized) == cold['stop_evidence_sha256'], 'original_stop_record_changed')
+        self.before = {'runtime': stopped, 'manager': {}, 'boot_id': context['boot_id'],
+                       'pids': pids, 'stage0': context}
+        self.stopped = normalized
+        return normalized
+
     def _once(self, action):
         require(action not in self.called, action + '_already_requested')
         self.called.add(action)
@@ -379,15 +446,8 @@ class FixedManager:
                     and type(stopped.get('supervisor_exit_code', 0)) is int
                     and stopped.get('supervisor_exit_code', 0) == 0, 'stage0_supervision_failed')
             require(stopped.get('stage0') == context, 'stage0_stop_context_changed')
-            require(type(native_exit) is dict and native_exit.get('schema') == 'ags.routeb-stage0-exit.v1'
-                    and all(native_exit.get(key) == context[key] for key in
-                            ('registration_sha256', 'invocation_id', 'phase', 'boot_id', 'supervisor', 'child'))
-                    and native_exit.get('child_exit_code') == 0
-                    and type(native_exit.get('child_exit_code')) is int
-                    and native_exit.get('forced_kill') is False
-                    and all(native_exit.get(key) is True for key in
-                            ('signal_forwarded', 'context_verified', 'authority_rechecked', 'normal_exit'))
-                    and all(absent(pid) for pid in self.before['pids']), 'stage0_normal_stop_unproven')
+            normal_native_exit(native_exit, context, self.spec['target'])
+            require(all(absent(pid) for pid in self.before['pids']), 'stage0_normal_stop_unproven')
             # The root peer independently verified the post-exit manager proof
             # and empty cgroup. Keep checking present inactivity and every PID;
             # inactive-unit GC may already have discarded ExecMainCode.

@@ -67,6 +67,7 @@ type Response struct {
 	Error             string             `json:"error,omitempty"`
 	Context           *Context           `json:"context,omitempty"`
 	Runtime           *RuntimeIdentity   `json:"runtime,omitempty"`
+	Stopped           *StoppedIdentity   `json:"stopped,omitempty"`
 	Exit              *ExitRecord        `json:"exit,omitempty"`
 	ManagerCompletion *ManagerCompletion `json:"manager_completion,omitempty"`
 	Action            string             `json:"action,omitempty"`

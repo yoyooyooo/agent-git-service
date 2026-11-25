@@ -53,6 +53,30 @@ def parse_native_profile(raw, facts, root):
     transaction, profile, bundle = native_locations(root, facts.home)
     require(value['transaction_id'] == transaction and value['root'] == str(root)
             and value['tool_bundle'] == str(bundle), 'native_profile_mismatch')
+    if value['platform'] == 'Linux':
+        # A disposable Linux VM uses its own measured account. The production
+        # ~/.ags identity and its fixed HOSTS mapping are not widened here.
+        identifier(value['logical_host']); identifier(value['host_instance']); identifier(value['user'])
+        require(type(value['uid']) is int and 0 < value['uid'] < 2 ** 32
+                and type(value['gid']) is int and 0 < value['gid'] < 2 ** 32
+                and value['uid'] == facts.uid == facts.euid and value['gid'] == facts.gid
+                and value['user'] == facts.user and value['home'] == facts.home
+                and Path(value['home']).is_absolute() and value['home'] != '/'
+                and os.path.normpath(value['home']) == value['home'], 'native_execution_identity_mismatch')
+        require((value['platform'], value['arch'], value['machine_id_kind']) ==
+                (facts.platform, facts.arch, facts.machine_id_kind) == ('Linux', 'x86_64', 'machine-id')
+                and value['machine_id_sha256'] == facts.machine_id_sha256,
+                'native_machine_mismatch')
+        from upgrade_backup_contract import digest
+        digest(value['machine_id_sha256'])
+        require(type(value['aliases']) is list and 1 <= len(value['aliases']) <= 8, 'native_alias_invalid')
+        aliases = tuple(identity.alias(item) for item in value['aliases'])
+        require(len(set(aliases)) == len(aliases) and identity.alias(facts.hostname) in aliases,
+                'native_alias_invalid')
+        selected = {key: item for key, item in value.items()
+                    if key not in ('schema', 'scope', 'transaction_id', 'tool_bundle', 'aliases')}
+        checked = identity.HostIdentity(**selected, aliases=aliases, profile_sha256=hashlib.sha256(raw).hexdigest())
+        return VerifiedHost(checked, 'isolated-native', profile, bundle)
     production_shape = {key: item for key, item in value.items()
                         if key not in ('scope', 'transaction_id', 'tool_bundle')}
     production_shape['schema'] = 'ags.host-identity.v1'

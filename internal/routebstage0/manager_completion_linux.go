@@ -34,6 +34,16 @@ func (s *supervisor) recordManagerStart() error {
 }
 
 func (l *loaded) readManagerRecords(i Invocation, boot string) (Context, ExitRecord, ManagerStart, []byte, []byte, []byte, error) {
+	context, exit, anchor, contextRaw, exitRaw, anchorRaw, err := l.readManagerIdentity(i, boot)
+	if err == nil {
+		err = validateManagerExit(context, exit, i)
+	}
+	return context, exit, anchor, contextRaw, exitRaw, anchorRaw, err
+}
+
+// Identity is shared by normal completion and the narrowly supported failed
+// controller readback. A failed controller never becomes a normal completion.
+func (l *loaded) readManagerIdentity(i Invocation, boot string) (Context, ExitRecord, ManagerStart, []byte, []byte, []byte, error) {
 	var context Context
 	var exit ExitRecord
 	var anchor ManagerStart
@@ -54,9 +64,6 @@ func (l *loaded) readManagerRecords(i Invocation, boot string) (Context, ExitRec
 	}
 	if err = l.verifyManagerContext(i, context, boot); err == nil {
 		err = validateManagerStart(anchor, context, contextRaw, i)
-	}
-	if err == nil {
-		err = validateManagerExit(context, exit, i)
 	}
 	return context, exit, anchor, contextRaw, exitRaw, anchorRaw, err
 }
@@ -124,10 +131,8 @@ func CompleteManager(id, operation string) error {
 		return err
 	}
 	l.invocation = i
-	if i.Operation == "restore" || i.Operation == "old-start" || i.Phase == "serve-old" {
-		if err = l.loadRecoveryCompletion(); err != nil {
-			return err
-		}
+	if _, err = l.invocationLateHash(i, false); err != nil {
+		return err
 	}
 	if err = l.verifyUnit(i, false); err != nil {
 		return err
@@ -175,6 +180,27 @@ func CompleteManager(id, operation string) error {
 }
 
 func (l *loaded) completedManager(i Invocation, boot string) (Context, ExitRecord, ManagerCompletion, error) {
+	context, exit, completion, err := l.managerCompletionEvidence(i, boot)
+	if err != nil {
+		return context, exit, completion, err
+	}
+	properties, err := managerProperties(i.Unit, "MainPID", "ActiveState", "SubState", "Result")
+	if err != nil {
+		return context, exit, completion, refused("stage0_manager_not_stopped")
+	}
+	members, err := cgroupMembers(i.Unit)
+	if err != nil {
+		return context, exit, completion, refused("stage0_manager_cgroup_not_empty")
+	}
+	err = validateCurrentStoppedManager(properties,
+		processGone(context.Supervisor) && processGone(context.Child) && processGone(completion.Hook), members)
+	return context, exit, completion, err
+}
+
+// A sealed restoration may be read by an already running serve-old. Its
+// historical normal-stop identity remains required, while the shared serve
+// unit is no longer expected to be inactive.
+func (l *loaded) managerCompletionEvidence(i Invocation, boot string) (Context, ExitRecord, ManagerCompletion, error) {
 	context, exit, anchor, contextRaw, exitRaw, anchorRaw, err := l.readManagerRecords(i, boot)
 	var completion ManagerCompletion
 	if err != nil {
@@ -190,15 +216,5 @@ func (l *loaded) completedManager(i Invocation, boot string) (Context, ExitRecor
 	if err = validateManagerCompletion(completion, anchor, context, exit, anchorRaw, contextRaw, exitRaw, i); err != nil {
 		return context, exit, completion, err
 	}
-	properties, err := managerProperties(i.Unit, "MainPID", "ActiveState", "SubState", "Result")
-	if err != nil {
-		return context, exit, completion, refused("stage0_manager_not_stopped")
-	}
-	members, err := cgroupMembers(i.Unit)
-	if err != nil {
-		return context, exit, completion, refused("stage0_manager_cgroup_not_empty")
-	}
-	err = validateStoppedManager(completion, anchor, context, exit, anchorRaw, contextRaw, exitRaw, i, properties,
-		processGone(context.Supervisor) && processGone(context.Child) && processGone(completion.Hook), members)
-	return context, exit, completion, err
+	return context, exit, completion, nil
 }

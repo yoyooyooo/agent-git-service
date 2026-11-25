@@ -37,11 +37,11 @@ from upgrade_backup_contract import (ContractError, canonical, digest, fields, f
                                      identifier, require, strict_json, timestamp)
 from upgrade_identity import read_trusted
 from upgrade_inventory import file_digest
-from upgrade_recovery import ColdWindow, read_original_binding
+from upgrade_recovery import ColdWindow, read_original_binding, read_window
 from routeb_full_restore import apply_restore, old_start, plan_restore, verify_recovered_group
 from routeb_host_native import FixedManager, WriterProbe
 from routeb_host_package import (NATIVE_PROFILE_SCHEMA, PRIVATE_DOCUMENT_LIMIT, RESTORE_RESULT_LIMIT,
-                                  load as load_package, read_document)
+                                  load as load_package, load_preimage, read_document)
 from routeb_native_delegation import is_delegated, require_delegation
 import routeb_native_capture as capture
 import routeb_stage0_client as client
@@ -209,7 +209,13 @@ def packet(root, package_path, approval_path, operation):
     profile_raw = read_trusted(REGISTRY / context['registration_id'] / 'host-profile.json', maximum=65536)
     host = strict_json(profile_raw)
     consumed, binding = consumed_window(root, context, late, package_path, approval_path)
-    package = load_package(package_path, approval_path, host['logical_host'], consumed_at=consumed)
+    if operation == 'restore':
+        _, _, pending = read_window(root)
+        package = load_preimage(package_path, approval_path, host['logical_host'], consumed_at=consumed,
+                                journal_sha256=file_digest(pending / 'cold-journal.json'),
+                                manifest_sha256=late['manifest_sha256'])
+    else:
+        package = load_package(package_path, approval_path, host['logical_host'], consumed_at=consumed)
     require(package.root == Path(root) and package.profile['schema'] == NATIVE_PROFILE_SCHEMA
             and package.host.scope == 'isolated-native' and fingerprint(package.group) == late['group_sha256']
             and not package.execution_blockers(), 'native_recovery_package_blocked')
@@ -238,11 +244,22 @@ def restore(root, package_path, approval_path):
         recovery_binding(root, operations=('restore',), expected=context)
         authorize_recovery(package, context, late)
         approval(late, 'full-restore', root)
-        manager.preflight(); manager.suppress_restart()
-        effects.append({'effect_id': 'normal-stop', 'status': 'intent'})
-        stopped = manager.stop()
-        effects.append({'effect_id': 'normal-stop', 'status': 'observed', 'record_sha256': fingerprint(stopped)})
-        window.acquire()
+        retained, _ = private_json(Path(root) / 'state/runtime.json')
+        if retained.get('stage0', {}).get('phase') == 'serve-initial' and 'stopped_at' in retained:
+            # This is a routing hint only. Root must positively prove the
+            # original normal stop, terminal failed controllers and absence of
+            # every candidate effect. An active-stop failure never falls here.
+            window.acquire()
+            _, cold, _ = read_window(root)
+            stopped = manager.rebind_stopped(cold)
+            effects.append({'effect_id': 'original-normal-stop', 'status': 'observed',
+                            'record_sha256': fingerprint(stopped)})
+        else:
+            manager.preflight(); manager.suppress_restart()
+            effects.append({'effect_id': 'normal-stop', 'status': 'intent'})
+            stopped = manager.stop()
+            effects.append({'effect_id': 'normal-stop', 'status': 'observed', 'record_sha256': fingerprint(stopped)})
+            window.acquire()
         closed(root, context['invocation_id'])
         recovery_binding(root, operations=('restore',), expected=context)
         decision = approval(late, 'full-restore', root)

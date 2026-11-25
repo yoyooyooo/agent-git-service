@@ -49,6 +49,9 @@ class OrchestrationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name); self.base.chmod(0o700)
         self.root = self.base / 'ags'; self.root.mkdir(mode=0o700)
+        (self.root / 'state').mkdir(mode=0o700)
+        runtime = self.root / 'state/runtime.json'
+        runtime.write_bytes(canonical({'stage0': {'phase': 'serve-candidate'}})); runtime.chmod(0o600)
         (self.base / 'recovery').mkdir(mode=0o700)
         self.events = []
         self.context = {'registration_id': 'fixture', 'registration_sha256': 'a' * 64,
@@ -126,6 +129,35 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(self.events[-2:], ['release', 'release-owner'])
         self.manager.start.assert_not_called()
         self.assertEqual(len(list((self.base / 'recovery/native-recovery').glob('effect-*.json'))), 4)
+
+    def test_prestart_restore_requires_positive_root_readback_and_never_stops_again(self):
+        runtime = self.root / 'state/runtime.json'
+        runtime.write_bytes(canonical({'stage0': {'phase': 'serve-initial'}, 'stopped_at': 'fixture'}))
+        def rebind(_cold):
+            self.assertTrue(self.window.owner and self.window.locks)
+            self.events.append('root-stopped'); return {'normal': True}
+        self.manager.rebind_stopped.side_effect = rebind
+        with patch.object(recovery, 'read_window', return_value=({}, {'fixture': True}, None)):
+            result = recovery.restore(self.root, 'package', 'approval')
+        self.assertTrue(result['restored'])
+        self.assertLess(self.events.index('locks'), self.events.index('root-stopped'))
+        self.assertLess(self.events.index('root-stopped'), self.events.index('closed-writers'))
+        self.manager.preflight.assert_not_called(); self.manager.stop.assert_not_called()
+
+    def test_prestart_unknown_root_effect_never_falls_back_to_active_stop(self):
+        runtime = self.root / 'state/runtime.json'
+        runtime.write_bytes(canonical({'stage0': {'phase': 'serve-initial'}, 'stopped_at': 'fixture'}))
+        self.manager.rebind_stopped.side_effect = ContractError('stage0_candidate_start_attempted_or_unknown')
+        with patch.object(recovery, 'read_window', return_value=({}, {}, None)):
+            with self.assertRaisesRegex(ContractError, 'stage0_candidate_start_attempted_or_unknown'):
+                recovery.restore(self.root, 'package', 'approval')
+        self.manager.stop.assert_not_called(); self.apply.assert_not_called(); self.complete.assert_not_called()
+
+    def test_active_stop_failure_never_falls_back_to_prestart(self):
+        self.manager.stop.side_effect = ContractError('stage0_normal_stop_required')
+        with self.assertRaisesRegex(ContractError, 'stage0_normal_stop_required'):
+            recovery.restore(self.root, 'package', 'approval')
+        self.manager.rebind_stopped.assert_not_called(); self.apply.assert_not_called()
 
     def test_open_or_unknown_writers_refuse_before_any_restore(self):
         self.writer.side_effect = lambda root, generation: {'generation': generation, 'closed': False,
@@ -247,6 +279,13 @@ class PacketWindowTests(unittest.TestCase):
         self.stack = ExitStack(); self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(recovery, 'recovery_binding', side_effect=lambda *a, **kw: (self.context, self.late)))
         self.stack.enter_context(patch.object(recovery, 'read_trusted', return_value=canonical({'logical_host':'mini'})))
+        # These tests isolate original-window time validation. The sealed
+        # preimage itself has real-file coverage in test_routeb_native_continuation.
+        self.stack.enter_context(patch.object(recovery, 'read_window', return_value=({}, {}, self.pending)))
+        self.write(self.pending / 'cold-journal.json', {'fixture': 'window-time-only'})
+        self.stack.enter_context(patch.object(recovery, 'load_preimage', side_effect=
+            lambda package_path, approval_path, host, *, consumed_at, journal_sha256, manifest_sha256:
+                package.load(package_path, approval_path, host, consumed_at=consumed_at)))
         self.stack.enter_context(patch.object(package, 'require_interpreter_closure', return_value=self.context))
         self.stack.enter_context(patch.object(package, 'resolve_for_root', return_value=self.host))
         for name in ('validate_capture_profile', 'bundle_engine', 'verify_launch_dependencies',
