@@ -14,7 +14,7 @@ Use the existing **Native adapter isolation** workflow with:
 - `native_continuation=true`, `native_probe=false`;
 - `source_ci_run` naming the successful default-branch push Fork CI run for the
   exact SHA being dispatched;
-- `authorization_sha256` naming the actual private source file digest;
+- `authorization_sha256` naming the SHA256 of the final transported bytes;
 - `continuation_case=continue` for the complete positive sequence.
 
 The operator supplies the already reviewed private authorization source through
