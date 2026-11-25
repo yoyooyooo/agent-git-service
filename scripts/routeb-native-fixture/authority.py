@@ -293,6 +293,11 @@ def produce(pin_path, authority_id, binding, inspector):
     # The supported Linux/amd64 glibc startup also maps this non-ELF data.
     # Resolve and bind it like every other external, including its recovery asset.
     add_external(resolve(Path('/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache')))
+    # Default glibc locale lookup tries the archive before split locale files.
+    # Keep the existing locale environment and seal the archive when present.
+    locale_archive = Path('/usr/lib/locale/locale-archive')
+    if locale_archive.exists() or locale_archive.is_symlink():
+        add_external(resolve(locale_archive))
     locale = Path('/usr/lib/locale/C.utf8')
     require(locale.is_dir(), 'utf8_locale_unavailable')
     add_external(locale)

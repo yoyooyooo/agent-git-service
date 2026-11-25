@@ -213,12 +213,20 @@ func TestCatalogRealFilesAndLargePublisherMember(t *testing.T) {
 }
 
 func TestExternalDataFileMapsWithIndependentRecoveryAsset(t *testing.T) {
-	for _, mutation := range []string{"none", "missing_asset", "changed_asset"} {
-		t.Run(mutation, func(t *testing.T) {
+	cases := []struct{ name, mutation string }{
+		{"gconv-modules.cache", "none"},
+		{"gconv-modules.cache", "missing_asset"},
+		{"gconv-modules.cache", "changed_asset"},
+		{"locale-archive", "none"},
+		{"locale-archive", "missing_asset"},
+		{"locale-archive", "changed_asset"},
+	}
+	for _, test := range cases {
+		t.Run(test.name+"/"+test.mutation, func(t *testing.T) {
 			f := newFixture(t, false)
-			data := []byte("non-ELF glibc conversion data\n")
-			name := filepath.Join(f.policy.boundary, "gconv-modules.cache")
-			asset := filepath.Join(f.policy.boundary, "assets", "gconv.asset")
+			data := []byte("non-ELF glibc data\n")
+			name := filepath.Join(f.policy.boundary, test.name)
+			asset := filepath.Join(f.policy.boundary, "assets", test.name+".asset")
 			for _, path := range []string{name, asset} {
 				if err := os.WriteFile(path, data, 0644); err != nil {
 					t.Fatal(err)
@@ -254,7 +262,7 @@ func TestExternalDataFileMapsWithIndependentRecoveryAsset(t *testing.T) {
 				t.Fatal("recovery asset became a runtime mapping")
 			}
 			wantError := ""
-			switch mutation {
+			switch test.mutation {
 			case "missing_asset":
 				if err := os.Remove(asset); err != nil {
 					t.Fatal(err)
