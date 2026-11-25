@@ -223,7 +223,9 @@ included through `scripts/regression_gate.list` and the existing Fork CI step.
 The Source and governance job has a 30-minute bound for the expanded sequential
 source suites and owning Go checks. Each entry has isolated HOME/TMPDIR/cwd
 under one owner-marked system temporary directory, honoring the caller's TMPDIR.
-The runner's terminal trap records the actual exit status. Each Python entry runs
+The runner's terminal trap records the actual exit status. Top-level INT/TERM
+cancellation terminates its tracked supervisors with TERM and waits for them,
+while preserving the caller's 130/143 exit code. Each Python entry runs
 in an owned process group; a leftover group fails the entry and is stopped before
 the runner can consider its sandbox successful. On macOS a successful, unchanged
 sandbox is moved through the verified system Trash executable. Failure,
@@ -232,7 +234,9 @@ state and a private JSON receipt. Failure evidence contains at most 128 file
 metadata entries, at most four directory levels, without reading file contents
 or following symlinks. Other platforms retain their job-owned sandbox; no
 permanent-delete fallback is provided. SIGKILL can leave the owner marker without
-a terminal receipt. Moving to Trash does not claim to release disk space.
+a terminal receipt. Process-group ownership does not contain descendants that
+deliberately detach with a new session or double-fork. Moving to Trash does not
+claim to release disk space.
 The runner
 unsets PYTHONDONTWRITEBYTECODE, PYTHONPYCACHEPREFIX, PYTHONPATH and BASH_ENV before
 `scripts/ags-python.sh` establishes bytecode-free execution.

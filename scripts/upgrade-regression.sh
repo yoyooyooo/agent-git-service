@@ -4,15 +4,28 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IFS=$'\t' read -r sandbox sandbox_identity < <("$root/scripts/ags-python.sh" "$root/scripts/regression_sandbox.py" create --owner-pid "$$")
 finish_sandbox() {
-  status=$?
+  local status=$?
   trap - EXIT INT TERM
   "$root/scripts/ags-python.sh" "$root/scripts/regression_sandbox.py" finish \
     --root "$sandbox" --identity "$sandbox_identity" --owner-pid "$$" --exit-code "$status" || true
   exit "$status"
 }
+cancel_sandbox() {
+  # A foreground wait delays Bash traps. Signal only this shell's background
+  # supervisors, including a child started just before its PID is assigned.
+  trap '' INT TERM
+  local child
+  for child in $(jobs -pr); do
+    # Bash background jobs initially ignore INT. TERM also covers that startup
+    # window; the caller's original cancellation code is preserved below.
+    kill -s TERM "$child" 2>/dev/null || true
+  done
+  wait || true
+  exit "$1"
+}
 trap finish_sandbox EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'cancel_sandbox 130' INT
+trap 'cancel_sandbox 143' TERM
 printf 'Upgrade regression sandbox: %s\n' "$sandbox"
 entries=(
   'scripts/test_upgrade_regression_sandbox.py'
@@ -70,9 +83,11 @@ for index in "${!entries[@]}"; do
   printf '\n==> %s\n' "${entries[$index]}"
   start=$(date +%s)
   set +e
-  (cd "$work/cwd" && env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX -u PYTHONPATH -u BASH_ENV \
+  (cd "$work/cwd" && exec env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX -u PYTHONPATH -u BASH_ENV \
     HOME="$work/home" TMPDIR="$work/tmp" "$root/scripts/ags-python.sh" "$root/scripts/regression_sandbox.py" run -- \
-    "$root/scripts/ags-python.sh" "${args[@]}" -v)
+    "$root/scripts/ags-python.sh" "${args[@]}" -v) &
+  supervisor_pid=$!
+  wait "$supervisor_pid"
   status=$?
   set -e
   printf 'ENTRY %s exit=%s seconds=%s\n' "${entries[$index]}" "$status" "$(( $(date +%s) - start ))"

@@ -8,7 +8,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 
@@ -20,14 +19,8 @@ HERE = Path(__file__).resolve().parent
 class SandboxTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.root = Path(tempfile.mkdtemp(prefix='ags-sandbox-tests-')).resolve()
-
-    @classmethod
-    def tearDownClass(cls):
-        # Only this class's fresh synthetic tree; no permanent-delete fallback.
-        outcome = resource.system_trash(cls.root)
-        if outcome != 'trashed':
-            print(json.dumps({'test_fixture_retained': str(cls.root), 'cleanup': outcome}))
+        cls.class_owner = resource.create(None, os.getpid())
+        cls.root = cls.class_owner.path
 
     def owner(self):
         return resource.create(self.root, os.getpid())
@@ -155,6 +148,68 @@ class SandboxTests(unittest.TestCase):
             else:
                 self.assertEqual(receipt['cleanup'], 'retained_trash_unavailable')
 
+    def assert_shell_cancellation(self, selected, expected):
+        case = self.owner().path
+        scripts = case / 'scripts'
+        scripts.mkdir()
+        for name in ('ags-python.sh', 'regression_sandbox.py'):
+            shutil.copy2(HERE / name, scripts / name)
+        runner = (HERE / 'upgrade-regression.sh').read_text()
+        runner = re.sub(r'entries=\(.*?\n\)', "entries=(\n  'scripts/probe.py'\n)", runner, flags=re.S)
+        (scripts / 'upgrade-regression.sh').write_text(runner)
+        ready = case / 'ready.json'
+        program = (
+            'import subprocess,sys,os,json,time; '
+            'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"]); '
+            f'open({str(ready)!r},"w").write(json.dumps([os.getpid(),child.pid,os.getppid()])); '
+            'time.sleep(30)'
+        )
+        (scripts / 'probe.py').write_text(program)
+        temporary = case / 'tmp'
+        temporary.mkdir()
+        child = subprocess.Popen(['bash', str(scripts / 'upgrade-regression.sh')], cwd=case,
+                                 env=dict(os.environ, TMPDIR=str(temporary)),
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        pids = []
+        try:
+            for _ in range(300):
+                if ready.exists():
+                    break
+                time.sleep(0.01)
+            self.assertTrue(ready.exists())
+            pids = json.loads(ready.read_text())
+            child.send_signal(selected)  # Only the top-level Bash PID, not its process group.
+            stdout, stderr = child.communicate(timeout=3)
+            self.assertEqual(child.returncode, expected, stdout + stderr)
+            for pid in pids:
+                for _ in range(200):
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail('owned subprocess remains after top-level shell cancellation')
+        finally:
+            if child.poll() is None:
+                if len(pids) == 3:
+                    try:
+                        os.kill(pids[2], signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                child.terminate()
+                child.communicate(timeout=5)
+
+    def test_top_level_shell_term_stops_its_group_promptly(self):
+        self.assert_shell_cancellation(signal.SIGTERM, 143)
+
+    def test_top_level_shell_int_stops_its_group_promptly(self):
+        self.assert_shell_cancellation(signal.SIGINT, 130)
+
 
 if __name__ == '__main__':
-    unittest.main()
+    program = unittest.main(exit=False)
+    code = 0 if program.result.wasSuccessful() else 1
+    if hasattr(SandboxTests, 'class_owner'):
+        print(json.dumps(resource.finish(SandboxTests.class_owner, code)))
+    raise SystemExit(code)

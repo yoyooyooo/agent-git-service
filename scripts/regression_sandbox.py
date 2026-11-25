@@ -154,19 +154,23 @@ def settle_group(pid: int) -> bool:
 
 
 def run_owned(command: list[str]) -> int:
-    child = subprocess.Popen(command, start_new_session=True)
+    child = None
     interrupted = []
     previous = {}
     def interrupt(selected, _frame):
         if not interrupted:
             interrupted.append(selected)
-        try:
-            os.killpg(child.pid, selected)
-        except ProcessLookupError:
-            pass
+        if child is not None:
+            try:
+                os.killpg(child.pid, selected)
+            except ProcessLookupError:
+                pass
     for selected in (signal.SIGINT, signal.SIGTERM):
         previous[selected] = signal.signal(selected, interrupt)
     try:
+        child = subprocess.Popen(command, start_new_session=True)
+        if interrupted:
+            interrupt(interrupted[0], None)
         while True:
             try:
                 code = child.wait(timeout=0.1)
