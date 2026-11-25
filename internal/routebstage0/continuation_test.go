@@ -152,7 +152,7 @@ func TestContinuationRegistrationPreservesOriginalAndCandidateSlots(t *testing.T
 
 func TestContinuationUsesTheFixedHostEntry(t *testing.T) {
 	r := continuationFixture()
-	h := HostProfile{Root: "/home/example/transaction/ags", ToolBundle: rootFor(r.ID) + "/bundle", LogicalHost: "imile-win"}
+	h := HostProfile{Root: "/home/example/transaction/ags", ToolBundle: rootFor(r.ID) + "/bundle", LogicalHost: "primary.example.test"}
 	got, err := childArguments(r, h, "/publisher/python", "continue-installed")
 	if err != nil {
 		t.Fatal(err)
