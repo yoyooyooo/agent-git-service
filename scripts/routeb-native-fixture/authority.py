@@ -4,6 +4,8 @@ Only the later unchanged Go verifier decides whether this inventory closes the
 interpreter. This producer never writes catalog_verified/native_pass claims.
 """
 import os
+import posixpath
+import re
 from pathlib import Path, PurePosixPath
 import stat
 import tarfile
@@ -40,6 +42,62 @@ def entry(path, name):
         raw = read_bytes(path, 128 << 20, owner=0)
         value.update(kind='file', file={'sha256': sha(raw), 'size': len(raw)})
     return value
+
+
+def catalog_file_conditions(value, catalog_digest):
+    """Project input facts after authority_file_invalid; never validate or authorize.
+
+    The two File/Entry predicates are in interpreterauthority/catalog.go. Keep
+    paths and invalid strings opaque, and bound output independently of inventory.
+    """
+    rows, count = [], 0
+
+    def add(scope, index, field, path, **numbers):
+        nonlocal count
+        count += 1
+        if len(rows) < 8:
+            rows.append({'scope': scope, 'index': index, 'field': field,
+                         'path_sha256': sha(path.encode('utf-8')) if type(path) is str else None,
+                         **numbers})
+
+    def content(item, scope, index, path, maximum):
+        digest, size = item.get('sha256'), item.get('size')
+        if type(digest) is not str or not re.fullmatch('[0-9a-f]{64}', digest) or digest == '0' * 64:
+            add(scope, index, 'sha256', path)
+        if type(size) is not int or not 0 <= size <= maximum:
+            add(scope, index, 'size', path, size=size if type(size) is int else None, maximum=maximum)
+
+    def reference(item, scope, index, maximum):
+        path = item.get('path')
+        if (type(path) is not str or not path or any(c in path for c in '\\\x00\r\n\t')
+                or not posixpath.isabs(path) or path.startswith('//') or posixpath.normpath(path) != path):
+            add(scope, index, 'path', path)
+        content(item, scope, index, path, maximum)
+
+    def entry_facts(item, scope, index):
+        if item['kind'] != 'file':
+            return
+        path, file = item['path'], item.get('file')
+        if file is None:
+            add(scope, index, 'file', path)
+        else:
+            content(file, scope, index, path, 128 << 20)
+        if item.get('link') is not None:
+            add(scope, index, 'link', path)
+        mode = item['metadata']['mode']
+        if type(mode) is int and mode & 0o022:
+            add(scope, index, 'mode', path, mode=mode, non_owner_write_bits=mode & 0o022)
+
+    reference(value['publisher']['archive'], 'publisher_archive', None, 256 << 20)
+    reference(value['publisher']['checksums'], 'publisher_checksums', None, 16 << 20)
+    for index, item in enumerate(value['prefix']['entries']):
+        entry_facts(item, 'prefix_entry', index)
+    for index, item in enumerate(value['external']):
+        entry_facts(item['entry'], 'external_entry', index)
+        if item['entry']['kind'] == 'file' and item.get('asset') is not None:
+            reference(item['asset'], 'external_asset', index, 128 << 20)
+    return {'authority_sha256': catalog_digest, 'matching_conditions': count,
+            'conditions': rows, 'truncated': count > len(rows)}
 
 
 def publisher_download(pin, directory):

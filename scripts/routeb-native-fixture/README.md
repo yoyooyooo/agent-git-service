@@ -97,6 +97,15 @@ text and extra fields stay opaque; argv, environment and output contents are
 not exported. These fields describe a failure, not native admission. Digests
 identify captured output and do not establish a root cause on their own.
 
+Only after the real verifier returns `authority_file_invalid`, the failure can
+include conditions from the digest-bound catalog input: a fixed file category,
+entry index, field, numeric mode/size, and a path digest. At most eight conditions
+are exported, with the total count and truncation flag. Paths, invalid strings,
+and contents remain private. Missing diagnostic facts remain unavailable; no
+result authorizes a file permission change or substitutes for catalog verification.
+A source counterexample for writable external files does not identify which
+condition occurred in a completed VM whose catalog was not exported.
+
 Passing this job proves only the exercised disposable Linux cases for its exact
 source and VM. It is not production activation, Darwin acceptance, a complete
 native negative-case suite, or an Express release gate. Purpose/preimage/issuer
