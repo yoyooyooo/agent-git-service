@@ -16,7 +16,7 @@ import urllib.request
 
 import authorization
 from approval_fault import invocation, start_paths
-from common import (ID, REGISTRY, Refused, absent, canonical, command, exclusive,
+from common import (ID, REGISTRY, CommandFailed, Refused, absent, canonical, command, exclusive,
                     exclusive_json, file_reference, fingerprint, object_json,
                     read_bytes, read_json, reference, require, sha, utc)
 from provision import provision
@@ -28,7 +28,7 @@ PROPERTIES = ('MainPID', 'ControlPID', 'ActiveState', 'SubState', 'Result', 'Inv
 
 def properties(unit):
     raw = command(['/usr/bin/systemctl', 'show', unit, '--no-pager',
-                   '--property=' + ','.join(PROPERTIES)])
+                   '--property=' + ','.join(PROPERTIES)], operation='manager_properties')
     values = dict(line.split('=', 1) for line in raw.decode().splitlines() if '=' in line)
     require(set(values) == set(PROPERTIES), 'manager_readback_incomplete')
     return values
@@ -197,11 +197,11 @@ def execute(registry, scenario):
     profile = object_json(file_reference(registration['host_profile']))
     root, evidence = Path(profile['root']), registry / 'fixture-evidence'
     require(fingerprint(registration) == sha(raw), 'fixture_canonical_registration')
-    command(['/usr/bin/systemctl', 'daemon-reload'])
+    command(['/usr/bin/systemctl', 'daemon-reload'], operation='manager_reload')
     bootstrap = invocation(registration, 'bootstrap')
     finished(registry, bootstrap, start_controller(bootstrap, evidence, 'bootstrap'), expected=0)
     initial = invocation(registration, 'serve-initial')
-    command(['/usr/bin/systemctl', 'start', initial['unit']], timeout=150)
+    command(['/usr/bin/systemctl', 'start', initial['unit']], operation='initial_start', timeout=150)
     ready(root, 'serve-initial')
     fault_output = open(evidence / 'fault-stdout.txt', 'xb')
     fault_error = open(evidence / 'fault-stderr.txt', 'xb')
@@ -321,6 +321,8 @@ def main():
         result, code = execute(registry, args.scenario), 0
     except (Refused, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         result['code'] = str(error) if isinstance(error, Refused) else type(error).__name__
+        if isinstance(error, CommandFailed):
+            result['command_failure'] = error.diagnostic
     finally:
         # provision() starts no service. Only its successful return gives this
         # invocation ownership; a pre-existing registry is never that proof.

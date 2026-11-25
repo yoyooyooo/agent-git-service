@@ -17,10 +17,90 @@ from approval_fault import (FAN_OPEN_PERM, FAN_Q_OVERFLOW, METADATA,
                             events, select_checkpoint, start_paths)
 import authority
 import authorization
+import common
 from common import Refused, canonical, exclusive, fingerprint, object_json, read_bytes, sha
 from provision import unit
 from source_evidence import validate
 import run as fixture_run
+
+
+class CommandDiagnosticsTests(unittest.TestCase):
+    def failed(self, operation='candidate_version', stderr=b'private-stderr-sentinel'):
+        stdout = b'private-stdout-sentinel'
+        code = ('import sys;sys.stdout.buffer.write(%r);sys.stderr.buffer.write(%r);sys.exit(23)'
+                % (stdout, stderr))
+        with self.assertRaises(Refused) as caught:
+            common.command([sys.executable, '-c', code, 'private-argv-sentinel'],
+                           operation=operation, env={**os.environ, 'PRIVATE_SENTINEL': 'private-env-sentinel'})
+        self.assertEqual(str(caught.exception), 'command_failed')
+        return caught.exception, stdout
+
+    def test_real_failure_retains_operation_returncode_and_only_output_digests(self):
+        error, stdout = self.failed()
+        value = error.diagnostic
+        self.assertEqual(value['operation'], 'candidate_version')
+        self.assertEqual(value['returncode'], 23)
+        self.assertEqual(value['stdout'], {'bytes': len(stdout), 'sha256': sha(stdout)})
+        self.assertEqual(value['stderr'], {'bytes': 23, 'sha256': sha(b'private-stderr-sentinel')})
+        self.assertNotIn('private-', json.dumps(value))
+        self.assertNotIn('argv', value)
+        self.assertNotIn('env', value)
+
+    def test_native_failure_accepts_only_matching_stage_and_known_reason(self):
+        payload = {'schema': 'ags.routeb-fixture-command-error.v1', 'stage': 'verify-catalog',
+                   'reason': 'authority_linux_needed_unbound'}
+        error, _ = self.failed('verify_catalog', canonical(payload))
+        self.assertEqual(error.diagnostic['native_tools'], payload)
+        for changed in ({**payload, 'stage': 'seed-db'},
+                        {**payload, 'reason': 'authority_private_sentinel'},
+                        {**payload, 'private': 'private-extra-sentinel'}):
+            with self.subTest(changed=changed):
+                error, _ = self.failed('verify_catalog', canonical(changed))
+                self.assertNotIn('native_tools', error.diagnostic)
+                self.assertNotIn('private-', json.dumps(error.diagnostic))
+
+    def test_non_native_and_unparseable_stderr_stay_opaque(self):
+        valid = canonical({'schema': 'ags.routeb-fixture-command-error.v1',
+                           'stage': 'verify-catalog', 'reason': 'authority_binding_mismatch'})
+        error, _ = self.failed('source_head', valid)
+        self.assertNotIn('native_tools', error.diagnostic)
+        for raw in (b'private-stderr-sentinel', b'private-' * 1024,
+                    b'{"schema":"private","schema":"ags.routeb-fixture-command-error.v1"}'):
+            with self.subTest(size=len(raw)):
+                error, _ = self.failed('verify_catalog', raw)
+                self.assertNotIn('native_tools', error.diagnostic)
+                self.assertEqual(error.diagnostic['stderr']['sha256'], sha(raw))
+                self.assertNotIn('private-', json.dumps(error.diagnostic))
+
+    def test_success_preserves_bytes_and_rejects_unknown_operation_before_launch(self):
+        self.assertEqual(common.command([sys.executable, '-c', 'import sys;sys.stdout.buffer.write(b"ok\\x00")'],
+                                        operation='candidate_version'), b'ok\x00')
+        with mock.patch.object(common.subprocess, 'run') as launch:
+            with self.assertRaisesRegex(Refused, '^command_operation_invalid$'):
+                common.command(['unused'], operation='private-operation-sentinel')
+            launch.assert_not_called()
+
+    def test_failed_provision_exports_diagnostics_without_manager_effects(self):
+        error, _ = self.failed('verify_catalog')
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            output = base / 'output'
+            argv = ['fixture', '--source', str(base), '--build', str(base), '--source-evidence', str(base),
+                    '--authorization-file', str(base / 'private-input'), '--authorization-sha256', '1' * 64,
+                    '--uid', str(os.getuid()), '--transaction', 'gha-13-1', '--scenario', 'continue',
+                    '--export-directory', str(output), '--execute']
+            with mock.patch.object(sys, 'argv', argv), mock.patch.object(fixture_run, 'REGISTRY', base / 'registry'), \
+                 mock.patch.object(fixture_run, 'provision', side_effect=error), \
+                 mock.patch.object(fixture_run.subprocess, 'run') as manager, \
+                 mock.patch.object(fixture_run.os, 'chown'), mock.patch.object(fixture_run.os, 'fchown'), \
+                 mock.patch('builtins.print'):
+                self.assertEqual(fixture_run.main(), 78)
+                manager.assert_not_called()
+            value = json.loads((output / 'result.json').read_bytes())
+            self.assertFalse(value['native_pass'])
+            self.assertEqual(value['code'], 'command_failed')
+            self.assertEqual(value['command_failure'], error.diagnostic)
+            self.assertNotIn('private-', json.dumps(value))
 
 
 class LifecycleOwnershipTests(unittest.TestCase):

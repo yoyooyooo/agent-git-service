@@ -1,14 +1,56 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+func TestFailureDiagnosticUsesClosedStageAndReason(t *testing.T) {
+	tests := []struct {
+		stage, reason string
+		err           error
+	}{
+		{"verify-catalog", "authority_binding_mismatch", errors.New("authority_binding_mismatch")},
+		{"verify-catalog", "catalog_error", errors.New("authority_private_sentinel")},
+		{"inspect-elf", "permission_denied", &os.PathError{Op: "open", Path: "private-path-sentinel", Err: os.ErrPermission}},
+		{"private-stage-sentinel", "operation_error", errors.New("private-error-sentinel")},
+	}
+	for _, test := range tests {
+		t.Run(test.reason, func(t *testing.T) {
+			value := diagnosticFailure(test.stage, test.err)
+			raw, err := json.Marshal(value)
+			if err != nil || strings.Contains(string(raw), "private") || value.Reason != test.reason {
+				t.Fatalf("unsafe or incorrect diagnostic: %s, %v", raw, err)
+			}
+			if value.Schema != "ags.routeb-fixture-command-error.v1" {
+				t.Fatal("unexpected diagnostic schema")
+			}
+		})
+	}
+}
+
+func TestFailureDiagnosticPreservesActualCatalogRefusal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "catalog-input.json")
+	if err := os.WriteFile(path, []byte(`{"private-input-sentinel":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := run([]string{"verify-catalog", path})
+	if err == nil {
+		t.Fatal("invalid catalog input was accepted")
+	}
+	value := diagnosticFailure("verify-catalog", err)
+	if value.Stage != "verify-catalog" || value.Reason != "authority_json_shape" {
+		t.Fatalf("real catalog refusal was lost: %+v", value)
+	}
+}
 
 func TestSeedUsesActualSchemaAndRefusesOverwrite(t *testing.T) {
 	if os.Getuid() == 0 {
