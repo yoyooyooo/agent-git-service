@@ -6,7 +6,6 @@ observation is evidence, not M6 acceptance or permission for production use.
 An existing claim is never resumed by run; status is the read-only entry.
 """
 from contextlib import ExitStack
-import copy
 from datetime import datetime, timezone
 import hashlib
 import os
@@ -20,7 +19,7 @@ from upgrade import Failure, directory_fd, private_json
 from upgrade_backup import durable_bytes, preflight_space
 from upgrade_backup_contract import ContractError, canonical, fingerprint, require
 from upgrade_inventory import check_database_schema, file_digest, sqlite_path
-from upgrade_recovery import ColdWindow, MARKER, read_window, replace_json
+from upgrade_recovery import ColdWindow, MARKER, exact_source_installation, read_window, replace_json
 import routeb_native_capture as capture
 from routeb_host_native import FixedManager, SystemTrash, WriterProbe
 from routeb_host_package import require_interpreter_closure
@@ -201,14 +200,7 @@ class HostExecution:
                         (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
                         and len(data) == before.st_size and capture.sha(data) == package.candidate.sha256,
                         'candidate_replaced')
-            installed = copy.deepcopy(current)
-            for key in ('release_id', 'release_tag', 'control_revision', 'attestation'):
-                installed.pop(key, None)
-            installed.update(artifact_kind='exact-source', source=package.candidate.revision,
-                             runtime_tree=package.candidate.tree, version=expected['version'],
-                             tool_sha256=package.package['tool_sha256'],
-                             candidate_manifest_sha256=package.candidate.raw_manifest_sha256)
-            installed['binaries']['gh-server'] = {'sha256': package.candidate.sha256, 'identity': expected}
+            installed = exact_source_installation(current, self.binding, expected)
 
             def write_json(name, value):
                 stage = name + '.routeb-new'
