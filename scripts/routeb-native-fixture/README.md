@@ -117,6 +117,23 @@ means the parent did not complete its first recheck and active/manager-start
 records; it does not prove that no peer request arrived. The exit's final
 authority-file recheck is a separate observation.
 
+For a mapping refusal, the parent also keeps its first single rejected
+`/proc/<child>/maps` row in root-private `state/failures/<invocation>.json`.
+The existing code is unchanged; the record identifies the exact predicate,
+registration/catalog, requesting and observed invocations, child PID/start,
+and expected inode/device when the pathname was registered. `not_checked`
+means an earlier shape predicate refused the row, not that the file was absent
+from the catalog. The row retains the observed pathname, inode and device,
+including spaces or a deleted suffix; it does not read the mapped file.
+The disposable fixture exports only this closed, bound record, at most one
+row per invocation, bounded by the existing 4 MiB maps read, with its exact
+hash in the existing index.
+Other private failure schemas remain excluded. No complete maps inventory,
+environment, argv or file contents enter the artifact. Unavailable or oversized
+diagnostics remain unavailable, never permission to trust a new mapping.
+This evidence locates a mismatch; it does not add a member to the catalog or
+change any refusal, admission, lifecycle or recovery decision.
+
 Only after the real verifier returns `authority_file_invalid`, the failure can
 include conditions from the digest-bound catalog input: a fixed file category,
 entry index, field, numeric mode/size, and a path digest. At most eight conditions

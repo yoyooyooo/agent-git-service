@@ -268,34 +268,40 @@ func verifyMappings(pid int, catalog *interpreterauthority.RegisteredCatalog) er
 	if err != nil {
 		return err
 	}
-	known := catalog.Files()
-	main := catalog.Evidence().Executable
+	return verifyMappingRows(raw, catalog.Files(), catalog.Evidence().Executable)
+}
+
+func verifyMappingRows(raw []byte, known map[string]interpreterauthority.FileIdentity, main string) error {
 	seenMain := false
-	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+	for index, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
 		parts := strings.Fields(line)
 		if len(parts) < 5 {
-			return refused("stage0_mapping_invalid")
+			return refusedMapping("stage0_mapping_invalid", "field_count", raw, index+1, line, len(parts), "not_checked", nil)
 		}
 		inode, err := strconv.ParseUint(parts[4], 10, 64)
 		if err != nil {
-			return refused("stage0_mapping_invalid")
+			return refusedMapping("stage0_mapping_invalid", "inode_parse", raw, index+1, line, len(parts), "not_checked", nil)
 		}
 		if inode == 0 {
 			if len(parts) > 5 && (!strings.HasPrefix(parts[5], "[") || !strings.HasSuffix(parts[5], "]")) {
-				return refused("stage0_mapping_unknown")
+				return refusedMapping("stage0_mapping_unknown", "zero_inode_named", raw, index+1, line, len(parts), "not_checked", nil)
 			}
 			continue
 		}
 		if len(parts) != 6 || !absolute(parts[5]) {
-			return refused("stage0_mapping_unknown")
+			return refusedMapping("stage0_mapping_unknown", "file_path_shape", raw, index+1, line, len(parts), "not_checked", nil)
 		}
 		entry, ok := known[parts[5]]
 		if !ok || entry.Inode != inode {
-			return refused("stage0_mapping_unknown")
+			match, expected := "absent", (*interpreterauthority.FileIdentity)(nil)
+			if ok {
+				match, expected = "present", &entry
+			}
+			return refusedMapping("stage0_mapping_unknown", "catalog_file_identity", raw, index+1, line, len(parts), match, expected)
 		}
 		var major, minor uint64
 		if _, err = fmt.Sscanf(parts[3], "%x:%x", &major, &minor); err != nil || unix.Mkdev(uint32(major), uint32(minor)) != entry.Device {
-			return refused("stage0_mapping_changed")
+			return refusedMapping("stage0_mapping_changed", "device_identity", raw, index+1, line, len(parts), "present", &entry)
 		}
 		if parts[5] == main {
 			seenMain = true

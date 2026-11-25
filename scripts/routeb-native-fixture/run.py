@@ -16,7 +16,7 @@ import urllib.request
 
 import authorization
 from approval_fault import invocation, start_paths
-from common import (ID, REGISTRY, CommandFailed, Refused, absent, canonical, command, exclusive,
+from common import (ID, REGISTRY, SHA, CommandFailed, Refused, absent, canonical, command, exclusive,
                     exclusive_json, file_reference, fingerprint, object_json,
                     read_bytes, read_json, reference, require, sha, utc)
 from provision import provision
@@ -273,11 +273,57 @@ def execute(registry, scenario):
             'consumed_continuation_refused': True, 'native_pass': True}
 
 
+def exportable_mapping_failure(value, registration, registration_sha, invocation_id):
+    """Only the fixed parent's single-row diagnostic, bound to this fixture."""
+    keys = {'schema', 'registration_sha256', 'catalog_sha256', 'invocation_id',
+            'subject_invocation_id', 'phase', 'boot_id', 'supervisor', 'child',
+            'code', 'maps_sha256', 'maps_bytes', 'mapping'}
+    if (set(value) != keys or value['schema'] != 'ags.routeb-stage0-mapping-refusal.v1'
+            or value['registration_sha256'] != registration_sha
+            or value['catalog_sha256'] != registration['interpreter']['sha256']
+            or value['invocation_id'] != invocation_id):
+        return False
+    subjects = {row['id']: row['phase'] for row in registration['invocations']}
+    if (type(value['subject_invocation_id']) is not str or value['subject_invocation_id'] not in subjects
+            or value['phase'] != subjects[value['subject_invocation_id']]
+            or type(value['boot_id']) is not str or len(value['boot_id']) > 64
+            or type(value['maps_sha256']) is not str or not SHA.fullmatch(value['maps_sha256'])
+            or type(value['maps_bytes']) is not int or not 0 <= value['maps_bytes'] <= 4 << 20):
+        return False
+    for key in ('supervisor', 'child'):
+        process = value[key]
+        if (type(process) is not dict
+                or set(process) != {'pid', 'start_ticks', 'parent_pid', 'uid', 'gid', 'executable_sha256'}
+                or any(type(process[k]) is not int or process[k] < 0
+                       for k in ('pid', 'start_ticks', 'parent_pid', 'uid', 'gid'))
+                or process['pid'] <= 1 or process['start_ticks'] == 0
+                or type(process['executable_sha256']) is not str or not SHA.fullmatch(process['executable_sha256'])):
+            return False
+    detail = value['mapping']
+    branches = {'field_count': 'stage0_mapping_invalid', 'inode_parse': 'stage0_mapping_invalid',
+                'zero_inode_named': 'stage0_mapping_unknown', 'file_path_shape': 'stage0_mapping_unknown',
+                'catalog_file_identity': 'stage0_mapping_unknown', 'device_identity': 'stage0_mapping_changed'}
+    if (type(detail) is not dict
+            or set(detail) != {'branch', 'line_number', 'line', 'field_count', 'catalog_match', 'expected'}
+            or type(detail['branch']) is not str or branches.get(detail['branch']) != value['code']
+            or type(detail['line_number']) is not int or detail['line_number'] < 1
+            or type(detail['field_count']) is not int or detail['field_count'] < 0
+            or type(detail['line']) is not str or len(detail['line'].encode()) > 4 << 20
+            or '\n' in detail['line'] or '\r' in detail['line']
+            or detail['catalog_match'] not in ('not_checked', 'absent', 'present')):
+        return False
+    expected = detail['expected']
+    if detail['catalog_match'] == 'present':
+        return (type(expected) is dict and set(expected) == {'device', 'inode'}
+                and all(type(v) is int and v >= 0 for v in expected.values()))
+    return expected is None
+
+
 def export(registry, destination, uid, gid):
     """Closed artifact allowlist. No source/grant/approval/env/database payload."""
     destination.mkdir(mode=0o700)
     os.chown(destination, uid, gid)
-    registration, _ = read_json(registry / 'stage0-registration.json')
+    registration, registration_raw = read_json(registry / 'stage0-registration.json')
     profile = object_json(file_reference(registration['host_profile']))
     root = Path(profile['root'])
     candidates = list((registry / 'fixture-evidence').glob('*.json'))
@@ -286,13 +332,24 @@ def export(registry, destination, uid, gid):
     candidates = [p for p in candidates if not p.name.startswith('source-') and p.name != 'catalog-input.json']
     for kind in ('claims', 'active', 'effects', 'exits', 'manager-start', 'manager-completion'):
         candidates += list((registry / 'state' / kind).glob('*.json'))
+    # Do not export arbitrary private failures or journal text. A mapping row
+    # names its actual object (including spaces/deleted suffix); a path digest
+    # alone cannot distinguish the existing refusal branches in an ended VM.
+    mapping_failures = {}
+    for row in registration['invocations']:
+        path = registry / 'state/failures' / (row['id'] + '.json')
+        if path.is_file():
+            value, raw = read_json(path, 8 << 20)
+            if exportable_mapping_failure(value, registration, sha(registration_raw), row['id']):
+                candidates.append(path)
+                mapping_failures[path] = raw
     for suffix in ('continuation/host-execution.json', 'continuation/observation/capture.json'):
         path = root / 'state/ags-autodeploy/local-v2/pending' / suffix
         if path.is_file():
             candidates.append(path)
     index = []
     for number, path in enumerate(sorted(set(candidates))):
-        raw = read_bytes(path, 16 << 20)
+        raw = mapping_failures[path] if path in mapping_failures else read_bytes(path, 16 << 20)
         name = '%03d-%s' % (number, path.name)
         exclusive(destination / name, raw, uid=uid, gid=gid)
         index.append({'name': name, 'original_path': str(path), 'sha256': sha(raw), 'size': len(raw)})

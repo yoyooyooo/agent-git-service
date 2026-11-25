@@ -71,6 +71,7 @@ func (s *supervisor) validateRuntimeContext(c Context, i Invocation) error {
 		}
 	}
 	if err = verifyMappings(child.PID, l.catalog); err != nil {
+		s.keepMappingFailure(err, c)
 		return err
 	}
 	if err = l.verifyUnit(i, false); err != nil {
