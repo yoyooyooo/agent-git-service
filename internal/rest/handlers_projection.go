@@ -11,6 +11,18 @@ import (
 	"github.com/ngaut/agent-git-service/internal/rest/respond"
 )
 
+// GetGitLabMirrorFacts returns only the running integration's configuration for
+// one exact ref. The service enforces repository read permission.
+func (d *Deps) GetGitLabMirrorFacts(w http.ResponseWriter, r *http.Request) {
+	res, err := d.Svc.GetGitLabMirrorFacts(r.Context(), repoFullName(r), r.URL.Query().Get("ref"))
+	if err != nil {
+		respond.ServiceErrorRequest(r, w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	respond.JSON(w, http.StatusOK, res)
+}
+
 // GetProjectionStatus handles GET /api/v3/repos/{owner}/{repo}/projection/status.
 func (d *Deps) GetProjectionStatus(w http.ResponseWriter, r *http.Request) {
 	res, err := d.Svc.GetProjectionStatus(r.Context(), repoFullName(r))

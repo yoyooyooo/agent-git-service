@@ -235,6 +235,11 @@ func buildGitHubCompatibleOpenAPIPaths() map[string]any {
 
 func buildRESTOpenAPIPaths() map[string]any {
 	return map[string]any{
+		"/api/ext/v1/repos/{owner}/{repo}/projection/gitlab/facts": map[string]any{
+			"get": operation("getGitLabMirrorFacts", "Read the running GitLab integration's whitelist configuration and same-ref mirror target for one full ref. Requires repository read permission. A target is configuration only, not credential validation, connectivity, or GitLab ref readback; gitlab_ref_readback is not_claimed. No provider request is made.", auth(), nil,
+				append(pathParams(param("owner", "string"), param("repo", "string")), map[string]any{"name": "ref", "in": "query", "required": true, "schema": map[string]any{"type": "string"}, "description": "Full Git ref, for example refs/heads/main. Non-branch refs have no mirror target."}),
+				response(200, "Configuration and target are null when no integration is loaded; target is null when this ref has no configured mirror destination. Cache-Control: no-store.")),
+		},
 		"/api/ext/v1/client-runs": map[string]any{"post": operation("startClientRun", "Create one short-lived native actor run identity. Context association is best-effort, never a permission grant.", auth(), clientRunOpenAPIBody(), nil, clientRunOpenAPIResponses(true))},
 		"/api/ext/v1/client-runs/{run_id}": map[string]any{
 			"get":    operation("getClientRun", "Read the owned run receipt; current identifies the authenticating run.", auth(), nil, pathParams(param("run_id", "string")), clientRunOpenAPIResponses(false)),
