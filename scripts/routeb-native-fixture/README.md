@@ -52,6 +52,13 @@ system tzdata permission is changed. The two locale variables remain fixed.
 The Linux/amd64 fixture also registers glibc's `gconv-modules.cache` as external
 data, with its resolved aliases, actual file identity and bytes, and an independent
 recovery asset. ELF dependency enumeration does not cover this data mapping.
+With `LANG` and `LC_ALL` fixed to `C.UTF-8`, glibc can first map the default
+`/usr/lib/locale/locale-archive`. When present, the producer resolves and seals
+that archive through the same External and independent-asset contract, without
+classifying it as a native image. An archive alias must resolve to a real file;
+an absent archive leaves the existing `C.utf8` directory inputs in place.
+The fixture retains both locale forms when available and does not set `LOCPATH`
+or change the child environment. See the [glibc locale lookup rules](https://man7.org/linux/man-pages/man7/locale.7.html).
 Missing or changed inputs still fail the existing closure checks;
 the producer does not learn trusted files from a running process.
 

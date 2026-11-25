@@ -378,8 +378,11 @@ class AuthorityTests(unittest.TestCase):
         # Exercise the complete producer with a tiny real archive and private
         # files. Only root/platform, network and ELF inspection are fixtures;
         # this is not a root-owned catalog or native admission test.
-        for alias in (False, True):
-            with self.subTest(alias=alias), tempfile.TemporaryDirectory() as temporary:
+        cases = [(False, 'absent'), (True, 'absent'), (False, 'file'),
+                 (False, 'alias'), (False, 'dangling')]
+        for alias, locale_form in cases:
+            with self.subTest(gconv_alias=alias, locale_archive=locale_form), \
+                 tempfile.TemporaryDirectory() as temporary:
                 base = Path(temporary).resolve()
                 host, registry = base / 'host', base / 'interpreters'
                 registry.mkdir()
@@ -399,7 +402,14 @@ class AuthorityTests(unittest.TestCase):
                 loader = write_host('/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2', b'\x7fELFloader')
                 for name in ('passwd', 'group', 'nsswitch.conf'):
                     write_host('/etc/' + name, name.encode())
-                write_host('/usr/lib/locale/C.utf8/LC_CTYPE', b'locale-data')
+                locale_file = write_host('/usr/lib/locale/C.utf8/LC_CTYPE', b'locale-data')
+                locale_path = private_path('/usr/lib/locale/locale-archive')
+                locale_archive = None
+                if locale_form in ('file', 'alias'):
+                    locale_archive = write_host(str(locale_path) + ('.real' if locale_form == 'alias' else ''),
+                                                b'locale-archive-data-not-ELF')
+                if locale_form in ('alias', 'dangling'):
+                    locale_path.symlink_to('locale-archive.real')
                 cache_path = '/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache'
                 cache = write_host(cache_path + ('.real' if alias else ''), b'gconv-data-not-ELF')
                 if alias:
@@ -441,23 +451,40 @@ class AuthorityTests(unittest.TestCase):
                 private_os.getuid.return_value = 0
                 with mock.patch.multiple(authority, Path=private_path, INTERPRETERS=registry,
                                          os=private_os, metadata=private_metadata, read_bytes=private_read,
-                                         protected_directory=lambda path: self.assertEqual(path, registry),
-                                         publisher_download=publisher, command=inspect):
+                                          protected_directory=lambda path: self.assertEqual(path, registry),
+                                          publisher_download=publisher, command=inspect):
+                    if locale_form == 'dangling':
+                        with self.assertRaisesRegex(Refused, 'elf_dependency_missing'):
+                            authority.produce(pin_path, 'data-fixture',
+                                              {'platform': 'linux', 'architecture': 'amd64'}, 'inspector')
+                        self.assertFalse((registry / 'data-fixture/authority.json').exists())
+                        continue
                     output = authority.produce(pin_path, 'data-fixture',
                                                {'platform': 'linux', 'architecture': 'amd64'}, 'inspector')
                 document = json.loads(Path(output['path']).read_bytes())
                 external = {row['entry']['path']: row for row in document['external']}
-                self.assertIn(str(cache), external)
-                row, info = external[str(cache)], cache.stat()
-                self.assertEqual(row['entry']['kind'], 'file')
-                self.assertEqual(row['entry']['file'], {'sha256': sha(cache.read_bytes()), 'size': info.st_size})
-                self.assertEqual((row['entry']['metadata']['device'], row['entry']['metadata']['inode']),
-                                 (info.st_dev, info.st_ino))
-                asset = Path(row['asset']['path'])
-                self.assertFalse(os.path.samefile(cache, asset))
-                self.assertEqual(asset.read_bytes(), cache.read_bytes())
-                self.assertEqual({key: row['asset'][key] for key in ('sha256', 'size')}, row['entry']['file'])
-                self.assertNotIn(str(cache), [image['path'] for image in document['native_images']])
+                self.assertEqual(document['environment'], {
+                    'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8', 'TZ': 'UTC0',
+                    'TZDIR': str(registry / 'data-fixture/timezone')})
+                for data_file in [cache, locale_file] + ([locale_archive] if locale_archive else []):
+                    self.assertIn(str(data_file), external)
+                    row, info = external[str(data_file)], data_file.stat()
+                    self.assertEqual(row['entry']['kind'], 'file')
+                    self.assertEqual(row['entry']['file'], {'sha256': sha(data_file.read_bytes()), 'size': info.st_size})
+                    self.assertEqual((row['entry']['metadata']['device'], row['entry']['metadata']['inode']),
+                                     (info.st_dev, info.st_ino))
+                    asset = Path(row['asset']['path'])
+                    self.assertFalse(os.path.samefile(data_file, asset))
+                    self.assertEqual(asset.read_bytes(), data_file.read_bytes())
+                    self.assertEqual({key: row['asset'][key] for key in ('sha256', 'size')}, row['entry']['file'])
+                    self.assertNotIn(str(data_file), [image['path'] for image in document['native_images']])
+                if locale_form == 'alias':
+                    link = external[str(locale_path)]
+                    self.assertEqual((link['entry']['kind'], link['entry']['link']),
+                                     ('symlink', locale_archive.name))
+                    self.assertNotIn('asset', link)
+                elif locale_form == 'absent':
+                    self.assertNotIn(str(locale_path), external)
                 if alias:
                     link = external[str(private_path(cache_path))]
                     self.assertEqual((link['entry']['kind'], link['entry']['link']), ('symlink', cache.name))
