@@ -84,6 +84,35 @@ The installation receipt identifies the actual exact source and tree, binary,
 candidate manifest and tool bundle. It does not relabel that build as a release
 or retain a stale release attestation.
 
+## Installed state rebind component
+
+`ColdWindow.reopen_installed` lets a new coordinator object read the same
+exact-source cold window after installation completed and before any start
+intent. It requires the original owner and both cold locks, an explicitly
+bound cold-journal hash, and the caller's continuation authorization check.
+It verifies the original claim, sealed backup and independent restore report,
+retained old installation bytes, unchanged recovery data, current writer
+closure, and the installed candidate identity. The complete installation
+receipt must match the same pure derivation used by the installer. Its raw
+hash must also match the hash recorded at installation.
+
+The rebind writes no files and retains the same generation. It does not repeat
+stop, copy, restore or install, create a replacement claim, or change the
+host journal's recorded failure. Only the existing `start_intent` and `start`
+methods can subsequently publish and consume the original one-use handoff.
+Any partial install, prior start intent, unknown writer, changed protected
+data or changed evidence is refused. A change outside the recovery group does
+not expand that group's data comparison.
+
+This is a source component, not an executable host continuation command.
+`run` still refuses an existing claim. Native continuation still needs a
+separately registered invocation and independent authorization, durable
+readback of the original root-owned normal-stop evidence, and a candidate
+ticket issuer bound to that invocation. The component's fixture authorization
+and writer callbacks cannot supply those native facts. Source tests exercise
+a separate Python process and preserve the original host failure; they do not
+claim native mount-alias, Docker, manager or production acceptance.
+
 ## Observation and running health
 
 Startup evidence includes raw process and manager facts, verified lifecycle

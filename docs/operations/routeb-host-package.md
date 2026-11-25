@@ -25,6 +25,10 @@ native supervisor described below. The coordinator in `routeb_host_execution.py`
 manager components retain source-level tests for backup, independent restore
 verification and a single start. An unknown start is not replayed. These
 component tests do not admit a native transaction.
+The installed-state rebind component can verify an existing installed,
+unstarted cold window without rewriting its failure history or replaying
+prior effects. It does not add a host continuation CLI or native invocation;
+see [its boundary](../routeb-host-execution.md#installed-state-rebind-component).
 
 The public admission gate reports this same blocker for each refused native
 context. Its exception cause preserves the client's specific refusal reason;

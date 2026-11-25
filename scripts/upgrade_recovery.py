@@ -180,6 +180,20 @@ def stable_data(group, dsn, schema):
     return fingerprint(summaries)
 
 
+def exact_source_installation(old_receipt, binding, identity):
+    """Derive the complete installed receipt from the retained old receipt."""
+    installed = copy.deepcopy(old_receipt)
+    for key in ('release_id', 'release_tag', 'control_revision', 'attestation'):
+        installed.pop(key, None)
+    installed.update(artifact_kind='exact-source', source=binding['new'],
+                     runtime_tree=binding['runtime_tree'], version=identity['version'],
+                     tool_sha256=binding['tool_sha256'],
+                     candidate_manifest_sha256=binding['manifest_sha256'])
+    installed['binaries']['gh-server'] = {'sha256': binding['new_binary_sha256'],
+                                         'identity': copy.deepcopy(identity)}
+    return installed
+
+
 class ColdWindow:
     """Private harness supplies a reviewed fixed manager and writer probe.
 
@@ -401,8 +415,13 @@ class ColdWindow:
     def installed(self, expected_identity, identity_reader):
         require(self.journal['phase'] == 'install_started', 'cold_phase_invalid')
         self.unchanged(full=False)
+        _, receipt_sha = self.installed_identity(expected_identity, identity_reader)
+        self.phase('installed', installed_receipt_sha256=receipt_sha)
+
+    def installed_identity(self, expected_identity, identity_reader):
+        """Read the installed bytes without replaying the installation phase."""
         binary = self.root / 'bin/gh-server'
-        receipt, _ = private_json(self.state / 'installation.json')
+        receipt, receipt_sha = private_json(self.state / 'installation.json')
         if self.backup_binding.get('artifact_kind') == 'exact-source':
             require(receipt.get('artifact_kind') == 'exact-source'
                     and not any(key in receipt for key in ('release_id', 'release_tag', 'control_revision'))
@@ -425,7 +444,51 @@ class ColdWindow:
                 and receipt['binaries']['gh-server']['sha256'] == file_digest(binary)
                 and receipt['binaries']['gh-server']['identity'] == expected_identity
                 and identity_reader(binary) == expected_identity, 'installed_identity_mismatch')
-        self.phase('installed', installed_receipt_sha256=file_digest(self.state / 'installation.json'))
+        return receipt, receipt_sha
+
+    def reopen_installed(self, expected_identity, identity_reader, *, journal_sha256, authorize):
+        """Rebind an exact installed/unstarted window under its original locks.
+
+        This reads evidence only. The caller supplies independent continuation
+        authorization and a fixed writer probe; this method grants no native
+        invocation and does not repeat stop, backup, restore or installation.
+        The existing start_intent/start sequence remains the sole start fence.
+        """
+        require(self.owner is not None and self.locks is not None, 'cold_locks_required')
+        require(self.journal is None, 'cold_window_already_loaded')
+        digest(journal_sha256)
+        journal_path = self.pending / 'cold-journal.json'
+        require(file_digest(journal_path) == journal_sha256, 'installed_journal_changed')
+        marker, journal, pending = read_window(self.root)
+        require(journal['phase'] == 'installed' and journal['start_attempted'] is False
+                and 'start_called' not in journal and 'handoff' not in journal,
+                'installed_continuation_refused')
+        require(self.binding == read_original_binding(pending)
+                and self.backup_binding == journal['backup_binding']
+                and self.backup_binding.get('artifact_kind') == 'exact-source',
+                'cold_binding_mismatch')
+        self.journal = journal
+        try:
+            self.unchanged(full=False)
+            backup, _ = self.verified_backup()
+            old, old_sha = private_json(pending / 'old-installation.json')
+            require(old_sha == journal['old_receipt_sha256']
+                    and old_sha == file_digest(backup / group_object(self.group, 'installation')['id'])
+                    and file_digest(pending / 'old-binary') == self.backup_binding['old_binary_sha256']
+                    and old.get('source') == self.binding['old']
+                    and old.get('binaries', {}).get('gh-server', {}).get('sha256') ==
+                        self.backup_binding['old_binary_sha256'], 'old_evidence_mismatch')
+            expected = exact_source_installation(old, self.backup_binding, expected_identity)
+            receipt, receipt_sha = self.installed_identity(expected_identity, identity_reader)
+            require(receipt == expected and receipt_sha == journal['installed_receipt_sha256'],
+                    'installed_identity_mismatch')
+            authorize()
+            require(read_window(self.root) == (marker, journal, pending)
+                    and file_digest(journal_path) == journal_sha256, 'installed_journal_changed')
+        except BaseException:
+            self.journal = None
+            raise
+        return copy.deepcopy(journal)
 
     def start_intent(self):
         require(self.journal['phase'] == 'installed' and not self.journal['start_attempted'], 'cold_phase_invalid')

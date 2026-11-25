@@ -265,6 +265,37 @@ class AdmissionTests(unittest.TestCase):
 
 class UnknownStartTests(unittest.TestCase):
     def test_unknown_start_retains_durable_claim_and_never_replays_manager(self):
+        self.failed_run(before_start=False)
+
+    def test_installed_reopen_keeps_the_original_host_failure_and_cold_generation(self):
+        fixture, operation, failed = self.failed_run(before_start=True)
+        frozen = (fixture.pending / 'cold-journal.json').read_bytes()
+        window = cold.ColdWindow(fixture.root, operation.binding, operation.binding, fixture.group,
+            'sqlite:' + str(fixture.storage.dbpath), fixture.storage.admission,
+            fixture.manager, None, fixture.trash)
+        window.writer_probe = lambda: {'generation': window.journal['generation'],
+                                      'closed': True, 'writers': [], 'unknown': []}
+        window.acquire_owner()
+        try:
+            window.acquire()
+            authorization = Mock()
+            window.reopen_installed(fixture.identity, lambda _: fixture.identity,
+                                    journal_sha256=hashlib.sha256(frozen).hexdigest(),
+                                    authorize=authorization)
+            authorization.assert_called_once_with()
+            self.assertEqual((fixture.pending / execution.JOURNAL).read_bytes(), failed)
+            self.assertEqual((fixture.pending / 'cold-journal.json').read_bytes(), frozen)
+            window.start_intent()
+            _, journal, _ = cold.read_window(fixture.root)
+            self.assertTrue(journal['start_attempted'])
+            self.assertEqual(journal['generation'], operation.window.journal['generation'])
+            self.assertEqual((fixture.pending / execution.JOURNAL).read_bytes(), failed)
+            self.assertEqual(fixture.manager.starts, 0)
+        finally:
+            window.release()
+            window.release_owner()
+
+    def failed_run(self, *, before_start):
         fixture = cold_fixtures.ExactSourceColdTests()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
@@ -316,21 +347,25 @@ class UnknownStartTests(unittest.TestCase):
                 patch.object(execution, 'preflight', side_effect=boundary), \
                 patch.object(execution, 'read_version', side_effect=version):
             operation = execution.HostExecution(package)
-            with patch.object(operation, 'observe_start', side_effect=ContractError('start_observation_unknown')):
-                with self.assertRaisesRegex(ContractError, 'start_observation_unknown'):
+            target, method, reason = ((operation.window, 'start_intent', 'fixture_installed_interruption')
+                                      if before_start else (operation, 'observe_start', 'start_observation_unknown'))
+            with patch.object(target, method, side_effect=ContractError(reason)):
+                with self.assertRaisesRegex(ContractError, reason):
                     operation.run()
             journal, _ = execution.private_json(fixture.pending / execution.JOURNAL)
             self.assertEqual(journal['status'], 'failed')
             self.assertTrue(journal['recovery_required'])
-            self.assertTrue(journal['start_attempted'])
-            self.assertEqual(fixture.manager.starts, 1)
+            self.assertEqual(journal['start_attempted'], not before_start)
+            self.assertEqual(journal['phase'], 'installed' if before_start else 'start_attempted')
+            self.assertEqual(fixture.manager.starts, 0 if before_start else 1)
             self.assertTrue((fixture.pending / 'old-installation.json').is_file())
             self.assertTrue((Path(operation.window.journal['backup_dir']) / 'restore-report.json').is_file())
             saved = (fixture.pending / execution.JOURNAL).read_bytes()
             with self.assertRaisesRegex(ContractError, 'execution_preflight_blocked'):
                 execution.HostExecution(package).run()
-            self.assertEqual(fixture.manager.starts, 1)
+            self.assertEqual(fixture.manager.starts, 0 if before_start else 1)
             self.assertEqual((fixture.pending / execution.JOURNAL).read_bytes(), saved)
+        return fixture, operation, saved
 
 
 if __name__ == '__main__':
