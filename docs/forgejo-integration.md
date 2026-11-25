@@ -923,6 +923,59 @@ When Forgejo emits a signed `pull_request.closed` payload with `merged=true` but
 
 When Forgejo later emits a signed branch `delete` payload for the PR source branch, AGS treats it as cleanup only. The handler resolves the merged AGS PR through the Forgejo projection row and source branch, deletes the matching AGS `refs/heads/<branch>` if it still exists, optionally deletes the mirrored GitLab and GitHub source branches, preserves `refs/pull/<ags-pr>/head`, and projects `source_branch_state=deleted` back to Multica. Branch deletion never creates the merge/completion fact; the `pull_request.merged=true` event remains the authority for AGS merge state and Multica issue completion.
 
+### Read configured GitLab mirror facts
+
+Repository readers can inspect the running GitLab integration for one full ref:
+
+```text
+GET /api/ext/v1/repos/example-owner/demo/projection/gitlab/facts?ref=refs/heads/main
+```
+
+The response uses `schema: ags.gitlab-mirror-facts.v1` and
+`configuration_source: running_integration`. It reads the instantiated
+integration, without rereading configuration or token files. For example:
+
+```json
+{
+  "schema": "ags.gitlab-mirror-facts.v1",
+  "repository": "example-owner/demo",
+  "configuration_source": "running_integration",
+  "gitlab_ref_readback": "not_claimed",
+  "ref": "refs/heads/main",
+  "configuration": {
+    "enabled": true,
+    "base_url": "https://gitlab.example.test",
+    "merge_authority": "forgejo"
+  },
+  "target": {
+    "project_path": "backup/demo",
+    "ref": "refs/heads/main"
+  }
+}
+```
+
+`configuration` is null when no GitLab integration is instantiated. Otherwise
+it contains only the actual enabled flag, base URL, and merge authority. An empty
+merge authority remains empty. Credential-bearing URLs, URLs with a query or
+fragment, and non-HTTP(S) transports cannot be exposed through this endpoint;
+the request fails without returning the configured URL.
+
+`target` is non-null only when local configuration can construct this ref's
+`PushRef` destination. The query uses the same branch selection, exclude-before-
+include policy, repository mapping, and remote construction as the mirror
+executor. Disabled integrations, unavailable local prerequisites, unmapped
+repositories, excluded branches, tags, and project-ID-only mappings have a null
+target. This does not validate credentials, connectivity, remote repository
+existence, or provider write permission. The read makes no provider request and
+never reports a GitLab ref SHA; `gitlab_ref_readback` remains `not_claimed`.
+
+The service requires native repository read permission, including delegated
+`repo:read` checks. Private repositories remain hidden from unauthorized
+readers. The response is `Cache-Control: no-store`. This API is a configuration
+observation, not a durable submission receipt or proof that a downstream build
+uses the expected source SHA. Consumers retain historical submission evidence
+under their existing receipt contract.
+
 ## Non-goals
 
 - No bidirectional AGS/Forgejo reconciliation. The reverse directions are limited to signed Forgejo merge-authority callbacks and explicit AGS workflow action-label callbacks; both mutate AGS through AGS-owned service logic.
