@@ -1,24 +1,163 @@
 #!/usr/bin/env python3
 """Fixture boundaries for the native parent chain; no host service is controlled."""
 import copy
+from contextlib import contextmanager, ExitStack, redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import os
 from pathlib import Path
+import re
+import stat
+import struct
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import routeb_host_native as native
+import routeb_host_package as host_package
+import routeb_native_bootstrap as bootstrap
 import routeb_native_capture as capture
 import routeb_stage0_client as peer_client
-from upgrade_backup_contract import ContractError
+from upgrade_backup_contract import ContractError, canonical
+from upgrade_identity import IdentityError
 
 
 def identity(pid, parent, uid, gid, stamp, sha):
     return {'pid': pid, 'parent_pid': parent, 'uid': uid, 'gid': gid,
-            'start_ticks': stamp, 'executable_sha256': sha * 64}
+             'start_ticks': stamp, 'executable_sha256': sha * 64}
+
+
+class ContextFailureDiagnosticsTests(unittest.TestCase):
+    """Exercise the child boundary and existing CLI, without a native parent."""
+
+    def setUp(self):
+        self.root = '/fixture/account/.local/state/ags-routeb-native/example/ags'
+        self.binding = {'tool_revision': 'a' * 40, 'tool_tree': 'b' * 40,
+                        'tool_manifest_sha256': 'c' * 64}
+        self.invocation = {'id': 'example-bootstrap', 'operation': 'bootstrap', 'phase': 'bootstrap',
+                           'attempt_id': 'example-attempt', 'authority_epoch': 1,
+                           'authorization_id': 'example-approval'}
+        self.registration = {'id': 'example', 'binding': self.binding,
+                             'native_image': {'sha256': 'a' * 64},
+                             'interpreter': {'sha256': 'e' * 64}, 'invocations': [self.invocation]}
+        self.host = {'root': self.root}
+        self.context = {'schema': 'ags.routeb-stage0-context.v1', 'registration_id': 'example',
+                        'registration_sha256': 'd' * 64, 'root': self.root,
+                        **{k: v for k, v in self.invocation.items() if k != 'id'},
+                        'invocation_id': self.invocation['id'],
+                        'boot_id': '00000000-0000-4000-8000-000000000001',
+                        'supervisor': identity(1101, 1, 0, 0, 100, 'a'),
+                        'child': identity(1102, 1101, 1001, 1001, 101, 'b'),
+                        'interpreter_authority_sha256': 'e' * 64, **self.binding,
+                        'recovery_registration_sha256': '', 'scope_grant_sha256': ''}
+
+    @contextmanager
+    def peer(self, response=None, *, transport_error=None, local_error=None):
+        if response is None:
+            response = {'schema': peer_client.PROTOCOL, 'ok': True, 'context': self.context}
+        raw = response if isinstance(response, bytes) else canonical(response)
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.connect.side_effect = transport_error
+        connection.getsockopt.return_value = struct.pack('3i', 1101, 0, 0)
+        connection.recv.side_effect = [raw, b'']
+        def metadata(path):
+            socket_file = path.name.endswith('.sock')
+            return SimpleNamespace(st_mode=(stat.S_IFSOCK | 0o600) if socket_file else (stat.S_IFDIR | 0o755),
+                                   st_uid=1001 if socket_file else 0)
+        with ExitStack() as stack:
+            for name, value in (('getpid', 1102), ('getppid', 1101), ('getuid', 1001), ('getgid', 1001)):
+                stack.enter_context(patch.object(peer_client.os, name, return_value=value))
+            stack.enter_context(patch.object(peer_client, '_registered',
+                               return_value=(self.registration, self.host, 'd' * 64), side_effect=local_error))
+            stack.enter_context(patch.object(Path, 'lstat', autospec=True, side_effect=metadata))
+            stack.enter_context(patch.object(peer_client.socket, 'socket', return_value=connection))
+            stack.enter_context(patch.object(peer_client.socket, 'SO_PEERCRED', 17, create=True))
+            stack.enter_context(patch.object(sys, 'argv', ['bootstrap', 'activate', '--root', self.root,
+                                                         '--approval', '/fixture/approval.json']))
+            read = stack.enter_context(patch.object(bootstrap, 'read_bindings'))
+            stderr, stdout = io.StringIO(), io.StringIO()
+            stack.enter_context(redirect_stderr(stderr)); stack.enter_context(redirect_stdout(stdout))
+            yield stderr, stdout, read
+
+    def refusal(self, expected, **kwargs):
+        with self.peer(**kwargs) as (stderr, stdout, read):
+            self.assertEqual(bootstrap.main(), 78)
+            read.assert_not_called()
+        self.assertEqual(stdout.getvalue(), '')
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(lines[-1], 'code=interpreter_full_closure_required')
+        self.assertIn('code=' + expected, lines)
+        self.assertNotIn('private-sentinel', stderr.getvalue())
+        self.assertNotIn('/fixture/', stderr.getvalue())
+        return lines
+
+    def test_parent_refusal_survives_the_public_blocker(self):
+        self.refusal('stage0_mapping_unknown', response={
+            'schema': peer_client.PROTOCOL, 'ok': False, 'error': 'stage0_mapping_unknown'})
+
+    def test_transport_failure_is_closed_and_keeps_exit_78(self):
+        for error in (ConnectionRefusedError(61, 'private-sentinel /fixture/socket'),
+                      TimeoutError('private-sentinel timeout')):
+            with self.subTest(kind=type(error).__name__):
+                self.refusal('stage0_context_transport_unavailable', transport_error=error)
+
+    def test_other_peer_operations_keep_their_existing_os_failure(self):
+        error = ConnectionRefusedError(61, 'private-sentinel')
+        with self.peer(transport_error=error) as (stderr, _stdout, _read):
+            with self.assertRaises(ConnectionRefusedError) as caught:
+                peer_client._request('runtime_identity', root=self.root)
+        self.assertIs(caught.exception, error)
+        self.assertEqual(stderr.getvalue(), '')
+
+    def test_local_identity_and_shape_failures_do_not_become_transport_failures(self):
+        self.refusal('dependency_unavailable', local_error=IdentityError('dependency_unavailable', 69))
+        self.refusal('stage0_context_local_unavailable', local_error=OSError('private-sentinel'))
+        self.refusal('stage0_context_invalid', local_error=KeyError('private-sentinel'))
+
+    def test_response_json_shape_and_context_binding_remain_distinct(self):
+        self.refusal('json_invalid', response=b'private-sentinel not JSON')
+        self.refusal('stage0_response_invalid', response={
+            'schema': peer_client.PROTOCOL, 'ok': False, 'error': 'private-sentinel /fixture/path'})
+        self.refusal('stage0_context_shape', response={
+            'schema': peer_client.PROTOCOL, 'ok': True, 'context': {**self.context, 'extra': 'private-sentinel'}})
+        self.refusal('stage0_context_binding', response={
+            'schema': peer_client.PROTOCOL, 'ok': True, 'context': {**self.context, 'registration_sha256': 'f' * 64}})
+
+    def test_go_context_fields_and_valid_child_consumer_agree(self):
+        source = (Path(__file__).parents[1] / 'internal/routebstage0/types.go').read_text()
+        declaration = re.search(r'type Context struct \{(.*?)\n\}', source, re.S).group(1)
+        fields = set(re.findall(r'json:"([^"]+)"', declaration))
+        self.assertEqual(len(fields), 19)
+        self.assertEqual(fields, peer_client.CONTEXT_FIELDS)
+        with self.peer() as (stderr, _stdout, read):
+            self.assertEqual(host_package.require_interpreter_closure(self.root, ('bootstrap',)), self.context)
+            read.assert_not_called()
+        self.assertEqual(stderr.getvalue(), '')
+        for field in fields:
+            with self.subTest(missing=field), self.peer() as _captured:
+                changed = {k: v for k, v in self.context.items() if k != field}
+                with self.assertRaisesRegex(ContractError, '^stage0_context_shape$'):
+                    peer_client._validate_context(changed, self.registration, self.host, 'd' * 64, 1101)
+
+    def test_raw_or_cyclic_exception_causes_cannot_expand_public_diagnostics(self):
+        error = ContractError('private-sentinel /fixture/path\nraw exception')
+        error.__cause__ = error
+        with patch.object(peer_client, 'context', side_effect=error), redirect_stderr(io.StringIO()) as output:
+            with self.assertRaisesRegex(ContractError, '^interpreter_full_closure_required$'):
+                host_package.require_interpreter_closure(self.root, ('bootstrap',))
+        self.assertEqual(output.getvalue(), '')
+
+    def test_failed_diagnostic_write_cannot_replace_the_refusal(self):
+        error = ContractError('stage0_mapping_unknown')
+        output = Mock()
+        output.write.side_effect = OSError('private-sentinel')
+        with patch.object(peer_client, 'context', side_effect=error), patch.object(sys, 'stderr', output):
+            with self.assertRaisesRegex(ContractError, '^interpreter_full_closure_required$') as caught:
+                host_package.require_interpreter_closure(self.root, ('bootstrap',))
+        self.assertIs(caught.exception.__cause__, error)
 
 
 class NativeTreeTests(unittest.TestCase):
