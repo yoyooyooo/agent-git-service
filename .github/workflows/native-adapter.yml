@@ -1,7 +1,8 @@
 name: Native adapter isolation
 
 # Not release-required evidence. Default off. A skipped or unrun result is UNVERIFIED,
-# not a pass. This workflow does not call launchctl or systemctl.
+# not a pass. The original injected job does not call a service manager.
+# The separate Linux job provisions only its disposable GitHub-hosted VM.
 on:
   workflow_dispatch:
     inputs:
@@ -9,6 +10,23 @@ on:
         description: Run the injected native sequence only. Not a real service probe.
         type: boolean
         default: false
+      native_continuation:
+        description: Run real PID1 installed/unstarted continuation on a fresh Ubuntu VM.
+        type: boolean
+        default: false
+      source_ci_run:
+        description: Successful Fork CI push run for this exact accepted default-branch SHA.
+        type: string
+        default: ''
+      authorization_sha256:
+        description: Digest of the separately supplied private one-time authorization source.
+        type: string
+        default: ''
+      continuation_case:
+        description: Run the complete continuation first; expired is a separate fresh negative case.
+        type: choice
+        options: [continue, expired]
+        default: continue
 
 permissions:
   contents: read
@@ -34,3 +52,90 @@ jobs:
         run: |
           test "${NATIVE_LABEL#*once}" != "$NATIVE_LABEL"
           python3 scripts/test_native_probe_sequence.py -q
+
+  linux-continuation:
+    name: Disposable Linux native continuation
+    if: github.event_name == 'workflow_dispatch' && inputs.native_continuation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GIT_TERMINAL_PROMPT: '0'
+      GOENV: 'off'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: .go-version
+          cache-dependency-path: go.sum
+      - name: Check source and fixture inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_CI_RUN: ${{ inputs.source_ci_run }}
+        run: |
+          python3 -B scripts/routeb-native-fixture/test_fixture.py -q
+          python3 -B scripts/routeb-native-fixture/source_evidence.py \
+            --source-ci-run "$SOURCE_CI_RUN" --directory "$RUNNER_TEMP/routeb-source"
+      - name: Build real exact-source programs
+        run: |
+          mkdir -m 755 "$RUNNER_TEMP/routeb-build"
+          GIT_SHA="$GITHUB_SHA" CGO_ENABLED=1 scripts/build-exact-source.sh binary \
+            --output "$RUNNER_TEMP/routeb-build/gh-server"
+          tree=$(git rev-parse 'HEAD^{tree}')
+          flags="-X github.com/ngaut/agent-git-service/internal/buildinfo.Version=source-$GITHUB_SHA"
+          flags="$flags -X github.com/ngaut/agent-git-service/internal/buildinfo.Revision=$GITHUB_SHA"
+          flags="$flags -X github.com/ngaut/agent-git-service/internal/buildinfo.Tree=$tree"
+          CGO_ENABLED=0 go build -trimpath -ldflags "$flags" \
+            -o "$RUNNER_TEMP/routeb-build/ags-routeb-stage0" ./cmd/ags-routeb-stage0
+          CGO_ENABLED=1 go build -trimpath -o "$RUNNER_TEMP/routeb-build/native-tools" \
+            ./scripts/routeb-native-fixture/native-tools
+          test -x /usr/bin/gio
+      - name: Materialize private authorization input
+        env:
+          FIXTURE_AUTHORIZATION: ${{ secrets.AGS_ROUTEB_NATIVE_FIXTURE_AUTHORIZATION }}
+          AUTHORIZATION_SHA256: ${{ inputs.authorization_sha256 }}
+        run: |
+          python3 -B - <<'PY'
+          import hashlib, os, pathlib, re
+          raw = os.environ['FIXTURE_AUTHORIZATION'].encode('utf-8')
+          expected = os.environ['AUTHORIZATION_SHA256']
+          if not raw or len(raw) > 262144 or not re.fullmatch('[0-9a-f]{64}', expected):
+              raise SystemExit('private authorization missing or invalid')
+          if hashlib.sha256(raw).hexdigest() != expected:
+              raise SystemExit('private authorization digest mismatch')
+          directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'routeb-private'
+          directory.mkdir(mode=0o700)
+          fd = os.open(directory / 'authorization-input.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(fd, 'wb') as output:
+              output.write(raw)
+              output.flush()
+              os.fsync(output.fileno())
+          PY
+      - name: Run one real isolated transaction
+        env:
+          AUTHORIZATION_SHA256: ${{ inputs.authorization_sha256 }}
+          CONTINUATION_CASE: ${{ inputs.continuation_case }}
+        run: |
+          sudo /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
+            /usr/bin/python3 -I -B scripts/routeb-native-fixture/entry.py \
+            --source "$GITHUB_WORKSPACE" --build "$RUNNER_TEMP/routeb-build" \
+            --source-evidence "$RUNNER_TEMP/routeb-source" \
+            --authorization-file "$RUNNER_TEMP/routeb-private/authorization-input.json" \
+            --authorization-sha256 "$AUTHORIZATION_SHA256" --uid "$(id -u)" \
+            --transaction "gha-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --scenario "$CONTINUATION_CASE" --export-directory "$RUNNER_TEMP/routeb-public" --execute
+      - name: Publish bounded effect evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: routeb-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/routeb-public/
+          if-no-files-found: warn
+          retention-days: 7

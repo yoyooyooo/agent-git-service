@@ -1,0 +1,10 @@
+{
+  "repository": "astral-sh/python-build-standalone",
+  "release": "20261026",
+  "asset_name": "cpython-3.13.18+20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+  "archive_sha256": "df15fe60d3ff55bf9dcf25824b5572756bb8816ff93865a273d3301d7066a8b7",
+  "archive_size": 35395906,
+  "checksums_sha256": "39af6e3d3c712476893409f714a3b9ab795a861a89ec1628cbc99b45d1271a73",
+  "checksums_size": 142210,
+  "executable": "bin/python3.13"
+}
