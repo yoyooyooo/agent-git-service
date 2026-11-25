@@ -26,7 +26,7 @@ import run as fixture_run
 
 
 class MappingDiagnosticsTests(unittest.TestCase):
-    def export_failure(self, mutate=None):
+    def export_failure(self, mutate=None, partial=False, required_symlink=False):
         # Exercise the real artifact writer with a kernel-row-shaped failure.
         # The profile is a test-owned file; no root namespace or service exists.
         with tempfile.TemporaryDirectory() as temporary:
@@ -55,7 +55,15 @@ class MappingDiagnosticsTests(unittest.TestCase):
                 mutate(value)
             raw = canonical(value)
             failure = registry / 'state/failures/bootstrap-one.json'
-            failure.write_bytes(raw)
+            failure.write_bytes(b'{"schema":' if partial else raw)
+            if partial:
+                (registry / 'fixture-evidence/result.json').write_bytes(canonical(
+                    {'native_pass': False, 'code': 'manager_exit_unexpected', 'exit_code': 78}))
+            if required_symlink:
+                (registry / 'state/effects').mkdir()
+                target = base / 'required-record.json'
+                target.write_bytes(b'{}')
+                (registry / 'state/effects/required.json').symlink_to(target)
             # A different private diagnostic is never a blanket export grant.
             (registry / 'state/failures/private.json').write_bytes(canonical(
                 {'schema': 'other', 'env': 'private-env-sentinel'}))
@@ -87,6 +95,19 @@ class MappingDiagnosticsTests(unittest.TestCase):
             with self.subTest(field=field):
                 _, _, files = self.export_failure(lambda value: value.update({field: replacement}))
                 self.assertEqual(files, [])
+
+    def test_partial_optional_record_keeps_original_failure_result_and_index(self):
+        _, _, files = self.export_failure(partial=True)
+        self.assertEqual(len(files), 1)
+        row, raw = files[0]
+        self.assertTrue(row['name'].endswith('-result.json'))
+        self.assertEqual(json.loads(raw),
+                         {'native_pass': False, 'code': 'manager_exit_unexpected', 'exit_code': 78})
+        self.assertEqual(row['sha256'], sha(raw))
+
+    def test_required_effect_read_failure_is_still_fatal(self):
+        with self.assertRaisesRegex(Refused, '^noncanonical_path$'):
+            self.export_failure(required_symlink=True)
 
 
 class CommandDiagnosticsTests(unittest.TestCase):
