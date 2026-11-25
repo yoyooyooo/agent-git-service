@@ -219,7 +219,7 @@ def produce(pin_path, authority_id, binding, inspector):
         external_paths[str(path)] = path
 
     def resolve(path):
-        """Keep every real root-owned alias traversed by an ELF loader path."""
+        """Keep every real root-owned alias traversed by an external input."""
         current = Path(path)
         for _ in range(64):
             changed = False
@@ -290,6 +290,9 @@ def produce(pin_path, authority_id, binding, inspector):
     add_external(timezone)
     for path in (Path('/etc/passwd'), Path('/etc/group'), Path('/etc/nsswitch.conf')):
         add_external(resolve(path))
+    # The supported Linux/amd64 glibc startup also maps this non-ELF data.
+    # Resolve and bind it like every other external, including its recovery asset.
+    add_external(resolve(Path('/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache')))
     locale = Path('/usr/lib/locale/C.utf8')
     require(locale.is_dir(), 'utf8_locale_unavailable')
     add_external(locale)

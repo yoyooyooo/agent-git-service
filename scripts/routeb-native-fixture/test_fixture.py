@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import struct
 import sys
 import tarfile
@@ -287,6 +288,95 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual((prefix / 'bin/python3.13').read_bytes(), b'elf')
             with self.assertRaises(FileExistsError):
                 authority.extract_publisher(archive, prefix)
+
+    def test_complete_producer_binds_glibc_data_and_independent_asset(self):
+        # Exercise the complete producer with a tiny real archive and private
+        # files. Only root/platform, network and ELF inspection are fixtures;
+        # this is not a root-owned catalog or native admission test.
+        for alias in (False, True):
+            with self.subTest(alias=alias), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary).resolve()
+                host, registry = base / 'host', base / 'interpreters'
+                registry.mkdir()
+
+                def private_path(*parts):
+                    path = Path(*parts)
+                    if path.is_absolute() and not path.is_relative_to(base):
+                        return host / path.relative_to('/')
+                    return path
+
+                def write_host(name, raw):
+                    path = private_path(name)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    exclusive(path, raw, mode=0o644)
+                    return path
+
+                loader = write_host('/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2', b'\x7fELFloader')
+                for name in ('passwd', 'group', 'nsswitch.conf'):
+                    write_host('/etc/' + name, name.encode())
+                write_host('/usr/lib/locale/C.utf8/LC_CTYPE', b'locale-data')
+                cache_path = '/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache'
+                cache = write_host(cache_path + ('.real' if alias else ''), b'gconv-data-not-ELF')
+                if alias:
+                    private_path(cache_path).symlink_to(cache.name)
+                archive = self.archive(base, [('python/bin/python3.13', 'file', b'\x7fELFpython'),
+                                              ('python/lib/python3.13/os.py', 'file', b'value = 1\n')])
+                pin = {'executable': 'bin/python3.13'}
+                pin_path = base / 'pin.json'
+                exclusive(pin_path, canonical(pin))
+
+                def publisher(actual_pin, directory):
+                    self.assertEqual(actual_pin, pin)
+                    return {'repository': 'astral-sh/python-build-standalone', 'release': '20261026',
+                            'asset_name': archive.name,
+                            'archive': exclusive(directory / archive.name, archive.read_bytes(), mode=0o644),
+                            'checksums': exclusive(directory / 'SHA256SUMS', b'fixture', mode=0o644)}
+
+                def inspect(argv, *, operation, timeout):
+                    self.assertEqual((operation, timeout), ('inspect_elf', 10))
+                    path = Path(argv[2])
+                    if not path.read_bytes().startswith(b'\x7fELF'):
+                        return canonical({'native': False})
+                    return canonical({'native': True, 'image': {
+                        'path': str(path), 'format': 'elf', 'needed': [], 'rpath': [], 'runpath': [],
+                        'interpreter': str(loader) if path.name == 'python3.13' else ''}})
+
+                def private_metadata(path):
+                    info = path.lstat()
+                    self.assertEqual(info.st_uid, os.getuid())
+                    return {'mode': stat.S_IMODE(info.st_mode), 'gid': info.st_gid,
+                            'device': info.st_dev, 'inode': info.st_ino, 'mtime_ns': info.st_mtime_ns,
+                            'xattrs': {}}
+
+                def private_read(path, maximum=1 << 20, *, owner=None):
+                    self.assertIn(owner, (None, 0))
+                    return read_bytes(path, maximum, owner=os.getuid())
+
+                private_os = mock.Mock(wraps=os)
+                private_os.getuid.return_value = 0
+                with mock.patch.multiple(authority, Path=private_path, INTERPRETERS=registry,
+                                         os=private_os, metadata=private_metadata, read_bytes=private_read,
+                                         protected_directory=lambda path: self.assertEqual(path, registry),
+                                         publisher_download=publisher, command=inspect):
+                    output = authority.produce(pin_path, 'data-fixture',
+                                               {'platform': 'linux', 'architecture': 'amd64'}, 'inspector')
+                document = json.loads(Path(output['path']).read_bytes())
+                external = {row['entry']['path']: row for row in document['external']}
+                self.assertIn(str(cache), external)
+                row, info = external[str(cache)], cache.stat()
+                self.assertEqual(row['entry']['kind'], 'file')
+                self.assertEqual(row['entry']['file'], {'sha256': sha(cache.read_bytes()), 'size': info.st_size})
+                self.assertEqual((row['entry']['metadata']['device'], row['entry']['metadata']['inode']),
+                                 (info.st_dev, info.st_ino))
+                asset = Path(row['asset']['path'])
+                self.assertFalse(os.path.samefile(cache, asset))
+                self.assertEqual(asset.read_bytes(), cache.read_bytes())
+                self.assertEqual({key: row['asset'][key] for key in ('sha256', 'size')}, row['entry']['file'])
+                self.assertNotIn(str(cache), [image['path'] for image in document['native_images']])
+                if alias:
+                    link = external[str(private_path(cache_path))]
+                    self.assertEqual((link['entry']['kind'], link['entry']['link']), ('symlink', cache.name))
+                    self.assertNotIn('asset', link)
 
     def test_archive_cannot_escape_or_replace_parent(self):
         rows = [[('../outside', 'file', b'x')],

@@ -212,6 +212,69 @@ func TestCatalogRealFilesAndLargePublisherMember(t *testing.T) {
 	}
 }
 
+func TestExternalDataFileMapsWithIndependentRecoveryAsset(t *testing.T) {
+	for _, mutation := range []string{"none", "missing_asset", "changed_asset"} {
+		t.Run(mutation, func(t *testing.T) {
+			f := newFixture(t, false)
+			data := []byte("non-ELF glibc conversion data\n")
+			name := filepath.Join(f.policy.boundary, "gconv-modules.cache")
+			asset := filepath.Join(f.policy.boundary, "assets", "gconv.asset")
+			for _, path := range []string{name, asset} {
+				if err := os.WriteFile(path, data, 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			metadata := metadataFor(t, name)
+			f.catalog.External = []External{{
+				Entry: Entry{Path: name, Kind: "file", Metadata: metadata,
+					File: &Content{hashBytes(data), int64(len(data))}},
+				Asset: &File{asset, hashBytes(data), int64(len(data))},
+			}}
+			raw, err := json.Marshal(f.catalog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := Parse(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence, err := verifyFiles(parsed, f.policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !evidence.CatalogVerified || evidence.NativeExecutionAllowed {
+				t.Fatalf("invalid file-only evidence: %#v", evidence)
+			}
+			registered := RegisteredCatalog{document: parsed, evidence: evidence}
+			files := registered.Files()
+			if got, want := files[name], (FileIdentity{name, hashBytes(data), metadata.Device, metadata.Inode}); got != want {
+				t.Fatalf("data mapping identity: got %#v, want %#v", got, want)
+			}
+			if _, ok := files[asset]; ok {
+				t.Fatal("recovery asset became a runtime mapping")
+			}
+			wantError := ""
+			switch mutation {
+			case "missing_asset":
+				if err := os.Remove(asset); err != nil {
+					t.Fatal(err)
+				}
+				wantError = "authority_file_unavailable"
+			case "changed_asset":
+				if err := os.WriteFile(asset, []byte("changed recovery bytes\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				wantError = "authority_asset_changed"
+			}
+			if wantError != "" {
+				if _, err := verifyFiles(parsed, f.policy); err == nil || err.Error() != wantError {
+					t.Fatalf("asset drift: got %v, want %s", err, wantError)
+				}
+			}
+		})
+	}
+}
+
 func TestStrictJSONRejectsCaseAliasesDuplicatesMissingAndUnknown(t *testing.T) {
 	value := newFixture(t, false).catalog
 	raw, _ := json.Marshal(value)
