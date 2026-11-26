@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -284,6 +285,11 @@ func (d *Deps) resolveRunsByRef(r *http.Request, repoID uint, fullName, ref stri
 // ListCheckRunsForRef handles GET /api/v3/repos/{owner}/{repo}/commits/{ref}/check-runs
 // Returns workflow run jobs for runs matching the given commit ref.
 func (d *Deps) ListCheckRunsForRef(w http.ResponseWriter, r *http.Request) {
+	page, perPage, valid := ciRunPagination(r.URL.Query())
+	if !valid {
+		respond.Error(w, http.StatusUnprocessableEntity, "invalid check-run pagination")
+		return
+	}
 	full := repoFullName(r)
 	ref := pathParam(r, "ref")
 
@@ -299,17 +305,23 @@ func (d *Deps) ListCheckRunsForRef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stable IDs keep page boundaries deterministic when creation timestamps tie.
+	sort.Slice(runs, func(i, j int) bool { return runs[i].ID < runs[j].ID })
 	var checkRuns []any
 	for _, run := range runs {
-		jobs, _ := d.Svc.ListWorkflowRunJobsByRun(r.Context(), run.ID)
+		jobs, err := d.Svc.ListWorkflowRunJobsByRun(r.Context(), run.ID)
+		if err != nil {
+			respond.ServiceErrorRequest(r, w, err)
+			return
+		}
+		sort.Slice(jobs, func(i, j int) bool { return jobs[i].ID < jobs[j].ID })
 		for _, job := range jobs {
 			checkRuns = append(checkRuns, workflowJobCheckRun(full, run, job))
 		}
 	}
-	if checkRuns == nil {
-		checkRuns = []any{}
-	}
-	respond.JSON(w, 200, map[string]any{"total_count": len(checkRuns), "check_runs": checkRuns})
+	total := len(checkRuns)
+	checkRuns = paginate(w, r, d.Svc.APIBaseURL(), checkRuns, page, perPage)
+	respond.JSON(w, 200, map[string]any{"total_count": total, "check_runs": checkRuns})
 }
 
 // ListCheckSuitesForRef handles GET /api/v3/repos/{owner}/{repo}/commits/{ref}/check-suites

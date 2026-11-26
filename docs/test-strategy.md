@@ -502,6 +502,7 @@ Phase 2 is not complete until each surface has at least one core-path integratio
 17. delegated PR create/get/list actor projection, stable-principal compatibility, historical snapshot stability, and authentication-material exclusion
 18. execution-context intake without an AGS credential, proving strict request closure, fixed registered egress, no redirect forwarding, exact running locator match, immutable snapshot persistence, OpenAPI coverage, and source bearer/hash exclusion from DB/error/response
 19. repository-wide provider observations through the production router and native token middleware: provider-number/AGS-number divergence, unmapped historical PRs, short provider pages through terminal empty pages, official `gh api --paginate --slurp` where installed, configured API continuation URLs, native grant revocation, delegated-session denial, no grant backfill or business writes, and exact live provider branches without native Git or PR-base fallback. These tests use isolated SQLite and an HTTP provider fixture; deployed providers and credentials are never test dependencies.
+20. commit check-run pagination for native and selected external CI: deterministic ordering across independent workflows, unchanged full `total_count`, exact page slices and empty arrays beyond the last page, configured API `Link` headers, and official `gh api --paginate --slurp` without repeated IDs. A native job-read error must not produce a partial successful count.
 
 #### GraphQL
 
