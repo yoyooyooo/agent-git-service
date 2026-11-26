@@ -13,6 +13,60 @@ For the separate future ref-operation protocol, see [ref convergence contracts](
 - Ordinary PR verification reads the exact provider PR and exact-head Actions runs through authenticated AGS `/pulls/{number}/provider/projection` and `/provider/ci/runs`; AGS owns the provider credential, revalidates delegated authority immediately before provider I/O, requires the observed PR number to match the stored binding, exhausts bounded Actions pagination, and emits a secret-safe correlation receipt/audit. Anonymous requests, client-selected provider repo/number mismatches, incomplete pagination, and late authority drift fail closed before a successful observation.
 - The integration is best-effort post-push work. Forgejo failures must not reject the original AGS git push, but AGS records structured projection status so wrappers can detect and repair drift.
 
+## Repository-wide provider observations
+
+Native PR listing enumerates AGS PRs and their **current** projection mappings.
+It cannot discover a provider PR whose mapping was replaced or never existed.
+For a provider inventory, use these GET-only extension endpoints:
+
+| Endpoint below `/api/ext/v1/repos/{owner}/{repo}` | Observation |
+| --- | --- |
+| `/provider/pulls?state=all` | One live Forgejo PR page, including unmapped PRs. |
+| `/provider/pulls/{provider_number}` | One exact Forgejo PR, even without an AGS mapping. |
+| `/provider/git/ref?ref=refs%2Fheads%2Fmain` | The live Forgejo branch commit, independently of AGS Git and PR base snapshots. |
+
+All three require native AGS authentication and current repository read
+permission, including for a public repository. PR-scoped delegated sessions and
+Access Grant transports are rejected. AGS resolves the external repository and
+credential from its running integration; the caller supplies neither. Permission
+checks are observational and do not invoke compatibility grant backfills.
+
+PR rows use provider `number` and nullable `ags_pr_number` as separate identities.
+`mapping_status=current` means the exact current projection row joins to a PR
+in this AGS repository. `mapping_status=unmapped` and `ags_pr_number=null` mean
+there is no current mapping; they do not infer historical ownership from PR titles,
+bodies or matching numbers. These reads never upsert mappings, enqueue repair,
+reopen PRs or write to Forgejo.
+
+List accepts `state=open|closed|all` (default `open`), `page=1..10000` and
+`per_page=1..100` (default `100`, matching official `gh --paginate`). Provider
+order is oldest first. **Continue through short pages until an empty page**:
+Forgejo may cap the requested page size. Every nonempty page has `next_page` and
+an absolute `Link: rel="next"` on the configured AGS API origin; an empty page
+returns `pull_requests=[]` and `next_page=null` without a next link. The traversal
+therefore makes one final empty-page request. Exhausting the page bound, invalid
+observations or a provider failure returns an error, not a successful empty result.
+Callers must check the command exit status before accepting a collected inventory.
+
+```bash
+gh api --paginate --slurp \
+  'https://ags.example.test/api/ext/v1/repos/example-team/project/provider/pulls?state=all'
+gh api \
+  'https://ags.example.test/api/ext/v1/repos/example-team/project/provider/pulls/3'
+gh api \
+  'https://ags.example.test/api/ext/v1/repos/example-team/project/provider/git/ref?ref=refs%2Fheads%2Fmain' \
+  --jq .sha
+```
+
+Responses have `Cache-Control: no-store` and an `observed_at` timestamp. Pages and
+mapping joins are separate observations, not an atomic snapshot across AGS and
+Forgejo; concurrent PR changes may require a repeat inventory or exact readback.
+The ref endpoint accepts legal full `refs/heads/` names only and validates the
+provider branch name and full commit ID. It never substitutes a native AGS ref
+or a PR's `base_sha`. Missing exact provider PRs/branches return `404`, an
+unconfigured or disabled target returns `503`, and failed provider observations
+return `502` without upstream response bodies or credentials.
+
 ## Trigger model
 
 Forgejo Actions only trigger from Forgejo repository events. A push to AGS is not visible to Forgejo until AGS mirrors the branch.

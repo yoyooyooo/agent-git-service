@@ -235,6 +235,15 @@ func buildGitHubCompatibleOpenAPIPaths() map[string]any {
 
 func buildRESTOpenAPIPaths() map[string]any {
 	return map[string]any{
+		"/api/ext/v1/repos/{owner}/{repo}/provider/pulls": map[string]any{
+			"get": operation("listProviderPullRequests", "Read a live provider PR page, including PRs without a current AGS mapping. Requires native repository read permission; delegated sessions are rejected. Follow Link or next_page until an empty page, even after a short page. Provider order is oldest first.", auth(), nil, providerInventoryOpenAPIParameters(), providerObservationOpenAPIResponses("list")),
+		},
+		"/api/ext/v1/repos/{owner}/{repo}/provider/pulls/{provider_number}": map[string]any{
+			"get": operation("getProviderPullRequest", "Read one exact provider PR number in the server-configured target, independently of current AGS mappings. Requires native repository read permission; delegated sessions are rejected.", auth(), nil, pathParams(param("owner", "string"), param("repo", "string"), param("provider_number", "integer")), providerObservationOpenAPIResponses("pull")),
+		},
+		"/api/ext/v1/repos/{owner}/{repo}/provider/git/ref": map[string]any{
+			"get": operation("getProviderGitRef", "Read the exact live provider branch, independently of native Git and PR snapshots. Requires native repository read permission; delegated sessions are rejected.", auth(), nil, append(pathParams(param("owner", "string"), param("repo", "string")), map[string]any{"name": "ref", "in": "query", "required": true, "schema": map[string]any{"type": "string"}, "description": "Full legal refs/heads/ branch name, for example refs/heads/main."}), providerObservationOpenAPIResponses("ref")),
+		},
 		"/api/ext/v1/repos/{owner}/{repo}/projection/gitlab/facts": map[string]any{
 			"get": operation("getGitLabMirrorFacts", "Read the running GitLab integration's whitelist configuration and same-ref mirror target for one full ref. Requires repository read permission. A target is configuration only, not credential validation, connectivity, or GitLab ref readback; gitlab_ref_readback is not_claimed. No provider request is made.", auth(), nil,
 				append(pathParams(param("owner", "string"), param("repo", "string")), map[string]any{"name": "ref", "in": "query", "required": true, "schema": map[string]any{"type": "string"}, "description": "Full Git ref, for example refs/heads/main. Non-branch refs have no mirror target."}),

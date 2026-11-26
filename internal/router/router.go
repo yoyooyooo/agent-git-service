@@ -557,6 +557,9 @@ func registerRepoRoutes(r chi.Router, handlers *rest.Deps) {
 }
 
 func registerProjectionRoutes(r chi.Router, handlers *rest.Deps) {
+	r.Get("/api/ext/v1/repos/{owner}/{repo}/provider/git/ref", handlers.GetProviderGitRef)
+	r.Get("/api/ext/v1/repos/{owner}/{repo}/provider/pulls", handlers.ListProviderPullRequests)
+	r.Get("/api/ext/v1/repos/{owner}/{repo}/provider/pulls/{provider_number}", handlers.GetProviderPullRequest)
 	r.Get("/api/ext/v1/repos/{owner}/{repo}/projection/gitlab/facts", handlers.GetGitLabMirrorFacts)
 	r.Get("/api/v3/repos/{owner}/{repo}/projection/status", handlers.GetProjectionStatus)
 	r.Post("/api/v3/repos/{owner}/{repo}/projection/forgejo/pulls/{number}/retry", handlers.RetryProjection)

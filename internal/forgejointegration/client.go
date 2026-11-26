@@ -737,7 +737,7 @@ func pullRequestSnapshotFromPayload(pr pullRequestPayload) PullRequestSnapshot {
 		}
 	}
 	return PullRequestSnapshot{
-		UpdatedAt: pr.UpdatedAt, Number: pr.Number, URL: firstNonEmpty(pr.HTMLURL, pr.URL), State: pr.State,
+		Title: pr.Title, UpdatedAt: pr.UpdatedAt, Number: pr.Number, URL: firstNonEmpty(pr.HTMLURL, pr.URL), State: pr.State,
 		Merged: pr.Merged, Mergeable: pr.Mergeable, MergeCommitSHA: pr.MergeCommitSHA, MergeBaseSHA: pr.MergeBaseSHA,
 		HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA, BaseRef: pr.Base.Ref, BaseSHA: pr.Base.SHA,
 		Body: pr.Body, Labels: labels,
