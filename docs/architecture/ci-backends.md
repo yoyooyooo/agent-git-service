@@ -106,6 +106,14 @@ gh run view https://build.example.test/ci/service/actions/runs/9 \
 
 ### Run filtering and pagination
 
+Commit `check-runs` responses paginate the completed check inventory for both
+native and selected external CI. `total_count` remains the full count on every
+page; `check_runs` contains only that page and is `[]` beyond the last page.
+Stable IDs determine ordering before slicing, including checks collected from
+independent workflows. Continuation links use the configured AGS API origin so
+official `gh api --paginate` follows the same backend. Page and size validation
+matches Actions runs (`page=1..1000`, `per_page=1..100`).
+
 Forgejo listings are ordered by repository run number descending. Branch,
 workflow, head SHA, event and status/conclusion filters apply before the client
 page is selected. `status=failure` matches the conclusion of a completed run;

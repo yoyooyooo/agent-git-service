@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -388,6 +389,11 @@ func ciCheckFromObservation(check service.CICheck, base string) map[string]any {
 // listExternalCheckRunsForRef projects the selected backend's jobs for one commit.
 // gh pr checks uses GraphQL; this is the REST surface used by gh api and other clients.
 func (d *Deps) listExternalCheckRunsForRef(w http.ResponseWriter, r *http.Request, repo db.Repository, base string) {
+	page, perPage, valid := ciRunPagination(r.URL.Query())
+	if !valid {
+		respond.Error(w, http.StatusUnprocessableEntity, "invalid check-run pagination")
+		return
+	}
 	ref := chi.URLParam(r, "ref")
 	sha := ref
 	if len(sha) != 40 {
@@ -407,6 +413,9 @@ func (d *Deps) listExternalCheckRunsForRef(w http.ResponseWriter, r *http.Reques
 		ciHTTPError(w, err)
 		return
 	}
+	// Service observations gather independent workflows from a map. Sort their
+	// durable IDs before slicing, so separate pages cannot reorder the same facts.
+	sort.Slice(observed.Checks, func(i, j int) bool { return observed.Checks[i].ID < observed.Checks[j].ID })
 	rows := make([]any, 0, len(observed.Checks))
 	for _, check := range observed.Checks {
 		if strings.HasPrefix(check.ID, "required:") {
@@ -416,7 +425,9 @@ func (d *Deps) listExternalCheckRunsForRef(w http.ResponseWriter, r *http.Reques
 		row["head_sha"] = sha
 		rows = append(rows, row)
 	}
-	respond.JSON(w, 200, map[string]any{"total_count": len(rows), "check_runs": rows})
+	total := len(rows)
+	rows = paginate(w, r, d.Svc.APIBaseURL(), rows, page, perPage)
+	respond.JSON(w, 200, map[string]any{"total_count": total, "check_runs": rows})
 }
 
 func ciWorkflowJSON(value service.CIWorkflow, base string) map[string]any {
