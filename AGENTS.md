@@ -21,7 +21,7 @@ Read [fork governance](fork/README.md) before changing generation history, versi
 
 ## Verification entries
 
-Use the Go version required by each `go.mod` and format changed Go files with `gofmt`.
+Use the Go version required by each `go.mod` and format changed Go files with `gofmt`. For docs-only edits, start with `python3 scripts/doc_lint.py` and check affected links and anchors. For hosted requirements and suite selection, see [CI](docs/ci.md) and the [test strategy](docs/test-strategy.md).
 
 ```bash
 go build ./...

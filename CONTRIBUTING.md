@@ -2,28 +2,28 @@
 
 Thanks for helping improve `agent-git-service`.
 
-## Development Setup
+## Development setup
 
-1. Install the prerequisites listed in `README.md`.
-2. Copy `.env.example` to `.env` and set `DB_DSN` to a TiDB Cloud Starter database for production or persistent development.
-3. Run `make setup` for the full GitHub-compatible API environment, `make test-setup` for the test-only TiDB playground, or `make build` for a quick compile.
+Use the Go version in [`.go-version`](.go-version) to match hosted CI. See the
+[quick start](docs/quickstart.md) for local prerequisites. You do not need a
+running AGS or a database to compile development code with `make build-dev`.
+`make build` produces an attributable binary from an exact accepted Git commit.
 
-## Before Opening A Pull Request
+Follow [fork governance](fork/README.md) for the active generation, branch
+workflow, and upstream boundary. Open pull requests against the maintained fork,
+not the upstream repository.
 
-Run the fastest relevant checks first:
+## Before opening a pull request
 
-```bash
-make check
-```
+For documentation-only changes, run `python3 scripts/doc_lint.py` and check
+links or anchors the lint does not cover. For code changes, start with `make check`
+to compile and vet development code. Add focused tests beside the changed code.
+Use the [test strategy](docs/test-strategy.md) to choose commands and provision an
+isolated test database when needed. Never point tests at a deployed AGS database.
+Use the [CI guide](docs/ci.md) to distinguish local checks from hosted gates.
 
-For behavior changes, add focused tests beside the code you changed and run the matching package tests. For wider changes, use:
-
-```bash
-make test-unit
-bash scripts/integration_tests.sh
-```
-
-Changes that affect API compatibility, Git transport, routing, auth, CI, or test expectations should also update the matching docs under `docs/`.
+Update the matching [implementation docs](docs/README.md) when you change an API,
+Git transport, routing, authorization, CI, or test contract.
 
 ## Pull Request Expectations
 

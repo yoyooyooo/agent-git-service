@@ -131,7 +131,8 @@ These priorities are intentionally GitHub-compatible API-server centric. gh CLI 
 
 ## CI Layers
 
-The repository now follows a layered merge gate adapted to what is stable today.
+Use these verification layers to select local or dedicated checks. The active
+hosted jobs are listed in [Fork CI](ci.md#main-ci-workflow).
 
 ### Layer 1: Regression Gate
 
@@ -141,8 +142,7 @@ Run with:
 bash scripts/regression_gate.sh
 ```
 
-This gate is intentionally small and deterministic.
-It is the merge-blocking pack for fast feedback, not the place to dump every existing suite.
+Use this smaller local pack for deterministic feedback before wider suites.
 
 Its responsibilities are:
 
@@ -163,8 +163,8 @@ Run with:
 bash scripts/integration_tests.sh
 ```
 
-This gate makes the stable real-router integration pack merge-blocking.
-It is intentionally package-oriented: the same command should run locally and in CI without requiring a pre-started server.
+This package-oriented pack covers real-router integration without a
+pre-started server. Use an isolated test database.
 
 Its responsibilities are:
 
@@ -208,7 +208,8 @@ These gates prove the built server still works as a real process, not just as is
   - boot the server against that TiDB DSN and wait for `/readyz`
   - fail early on TiDB-incompatible migration or bootstrap DDL
 
-The smoke layer should stay small enough to run on every PR, but realistic enough to catch wiring and startup regressions the regression gate cannot see.
+Keep smoke checks small and focused on wiring and startup regressions that
+package tests cannot see.
 
 ### Layer 4: Compatibility And E2E Gates
 
@@ -219,19 +220,20 @@ make test
 make test-e2e
 ```
 
-These gates cover the higher-fidelity compatibility and shell E2E paths that are stable enough to be merge-blocking today.
+These are local or dedicated acceptance paths. For the active hosted job list,
+see [Fork CI](ci.md#main-ci-workflow).
 
-- `make test` boots against a live TiDB-backed `github.localhost` server and runs the vendored gh CLI compatibility inventory
-- CI mirrors the local acceptance path with the test-only TiDB playground: `make test-setup`, a Docker access verification step (`docker --version` plus `docker run --rm hello-world`), `ENABLE_WORKFLOW_EXEC=1 make run-bg`, `make test`, then `make test-clean-all`
-- `make test-e2e` runs the full shell E2E inventory under `e2e/`
-- the full E2E inventory includes `e2e/repo-transfer-lifecycle.sh`, so repo transfer remains merge-blocking without a separate standalone smoke job
-- the full E2E inventory also includes `e2e/agent-auth-flow.sh`, which now asserts the agent-binding confirm contract for canonical agent tokens plus the human-token `403`, invalid-invite `422`, and consumed-invite `409` failure paths
-- CI mirrors the local full E2E path too with the test-only TiDB playground: `make test-setup`, `ENABLE_WORKFLOW_EXEC=1 make run-bg`, `make test-e2e`, then `make test-clean-all`
-- `make run-bg` waits up to `STARTUP_WAIT_SECONDS` seconds for `/readyz`; the default intentionally leaves enough room for first-start TiDB schema migration in the compatibility and E2E test lanes
+- `make test` expects a running, isolated TiDB-backed server on
+  `http://github.localhost:80`. A `make run-bg` fallback to port `8080` does not
+  satisfy the acceptance preflight.
+- `make test-e2e` runs the shell inventory under `e2e/`. It includes repository
+  transfer and agent-binding flows. Use an isolated server and test data.
+- `make run-bg` waits up to `STARTUP_WAIT_SECONDS` for `/readyz`. Do not use it
+  to share a host with a deployed AGS process.
 
 #### OAuth Device Flow E2E
 
-`e2e/oauth-device-flow.sh` is the merge-blocking shell regression for the live OAuth device bootstrap path.
+`e2e/oauth-device-flow.sh` exercises the live OAuth device bootstrap path.
 It keeps the runtime contract executable across the full device flow:
 
 - `POST /login/device/code` returns a device code, user code, verification URI, complete verification URI, and the expected `expires_in` and `interval` polling metadata
@@ -316,15 +318,12 @@ Workflow execution sandbox coverage was added in 2026 with:
 
 The repo also has focused shell end-to-end coverage under `e2e/`, including org collaboration governance and code search. Keep those flows in the normal regression toolbox when a change spans multiple endpoints and is awkward to express through one package test. The code search flow also creates repository contents through the GitHub-compatible Contents API, so it should keep asserting the GitHub create status contract while protecting repository-scoped search boundaries.
 
-The main CI workflow runs the full backend inventory through `make test-unit`, with an explicit, overridable `GO_TEST_TIMEOUT` (default 20m). An authenticated Human may merge after sufficient local evidence while provider CI continues asynchronously. A complete exact-SHA CI result remains mandatory before release, deployment promotion, Ticket closure, or a final acceptance claim.
-CI shards that inventory with `GO_TEST_PACKAGES` so each shard has an isolated TiDB playground instead of forcing the slowest database-backed packages to contend for one local TiDB instance.
-The vendored `cli/` inventory remains outside the routine backend lane because it is slower and more environment-heavy.
-The correct pattern is:
-
-- run focused tests plus compile/vet locally before an early Human merge
-- keep `make test-unit`, compile-all, and stable repaired packages in the asynchronous exact-SHA CI inventory
-- keep a live smoke layer for real process validation
-- require the complete inventory before final release/acceptance claims rather than serializing every small correction behind it
+[Fork CI](ci.md#main-ci-workflow) owns the hosted job inventory and uses
+job-owned loopback TiDB instances. `make test-unit` is the separate local TiDB
+playground command. Run focused local checks for the changed behavior and keep
+their results separate from hosted exact-head CI. Neither replaces live release
+or deployment acceptance. The vendored CLI has separate core and full-suite
+verification paths.
 
 To inspect the current test inventory instead of hard-coding counts:
 
@@ -746,7 +745,9 @@ in CI.
 
 ### CI Coverage
 
-For normal CI, run the full gh CLI compatibility inventory and a focused E2E subset around the major paths.
+For the current hosted job inventory, see [Fork CI](ci.md#main-ci-workflow).
+Use the following as a checklist when you need wider compatibility coverage in
+an isolated environment.
 
 The acceptance lane should still prove the visible entry sequence around `gh`: `/api/v3/`, `/api/v3/meta`, `gh auth login --with-token`, then `gh auth setup-git`, while E2E scripts cover API flows that are easier to drive with `curl`, `git`, and `jq`.
 
@@ -766,15 +767,8 @@ The acceptance lane should still prove the visible entry sequence around `gh`: `
 - `e2e/push-postprocessing-consistency.sh`
 - `e2e/oauth-device-flow.sh`
 
-The current blocking merge gate includes:
-
-- `make test-unit`
-- `bash scripts/integration_tests.sh`
-- `make test`
-- `make test-e2e`
-- `bash scripts/backend_smoke.sh`
-
-Optional quick local sampling can still use `make test-e2e SCRIPT=...`, but the main gate now runs the full shell inventory.
+To sample one shell flow in an isolated environment, use
+`make test-e2e SCRIPT=...`. To run the full shell inventory, omit `SCRIPT`.
 
 ### Full Compatibility Runs
 
