@@ -4,6 +4,7 @@ on:
     branches: ['main', 'fork/**', 'prepare/public-fork-*']
     paths: ['go.mod', 'go.sum', 'LICENSE', 'NOTICE', 'scripts/license_check.py', '.github/workflows/license-check.yml']
   pull_request:
+    types: [opened, synchronize, reopened, closed]
     branches: ['main', 'fork/**']
   workflow_dispatch:
 permissions:
@@ -16,6 +17,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   licenses:
+    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

@@ -23,6 +23,19 @@ list `scripts/test_routeb_launchd_native.py`. A skipped native run is not a
 source-CI pass and does not authorize deployment. See
 [Route B host package](operations/routeb-host-package.md).
 
+## Superseded and closed pull requests
+
+Quality workflows keep only the newest run for each workflow and pull request
+(or branch for push and manual events). Closing or merging a pull request enters
+that same concurrency group and cancels its previous run; every job in the closed
+event skips. Separate pull requests keep independent groups.
+
+The CI, license, and secret workflows explicitly include closed alongside the
+normal opened, synchronize, and reopened events. The conditions for full
+regression on open pull requests, generation branches, and manual runs stay the
+same. Deployment, publication, and native acceptance continuation use their own
+existing concurrency and admission rules.
+
 ## Workflow Files
 
 - `ci.yml` - main layered CI gate for pull requests, pushes to `main`, and
