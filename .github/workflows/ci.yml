@@ -4,6 +4,7 @@ on:
   push:
     branches: ['main', 'fork/**', 'prepare/public-fork-*']
   pull_request:
+    types: [opened, synchronize, reopened, closed]
     branches: ['main', 'fork/**']
   workflow_dispatch:
     inputs:
@@ -31,6 +32,7 @@ env:
 
 jobs:
   checks:
+    if: github.event.action != 'closed'
     name: Source and governance
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -104,7 +106,7 @@ jobs:
     needs: checks
     # Preparation pushes are intentionally cheap. Release generations and PRs
     # require the complete matrix, or an operator can request it explicitly.
-    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/fork/') || github.ref == 'refs/heads/main' || inputs.full_regression
+    if: github.event.action != 'closed' && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/fork/') || github.ref == 'refs/heads/main' || inputs.full_regression)
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
@@ -152,7 +154,7 @@ jobs:
   race:
     name: Edge and authority race checks
     needs: checks
-    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/fork/') || inputs.full_regression
+    if: github.event.action != 'closed' && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/fork/') || inputs.full_regression)
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -174,7 +176,7 @@ jobs:
   clients:
     name: Vendored client compatibility
     needs: checks
-    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/fork/') || inputs.full_regression
+    if: github.event.action != 'closed' && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/fork/') || inputs.full_regression)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -201,7 +203,7 @@ jobs:
   official-gh:
     name: Official gh and CI backend acceptance
     needs: checks
-    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/fork/') || inputs.full_regression
+    if: github.event.action != 'closed' && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/fork/') || inputs.full_regression)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -219,6 +221,7 @@ jobs:
         run: node scripts/gh-native-acceptance.mjs --privileged-namespace
 
   forgejo-projection:
+    if: github.event.action != 'closed'
     name: Real Forgejo protected-branch projection
     runs-on: ubuntu-24.04
     timeout-minutes: 15
