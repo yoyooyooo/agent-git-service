@@ -15,8 +15,10 @@ import (
 )
 
 func TestStatusCheckRollupKeepsUnboundForgejoRunQueued(t *testing.T) {
-	for _, status := range []string{"waiting", "blocked"} {
-		t.Run(status, func(t *testing.T) {
+	for _, tc := range []struct{ status, taskName string }{
+		{"waiting", ""}, {"blocked", ""}, {"waiting", "unit"}, {"running", "unit"}, {"waiting", "ci.yml"},
+	} {
+		t.Run(tc.status+"_"+tc.taskName, func(t *testing.T) {
 			database, err := db.Init("sqlite:" + filepath.Join(t.TempDir(), "queued.db") + "?_foreign_keys=on")
 			if err != nil {
 				t.Fatal(err)
@@ -42,7 +44,7 @@ func TestStatusCheckRollupKeepsUnboundForgejoRunQueued(t *testing.T) {
 			pr.Repository = repo
 			run := map[string]any{
 				"id": 17, "index_in_repo": 9, "workflow_id": "ci.yml", "title": "CI", "prettyref": "feature",
-				"commit_sha": head, "event": "push", "status": status,
+				"commit_sha": head, "event": "push", "status": tc.status,
 				"created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:01:00Z",
 				"html_url": "https://ci.example.test/ci/project/actions/runs/9",
 			}
@@ -55,10 +57,22 @@ func TestStatusCheckRollupKeepsUnboundForgejoRunQueued(t *testing.T) {
 				case "/api/v1/repos/ci/project/actions/runs/17":
 					_ = json.NewEncoder(w).Encode(run)
 				case "/api/internal/provider-logs/repos/ci/project/runs/17/jobs":
+					jobs := []any{}
+					if tc.taskName != "" {
+						jobs = append(jobs, map[string]any{"task_id": 41, "name": tc.taskName})
+					}
 					_ = json.NewEncoder(w).Encode(map[string]any{
 						"schema": "ags.internal-provider-jobs.v1", "repo": "ci/project", "run": "17",
-						"run_number": 9, "head_sha": head, "jobs": []any{},
+						"run_number": 9, "head_sha": head, "jobs": jobs,
 					})
+				case "/api/v1/repos/ci/project/actions/tasks":
+					if tc.taskName == "" {
+						t.Error("empty current task set scanned history")
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "workflow_runs": []any{map[string]any{
+						"id": 41, "run_number": 9, "workflow_id": "ci.yml", "name": tc.taskName, "head_sha": head, "status": "success",
+						"url": "https://ci.example.test/ci/project/actions/runs/9", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:01:00Z",
+					}}})
 				default:
 					t.Errorf("unbound rollup attempted unexpected task/log route: %s", r.URL.Path)
 					http.NotFound(w, r)
@@ -84,7 +98,7 @@ func TestStatusCheckRollupKeepsUnboundForgejoRunQueued(t *testing.T) {
 				t.Fatal(err)
 			}
 			server := &Server{Svc: &service.Service{DB: database, CI: registry, BaseURL: "https://primary.example.test"}}
-			state := &responseErrors{query: `query { repository(owner:"fixture",name:"project") { pullRequest(number:1) { commits(last:1) { nodes { commit { statusCheckRollup { contexts { nodes { ... on CheckRun { name status conclusion } } } } } } } } } }`}
+			state := &responseErrors{query: `query { repository(owner:"fixture",name:"project") { pullRequest(number:1) { commits(last:1) { nodes { commit { statusCheckRollup { contexts { nodes { ... on CheckRun { id name status conclusion } } } } } } } } } }`}
 			ctx := service.ContextWithUser(t.Context(), actor)
 			ctx = context.WithValue(ctx, responseErrorsKey{}, state)
 			body, err := json.Marshal(server.statusCheckRollupGQL(ctx, pr))
@@ -98,7 +112,7 @@ func TestStatusCheckRollupKeepsUnboundForgejoRunQueued(t *testing.T) {
 						StatusCheckRollup struct {
 							Contexts struct {
 								CheckRunCount int
-								Nodes         []struct{ Name, Status, Conclusion string }
+								Nodes         []struct{ ID, Name, Status, Conclusion string }
 							}
 						}
 					}
@@ -109,9 +123,34 @@ func TestStatusCheckRollupKeepsUnboundForgejoRunQueued(t *testing.T) {
 			}
 			commit := result.Nodes[0].Commit
 			checks := commit.StatusCheckRollup.Contexts
-			if commit.OID != head || checks.CheckRunCount != 1 || len(checks.Nodes) != 1 || checks.Nodes[0].Status != "QUEUED" || checks.Nodes[0].Conclusion != "" || checks.Nodes[0].Name == "" {
-				t.Fatalf("unbound run was not reported as queued without a conclusion: %s", body)
+			wantCount, wantPending := 1, "QUEUED"
+			if tc.taskName != "" {
+				wantCount++
 			}
+			if tc.status == "running" {
+				wantPending = "IN_PROGRESS"
+			}
+			if commit.OID != head || checks.CheckRunCount != wantCount || len(checks.Nodes) != wantCount {
+				t.Fatalf("wrong exact-head check inventory: %s", body)
+			}
+			pending, successful := 0, 0
+			ids := map[string]bool{}
+			for _, check := range checks.Nodes {
+				if check.ID == "" || ids[check.ID] {
+					t.Fatalf("run and job identity collided: %s", body)
+				}
+				ids[check.ID] = true
+				if check.Status == wantPending && check.Conclusion == "" && check.Name == "ci.yml" {
+					pending++
+				}
+				if check.Status == "COMPLETED" && check.Conclusion == "SUCCESS" && check.Name == tc.taskName {
+					successful++
+				}
+			}
+			if pending != 1 || successful != wantCount-1 {
+				t.Fatalf("completed task hid pending run or lost its own result: %s", body)
+			}
+
 		})
 	}
 }

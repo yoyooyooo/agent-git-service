@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -63,13 +64,18 @@ func TestCIChecksForgejoRetriedTasksUseCurrentJobBinding(t *testing.T) {
 	defer bridge.Close()
 
 	currentStatus := "success"
+	runStatus := ""
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "token provider-fixture-only" || r.Method != http.MethodGet {
 			t.Error("unexpected provider credential or method")
 		}
+		currentRunStatus := currentStatus
+		if runStatus != "" {
+			currentRunStatus = runStatus
+		}
 		run := map[string]any{
 			"id": 17, "index_in_repo": 9, "workflow_id": "ci.yml", "prettyref": pr.HeadRef, "commit_sha": pr.HeadSHA,
-			"event": "push", "status": currentStatus, "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:01:00Z",
+			"event": "push", "status": currentRunStatus, "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:01:00Z",
 		}
 		switch r.URL.Path {
 		case "/api/v1/repos/ci/project/actions/runs":
@@ -126,6 +132,80 @@ func TestCIChecksForgejoRetriedTasksUseCurrentJobBinding(t *testing.T) {
 		if err := s.enforceConfiguredCIForMerge(ctx, pr); (err == nil) != (status == "success") {
 			t.Fatalf("CI preflight for current task %s: %v", status, err)
 		}
+	}
+
+	for _, tc := range []struct {
+		name, runStatus, taskStatus, wantStatus, wantConclusion string
+		unboundStatus                                           int
+		wantRunCheck                                            bool
+	}{
+		{"waiting_attempt_after_completed_task", "waiting", "success", "queued", "", 5, true},
+		{"blocked_attempt_after_completed_task", "blocked", "success", "queued", "", 7, true},
+		{"running_after_completed_task", "running", "success", "in_progress", "", 5, true},
+		{"waiting_after_failed_task", "waiting", "failure", "queued", "", 5, true},
+		{"failed_run_after_successful_task", "failure", "success", "completed", "failure", 3, true},
+		{"cancelled_run_after_successful_task", "cancelled", "success", "completed", "cancelled", 3, true},
+		{"completed_success_needs_no_run_check", "success", "success", "", "", 4, false},
+		{"failed_task_already_expresses_failure", "failure", "failure", "", "", 3, false},
+		{"cancelled_task_already_expresses_cancellation", "cancelled", "cancelled", "", "", 3, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			currentStatus, runStatus = tc.taskStatus, tc.runStatus
+			t.Cleanup(func() {
+				runStatus = ""
+				if err := providerDB.Exec(`DELETE FROM action_run_job WHERE id=33`).Error; err != nil {
+					t.Fatal(err)
+				}
+			})
+			taskStatus := map[string]int{"success": 1, "failure": 2, "cancelled": 3}[tc.taskStatus]
+			if err := providerDB.Exec(`UPDATE action_run_job SET status=?,started=10,stopped=20,attempt=1 WHERE id=31`, taskStatus).Error; err != nil {
+				t.Fatal(err)
+			}
+			stopped := 0
+			if tc.unboundStatus == 3 {
+				stopped = 20
+			}
+			if err := providerDB.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped,attempt) VALUES (33,17,1,0,'waiting-stage',?,?,0,?,1)`, pr.HeadSHA, tc.unboundStatus, stopped).Error; err != nil {
+				t.Fatal(err)
+			}
+			observed, err := s.ReadCIChecks(ctx, pr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var runCheck *CICheck
+			var unit *CICheck
+			for i := range observed.Checks {
+				check := &observed.Checks[i]
+				if check.ID == fmt.Sprint(check.RunID) {
+					runCheck = check
+				}
+				if check.Name == "unit" {
+					unit = check
+				}
+			}
+			if unit == nil || unit.Status != "completed" || unit.Conclusion != tc.taskStatus || !unit.Required {
+				t.Fatalf("real task evidence changed: %+v", observed.Checks)
+			}
+			if tc.wantRunCheck {
+				if len(observed.Checks) != 2 || runCheck == nil || runCheck.Name != "ci.yml" || runCheck.Status != tc.wantStatus || runCheck.Conclusion != tc.wantConclusion || runCheck.Required {
+					t.Fatalf("task checks hid or invented provider run state: %+v", observed.Checks)
+				}
+				jobs, err := s.CIJobs(ctx, repo.FullName, runCheck.RunID)
+				if err != nil || len(jobs) != 1 || jobs[0].Job.Name != "unit" {
+					t.Fatalf("run check invented a task: %+v %v", jobs, err)
+				}
+				if _, err := s.CILogs(ctx, repo.FullName, runCheck.RunID, true); !errors.Is(err, ErrNotFound) {
+					t.Fatalf("run check acquired job-log identity: %v", err)
+				}
+			} else if len(observed.Checks) != 1 || runCheck != nil {
+				t.Fatalf("represented provider outcome acquired a duplicate check: %+v", observed.Checks)
+			}
+			// Only unit is required here. Observing the workflow must not silently
+			// add another required name or erase the real unit result.
+			if err := s.enforceConfiguredCIForMerge(ctx, pr); (err == nil) != (tc.taskStatus == "success") {
+				t.Fatalf("explicit required-name policy changed: %v", err)
+			}
+		})
 	}
 
 	// Two current jobs really sharing a name are still ambiguous. Filtering
