@@ -196,7 +196,20 @@ commit bindings remain errors.
 Unbound jobs contribute no task or log identity. A verified empty task set skips
 the repository task scan, and checks retain the provider run's queued status with
 no conclusion while waiting. Historical tasks are never substituted, including
-for job-log reads and run-log archives. Without a configured bridge, job
+for job-log reads and run-log archives.
+
+A mixed inventory may contain completed tasks while another job is unclaimed.
+If those task checks do not express the provider run's pending, failed or
+cancelled state, check aggregation also retains the existing run-level check.
+It uses the mapped provider run identity and original workflow name, with no
+task or job-log identity. A fully successful run adds no duplicate summary;
+a task already expressing the same non-success outcome needs none either.
+Real job names and results remain unchanged. A workflow and a job can share a
+display name while retaining distinct identities; duplicate real job names
+within one workflow remain invalid. Required policy still compares exact names
+and requires every matching observation to pass, without adding requirements.
+
+Without a configured bridge, job
 inventory is unsupported (501); an older bridge lacking the resource returns 404.
 The bridge and adapter therefore need compatible source versions before activation.
 
