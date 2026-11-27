@@ -71,7 +71,7 @@ func (h *Handler) serveJobs(w http.ResponseWriter, r *http.Request) {
 	h.write(w, 200, map[string]any{"schema": "ags.internal-provider-jobs.v1", "repo": owner + "/" + repo, "run": strconv.FormatInt(run, 10), "run_number": runs[0].Number, "head_sha": sha, "jobs": items})
 }
 
-// Forgejo 12 job states (models/actions/status.go):
+// Forgejo job states (models/actions/status.go):
 // 0 Unknown, 1 Success, 2 Failure, 3 Cancelled, 4 Skipped,
 // 5 Waiting, 6 Running, 7 Blocked.
 const (
@@ -81,16 +81,19 @@ const (
 	forgejoStatusBlocked   = 7
 )
 
-// neverStartedWithoutTask reports a job that has no current task association
-// because Forgejo has not allocated a task yet, or already reached a final
-// state without ever allocating one:
+// neverStartedWithoutTask reports a current attempt without a task because it
+// is queued or reached a permitted final state before task allocation:
 //   - Waiting / Blocked: the job is still queued, including a job blocked on
-//     `needs`. It keeps started=0, stopped=0 and attempt=0.
+//     `needs`. It keeps started=0 and stopped=0.
 //   - Skipped: a conditional job skipped before start keeps started=0 and
 //     stopped=0.
-//   - Cancelled: a job cancelled while still waiting or blocked (for example
-//     when its run is cancelled) keeps started=0 and attempt=0, but Forgejo
-//     stamps stopped with the cancellation time, so stopped may be non-zero.
+//   - Cancelled: a job cancelled while still waiting or blocked keeps started=0,
+//     but Forgejo stamps stopped with the cancellation time, so it may be non-zero.
+//
+// Forgejo 15 increments attempt when preparing a job, including reruns, before
+// allocating a task. Positive attempts do not imply that execution started.
+// Keep accepting legacy zero attempts; missing or negative counters are invalid
+// for waiting, blocked and cancelled jobs.
 //
 // The job contributes no task or log. A run that contains only these jobs has
 // an empty current-task inventory; callers then surface the provider run
@@ -104,9 +107,9 @@ func neverStartedWithoutTask(status, started, stopped, attempt *int64) bool {
 	case forgejoStatusSkipped:
 		return *stopped == 0
 	case forgejoStatusCancelled:
-		return *stopped >= 0 && attempt != nil && *attempt == 0
+		return *stopped >= 0 && attempt != nil && *attempt >= 0
 	case forgejoStatusWaiting, forgejoStatusBlocked:
-		return *stopped == 0 && attempt != nil && *attempt == 0
+		return *stopped == 0 && attempt != nil && *attempt >= 0
 	}
 	return false
 }

@@ -2,6 +2,7 @@ package providerlogbridge
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -186,7 +187,7 @@ func TestCIBridgeCurrentJobsAllowNeverStartedCancelledJobsWithoutTasks(t *testin
 	accepted := map[string]bool{"job_24220": true, "stopped_zero": true, "all_cancelled": true, "cancelled_and_skipped": true}
 	for _, mode := range []string{
 		"job_24220", "stopped_zero", "all_cancelled", "cancelled_and_skipped",
-		"started", "attempted", "null_attempt", "negative_stopped", "null_stopped", "null_started", "null_status",
+		"started", "negative_attempt", "null_attempt", "negative_stopped", "null_stopped", "null_started", "null_status",
 		"failure_unstarted", "waiting_unstarted", "blocked_unstarted", "running_unstarted",
 		"negative_task", "null_task", "missing_task", "task_zero_exists", "foreign_repo", "wrong_sha", "empty_name",
 	} {
@@ -203,8 +204,8 @@ func TestCIBridgeCurrentJobsAllowNeverStartedCancelledJobsWithoutTasks(t *testin
 				require.NoError(t, h.db.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped,attempt) VALUES (24221,4001,24,0,'conditional',?,4,0,0,0)`, fixtureSHA).Error)
 			case "started":
 				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET started=10 WHERE id=24220`).Error)
-			case "attempted":
-				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=1 WHERE id=24220`).Error)
+			case "negative_attempt":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=-1 WHERE id=24220`).Error)
 			case "null_attempt":
 				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=NULL WHERE id=24220`).Error)
 			case "negative_stopped":
@@ -281,7 +282,7 @@ func TestCIBridgeCurrentJobsAllowNeverStartedWaitingOrBlockedJobsWithoutTasks(t 
 	}
 	for _, mode := range []string{
 		"job_24486", "blocked", "all_waiting", "waiting_and_blocked", "waiting_beside_task",
-		"started", "attempted", "stopped", "null_attempt", "null_stopped", "null_started", "null_status",
+		"started", "negative_attempt", "stopped", "null_attempt", "null_stopped", "null_started", "null_status",
 		"failure_unstarted", "running_unstarted",
 		"negative_task", "null_task", "missing_task", "task_zero_exists", "foreign_repo", "wrong_sha", "empty_name",
 	} {
@@ -300,8 +301,8 @@ func TestCIBridgeCurrentJobsAllowNeverStartedWaitingOrBlockedJobsWithoutTasks(t 
 				// default fixture already has Backend Smoke as a current task
 			case "started":
 				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET started=10 WHERE id=24486`).Error)
-			case "attempted":
-				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=1 WHERE id=24486`).Error)
+			case "negative_attempt":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=-1 WHERE id=24486`).Error)
 			case "stopped":
 				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET stopped=20 WHERE id=24486`).Error)
 			case "null_attempt":
@@ -364,5 +365,53 @@ func TestCIBridgeCurrentJobsAllowNeverStartedWaitingOrBlockedJobsWithoutTasks(t 
 			require.Equal(t, int64(6949), body.Jobs[0].TaskID)
 			require.Equal(t, "Backend Smoke", body.Jobs[0].Name)
 		})
+	}
+}
+
+// Forgejo 15 prepares the attempt number before a runner allocates a task.
+// Reruns prepare higher numbers while clearing the task and timestamps again.
+func TestCIBridgeCurrentJobsAllowPreparedTasklessAttempts(t *testing.T) {
+	for _, state := range []struct {
+		name    string
+		status  int
+		stopped int64
+	}{
+		{name: "waiting", status: 5},
+		{name: "blocked", status: 7},
+		{name: "cancelled", status: 3, stopped: 20},
+	} {
+		for _, attempt := range []int{0, 1, 3} {
+			for _, tasklessOnly := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/attempt_%d/taskless_only_%t", state.name, attempt, tasklessOnly), func(t *testing.T) {
+					h, _ := setupBridge(t, 1024)
+					require.NoError(t, h.db.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped,attempt) VALUES (6765,4001,24,0,'Prepared Check',?,?,0,?,?)`, fixtureSHA, state.status, state.stopped, attempt).Error)
+					if tasklessOnly {
+						require.NoError(t, h.db.Exec(`UPDATE action_run_job SET task_id=0,status=?,started=0,stopped=?,attempt=? WHERE id=6763`, state.status, state.stopped, attempt).Error)
+					}
+					router := chi.NewRouter()
+					router.Use(CaptureSocketPeer)
+					router.Get("/api/internal/provider-logs/repos/{owner}/{repo}/runs/{run}/jobs", h.ServeHTTP)
+					req := httptest.NewRequest(http.MethodGet, "/api/internal/provider-logs/repos/"+fixtureOwner+"/"+fixtureRepo+"/runs/4001/jobs?head_sha="+fixtureSHA, nil)
+					req.RemoteAddr = fixturePeer
+					req.Header.Set("Authorization", "Bearer bridge-secret")
+					res := httptest.NewRecorder()
+					router.ServeHTTP(res, req)
+					require.Equal(t, http.StatusOK, res.Code, res.Body.String())
+					var body struct {
+						Jobs []struct {
+							TaskID int64 `json:"task_id"`
+						}
+					}
+					require.NoError(t, json.Unmarshal(res.Body.Bytes(), &body))
+					require.NotNil(t, body.Jobs)
+					if tasklessOnly {
+						require.Empty(t, body.Jobs, "prepared jobs must not borrow historical tasks")
+					} else {
+						require.Len(t, body.Jobs, 1)
+						require.Equal(t, int64(6949), body.Jobs[0].TaskID)
+					}
+				})
+			}
+		}
 	}
 }
