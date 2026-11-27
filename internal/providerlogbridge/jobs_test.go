@@ -183,10 +183,10 @@ func TestCIBridgeCurrentJobsAllowUnstartedSkippedJobsWithoutTasks(t *testing.T) 
 // unstarted skipped job, and must not fail the whole inventory.
 func TestCIBridgeCurrentJobsAllowNeverStartedCancelledJobsWithoutTasks(t *testing.T) {
 	const cancelledAt = 1794540600 // 2026-11-13 11:30 UTC+8
-	accepted := map[string]bool{"job_24220": true, "stopped_zero": true, "all_cancelled": true, "cancelled_and_skipped": true}
+	accepted := map[string]bool{"job_24220": true, "stopped_zero": true, "all_cancelled": true, "cancelled_and_skipped": true, "prepared_first_attempt": true, "prepared_retry": true}
 	for _, mode := range []string{
-		"job_24220", "stopped_zero", "all_cancelled", "cancelled_and_skipped",
-		"started", "attempted", "null_attempt", "negative_stopped", "null_stopped", "null_started", "null_status",
+		"job_24220", "stopped_zero", "all_cancelled", "cancelled_and_skipped", "prepared_first_attempt", "prepared_retry",
+		"started", "negative_attempt", "null_attempt", "negative_stopped", "null_stopped", "null_started", "null_status",
 		"failure_unstarted", "waiting_unstarted", "blocked_unstarted", "running_unstarted",
 		"negative_task", "null_task", "missing_task", "task_zero_exists", "foreign_repo", "wrong_sha", "empty_name",
 	} {
@@ -203,8 +203,12 @@ func TestCIBridgeCurrentJobsAllowNeverStartedCancelledJobsWithoutTasks(t *testin
 				require.NoError(t, h.db.Exec(`INSERT INTO action_run_job (id,run_id,repo_id,task_id,name,commit_sha,status,started,stopped,attempt) VALUES (24221,4001,24,0,'conditional',?,4,0,0,0)`, fixtureSHA).Error)
 			case "started":
 				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET started=10 WHERE id=24220`).Error)
-			case "attempted":
+			case "prepared_first_attempt":
 				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=1 WHERE id=24220`).Error)
+			case "prepared_retry":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=2 WHERE id=24220`).Error)
+			case "negative_attempt":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=-1 WHERE id=24220`).Error)
 			case "null_attempt":
 				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=NULL WHERE id=24220`).Error)
 			case "negative_stopped":
@@ -278,10 +282,12 @@ func TestCIBridgeCurrentJobsAllowNeverStartedCancelledJobsWithoutTasks(t *testin
 func TestCIBridgeCurrentJobsAllowNeverStartedWaitingOrBlockedJobsWithoutTasks(t *testing.T) {
 	accepted := map[string]bool{
 		"job_24486": true, "blocked": true, "all_waiting": true, "waiting_and_blocked": true, "waiting_beside_task": true,
+		"prepared_first_attempt": true, "prepared_blocked": true, "prepared_retry": true, "all_prepared": true,
 	}
 	for _, mode := range []string{
 		"job_24486", "blocked", "all_waiting", "waiting_and_blocked", "waiting_beside_task",
-		"started", "attempted", "stopped", "null_attempt", "null_stopped", "null_started", "null_status",
+		"prepared_first_attempt", "prepared_blocked", "prepared_retry", "all_prepared",
+		"started", "negative_attempt", "stopped", "null_attempt", "null_stopped", "null_started", "null_status",
 		"failure_unstarted", "running_unstarted",
 		"negative_task", "null_task", "missing_task", "task_zero_exists", "foreign_repo", "wrong_sha", "empty_name",
 	} {
@@ -300,8 +306,16 @@ func TestCIBridgeCurrentJobsAllowNeverStartedWaitingOrBlockedJobsWithoutTasks(t 
 				// default fixture already has Backend Smoke as a current task
 			case "started":
 				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET started=10 WHERE id=24486`).Error)
-			case "attempted":
+			case "prepared_first_attempt":
 				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=1 WHERE id=24486`).Error)
+			case "prepared_blocked":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET status=7,attempt=1 WHERE id=24486`).Error)
+			case "prepared_retry":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=2 WHERE id=24486`).Error)
+			case "all_prepared":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET task_id=0,status=5,started=0,stopped=0,attempt=1 WHERE run_id=4001`).Error)
+			case "negative_attempt":
+				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET attempt=-1 WHERE id=24486`).Error)
 			case "stopped":
 				require.NoError(t, h.db.Exec(`UPDATE action_run_job SET stopped=20 WHERE id=24486`).Error)
 			case "null_attempt":
@@ -356,7 +370,7 @@ func TestCIBridgeCurrentJobsAllowNeverStartedWaitingOrBlockedJobsWithoutTasks(t 
 			}
 			require.NoError(t, json.Unmarshal(res.Body.Bytes(), &body))
 			require.NotNil(t, body.Jobs)
-			if mode == "all_waiting" {
+			if mode == "all_waiting" || mode == "all_prepared" {
 				require.Empty(t, body.Jobs, "a waiting job must not borrow a historical task")
 				return
 			}
