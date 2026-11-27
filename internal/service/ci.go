@@ -465,12 +465,10 @@ func (s *Service) readCIChecks(ctx context.Context, pr db.PullRequest, matchBran
 		if !jobs.Complete {
 			return out, cibackend.ErrUnavailable
 		}
-		if len(jobs.Items) == 0 {
-			identity := ciCheckIdentity(run.Workflow, run.Name)
-			if seenChecks[identity] {
-				return out, fmt.Errorf("%w: ambiguous CI check names", cibackend.ErrInvalid)
-			}
-			seenChecks[identity] = true
+		if ciRunNeedsCheck(run, jobs.Items) {
+			// This is the provider run's existing identity, not a task. A run
+			// and a real job may share a display name; only duplicate real job
+			// names below are ambiguous. Required policy still checks every match.
 			out.Checks = append(out.Checks, CICheck{ID: fmt.Sprint(view.ID), RunID: view.ID, Name: run.Name, Status: run.Status, Conclusion: run.Conclusion, URL: run.URL, Workflow: run.Name, Event: run.Event, Required: required[run.Name], StartedAt: run.StartedAt})
 			delete(pending, run.Name)
 		}
@@ -497,8 +495,29 @@ func (s *Service) readCIChecks(ctx context.Context, pr db.PullRequest, matchBran
 	return out, nil
 }
 
-// ciCheckIdentity distinguishes checks that share a job name across workflow
-// files. The same name inside one workflow is still one check and stays ambiguous
+// ciRunNeedsCheck keeps provider state that the visible task checks do not
+// express. Forgejo may have unclaimed jobs with no task identity beside completed
+// tasks. Those tasks cannot turn a pending, failed or cancelled run into success.
+func ciRunNeedsCheck(run cibackend.Run, jobs []cibackend.Job) bool {
+	if len(jobs) == 0 {
+		return true
+	}
+	if run.Status == "completed" && run.Conclusion == "success" {
+		return false
+	}
+	for _, job := range jobs {
+		if run.Status != "completed" && job.Status != "completed" {
+			return false
+		}
+		if run.Status == "completed" && job.Status == "completed" && job.Conclusion == run.Conclusion {
+			return false
+		}
+	}
+	return true
+}
+
+// ciCheckIdentity distinguishes real jobs that share a name across workflow
+// files. The same job name inside one workflow stays ambiguous
 // when two observations disagree. Workflow is the file identity (ci.yml), not the
 // display title, so two files that both define notify-feishu-on-failure are distinct.
 func ciCheckIdentity(workflow, name string) string {
