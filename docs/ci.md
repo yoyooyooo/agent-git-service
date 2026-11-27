@@ -167,6 +167,11 @@ fail the workflow until they are reviewed and documented in
 
 ## Documentation Workflow
 
+The standalone `doc-lint.yml` entry is manual; ordinary contributions run the
+same check inside Fork CI. A newer manual run cancels an older run of this
+workflow on the same branch or tag. Different refs remain independent. The
+check only reads source files and has no publication or deployment step.
+
 `doc-lint.yml` runs `python3 scripts/doc_lint.py` to verify that:
 
 - required CI/testing docs and workflow files exist
