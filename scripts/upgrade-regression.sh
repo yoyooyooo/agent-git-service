@@ -2,11 +2,33 @@
 # One test entry for local regression and hosted CI; only synthetic data.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-sandbox="$(mktemp -d "$HOME/ags-upgrade-regression-XXXXXXXX")"
-chmod 700 "$sandbox"
-# Deliberately retained for diagnosis, never removed by this runner.
+IFS=$'\t' read -r sandbox sandbox_identity < <("$root/scripts/ags-python.sh" "$root/scripts/regression_sandbox.py" create --owner-pid "$$")
+finish_sandbox() {
+  local status=$?
+  trap - EXIT INT TERM
+  "$root/scripts/ags-python.sh" "$root/scripts/regression_sandbox.py" finish \
+    --root "$sandbox" --identity "$sandbox_identity" --owner-pid "$$" --exit-code "$status" || true
+  exit "$status"
+}
+cancel_sandbox() {
+  # A foreground wait delays Bash traps. Signal only this shell's background
+  # supervisors, including a child started just before its PID is assigned.
+  trap '' INT TERM
+  local child
+  for child in $(jobs -pr); do
+    # Bash background jobs initially ignore INT. TERM also covers that startup
+    # window; the caller's original cancellation code is preserved below.
+    kill -s TERM "$child" 2>/dev/null || true
+  done
+  wait || true
+  exit "$1"
+}
+trap finish_sandbox EXIT
+trap 'cancel_sandbox 130' INT
+trap 'cancel_sandbox 143' TERM
 printf 'Upgrade regression sandbox: %s\n' "$sandbox"
 entries=(
+  'scripts/test_upgrade_regression_sandbox.py'
   'scripts/test_upgrade_identity.py' 'scripts/test_routeb_candidate.py' 'scripts/test_routeb_host_admission.py' 'scripts/test_routeb_backup_binding.py' 'scripts/test_routeb_launchd_stop.py' 'scripts/test_routeb_oneshot.py'
   'scripts/test_routeb_metadata_darwin.py' 'scripts/test_routeb_restore_verify.py' 'scripts/test_routeb_storage.py'
   'scripts/test_routeb_full_restore.py' 'scripts/test_routeb_restore_switch.py' 'scripts/test_routeb_old_start.py'
@@ -61,8 +83,11 @@ for index in "${!entries[@]}"; do
   printf '\n==> %s\n' "${entries[$index]}"
   start=$(date +%s)
   set +e
-  (cd "$work/cwd" && env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX -u PYTHONPATH -u BASH_ENV \
-    HOME="$work/home" TMPDIR="$work/tmp" "$root/scripts/ags-python.sh" "${args[@]}" -v)
+  (cd "$work/cwd" && exec env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX -u PYTHONPATH -u BASH_ENV \
+    HOME="$work/home" TMPDIR="$work/tmp" "$root/scripts/ags-python.sh" "$root/scripts/regression_sandbox.py" run -- \
+    "$root/scripts/ags-python.sh" "${args[@]}" -v) &
+  supervisor_pid=$!
+  wait "$supervisor_pid"
   status=$?
   set -e
   printf 'ENTRY %s exit=%s seconds=%s\n' "${entries[$index]}" "$status" "$(( $(date +%s) - start ))"
@@ -80,5 +105,5 @@ fi
 if [[ "${AGS_ROUTEB_NATIVE:-}" == "1" ]]; then
   printf 'AGS_ROUTEB_NATIVE=1 does not make scripts/test_routeb_launchd_native.py a source-CI pass.\n'
 fi
-printf '\nUpgrade regression passed (%s entries). Sandbox retained: %s\n' "${#entries[@]}" "$sandbox"
+printf '\nUpgrade regression passed (%s entries). Sandbox cleanup follows.\n' "${#entries[@]}"
 exit 0
